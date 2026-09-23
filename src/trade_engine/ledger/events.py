@@ -7,7 +7,7 @@ which payload type each kind must carry. Nothing here performs I/O.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -219,6 +219,9 @@ class Event:
             except ValueError as err:
                 raise EventPayloadError(f"Unknown event kind '{self.kind}'") from err
         _require_utc(self.ts_utc, "Event.ts_utc")
+        # Aware is not enough: an ET-aware timestamp would be stored with its -04:00
+        # offset, and the column is named ts_utc for a reason (I7).
+        object.__setattr__(self, "ts_utc", self.ts_utc.astimezone(timezone.utc))
         if self.command_id is not None and not self.command_id:
             raise EventPayloadError("Event.command_id must be non-empty when provided (I3)")
         if not isinstance(self.schema_version, int) or self.schema_version <= 0:

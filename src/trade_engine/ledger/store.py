@@ -7,7 +7,13 @@ it. Properties this store is responsible for:
   returns the original event and writes nothing.
 - **I4 single instance** — one OS file lock per ledger, acquired before the first write.
 - **I2 no partial writes** — the row and its `command_id` index entry commit together, so
-  a crash between write and commit leaves no event and no claimed command id.
+  a crash between write and commit leaves no event and no claimed command id. A batch
+  (`extend`) is one transaction: all of it lands or none of it does.
+- **I12 outbox with the event** — `append(event, outbox=...)` writes the event's outbox
+  rows in the same transaction, so a crash cannot keep the event and lose its delivery.
+- **I2 no poison events** — every event is folded into its account's state inside the
+  transaction, before COMMIT. The log is append-only, so an event the fold refuses would
+  otherwise make every later fold raise, forever.
 
 Snapshots are a cache: `snapshot(account)` must equal `fold(events())[account]`, and
 `verify_snapshot()` proves it.
@@ -18,16 +24,16 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from datetime import datetime
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import codec
 from trade_engine.ledger.events import SCHEMA_VERSION, Event, EventKind
 from trade_engine.ledger.lock import LedgerLockError, SingleInstanceLock
 from trade_engine.ledger.outbox import DrainResult, OutboxItem, OutboxStatus
-from trade_engine.ledger.state import AccountState, FoldCache, fold
+from trade_engine.ledger.state import AccountState, FoldCache, apply_event, fold, fold_account
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -63,34 +69,42 @@ CREATE INDEX IF NOT EXISTS ix_outbox_dest_status_id
     ON outbox(destination, status, id);
 """
 
+OutboxSpec = Mapping[str, dict[str, Any]] | Sequence[tuple[str, dict[str, Any]]]
+
 
 class Ledger:
     """Append-only SQLite event ledger for one file."""
 
-    def __init__(self, path: str | Path, *, lock: bool = True) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = SingleInstanceLock(self.path) if lock else None
+        # Always locked: there is no unlocked writer, or I4 is only a convention.
+        self._lock = SingleInstanceLock(self.path)
         self._lock_held = False
         self._conn: sqlite3.Connection | None = None
+        # Folded state per account as of the last commit; the base append() validates
+        # against. Safe to cache because this instance is the only writer (I4).
+        self._states: dict[str, AccountState] = {}
         self._listeners: list[Callable[[Event], None]] = []
 
     def add_listener(self, callback: Callable[[Event], None]) -> None:
-        """Register a callback invoked immediately after each committed append."""
+        """Register a callback invoked after each commit with every newly written event."""
         if callback not in self._listeners:
             self._listeners.append(callback)
 
     def remove_listener(self, callback: Callable[[Event], None]) -> None:
-        """Unregister a committed append listener callback."""
         if callback in self._listeners:
             self._listeners.remove(callback)
 
-    def _notify_listeners(self, event: Event) -> None:
-        for listener in list(self._listeners):
-            try:
-                listener(event)
-            except Exception:
-                pass
+    def _notify_listeners(self, events: Sequence[Event]) -> None:
+        # After COMMIT only (commit-then-publish): a listener never sees an event that
+        # could still roll back, and a failing listener cannot undo a committed write.
+        for event in events:
+            for listener in list(self._listeners):
+                try:
+                    listener(event)
+                except Exception:
+                    pass
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -98,11 +112,11 @@ class Ledger:
         """Acquire the single-instance lock (I4) and open the database."""
         if self._conn is not None:
             return self
-        if self._lock is not None:
-            self._lock.acquire()
-            self._lock_held = True
+        self._lock.acquire()
+        self._lock_held = True
+        self._states = {}
         try:
-            conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False)
+            conn = sqlite3.connect(str(self.path), isolation_level=None)
             conn.row_factory = sqlite3.Row
             # synchronous=FULL, so a committed row is durable and an interrupted write
             # rolls back rather than half-applying (I2).
@@ -112,7 +126,7 @@ class Ledger:
             conn.executescript(_SCHEMA)
             self._conn = conn
         except Exception:
-            if self._lock_held and self._lock is not None:
+            if self._lock_held:
                 self._lock.release()
                 self._lock_held = False
             raise
@@ -122,7 +136,7 @@ class Ledger:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
-        if self._lock is not None and self._lock_held:
+        if self._lock_held:
             self._lock.release()
             self._lock_held = False
 
@@ -151,76 +165,89 @@ class Ledger:
 
     # -- append ------------------------------------------------------------------
 
-    def append(
-        self,
-        event: Event,
-        *,
-        outbox: list[tuple[str, dict[str, Any]]] | dict[str, dict[str, Any]] | None = None,
-    ) -> Event:
-        """Append one event. A replayed `command_id` is a no-op returning the original (I3)."""
-        if event.seq is not None:
-            raise ValueError("Event.seq is assigned by the ledger; pass seq=None to append")
+    def append(self, event: Event, *, outbox: OutboxSpec | None = None) -> Event:
+        """Append one event. A replayed `command_id` is a no-op returning the original (I3).
+
+        `outbox` maps destination -> payload; those rows commit with the event (I12). A
+        replayed command writes no outbox rows either.
+        """
+        return self._write([(event, _outbox_items(outbox))])[0]
+
+    def extend(self, events: Iterable[Event]) -> list[Event]:
+        """Append events in one transaction: all land or none do (I2).
+
+        Each new event is folded into its account's state before COMMIT; if the fold
+        refuses it, the whole batch rolls back and nothing is written (I2, I5).
+        """
+        return self._write([(event, []) for event in events])
+
+    def _write(
+        self, entries: Sequence[tuple[Event, Sequence[tuple[str, dict[str, Any]]]]]
+    ) -> list[Event]:
+        batch = [event for event, _ in entries]
+        for event in batch:
+            if event.seq is not None:
+                raise ValueError("Event.seq is assigned by the ledger; pass seq=None to append")
 
         conn = self.conn
+        staged: dict[str, AccountState] = {}
+        written: list[Event] = []
+        new_events: list[Event] = []
         in_transaction = False
         try:
             conn.execute("BEGIN IMMEDIATE")
             in_transaction = True
-            if event.command_id is not None:
-                existing = conn.execute(
-                    "SELECT * FROM events WHERE command_id = ?", (event.command_id,)
-                ).fetchone()
-                if existing is not None:
-                    # Decode before committing so a malformed stored row surfaces while
-                    # the transaction is still open.
-                    replay = self._row_to_event(existing)
-                    self._commit()
-                    in_transaction = False
-                    return replay
+            for event, outbox_items in entries:
+                if event.command_id is not None:
+                    existing = conn.execute(
+                        "SELECT * FROM events WHERE command_id = ?", (event.command_id,)
+                    ).fetchone()
+                    if existing is not None:
+                        # Decode inside the transaction so a malformed stored row surfaces
+                        # before anything commits.
+                        written.append(self._row_to_event(existing))
+                        continue
 
-            encoded = codec.encode_event(event)
-            cursor = conn.execute(
-                "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    event.ts_utc.isoformat(),
-                    event.account,
-                    event.kind.value,
-                    event.command_id,
-                    json.dumps(encoded["payload"], separators=(",", ":"), sort_keys=True),
-                    event.schema_version,
-                ),
-            )
-            seq = int(cursor.lastrowid)
-
-            if outbox:
-                items = outbox.items() if isinstance(outbox, dict) else outbox
-                for dest, payload in items:
-                    conn.execute(
-                        "INSERT INTO outbox (event_seq, destination, payload_json, status, attempts, created_at) "
-                        "VALUES (?, ?, ?, ?, 0, ?)",
-                        (
-                            seq,
-                            dest.strip(),
-                            json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                            OutboxStatus.PENDING.value,
-                            event.ts_utc.isoformat(),
-                        ),
-                    )
-
+                # Read the base state before the INSERT, which would otherwise be folded in.
+                if event.account in staged:
+                    current = staged[event.account]
+                else:
+                    current = self._committed_state(event.account)
+                encoded = codec.encode_event(event)
+                cursor = conn.execute(
+                    "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        event.ts_utc.isoformat(),
+                        event.account,
+                        event.kind.value,
+                        event.command_id,
+                        json.dumps(encoded["payload"], separators=(",", ":"), sort_keys=True),
+                        event.schema_version,
+                    ),
+                )
+                appended = replace(event, seq=int(cursor.lastrowid))
+                staged[event.account] = apply_event(current, appended)
+                written.append(appended)
+                new_events.append(appended)
+                for destination, payload in outbox_items:
+                    self._insert_outbox(int(cursor.lastrowid), destination, payload, event.ts_utc)
             self._commit()
             in_transaction = False
         except Exception:
             if in_transaction:
                 self._rollback()
             raise
+        self._states.update(staged)
+        self._notify_listeners(new_events)
+        return written
 
-        committed_event = replace(event, seq=seq)
-        self._notify_listeners(committed_event)
-        return committed_event
-
-    def extend(self, events: Iterable[Event]) -> list[Event]:
-        return [self.append(event) for event in events]
+    def _committed_state(self, account: str) -> AccountState:
+        state = self._states.get(account)
+        if state is None:
+            state = fold_account(self.events(account=account), account)
+            self._states[account] = state
+        return state
 
     # -- read --------------------------------------------------------------------
 
@@ -274,7 +301,8 @@ class Ledger:
         return fold(self.events())
 
     def state(self, account: str) -> AccountState:
-        return self.fold().get(account, AccountState(account_id=account))
+        """Folded state of one account, from that account's events only (I8)."""
+        return fold_account(self.events(account=account), account)
 
     def snapshot(self, account: str, *, at_seq: int | None = None) -> AccountState:
         """Folded state for one account, with `last_seq` pinned to the snapshot point."""
@@ -345,18 +373,7 @@ class Ledger:
         try:
             conn.execute("BEGIN IMMEDIATE")
             in_transaction = True
-            cursor = conn.execute(
-                "INSERT INTO outbox (event_seq, destination, payload_json, status, attempts, created_at) "
-                "VALUES (?, ?, ?, ?, 0, ?)",
-                (
-                    event_seq,
-                    destination.strip(),
-                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                    OutboxStatus.PENDING.value,
-                    created_at.isoformat(),
-                ),
-            )
-            outbox_id = int(cursor.lastrowid)
+            outbox_id = self._insert_outbox(event_seq, destination, payload, created_at)
             self._commit()
             in_transaction = False
         except sqlite3.IntegrityError as e:
@@ -377,6 +394,23 @@ class Ledger:
             attempts=0,
             created_at=created_at,
         )
+
+    def _insert_outbox(
+        self, event_seq: int, destination: str, payload: dict[str, Any], created_at: datetime
+    ) -> int:
+        """INSERT one PENDING row; the caller owns the transaction."""
+        cursor = self.conn.execute(
+            "INSERT INTO outbox (event_seq, destination, payload_json, status, attempts, created_at) "
+            "VALUES (?, ?, ?, ?, 0, ?)",
+            (
+                event_seq,
+                destination.strip(),
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                OutboxStatus.PENDING.value,
+                created_at.isoformat(),
+            ),
+        )
+        return int(cursor.lastrowid)
 
     def pending_outbox(
         self,
@@ -533,6 +567,18 @@ class Ledger:
 def fold_events(events: Iterable[Event]) -> dict[str, AccountState]:
     """Module-level pass-through so callers need not import state.py."""
     return fold(events)
+
+
+def _outbox_items(outbox: OutboxSpec | None) -> list[tuple[str, dict[str, Any]]]:
+    if not outbox:
+        return []
+    items = list(outbox.items()) if isinstance(outbox, Mapping) else list(outbox)
+    for destination, payload in items:
+        if not isinstance(destination, str) or not destination.strip():
+            raise ValueError("Outbox destination must be non-empty string")
+        if not isinstance(payload, dict):
+            raise ValueError(f"Outbox payload for '{destination}' must be a dict")
+    return items
 
 
 __all__ = [
