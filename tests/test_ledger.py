@@ -27,6 +27,8 @@ from trade_engine.ledger import (
     EventPayloadError,
     FoldCache,
     Ledger,
+    LedgerDuplicateFillError,
+    LedgerFillMismatchError,
     LedgerFoldError,
     LedgerLockError,
     LifecycleNotice,
@@ -45,6 +47,7 @@ from trade_engine.ledger.codec import decode_event, encode_event
 TS = datetime(2026, 9, 23, 21, 0, 0, tzinfo=timezone.utc)
 TS2 = datetime(2026, 9, 24, 21, 0, 0, tzinfo=timezone.utc)
 AAPL = Equity("AAPL")
+MSFT = Equity("MSFT")
 SPXW = OptionContract(
     underlying="SPXW", expiry=date(2026, 12, 18), strike=Decimal("6000"), right=OptionRight.CALL
 )
@@ -370,6 +373,110 @@ def test_fill_without_submitted_order_is_refused() -> None:
                 )
             ]
         )
+
+
+def test_fill_on_a_different_instrument_than_its_order_is_refused() -> None:
+    """A fill filed against the wrong order would invent a position in another symbol (I1)."""
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", instrument=AAPL), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", instrument=MSFT, price="500"), ts_utc=TS, seq=2),
+    ]
+    with pytest.raises(LedgerFillMismatchError, match="was filed against order 'o1' for AAPL"):
+        fold(events)
+
+
+def test_fill_against_the_order_side_is_refused() -> None:
+    """A SELL fill against a BUY order would silently reverse the position (I1)."""
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", side=Side.BUY), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", side=Side.SELL, price="500"), ts_utc=TS, seq=2),
+    ]
+    with pytest.raises(LedgerFillMismatchError, match="but its order 'o1' is a BUY"):
+        fold(events)
+
+
+def test_negative_control_matching_fill_is_accepted() -> None:
+    """Negative control: a fill that matches its order's side and instrument still applies."""
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", side=Side.SELL, quantity="10"), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", side=Side.SELL, quantity="10", price="50"), ts_utc=TS, seq=2),
+    ]
+    state = fold(events)["ACC"]
+    assert state.positions[AAPL].quantity == Decimal("-10")
+    assert state.orders["o1"].state is OrderState.FILLED
+
+
+def test_replayed_fill_id_under_a_new_command_is_refused() -> None:
+    """command_id dedupes events; fill_id is the persisted key for the *execution* (I3).
+
+    A venue fill replayed under a fresh command id must not double the position.
+    """
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", quantity="100"), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("same-fill", "o1", quantity="30", price="10"), ts_utc=TS, seq=2),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("same-fill", "o1", quantity="30", price="10"), ts_utc=TS2, seq=3),
+    ]
+    with pytest.raises(LedgerDuplicateFillError, match="already in the ledger"):
+        fold(events)
+
+
+def test_negative_control_two_fills_same_order_different_ids_both_apply() -> None:
+    """Negative control: two legitimate partial fills must both land."""
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", quantity="100"), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", quantity="30", price="10"), ts_utc=TS, seq=2),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f2", "o1", quantity="70", price="11"), ts_utc=TS2, seq=3),
+    ]
+    state = fold(events)["ACC"]
+    assert state.filled_quantity["o1"] == Decimal("100")
+    assert state.orders["o1"].state is OrderState.FILLED
+    assert state.positions[AAPL].quantity == Decimal("100")
+
+
+def test_realized_pnl_uses_fifo_lot_bases_not_average_cost() -> None:
+    """Realised P&L must come from the consumed lots, not the average cost (I11).
+
+    Buy 100@10, buy 100@20, sell 100@30: FIFO says (30-10)*100 = 2000, not the
+    average-cost answer 1500. The split must match the lots that remain.
+    """
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", quantity="100"), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", quantity="100", price="10"), ts_utc=TS, seq=2),
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o2", quantity="100"), ts_utc=TS, seq=3),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f2", "o2", quantity="100", price="20"), ts_utc=TS, seq=4),
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o3", side=Side.SELL, quantity="100"), ts_utc=TS, seq=5),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f3", "o3", side=Side.SELL, quantity="100", price="30"), ts_utc=TS2, seq=6),
+    ]
+    state = fold(events)["ACC"]
+    position = state.positions[AAPL]
+    assert position.realized_pnl == Decimal("2000")
+    # The surviving lot is the second buy, so the average must be its basis, not 15.
+    assert position.avg_cost == Decimal("20")
+    assert position.quantity == Decimal("100")
+    assert [lot.lot_id for lot in position.open_lots] == ["f2"]
+
+    # Closing the rest at 40 adds (40-20)*100 = 2000; totals only agree when flat.
+    events.append(
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o4", side=Side.SELL, quantity="100"), ts_utc=TS2, seq=7)
+    )
+    events.append(
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f4", "o4", side=Side.SELL, quantity="100", price="40"), ts_utc=TS2, seq=8)
+    )
+    final = fold(events)["ACC"]
+    assert final.positions[AAPL].realized_pnl == Decimal("4000")
+    assert final.positions[AAPL].quantity == Decimal("0")
+
+
+def test_fees_reduce_realized_pnl_not_just_cash() -> None:
+    """Cash and realised P&L must tell the same story, or E8's metrics lie (I11)."""
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", quantity="100"), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", quantity="100", price="10", fee="5"), ts_utc=TS, seq=2),
+    ]
+    state = fold(events)["ACC"]
+    assert state.cash == Decimal("-1005")
+    assert state.positions[AAPL].realized_pnl == Decimal("-5")
+    assert state.realized_pnl == Decimal("-5")
 
 
 def test_closing_fill_realizes_pnl_with_multiplier() -> None:
@@ -741,45 +848,93 @@ def test_second_process_on_the_same_ledger_refuses(ledger_path: Path) -> None:
 
 
 def test_snapshot_equals_full_fold_on_randomised_log(ledger: Ledger) -> None:
-    """Property: after a long randomised sequence, snapshot == full fold (Architecture §4.2)."""
+    """Property: after a long randomised sequence, snapshot == full fold (Architecture §4.2).
+
+    The generator deliberately exercises the paths the review found untested: SELL
+    orders as well as BUY, multiple partial fills against one order, non-zero fees,
+    and flips through zero. Every fill it emits matches its order's side and
+    instrument, because those are invariants of the log the fold enforces.
+    """
     import random
 
     rng = random.Random(20260923)
     symbols = [Equity("AAPL"), Equity("MSFT"), Equity("GOOG"), SPXW]
     accounts = ["ACC_A", "ACC_B"]
-    open_orders: dict[str, tuple[str, object, Decimal]] = {}
+    # order_id -> (account, instrument, side, remaining quantity)
+    open_orders: dict[str, tuple[str, object, Side, Decimal]] = {}
+    unfilled: set[str] = set()  # orders with no fill yet, i.e. still in SUBMITTED
     order_counter = 0
     fill_counter = 0
+
+    def submit() -> None:
+        nonlocal order_counter
+        order_counter += 1
+        order_id = f"{account}-o{order_counter}"
+        instrument = rng.choice(symbols)
+        side = rng.choice([Side.BUY, Side.SELL])
+        quantity = Decimal(rng.choice([1, 5, 10, 25, 100]))
+        order = an_order(order_id, account, instrument=instrument, side=side, quantity=str(quantity), command_id=f"cmd-{order_id}")
+        ledger.append(Event(account=account, kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=TS, command_id=order.command_id))
+        open_orders[order_id] = (account, instrument, side, quantity)
+        unfilled.add(order_id)
+
+    def fill_some() -> None:
+        nonlocal fill_counter
+        order_id = rng.choice(list(open_orders))
+        account_id, instrument, side, remaining = open_orders[order_id]
+        take = Decimal(rng.choice([1, 2, max(1, int(remaining / 2))]))
+        if take > remaining:
+            take = remaining
+        fill_counter += 1
+        fill = a_fill(
+            f"f{fill_counter}",
+            order_id,
+            account=account_id,
+            instrument=instrument,
+            side=side,
+            quantity=str(take),
+            price=str(rng.choice([10, 25, 101.25, 150, 6000])),
+            fee=str(rng.choice([0, 0.65, 1.3])),
+        )
+        ledger.append(Event(account=account_id, kind=EventKind.FILL, payload=fill, ts_utc=TS, command_id=f"cmd-f{fill_counter}"))
+        unfilled.discard(order_id)
+        if take == remaining:
+            open_orders.pop(order_id)
+        else:
+            open_orders[order_id] = (account_id, instrument, side, remaining - take)
+
+    def accept_some() -> None:
+        # Only orders still in SUBMITTED can be accepted: PARTIALLY_FILLED → ACCEPTED
+        # is illegal in the E0 state machine, and a venue cannot "re-accept" an order
+        # that has already started filling.
+        submitted = [oid for oid, meta in open_orders.items() if oid in unfilled]
+        if not submitted:
+            return
+        order_id = rng.choice(submitted)
+        ledger.append(
+            Event(
+                account=open_orders[order_id][0],
+                kind=EventKind.ORDER_ACCEPTED,
+                payload=OrderStateChange(order_id=order_id, reason="venue ack"),
+                ts_utc=TS,
+            )
+        )
+
+    for seed_account in accounts:
+        account = seed_account  # the closures read this loop variable
+        for _ in range(3):
+            submit()
 
     for step in range(1000):
         account = rng.choice(accounts)
         roll = rng.random()
-        if roll < 0.25:
-            order_counter += 1
-            order_id = f"{account}-o{order_counter}"
-            instrument = rng.choice(symbols)
-            quantity = Decimal(rng.choice([1, 5, 10, 25, 100]))
-            order = an_order(order_id, account, instrument=instrument, quantity=str(quantity), command_id=f"cmd-{order_id}")
-            ledger.append(Event(account=account, kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=TS, command_id=order.command_id))
-            open_orders[order_id] = (account, instrument, quantity)
-        elif roll < 0.6 and open_orders:
-            order_id = rng.choice(list(open_orders))
-            account_id, instrument, quantity = open_orders.pop(order_id)
-            fill_counter += 1
-            take = Decimal(rng.choice([1, max(1, int(quantity / 2))]))
-            if take > quantity:
-                take = quantity
-            fill = a_fill(
-                f"f{fill_counter}",
-                order_id,
-                account=account_id,
-                instrument=instrument,
-                quantity=str(take),
-                price=str(rng.choice([10, 25, 101.25, 150, 6000])),
-                fee=str(rng.choice([0, 0.65, 1.3])),
-            )
-            ledger.append(Event(account=account_id, kind=EventKind.FILL, payload=fill, ts_utc=TS, command_id=f"cmd-f{fill_counter}"))
-        elif roll < 0.75:
+        if roll < 0.30:
+            submit()
+        elif roll < 0.60 and open_orders:
+            fill_some()
+        elif roll < 0.70 and open_orders:
+            accept_some()
+        elif roll < 0.78:
             ledger.append(
                 Event(
                     account=account,
@@ -788,7 +943,7 @@ def test_snapshot_equals_full_fold_on_randomised_log(ledger: Ledger) -> None:
                     ts_utc=TS,
                 )
             )
-        elif roll < 0.85:
+        elif roll < 0.86:
             ledger.append(
                 Event(
                     account=account,
@@ -815,7 +970,7 @@ def test_snapshot_equals_full_fold_on_randomised_log(ledger: Ledger) -> None:
                 )
             )
 
-    assert ledger.count() == 1000
+    assert ledger.count() == 1000 + 2 * 3  # the 1,000-event run plus the two seeds per account
 
     full = ledger.fold()
     for account in accounts:

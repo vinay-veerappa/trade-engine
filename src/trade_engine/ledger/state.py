@@ -12,7 +12,7 @@ handlers; until then a ledger containing one of those events cannot be folded, l
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
@@ -39,6 +39,14 @@ class LedgerFoldError(RuntimeError):
     """Raised when a recorded event cannot be applied to state (I5)."""
 
 
+class LedgerFillMismatchError(LedgerFoldError):
+    """A fill that contradicts its order's instrument or side (I1, I5)."""
+
+
+class LedgerDuplicateFillError(LedgerFoldError):
+    """A venue fill replayed under a new command id (I3)."""
+
+
 @dataclass(frozen=True)
 class AccountState:
     """Folded state for one account. Every field is replaced, never mutated (I2)."""
@@ -48,6 +56,8 @@ class AccountState:
     positions: Mapping[Instrument, Position] = field(default_factory=lambda: MappingProxyType({}))
     orders: Mapping[str, Order] = field(default_factory=lambda: MappingProxyType({}))
     filled_quantity: Mapping[str, Decimal] = field(default_factory=lambda: MappingProxyType({}))
+    fills: tuple[Fill, ...] = ()
+    fill_ids: frozenset[str] = frozenset()
     marks: Mapping[Instrument, Decimal] = field(default_factory=lambda: MappingProxyType({}))
     realized_pnl: Decimal = ZERO
     signals_seen: int = 0
@@ -67,17 +77,27 @@ def _multiplier(instrument: Instrument) -> int:
         ) from err
 
 
-def _consume_lots(lots: list[Lot], quantity: Decimal) -> list[Lot]:
-    """Remove `quantity` from the front of the lot list (FIFO), dropping emptied lots."""
+def _consume_lots(lots: list[Lot], quantity: Decimal, exit_price: Decimal, multiplier: int) -> tuple[list[Lot], Decimal]:
+    """Close `quantity` from the front of the lot list (FIFO), returning kept lots and
+    the realised P&L of the closed quantity.
+
+    Realised P&L must come from the *consumed lots'* own cost bases, not the position's
+    average cost: the lots are FIFO, so an average-cost figure splits the same total
+    profit differently across partial closes, and every per-lot R / MFE-MAE number
+    computed downstream (E8) inherits the error (I11).
+    """
     remaining = quantity
+    realized = ZERO
     kept: list[Lot] = []
     for lot in lots:
         if remaining <= ZERO:
             kept.append(lot)
             continue
         if lot.quantity <= remaining:
-            remaining -= lot.quantity
+            closed = lot.quantity
+            remaining -= closed
         else:
+            closed = remaining
             kept.append(
                 Lot(
                     lot_id=lot.lot_id,
@@ -88,9 +108,13 @@ def _consume_lots(lots: list[Lot], quantity: Decimal) -> list[Lot]:
                 )
             )
             remaining = ZERO
+        if lot.side is Side.BUY:
+            realized += (exit_price - lot.cost_basis) * closed * multiplier
+        else:
+            realized += (lot.cost_basis - exit_price) * closed * multiplier
     if remaining != ZERO:
         raise LedgerFoldError(f"Open lots ran short by {remaining}; ledger is inconsistent (I2)")
-    return kept
+    return kept, realized
 
 
 def apply_fill(
@@ -139,12 +163,8 @@ def apply_fill(
         lots = [*old_lots, new_lot]
     else:
         closing = min(abs(signed_delta), abs(old_qty))
-        if old_qty > ZERO:
-            realized += (fill.price - avg) * closing * multiplier
-        else:
-            realized += (avg - fill.price) * closing * multiplier
-
-        lots = _consume_lots(old_lots, closing)
+        lots, close_pnl = _consume_lots(old_lots, closing, fill.price, multiplier)
+        realized += close_pnl
         new_qty = old_qty + signed_delta
 
         if abs(signed_delta) > abs(old_qty):
@@ -161,7 +181,9 @@ def apply_fill(
         elif new_qty == ZERO:
             new_avg = ZERO
         else:
-            new_avg = avg
+            # Remaining lots keep their own bases; the position average is the weighted
+            # mean of what is actually still open, so it never contradicts the lots.
+            new_avg = sum((lot.cost_basis * lot.quantity for lot in lots), ZERO) / abs(new_qty)
 
     return Position(
         account_id=account_id,
@@ -184,6 +206,8 @@ def _replace(state: AccountState, **changes: Any) -> AccountState:
         "positions": state.positions,
         "orders": state.orders,
         "filled_quantity": state.filled_quantity,
+        "fills": state.fills,
+        "fill_ids": state.fill_ids,
         "marks": state.marks,
         "realized_pnl": state.realized_pnl,
         "signals_seen": state.signals_seen,
@@ -214,12 +238,45 @@ def _on_cash_flow(state: AccountState, event: Event) -> AccountState:
 
 def _on_fill(state: AccountState, event: Event) -> AccountState:
     fill: Fill = event.payload
+    order = state.orders.get(fill.order_id)
+    if order is None:
+        raise LedgerFoldError(
+            f"Fill {fill.fill_id} references unknown order '{fill.order_id}' (I5)"
+        )
+
+    # A fill that disagrees with its order would silently invent or reverse a position,
+    # the exact corruption the ledger exists to make impossible (I1). The venue ids are
+    # provenance; the order is the record of intent.
+    if fill.instrument != order.instrument:
+        raise LedgerFillMismatchError(
+            f"Fill {fill.fill_id} on instrument {fill.instrument.symbol} was filed against "
+            f"order '{fill.order_id}' for {order.instrument.symbol}; the log contradicts "
+            f"the order (I5)"
+        )
+    if fill.side is not order.side:
+        raise LedgerFillMismatchError(
+            f"Fill {fill.fill_id} is a {fill.side.value} but its order '{fill.order_id}' is a "
+            f"{order.side.value}; refusing to apply the wrong direction (I5)"
+        )
+
+    if fill.fill_id in state.fill_ids:
+        raise LedgerDuplicateFillError(
+            f"Fill '{fill.fill_id}' is already in the ledger for account "
+            f"'{state.account_id}'; a replayed venue fill is a no-op, not a second "
+            f"position (I3)"
+        )
+
     multiplier = _multiplier(fill.instrument)
     gross = fill.quantity * fill.price * multiplier
     cash_delta = (gross if fill.side == Side.SELL else -gross) - fill.fee
 
     position = state.positions.get(fill.instrument)
+    prior_realized = position.realized_pnl if position is not None else ZERO
     updated = apply_fill(state.account_id, position, fill, multiplier)
+    # Fees are a realised cost of the trade that produced them, so they reduce realised
+    # P&L alongside the cash they already reduced. Without this, E8's profit factor
+    # overstates by every fee (I11: the cash and the P&L must tell the same story).
+    updated = replace(updated, realized_pnl=updated.realized_pnl - fill.fee)
     positions = dict(state.positions)
     positions[fill.instrument] = updated
 
@@ -227,11 +284,6 @@ def _on_fill(state: AccountState, event: Event) -> AccountState:
     filled[fill.order_id] = filled.get(fill.order_id, ZERO) + fill.quantity
 
     orders = dict(state.orders)
-    order = orders.get(fill.order_id)
-    if order is None:
-        raise LedgerFoldError(
-            f"Fill {fill.fill_id} references unknown order '{fill.order_id}' (I5)"
-        )
     total = filled[fill.order_id]
     if total > order.quantity:
         raise LedgerFoldError(
@@ -259,7 +311,9 @@ def _on_fill(state: AccountState, event: Event) -> AccountState:
         positions=MappingProxyType(positions),
         orders=MappingProxyType(orders),
         filled_quantity=MappingProxyType(filled),
-        realized_pnl=state.realized_pnl,
+        realized_pnl=state.realized_pnl + (updated.realized_pnl - prior_realized),
+        fills=state.fills + (fill,),
+        fill_ids=state.fill_ids | {fill.fill_id},
     )
 
 
@@ -443,6 +497,8 @@ __all__ = [
     "AccountState",
     "FoldCache",
     "HANDLERS",
+    "LedgerDuplicateFillError",
+    "LedgerFillMismatchError",
     "LedgerFoldError",
     "apply_fill",
     "fold",
