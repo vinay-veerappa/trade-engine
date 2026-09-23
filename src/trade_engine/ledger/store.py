@@ -46,10 +46,6 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
-class DuplicateEventError(RuntimeError):
-    """Raised when an event id (not command id) is already present."""
-
-
 class Ledger:
     """Append-only SQLite event ledger for one file."""
 
@@ -253,7 +249,14 @@ class Ledger:
         seed: dict[str, AccountState] = {}
         for account in accounts:
             state = self.snapshot(account, at_seq=after)
-            seed[account] = replace(state, last_seq=after)
+            if state.last_seq == 0:
+                # No events at or below the cutoff: nothing to seed. The seed must
+                # carry each account's *real* last_seq — stamping the cutoff in would
+                # fabricate a position the account never saw, and seeding an empty
+                # account at all would add a state the honest fold does not have,
+                # so verify() would fail (I2).
+                continue
+            seed[account] = state
         return FoldCache(self.events(after=after), seed=seed, base_seq=after)
 
     # -- meta --------------------------------------------------------------------
@@ -280,7 +283,6 @@ def fold_events(events: Iterable[Event]) -> dict[str, AccountState]:
 
 
 __all__ = [
-    "DuplicateEventError",
     "EventKind",
     "Ledger",
     "LedgerLockError",
