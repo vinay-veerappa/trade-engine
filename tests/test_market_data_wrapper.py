@@ -197,8 +197,8 @@ def test_future_timestamp_rejected_as_lookahead() -> None:
         wrapper.quote(eq, max_age_seconds=10.0)
 
 
-def test_wrapper_auto_stamp_mode() -> None:
-    """Auto-stamp missing as_of using injected clock when configured."""
+def test_missing_as_of_rejected() -> None:
+    """Finding 1: Data items missing as_of must be refused (no inventing timestamps)."""
     t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
     clock = ReplayClock(t0)
 
@@ -215,22 +215,104 @@ def test_wrapper_auto_stamp_mode() -> None:
         def quote(self, instrument, max_age_seconds):
             return RawQuoteItem(instrument)
 
-    wrapper = StampingMarketDataWrapper(RawProvider(), clock=clock, auto_stamp=True)
-    res = wrapper.quote(Equity("TEST"), max_age_seconds=5.0)
-    assert res.as_of == t0
+    wrapper = StampingMarketDataWrapper(RawProvider(), clock=clock)
+    with pytest.raises(ValueError, match="has no as_of timestamp"):
+        wrapper.quote(Equity("TEST"), max_age_seconds=5.0)
 
 
-def test_wrapper_validates_inputs() -> None:
+def test_max_age_nan_and_inf_rejected() -> None:
+    """Finding 2: max_age_seconds of NaN, inf, or <=0 must be rejected."""
     t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
     clock = ReplayClock(t0)
     provider = FakeProvider()
+    wrapper = StampingMarketDataWrapper(provider, clock=clock)
+    eq = Equity("SPY")
 
+    for bad_age in [float("nan"), float("inf"), float("-inf"), 0.0, -10.0]:
+        with pytest.raises(ValueError, match="finite positive number"):
+            wrapper.quote(eq, max_age_seconds=bad_age)
+
+
+def test_bars_lookahead_and_future_bars_rejected() -> None:
+    """Finding 3: Bars from future or requests with start in the future must be rejected."""
+    t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
+    clock = ReplayClock(t0)
+    provider = FakeProvider()
+    wrapper = StampingMarketDataWrapper(provider, clock=clock)
+    eq = Equity("SPY")
+
+    # 1. Start in the future relative to clock
+    future_start = t0 + timedelta(minutes=10)
+    future_end = t0 + timedelta(minutes=20)
+    with pytest.raises(ValueError, match="is in the future relative to clock"):
+        wrapper.bars(eq, "1m", future_start, future_end, max_age_seconds=60.0)
+
+    # 2. Returned bar has timestamp in future relative to clock
+    past_start = t0 - timedelta(minutes=10)
+    provider._bars = [
+        Bar(
+            instrument=eq,
+            timestamp=t0 + timedelta(minutes=5),  # 5 minutes in future!
+            open=Decimal("500"),
+            high=Decimal("501"),
+            low=Decimal("499"),
+            close=Decimal("500.5"),
+            volume=Decimal("100"),
+            as_of=t0,
+        )
+    ]
+    with pytest.raises(ValueError, match="Bar timestamp .* is in the future"):
+        wrapper.bars(eq, "1m", past_start, t0 + timedelta(minutes=10), max_age_seconds=60.0)
+
+
+def test_bars_start_after_end_rejected() -> None:
+    """Finding 8: start > end in bars() must be rejected."""
+    t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
+    clock = ReplayClock(t0)
+    provider = FakeProvider()
+    wrapper = StampingMarketDataWrapper(provider, clock=clock)
+    eq = Equity("SPY")
+
+    t_start = t0 - timedelta(minutes=5)
+    t_end = t0 - timedelta(minutes=10)
+    with pytest.raises(ValueError, match="cannot be after end datetime"):
+        wrapper.bars(eq, "1m", t_start, t_end, max_age_seconds=60.0)
+
+
+def test_chain_expiry_start_after_expiry_end_rejected() -> None:
+    """Finding 8: expiry_start > expiry_end in chain() must be rejected."""
+    t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
+    clock = ReplayClock(t0)
+    provider = FakeProvider()
+    wrapper = StampingMarketDataWrapper(provider, clock=clock)
+
+    with pytest.raises(ValueError, match="expiry_start .* cannot be after expiry_end"):
+        wrapper.chain("SPY", date(2026, 10, 30), date(2026, 10, 1), max_age_seconds=60.0)
+
+
+def test_future_tolerance_zero_slack() -> None:
+    """Finding 7: Default future tolerance is 0.0s slack (zero lookahead)."""
+    t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
+    clock = ReplayClock(t0)
+    provider = FakeProvider()
+    wrapper = StampingMarketDataWrapper(provider, clock=clock)
+
+    eq = Equity("SPY")
+    # Even 1 millisecond in the future raises ValueError
+    provider._quote = Quote(
+        instrument=eq,
+        bid=Decimal("500.00"),
+        ask=Decimal("500.10"),
+        bid_size=Decimal("100"),
+        ask_size=Decimal("200"),
+        as_of=t0 + timedelta(milliseconds=1),
+    )
+    with pytest.raises(ValueError, match="timestamp is in the future"):
+        wrapper.quote(eq, max_age_seconds=10.0)
+
+
+def test_wrapper_requires_clock() -> None:
+    provider = FakeProvider()
     with pytest.raises(ValueError, match="requires an injected Clock"):
         StampingMarketDataWrapper(provider, clock=None)  # type: ignore[arg-type]
 
-    wrapper = StampingMarketDataWrapper(provider, clock=clock)
-    with pytest.raises(ValueError, match="strictly positive"):
-        wrapper.quote(Equity("SPY"), max_age_seconds=0.0)
-
-    with pytest.raises(ValueError, match="strictly positive"):
-        wrapper.quote(Equity("SPY"), max_age_seconds=-5.0)

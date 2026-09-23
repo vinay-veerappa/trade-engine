@@ -83,3 +83,24 @@ def test_replay_clock_sleep_advances_simulated_time() -> None:
 
     with pytest.raises(ValueError, match="cannot be negative"):
         clock.sleep(-1.0)
+
+
+def test_replay_clock_normalizes_to_utc() -> None:
+    """Finding 6: ReplayClock initialized with non-UTC timezone must return timezone.utc."""
+    import zoneinfo
+    et = zoneinfo.ZoneInfo("America/New_York")
+    # 09:30 ET on 2026-11-27 is 14:30 UTC (EST, UTC-5)
+    t_et = datetime(2026, 11, 27, 9, 30, 0, tzinfo=et)
+    clock = ReplayClock(t_et)
+
+    now = clock.now_utc()
+    assert now.tzinfo == timezone.utc
+    assert now == datetime(2026, 11, 27, 14, 30, 0, tzinfo=timezone.utc)
+
+    # advance_to with non-UTC timezone
+    t_et_adv = datetime(2026, 11, 27, 10, 0, 0, tzinfo=et)
+    clock.advance_to(t_et_adv)
+    now_adv = clock.now_utc()
+    assert now_adv.tzinfo == timezone.utc
+    assert now_adv == datetime(2026, 11, 27, 15, 0, 0, tzinfo=timezone.utc)
+

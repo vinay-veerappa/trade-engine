@@ -1,9 +1,9 @@
-"""Market data wrapper stamping as_of and enforcing freshness (Architecture §4.8, I5, I7)."""
+"""Market data wrapper verifying as_of freshness and preventing lookahead (Architecture §4.8, I5, I7)."""
 
 from __future__ import annotations
 
-from dataclasses import is_dataclass, replace
 from datetime import date, datetime
+import math
 from typing import Any, Sequence, TypeVar
 
 from trade_engine.domain.instruments import Instrument
@@ -22,25 +22,28 @@ T = TypeVar("T", Bar, Quote, OptionQuote, CorporateAction)
 
 
 class StampingMarketDataWrapper(MarketData):
-    """Market data provider wrapper that verifies freshness and stamps timestamps.
+    """Market data provider wrapper that enforces freshness and prevents lookahead.
 
     Enforces:
     - I5: Refuse, never guess. Stale data (older than max_age_seconds) raises StaleDataError.
     - I7: Injected clock. Current time is ALWAYS queried via the injected Clock.
-    - Negative age (data from future relative to clock) is refused.
+    - No lookahead: Data timestamps and as_of timestamps after clock.now_utc() are refused.
+    - Missing as_of timestamp on any data item is strictly refused (I5: no invented timestamps).
     """
 
     def __init__(
         self,
         provider: Any,
         clock: Clock,
-        auto_stamp: bool = False,
+        future_tolerance_seconds: float = 0.0,
     ) -> None:
         if clock is None or not isinstance(clock, Clock):
             raise ValueError("StampingMarketDataWrapper requires an injected Clock protocol instance (I7)")
+        if not isinstance(future_tolerance_seconds, (int, float)) or not math.isfinite(future_tolerance_seconds) or future_tolerance_seconds < 0:
+            raise ValueError(f"future_tolerance_seconds must be a finite non-negative number: {future_tolerance_seconds!r}")
         self._provider = provider
         self._clock = clock
-        self._auto_stamp = auto_stamp
+        self._future_tolerance_seconds = float(future_tolerance_seconds)
 
     @property
     def clock(self) -> Clock:
@@ -55,46 +58,34 @@ class StampingMarketDataWrapper(MarketData):
         if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
             raise ValueError("Clock.now_utc() returned a naive datetime (I7)")
 
-        target_item = item
-        if self._auto_stamp:
-            as_of_val = getattr(target_item, "as_of", None)
-            if as_of_val is None:
-                if is_dataclass(target_item):
-                    target_item = replace(target_item, as_of=now)
-                else:
-                    try:
-                        setattr(target_item, "as_of", now)
-                    except Exception:
-                        pass
-
-        as_of = getattr(target_item, "as_of", None)
+        as_of = getattr(item, "as_of", None)
         if as_of is None:
-            raise ValueError(f"Market data item {target_item!r} has no as_of timestamp (I5)")
+            raise ValueError(f"Market data item {item!r} has no as_of timestamp (I5)")
         if as_of.tzinfo is None or as_of.tzinfo.utcoffset(as_of) is None:
             raise ValueError(f"as_of timestamp must be timezone-aware UTC datetime (I7): {as_of!r}")
 
         age = (now - as_of).total_seconds()
+        if age < -self._future_tolerance_seconds:
+            raise ValueError(
+                f"Market data timestamp is in the future relative to clock: as_of={as_of.isoformat()} > now={now.isoformat()} (I5)"
+            )
+
         if age > max_age_seconds:
             symbol = getattr(
-                target_item,
+                item,
                 "instrument",
-                getattr(target_item, "contract", getattr(target_item, "symbol", repr(target_item))),
+                getattr(item, "contract", getattr(item, "symbol", repr(item))),
             )
             raise StaleDataError(
                 f"Market data for {symbol} is stale: age {age:.3f}s exceeds allowed max_age {max_age_seconds:.3f}s "
                 f"(as_of={as_of.isoformat()}, now={now.isoformat()}) (I5)"
             )
 
-        if age < -1.0:
-            raise ValueError(
-                f"Market data timestamp is in the future: as_of={as_of.isoformat()} > now={now.isoformat()} (I5)"
-            )
-
-        return target_item
+        return item
 
     def _validate_max_age(self, max_age_seconds: float) -> None:
-        if max_age_seconds <= 0:
-            raise ValueError(f"max_age_seconds must be strictly positive (I5): {max_age_seconds}")
+        if not isinstance(max_age_seconds, (int, float)) or not math.isfinite(max_age_seconds) or max_age_seconds <= 0:
+            raise ValueError(f"max_age_seconds must be a finite positive number (I5), got: {max_age_seconds!r}")
 
     def bars(
         self,
@@ -110,16 +101,32 @@ class StampingMarketDataWrapper(MarketData):
         if end.tzinfo is None or end.tzinfo.utcoffset(end) is None:
             raise ValueError("end datetime must be timezone-aware (I7)")
         if start > end:
-            raise ValueError(f"start datetime {start} cannot be after end datetime {end}")
+            raise ValueError(f"start datetime {start.isoformat()} cannot be after end datetime {end.isoformat()} (I5)")
 
+        now = self._clock.now_utc()
+        if start > now:
+            raise ValueError(
+                f"Requested bar start {start.isoformat()} is in the future relative to clock {now.isoformat()} (I5)"
+            )
+
+        effective_end = min(end, now)
         raw_bars: Sequence[Bar] = self._provider.bars(
             instrument=instrument,
             tf=tf,
             start=start,
-            end=end,
+            end=effective_end,
             max_age_seconds=max_age_seconds,
         )
-        return [self._verify_item(b, max_age_seconds) for b in raw_bars]
+
+        verified: list[Bar] = []
+        for b in raw_bars:
+            if b.timestamp > now:
+                raise ValueError(
+                    f"Bar timestamp {b.timestamp.isoformat()} is in the future relative to clock {now.isoformat()} (I5)"
+                )
+            verified.append(self._verify_item(b, max_age_seconds))
+
+        return verified
 
     def quote(
         self,
@@ -142,7 +149,7 @@ class StampingMarketDataWrapper(MarketData):
     ) -> list[OptionQuote]:
         self._validate_max_age(max_age_seconds)
         if expiry_start > expiry_end:
-            raise ValueError(f"expiry_start {expiry_start} cannot be after expiry_end {expiry_end}")
+            raise ValueError(f"expiry_start {expiry_start} cannot be after expiry_end {expiry_end} (I5)")
 
         raw_chain: Sequence[OptionQuote] = self._provider.chain(
             underlying=underlying,

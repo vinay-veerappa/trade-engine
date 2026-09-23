@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Union
 
 from trade_engine.interfaces.clock import Clock
@@ -18,7 +18,7 @@ class ReplayClock(Clock):
     def __init__(self, initial_time: datetime) -> None:
         if initial_time.tzinfo is None or initial_time.tzinfo.utcoffset(initial_time) is None:
             raise ValueError("initial_time must be a timezone-aware UTC datetime (I7)")
-        self._current_time: datetime = initial_time
+        self._current_time: datetime = initial_time.astimezone(timezone.utc)
 
     def now_utc(self) -> datetime:
         """Return the current simulated time as a timezone-aware UTC datetime."""
@@ -31,11 +31,12 @@ class ReplayClock(Clock):
         """
         if target.tzinfo is None or target.tzinfo.utcoffset(target) is None:
             raise ValueError("target time must be a timezone-aware UTC datetime (I7)")
-        if target < self._current_time:
+        target_utc = target.astimezone(timezone.utc)
+        if target_utc < self._current_time:
             raise ValueError(
-                f"Cannot advance clock backwards in time: target {target.isoformat()} < current {self._current_time.isoformat()} (I5)"
+                f"Cannot advance clock backwards in time: target {target_utc.isoformat()} < current {self._current_time.isoformat()} (I5)"
             )
-        self._current_time = target
+        self._current_time = target_utc
 
     def advance_by(self, duration: Union[timedelta, float, int]) -> None:
         """Advance simulated time by a timedelta or float/int seconds."""

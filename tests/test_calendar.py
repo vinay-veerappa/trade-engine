@@ -120,3 +120,16 @@ def test_calendar_input_types_and_invariants() -> None:
     # Unknown exchange rejected
     with pytest.raises(ValueError, match="Unknown or unsupported exchange"):
         ExchangeCalendar("NONEXISTENT_EXCHANGE")
+
+
+def test_leaps_expiry_handled_and_date_range_independent_of_wall_clock() -> None:
+    """Finding 4: Ensure future dates (e.g. 2028 LEAPS) do not raise DateOutOfBounds."""
+    cal = get_calendar("XNYS")
+    # 2028-01-21 is a Friday third-Friday LEAPS expiration session
+    assert cal.is_session("2028-01-21") is True
+    close_2028 = cal.session_close("2028-01-21")
+    assert close_2028 == datetime(2028, 1, 21, 21, 0, tzinfo=timezone.utc)
+    # Check MLK Day holiday in 2028
+    assert cal.is_session("2028-01-17") is False
+    assert cal.is_holiday("2028-01-17") is True
+

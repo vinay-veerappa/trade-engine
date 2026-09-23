@@ -19,10 +19,15 @@ class ExchangeCalendar:
     and session navigation. All returned timestamps are timezone-aware UTC.
     """
 
-    def __init__(self, exchange: str = "XNYS") -> None:
+    def __init__(
+        self,
+        exchange: str = "XNYS",
+        start: str = "2000-01-01",
+        end: str = "2040-12-31",
+    ) -> None:
         self.exchange = exchange
         try:
-            self._cal = xcals.get_calendar(exchange)
+            self._cal = xcals.get_calendar(exchange, start=start, end=end)
         except Exception as e:
             raise ValueError(f"Unknown or unsupported exchange: {exchange!r}") from e
         cal_tz = self._cal.tz
@@ -63,26 +68,13 @@ class ExchangeCalendar:
     def is_holiday(self, d: DateLike) -> bool:
         """Return True if the date is an exchange holiday.
 
-        Specifically returns True for official holidays (including weekdays closed for holidays).
-        Regular weekend days that are not official holidays return False.
+        Specifically returns True for weekdays that are closed for exchange holidays.
+        Regular weekend days (Saturday/Sunday) return False.
         """
         session_date = self._to_date(d)
-        ts = pd.Timestamp(session_date)
-
-        # Check regular holiday calendar for this date
-        try:
-            is_reg = len(self._cal.regular_holidays.holidays(ts, ts)) > 0
-        except Exception:
-            is_reg = False
-
-        if is_reg:
-            return True
-
-        # Check adhoc holidays
-        if ts in self._cal.adhoc_holidays:
-            return True
-
-        return False
+        if session_date.weekday() >= 5:
+            return False
+        return not self.is_session(session_date)
 
     def is_early_close(self, d: DateLike) -> bool:
         """Return True if the session closes earlier than regular hours (e.g. 2026-11-27)."""
