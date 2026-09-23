@@ -34,12 +34,14 @@ from trade_engine.ledger.state import (
     fold_account,
     register_handler,
 )
+from trade_engine.ledger.outbox import DrainResult, OutboxItem, OutboxStatus
 from trade_engine.ledger.store import Ledger, fold_events
 
 __all__ = [
     "AccountState",
     "CASH_FLOW_KINDS",
     "CashFlow",
+    "DrainResult",
     "Event",
     "EventKind",
     "EventPayloadError",
@@ -54,6 +56,8 @@ __all__ = [
     "LifecycleNotice",
     "Mark",
     "OrderStateChange",
+    "OutboxItem",
+    "OutboxStatus",
     "PayloadCodecError",
     "SCHEMA_VERSION",
     "SingleInstanceLock",
