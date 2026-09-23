@@ -16,6 +16,9 @@ class StaleDataError(Exception):
     """Raised when market data is older than the caller's accepted max age (I5)."""
 
 
+StaleData = StaleDataError
+
+
 @dataclass(frozen=True)
 class Bar:
     """OHLCV market bar stamped with as_of timestamp."""
