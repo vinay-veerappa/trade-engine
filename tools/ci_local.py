@@ -115,6 +115,8 @@ def run_tests() -> bool:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Authoritative local CI runner")
     parser.add_argument(
         "--include-uncommitted",
