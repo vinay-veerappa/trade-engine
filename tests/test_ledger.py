@@ -1136,3 +1136,145 @@ def test_events_after_seq_filters_correctly(ledger: Ledger) -> None:
     tail = ledger.events(after=3)
     assert [e.seq for e in tail] == [4, 5]
     assert ledger.next_seq() == 6
+
+
+# --------------------------------------------------------------------------- re-review follow-ups
+
+
+def test_append_refuses_an_event_the_fold_would_refuse(ledger: Ledger) -> None:
+    """An unfoldable event must never reach the append-only log, or every later fold raises (I2)."""
+    bad = Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "ghost"), ts_utc=TS, command_id="c1")
+    with pytest.raises(LedgerFoldError, match="unknown order 'ghost'"):
+        ledger.append(bad)
+    assert ledger.count() == 0
+    assert ledger.event_by_command("c1") is None
+    assert ledger.fold() == {}
+
+
+def test_negative_control_valid_fill_still_appends(ledger: Ledger) -> None:
+    ledger.append(Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1"), ts_utc=TS, command_id="s1"))
+    ledger.append(Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1"), ts_utc=TS, command_id="c1"))
+    assert ledger.state("ACC").positions[AAPL].quantity == Decimal("100")
+
+
+def test_append_refuses_a_replayed_fill_under_a_new_command(ledger: Ledger) -> None:
+    ledger.append(Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1"), ts_utc=TS, command_id="s1"))
+    ledger.append(Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", quantity="30"), ts_utc=TS, command_id="c1"))
+    with pytest.raises(LedgerDuplicateFillError):
+        ledger.append(Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", quantity="30"), ts_utc=TS, command_id="c2"))
+    assert ledger.count() == 2
+
+
+def test_one_accounts_bad_history_does_not_block_another(ledger_path: Path) -> None:
+    """state(account) folds that account only, so a bad row elsewhere cannot spread (I8)."""
+    bad = Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "ghost"), ts_utc=TS)
+    encoded = encode_event(bad)
+    raw = sqlite3.connect(str(ledger_path))
+    raw.executescript(
+        "CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts_utc TEXT NOT NULL, account TEXT NOT NULL, "
+        "kind TEXT NOT NULL, command_id TEXT, payload_json TEXT NOT NULL, schema_version INTEGER NOT NULL);"
+    )
+    raw.execute(
+        "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) VALUES (?, ?, ?, NULL, ?, 1)",
+        (TS.isoformat(), "ACC", "Fill", json.dumps(encoded["payload"])),
+    )
+    raw.commit()
+    raw.close()
+    with Ledger(ledger_path) as lg:
+        lg.append(Event(account="OTHER", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("5"), kind="deposit", as_of=TS), ts_utc=TS, command_id="d1"))
+        assert lg.state("OTHER").cash == Decimal("5")
+        with pytest.raises(LedgerFoldError):
+            lg.state("ACC")
+
+
+def test_extend_is_one_transaction(ledger: Ledger) -> None:
+    """A batch whose second event is refused must leave nothing behind (I2)."""
+    batch = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1"), ts_utc=TS, command_id="s1"),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "ghost"), ts_utc=TS, command_id="c1"),
+    ]
+    with pytest.raises(LedgerFoldError):
+        ledger.extend(batch)
+    assert ledger.count() == 0
+    assert ledger.event_by_command("s1") is None
+
+
+def test_extend_crash_before_commit_leaves_no_event(ledger_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with Ledger(ledger_path) as lg:
+        _crash_before_commit(lg, monkeypatch)
+        with pytest.raises(_Boom):
+            lg.extend(
+                [
+                    Event(account="A", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("1"), kind="deposit", as_of=TS), ts_utc=TS, command_id="a"),
+                    Event(account="B", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("2"), kind="deposit", as_of=TS), ts_utc=TS, command_id="b"),
+                ]
+            )
+        monkeypatch.undo()
+        assert lg.count() == 0
+        # The failed batch must not have leaked into the validation base either.
+        lg.append(Event(account="A", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("1"), kind="deposit", as_of=TS), ts_utc=TS, command_id="a"))
+        assert lg.state("A").cash == Decimal("1")
+        lg.verify_snapshot("A")
+
+
+def test_negative_control_extend_chains_events_within_the_batch(ledger: Ledger) -> None:
+    """A fill may reference an order submitted earlier in the same batch."""
+    written = ledger.extend(
+        [
+            Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1"), ts_utc=TS, command_id="s1"),
+            Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1"), ts_utc=TS, command_id="c1"),
+            Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1"), ts_utc=TS, command_id="c1"),
+        ]
+    )
+    assert [e.seq for e in written] == [1, 2, 2]
+    assert ledger.count() == 2
+    assert ledger.state("ACC").orders["o1"].state is OrderState.FILLED
+
+
+def test_there_is_no_unlocked_writer(ledger_path: Path) -> None:
+    """I4 is not optional: the ledger cannot be opened without its lock."""
+    with pytest.raises(TypeError):
+        Ledger(ledger_path, lock=False)  # type: ignore[call-arg]
+
+
+def test_event_timestamp_is_normalised_to_utc(ledger: Ledger) -> None:
+    from zoneinfo import ZoneInfo
+
+    et = datetime(2026, 9, 23, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+    ledger.append(Event(account="ACC", kind=EventKind.MARK, payload=Mark(instrument=AAPL, price=Decimal("150"), as_of=TS), ts_utc=et))
+    stored = ledger.conn.execute("SELECT ts_utc FROM events").fetchone()[0]
+    assert stored == "2026-09-23T21:00:00+00:00"
+    assert ledger.events()[0].ts_utc.utcoffset().total_seconds() == 0
+
+
+def test_resubmitting_an_order_the_log_has_moved_on_is_refused() -> None:
+    order = an_order("o1")
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1"), ts_utc=TS, seq=2),
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=TS, seq=3),
+    ]
+    with pytest.raises(LedgerFoldError, match="already FILLED"):
+        fold(events)
+
+
+def test_negative_control_identical_resubmit_while_submitted_is_allowed() -> None:
+    order = an_order("o1")
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=TS, seq=2),
+    ]
+    assert fold(events)["ACC"].orders["o1"].state is OrderState.SUBMITTED
+
+
+def test_ledger_uses_full_synchronous(ledger: Ledger) -> None:
+    """§4.2: synchronous=FULL, so a committed row survives power loss."""
+    assert ledger.conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+
+
+def test_fold_orders_by_seq_not_input_order() -> None:
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1"), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1"), ts_utc=TS, seq=2),
+    ]
+    assert fold(list(reversed(events))) == fold(events)

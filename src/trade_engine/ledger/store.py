@@ -7,7 +7,11 @@ it. Properties this store is responsible for:
   returns the original event and writes nothing.
 - **I4 single instance** — one OS file lock per ledger, acquired before the first write.
 - **I2 no partial writes** — the row and its `command_id` index entry commit together, so
-  a crash between write and commit leaves no event and no claimed command id.
+  a crash between write and commit leaves no event and no claimed command id. A batch
+  (`extend`) is one transaction: all of it lands or none of it does.
+- **I2 no poison events** — every event is folded into its account's state inside the
+  transaction, before COMMIT. The log is append-only, so an event the fold refuses would
+  otherwise make every later fold raise, forever.
 
 Snapshots are a cache: `snapshot(account)` must equal `fold(events())[account]`, and
 `verify_snapshot()` proves it.
@@ -24,7 +28,7 @@ from typing import Any, Iterable, Sequence
 from trade_engine.ledger import codec
 from trade_engine.ledger.events import SCHEMA_VERSION, Event, EventKind
 from trade_engine.ledger.lock import LedgerLockError, SingleInstanceLock
-from trade_engine.ledger.state import AccountState, FoldCache, fold
+from trade_engine.ledger.state import AccountState, FoldCache, apply_event, fold, fold_account
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -49,12 +53,16 @@ CREATE TABLE IF NOT EXISTS meta (
 class Ledger:
     """Append-only SQLite event ledger for one file."""
 
-    def __init__(self, path: str | Path, *, lock: bool = True) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = SingleInstanceLock(self.path) if lock else None
+        # Always locked: there is no unlocked writer, or I4 is only a convention.
+        self._lock = SingleInstanceLock(self.path)
         self._lock_held = False
         self._conn: sqlite3.Connection | None = None
+        # Folded state per account as of the last commit; the base append() validates
+        # against. Safe to cache because this instance is the only writer (I4).
+        self._states: dict[str, AccountState] = {}
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -62,9 +70,9 @@ class Ledger:
         """Acquire the single-instance lock (I4) and open the database."""
         if self._conn is not None:
             return self
-        if self._lock is not None:
-            self._lock.acquire()
-            self._lock_held = True
+        self._lock.acquire()
+        self._lock_held = True
+        self._states = {}
         try:
             conn = sqlite3.connect(str(self.path), isolation_level=None)
             conn.row_factory = sqlite3.Row
@@ -76,7 +84,7 @@ class Ledger:
             conn.executescript(_SCHEMA)
             self._conn = conn
         except Exception:
-            if self._lock_held and self._lock is not None:
+            if self._lock_held:
                 self._lock.release()
                 self._lock_held = False
             raise
@@ -86,7 +94,7 @@ class Ledger:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
-        if self._lock is not None and self._lock_held:
+        if self._lock_held:
             self._lock.release()
             self._lock_held = False
 
@@ -117,50 +125,73 @@ class Ledger:
 
     def append(self, event: Event) -> Event:
         """Append one event. A replayed `command_id` is a no-op returning the original (I3)."""
-        if event.seq is not None:
-            raise ValueError("Event.seq is assigned by the ledger; pass seq=None to append")
+        return self.extend([event])[0]
+
+    def extend(self, events: Iterable[Event]) -> list[Event]:
+        """Append events in one transaction: all land or none do (I2).
+
+        Each new event is folded into its account's state before COMMIT; if the fold
+        refuses it, the whole batch rolls back and nothing is written (I2, I5).
+        """
+        batch = list(events)
+        for event in batch:
+            if event.seq is not None:
+                raise ValueError("Event.seq is assigned by the ledger; pass seq=None to append")
 
         conn = self.conn
+        staged: dict[str, AccountState] = {}
+        written: list[Event] = []
         in_transaction = False
         try:
             conn.execute("BEGIN IMMEDIATE")
             in_transaction = True
-            if event.command_id is not None:
-                existing = conn.execute(
-                    "SELECT * FROM events WHERE command_id = ?", (event.command_id,)
-                ).fetchone()
-                if existing is not None:
-                    # Decode before committing so a malformed stored row surfaces while
-                    # the transaction is still open.
-                    replay = self._row_to_event(existing)
-                    self._commit()
-                    in_transaction = False
-                    return replay
+            for event in batch:
+                if event.command_id is not None:
+                    existing = conn.execute(
+                        "SELECT * FROM events WHERE command_id = ?", (event.command_id,)
+                    ).fetchone()
+                    if existing is not None:
+                        # Decode inside the transaction so a malformed stored row surfaces
+                        # before anything commits.
+                        written.append(self._row_to_event(existing))
+                        continue
 
-            encoded = codec.encode_event(event)
-            cursor = conn.execute(
-                "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    event.ts_utc.isoformat(),
-                    event.account,
-                    event.kind.value,
-                    event.command_id,
-                    json.dumps(encoded["payload"], separators=(",", ":"), sort_keys=True),
-                    event.schema_version,
-                ),
-            )
-            seq = int(cursor.lastrowid)
+                # Read the base state before the INSERT, which would otherwise be folded in.
+                if event.account in staged:
+                    current = staged[event.account]
+                else:
+                    current = self._committed_state(event.account)
+                encoded = codec.encode_event(event)
+                cursor = conn.execute(
+                    "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        event.ts_utc.isoformat(),
+                        event.account,
+                        event.kind.value,
+                        event.command_id,
+                        json.dumps(encoded["payload"], separators=(",", ":"), sort_keys=True),
+                        event.schema_version,
+                    ),
+                )
+                appended = replace(event, seq=int(cursor.lastrowid))
+                staged[event.account] = apply_event(current, appended)
+                written.append(appended)
             self._commit()
             in_transaction = False
         except Exception:
             if in_transaction:
                 self._rollback()
             raise
-        return replace(event, seq=seq)
+        self._states.update(staged)
+        return written
 
-    def extend(self, events: Iterable[Event]) -> list[Event]:
-        return [self.append(event) for event in events]
+    def _committed_state(self, account: str) -> AccountState:
+        state = self._states.get(account)
+        if state is None:
+            state = fold_account(self.events(account=account), account)
+            self._states[account] = state
+        return state
 
     # -- read --------------------------------------------------------------------
 
@@ -214,7 +245,8 @@ class Ledger:
         return fold(self.events())
 
     def state(self, account: str) -> AccountState:
-        return self.fold().get(account, AccountState(account_id=account))
+        """Folded state of one account, from that account's events only (I8)."""
+        return fold_account(self.events(account=account), account)
 
     def snapshot(self, account: str, *, at_seq: int | None = None) -> AccountState:
         """Folded state for one account, with `last_seq` pinned to the snapshot point."""

@@ -355,6 +355,14 @@ def _on_order_submitted(state: AccountState, event: Event) -> AccountState:
             f"Order '{order.order_id}' was already submitted under command "
             f"'{existing.command_id}'; refusing to overwrite it with '{order.command_id}' (I3)"
         )
+    if existing is not None and existing.state is not OrderState.SUBMITTED:
+        # A second OrderSubmitted for an order the log has already moved on (accepted,
+        # filled, cancelled) would reset it to SUBMITTED while its fills and position
+        # stay, so the order record would contradict the rest of the state (I2).
+        raise LedgerFoldError(
+            f"Order '{order.order_id}' is already {existing.state.value}; refusing a second "
+            f"OrderSubmitted that would reset it (I2)"
+        )
     orders[order.order_id] = order
     return _replace(state, orders=MappingProxyType(orders))
 
@@ -436,16 +444,21 @@ def _dispatch(state: AccountState, event: Event) -> AccountState:
     raise UnhandledEventError(f"No fold handler registered for {event.kind.value} (I5)")
 
 
+def apply_event(state: AccountState, event: Event) -> AccountState:
+    """Fold one event into its account's state: the single step fold(), FoldCache and
+    Ledger.append share, so all three agree by construction. Pure (I2)."""
+    new_state = _dispatch(state, event)
+    return _replace(
+        new_state, last_seq=event.seq if event.seq is not None else new_state.last_seq
+    )
+
+
 def fold(events: Iterable[Event]) -> dict[str, AccountState]:
     """Fold a full event log into per-account state. Pure (I2)."""
-    ordered = _ordered(events)
     states: dict[str, AccountState] = {}
-    for event in ordered:
+    for event in _ordered(events):
         current = states.get(event.account, AccountState(account_id=event.account))
-        state = _dispatch(current, event)
-        states[event.account] = _replace(
-            state, last_seq=event.seq if event.seq is not None else state.last_seq
-        )
+        states[event.account] = apply_event(current, event)
     return states
 
 
@@ -497,10 +510,7 @@ class FoldCache:
                 )
             self._events.append(event)
             current = self._states.get(event.account, AccountState(account_id=event.account))
-            state = _dispatch(current, event)
-            self._states[event.account] = _replace(
-                state, last_seq=event.seq if event.seq is not None else state.last_seq
-            )
+            self._states[event.account] = apply_event(current, event)
 
     @property
     def accounts(self) -> tuple[str, ...]:
@@ -531,6 +541,7 @@ __all__ = [
     "LedgerDuplicateFillError",
     "LedgerFillMismatchError",
     "LedgerFoldError",
+    "apply_event",
     "apply_fill",
     "fold",
     "fold_account",
