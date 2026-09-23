@@ -382,12 +382,22 @@ class Ledger:
                 else:
                     error_msg = f"Delivery unconfirmed by sink {destination}"
                     self.mark_outbox_failed(item.id, error_msg)
-                    failed_item = item
+                    failed_item = replace(
+                        item,
+                        status=OutboxStatus.FAILED,
+                        attempts=item.attempts + 1,
+                        last_error=error_msg,
+                    )
                     break  # Stop immediately! Later events stay queued in order.
             except Exception as exc:
                 error_msg = f"Sink {destination} raised: {exc}"
                 self.mark_outbox_failed(item.id, error_msg)
-                failed_item = item
+                failed_item = replace(
+                    item,
+                    status=OutboxStatus.FAILED,
+                    attempts=item.attempts + 1,
+                    last_error=error_msg,
+                )
                 break  # Stop immediately!
 
         remaining = len(self.pending_outbox(destination=destination, include_failed=True))

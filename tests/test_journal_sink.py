@@ -52,11 +52,15 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
                         "key": trade_key,
                         "symbol": sym,
                         "accountId": body.get("accountId"),
+                        "status": "open",
                         "tags": [],
                         "stopLoss": None,
                         "profitTarget": None,
                     }
-                    server.trade_executions[trade_key] = [ex]
+                    if server.mode == "price_mismatch":
+                        server.trade_executions[trade_key] = [{**ex, "price": 999.0}]
+                    else:
+                        server.trade_executions[trade_key] = [ex]
 
             self._send_json(HTTPStatus.OK, {"inserted": len(executions), "duplicates": 0, "skipped": 0})
         else:
@@ -66,6 +70,10 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         server: _FakeJournalServer = self.server  # type: ignore
+
+        if server.mode == "patch_fail":
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Annotation write failed"})
+            return
 
         if self.path == "/api/settings":
             server.settings_multipliers.update(body.get("multipliers", {}))
@@ -375,3 +383,106 @@ def test_outbox_drain_with_journal_sink_stops_on_failure(
         assert len(pending) == 2
         assert pending[0].id == item3.id
         assert pending[1].id == item4.id
+
+
+def test_journal_sink_delivery_refused_on_account_mismatch(fake_journal: _FakeJournalServer) -> None:
+    """Invariant I8: Execution account must match configured sink account."""
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_main")
+
+    execution = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("0"),
+        executed_at=T0,
+        account_id="acc_other",  # Mismatch!
+        asset_class="equity",
+    )
+    assert sink.publish(1, execution) is False
+    assert len(fake_journal.posted_executions) == 0
+
+
+def test_journal_sink_delivery_refused_when_readback_price_mismatches(fake_journal: _FakeJournalServer) -> None:
+    """Delivery confirmation must verify execution price, not just timestamp and quantity."""
+    fake_journal.mode = "price_mismatch"
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    execution = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("0"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+    )
+    assert sink.publish(1, execution) is False
+
+
+def test_journal_sink_annotates_open_trade_when_symbol_has_historical_closed_trade(fake_journal: _FakeJournalServer) -> None:
+    """When an account has an old closed trade in AAPL, annotations must patch the new open trade."""
+    port = fake_journal.server_port
+    # Seed historical closed trade first
+    fake_journal.trades["trade-AAPL-old"] = {
+        "key": "trade-AAPL-old",
+        "symbol": "AAPL",
+        "accountId": "acc_50k",
+        "status": "closed",
+        "tags": ["old_strat"],
+        "stopLoss": 100.0,
+        "profitTarget": 120.0,
+    }
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    execution = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("50"),
+        price=Decimal("155.00"),
+        fee=Decimal("1.00"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+        stop_loss=Decimal("150.00"),
+        profit_target=Decimal("170.00"),
+        strategy_tag="new_strat",
+    )
+    ok = sink.publish(1, execution)
+    assert ok is True
+
+    # Old trade must be untouched
+    old_trade = fake_journal.trades["trade-AAPL-old"]
+    assert old_trade["stopLoss"] == 100.0
+    assert old_trade["tags"] == ["old_strat"]
+
+    # New open trade must receive annotations
+    new_trade = fake_journal.trades["trade-AAPL"]
+    assert new_trade["stopLoss"] == 150.0
+    assert new_trade["profitTarget"] == 170.0
+    assert "new_strat" in new_trade["tags"]
+
+
+def test_journal_sink_delivery_refused_when_annotation_readback_mismatches(fake_journal: _FakeJournalServer) -> None:
+    """Delivery confirmation must verify stopLoss/target annotations when requested."""
+    fake_journal.mode = "patch_fail"
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    execution = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("0"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+        stop_loss=Decimal("145.00"),
+    )
+    # PATCH fails, so stopLoss is not applied -> confirm_delivery must reject!
+    assert sink.publish(1, execution) is False
+

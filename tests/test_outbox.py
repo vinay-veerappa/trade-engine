@@ -117,7 +117,11 @@ def test_failing_sink_stops_at_first_failure_and_leaves_later_queued_in_order(
     # Drain stopped at item 2
     assert not res.ok
     assert res.drained_count == 1
-    assert res.failed_item is not None and res.failed_item.id == item2.id
+    assert res.failed_item is not None
+    assert res.failed_item.id == item2.id
+    assert res.failed_item.status == OutboxStatus.FAILED
+    assert res.failed_item.attempts == 1
+    assert res.failed_item.last_error == "Delivery unconfirmed by sink journal"
     assert attempted == [item1.id, item2.id]  # item3 was never attempted!
 
     # Pending outbox contains item2 (failed) followed by item3 (pending) in exact order

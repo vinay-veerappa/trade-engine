@@ -163,3 +163,51 @@ def test_events_sse_live_streaming(server: EngineHttpServer, ledger: Ledger) -> 
     stop_client.set()
 
     assert any(frame.startswith("id: 1") for frame in received_frames)
+
+
+def test_server_worker_threads_are_daemon(server: EngineHttpServer) -> None:
+    """Worker threads must be daemonic so lingering connections never block process shutdown."""
+    assert server._server is not None
+    assert server._server.daemon_threads is True
+
+
+def test_events_sse_deduplication_and_no_drop_during_handover(server: EngineHttpServer, ledger: Ledger) -> None:
+    """Events broadcast concurrently during backlog replay must be delivered without drops."""
+    _seed_events(ledger)  # events 1 and 2
+
+    # Connect client from seq 0
+    url = f"http://127.0.0.1:{server.port}/events?after=0"
+    received_ids: list[int] = []
+    stop_client = threading.Event()
+
+    def client_worker():
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            while not stop_client.is_set():
+                line = resp.readline().decode("utf-8")
+                if not line:
+                    break
+                line_str = line.strip()
+                if line_str.startswith("id: "):
+                    ev_id = int(line_str.split(":", 1)[1].strip())
+                    received_ids.append(ev_id)
+                    if ev_id >= 3:
+                        break
+
+    thread = threading.Thread(target=client_worker, daemon=True)
+    thread.start()
+
+    # Append and broadcast event 3 immediately
+    o3 = Order("o3", "ACC_A", Equity("TSLA"), OrderType.LIMIT, Side.BUY, Decimal("1"), "c3", T1, limit_price=Decimal("200"))
+    ev3 = ledger.append(Event("ACC_A", EventKind.ORDER_SUBMITTED, o3, T1, command_id="c3"))
+    server.broadcast(ev3)
+
+    thread.join(timeout=4.0)
+    stop_client.set()
+
+    assert 1 in received_ids
+    assert 2 in received_ids
+    assert 3 in received_ids
+    # Ensure no duplicates: each event id received at most once
+    assert len(received_ids) == len(set(received_ids))
+

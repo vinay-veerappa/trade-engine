@@ -77,6 +77,10 @@ class HttpJournalSink(JournalSink):
 
     def publish_execution(self, event_seq: int, execution: JournalExecution) -> bool:
         """Publish execution, annotate stop/target/tag, and confirm delivery by reading back."""
+        # 0. Invariant I8: refuse cross-account delivery
+        if execution.account_id and execution.account_id != self.account_id:
+            return False
+
         # 1. Post raw execution
         payload = {
             "accountId": self.account_id,
@@ -138,10 +142,9 @@ class HttpJournalSink(JournalSink):
                 return False
 
             trades = body.get("trades", [])
-            for trade in trades:
-                if trade.get("symbol") != execution.symbol:
-                    continue
-                # Verify trade execution list or key
+            # Search candidate trades newest first to minimize HTTP lookups
+            candidate_trades = [t for t in reversed(trades) if t.get("symbol") == execution.symbol]
+            for trade in candidate_trades:
                 trade_key = trade.get("key")
                 if not trade_key:
                     continue
@@ -154,13 +157,33 @@ class HttpJournalSink(JournalSink):
 
                 executions_list = dt_body.get("executions", [])
                 for fill in executions_list:
-                    fill_time = fill.get("executedAt", "")
+                    fill_time = str(fill.get("executedAt", ""))
                     fill_qty = float(fill.get("quantity", 0))
                     fill_price = float(fill.get("price", 0))
+                    fill_side = str(fill.get("side", "")).lower()
                     target_time = execution.executed_at.isoformat()
 
-                    # Match by executedAt timestamp and price/quantity
-                    if fill_time.startswith(target_time[:19]) and abs(fill_qty - float(execution.quantity)) < 1e-6:
+                    # Match by timestamp prefix, quantity, price, and side
+                    if (
+                        fill_time.startswith(target_time[:19])
+                        and abs(fill_qty - float(execution.quantity)) < 1e-6
+                        and abs(fill_price - float(execution.price)) < 1e-4
+                        and fill_side == execution.side.value.lower()
+                    ):
+                        # Verify annotations if specified on execution
+                        trade_detail = dt_body.get("trade", {})
+                        if execution.stop_loss is not None:
+                            sl = trade_detail.get("stopLoss")
+                            if sl is None or abs(float(sl) - float(execution.stop_loss)) > 1e-4:
+                                continue
+                        if execution.profit_target is not None:
+                            pt = trade_detail.get("profitTarget")
+                            if pt is None or abs(float(pt) - float(execution.profit_target)) > 1e-4:
+                                continue
+                        if execution.strategy_tag:
+                            tags = trade_detail.get("tags") or []
+                            if execution.strategy_tag not in tags:
+                                continue
                         return True
 
             return False
@@ -179,7 +202,11 @@ class HttpJournalSink(JournalSink):
                 return
 
             trades = body.get("trades", [])
-            matching_trade = next((t for t in trades if t.get("symbol") == execution.symbol), None)
+            # Prioritize open trades first, latest first (reversed)
+            matching_trade = next(
+                (t for t in reversed(trades) if t.get("symbol") == execution.symbol and t.get("status") == "open"),
+                next((t for t in reversed(trades) if t.get("symbol") == execution.symbol), None),
+            )
             if not matching_trade:
                 return
 
@@ -212,7 +239,12 @@ class HttpJournalSink(JournalSink):
             executed_at = executed_at_val
 
         side_val = d["side"]
-        side = Side(side_val) if not isinstance(side_val, Side) else side_val
+        if isinstance(side_val, Side):
+            side = side_val
+        elif isinstance(side_val, str):
+            side = Side(side_val.upper())
+        else:
+            raise ValueError(f"Invalid side: {side_val}")
 
         return JournalExecution(
             symbol=str(d["symbol"]),

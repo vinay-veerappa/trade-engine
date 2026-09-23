@@ -116,22 +116,31 @@ class _EngineHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"retry: 1000\n\n")
         self.wfile.flush()
 
-        # 1. Backlog events from ledger
-        backlog = self.server.ledger.events(after=after_seq)
-        for ev in backlog:
-            self._write_sse_event(ev)
-
-        # 2. Register for live events
+        # 1. Register for live events first to prevent race-condition drops
         sub_queue: queue.Queue[Event | None] = queue.Queue()
         self.server.add_subscriber(sub_queue)
+        max_seq_sent = after_seq
 
         try:
+            # 2. Backlog events from ledger
+            backlog = self.server.ledger.events(after=after_seq)
+            for ev in backlog:
+                self._write_sse_event(ev)
+                if ev.seq is not None and ev.seq > max_seq_sent:
+                    max_seq_sent = ev.seq
+
+            # 3. Stream live events from queue
             while self.server.is_running:
                 try:
                     event = sub_queue.get(timeout=self.server.ping_interval)
                     if event is None:  # Shutdown signal
                         break
+                    # Deduplicate any event already delivered via backlog
+                    if event.seq is not None and event.seq <= max_seq_sent:
+                        continue
                     self._write_sse_event(event)
+                    if event.seq is not None and event.seq > max_seq_sent:
+                        max_seq_sent = event.seq
                 except queue.Empty:
                     # Heartbeat frame to detect disconnected clients
                     self.wfile.write(b": ping\n\n")
@@ -163,6 +172,8 @@ class _EngineHandler(BaseHTTPRequestHandler):
 
 class _EngineServerInternal(ThreadingHTTPServer):
     """Internal ThreadingHTTPServer holding ledger and SSE subscriber registry."""
+
+    daemon_threads = True
 
     def __init__(
         self,
