@@ -19,19 +19,46 @@ from trade_engine.clock.replay import ReplayClock
 from trade_engine.domain.instruments import Side
 from trade_engine.interfaces.sinks import JournalExecution
 from trade_engine.ledger.store import Ledger
-from trade_engine.sinks.journal import HttpJournalSink
+from trade_engine.sinks.journal import HttpJournalSink, JournalAuthError, journal_executed_at
 
 T0 = datetime(2026, 9, 23, 15, 30, 0, tzinfo=timezone.utc)
 
 
 class _FakeJournalHandler(BaseHTTPRequestHandler):
-    """Mock HTTP server simulating the :3300 trade-journal API."""
+    """Fake :3300 journal, modelled on `third_party/trade-journal/apps/web/src/app/api`.
+
+    Wire shapes follow the real routes: `ok(data)` is unwrapped (GET /api/settings has
+    `multipliers` at the top level), PATCH /api/settings replaces the whole map, a manual
+    POST refuses `importMetadata` and a `notes: null`, rows de-duplicate on a hash of the
+    raw fields, a zero fee takes the default fee rule, and the trade detail is the raw row
+    (`tagsJson`, `contractMultiplier: null` when unset). The `tags` list kept on
+    `server.trades` is this fake's own storage, never sent as-is by the detail route.
+    """
+
+    def _auth_refused(self) -> bool:
+        server: _FakeJournalServer = self.server  # type: ignore
+        if server.mode == "auth":
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
+            return True
+        return False
 
     def do_POST(self) -> None:
+        if self._auth_refused():
+            return
         if self.path == "/api/executions":
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
             server: _FakeJournalServer = self.server  # type: ignore
+            server.post_bodies.append(body)
+
+            # requireValue(notes === undefined || string) and executionProblem(): manual
+            # rows may not carry importMetadata. Both throw -> 400.
+            if "notes" in body and not isinstance(body["notes"], str):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Notes must be at most 100,000 characters."})
+                return
+            if any("importMetadata" in ex for ex in body.get("executions", [])):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Every execution needs a symbol, buy/sell side, finite positive quantity, price, fee and valid timestamp."})
+                return
 
             if server.mode == "error":
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "DB crash"})
@@ -41,7 +68,15 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {"inserted": 0, "duplicates": 0, "skipped": 1, "skippedReasons": ["Invalid fee"]})
                 return
 
-            executions = body.get("executions", [])
+            executions = [
+                {
+                    **ex,
+                    "symbol": ex["symbol"].strip().upper(),
+                    "fee": server.default_fee if ex.get("fee", 0) == 0 and server.default_fee is not None else ex.get("fee", 0),
+                    "assetClass": ex.get("assetClass"),
+                }
+                for ex in body.get("executions", [])
+            ]
             inserted = 0
             duplicates = 0
             for ex in executions:
@@ -81,6 +116,8 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_PATCH(self) -> None:
+        if self._auth_refused():
+            return
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         server: _FakeJournalServer = self.server  # type: ignore
@@ -110,11 +147,19 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_GET(self) -> None:
+        if self._auth_refused():
+            return
         parsed = urllib.parse.urlparse(self.path)
         server: _FakeJournalServer = self.server  # type: ignore
 
         if parsed.path == "/api/settings":
-            self._send_json(HTTPStatus.OK, {"settings": {"multipliers": server.settings_multipliers}})
+            if server.mode == "settings_unreadable":
+                self._send_json(HTTPStatus.OK, {"timeZone": "America/New_York"})
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {"timeZone": "America/New_York", "importTimeZone": "America/New_York", "multipliers": dict(server.settings_multipliers)},
+            )
         elif parsed.path == "/api/trades":
             self._send_json(HTTPStatus.OK, {"trades": list(server.trades.values())})
         elif parsed.path.startswith("/api/trades/"):
@@ -124,7 +169,9 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
                 # Real journal detail endpoint returns tagsJson as JSON string and contractMultiplier
                 tags = raw_trade.pop("tags", [])
                 raw_trade["tagsJson"] = json.dumps(tags)
-                raw_trade["contractMultiplier"] = server.settings_multipliers.get(raw_trade.get("symbol"), 1)
+                raw_trade["contractMultiplier"] = (
+                    None if server.mode == "multiplier_not_applied" else server.settings_multipliers.get(raw_trade.get("symbol"))
+                )
                 self._send_json(
                     HTTPStatus.OK,
                     {
@@ -158,6 +205,8 @@ class _FakeJournalServer(HTTPServer):
         self.trade_executions: dict[str, list[dict[str, Any]]] = {}
         self.settings_multipliers: dict[str, int] = {}
         self.hashes: set[str] = set()
+        self.post_bodies: list[dict[str, Any]] = []
+        self.default_fee: float | None = None
 
     def calc_hash(self, ex: dict[str, Any]) -> str:
         meta = ex.get("importMetadata")
@@ -232,7 +281,10 @@ def test_journal_sink_delivery_success_confirmed_by_readback(
     assert raw["price"] == 150.25
     assert raw["fee"] == 1.0
     assert raw["assetClass"] == "equity"
-    assert raw["executedAt"] == T0.isoformat()
+    # Real time to the millisecond; the ledger seq in the sub-millisecond digits.
+    assert raw["executedAt"] == journal_executed_at(T0, 1) == "2026-09-23T15:30:00.000001+00:00"
+    assert "importMetadata" not in raw
+    assert fake_journal.post_bodies[0]["notes"] == "Gap breakout setup"
 
     # Verify multiplier was configured
     assert fake_journal.settings_multipliers.get("AAPL") == 100
@@ -586,76 +638,101 @@ def test_journal_sink_preserves_existing_multipliers_on_update(
     }
 
 
-def test_journal_sink_identical_fills_with_distinct_fill_ids_both_succeed(
+def _aapl(**overrides: Any) -> JournalExecution:
+    values: dict[str, Any] = dict(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("1.00"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+    )
+    values.update(overrides)
+    return JournalExecution(**values)
+
+
+def test_identical_fills_from_distinct_events_are_two_journal_rows(
     fake_journal: _FakeJournalServer,
 ) -> None:
-    """Must-Fix 3: Two identical fills at the same time with distinct fill_ids both insert."""
-    port = fake_journal.server_port
-    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+    """Two genuine fills with identical fields must not collapse into one journal row."""
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{fake_journal.server_port}", account_id="acc_50k")
 
-    ex1 = JournalExecution(
-        symbol="AAPL",
-        side=Side.BUY,
-        quantity=Decimal("10"),
-        price=Decimal("150.00"),
-        fee=Decimal("1.00"),
-        executed_at=T0,
-        account_id="acc_50k",
-        asset_class="equity",
-        fill_id="fill-001",
-    )
-    ex2 = JournalExecution(
-        symbol="AAPL",
-        side=Side.BUY,
-        quantity=Decimal("10"),
-        price=Decimal("150.00"),
-        fee=Decimal("1.00"),
-        executed_at=T0,
-        account_id="acc_50k",
-        asset_class="equity",
-        fill_id="fill-002",
-    )
-
-    assert sink.publish(1, ex1) is True
-    assert sink.publish(2, ex2) is True
+    assert sink.publish(1, _aapl()) is True
+    assert sink.publish(2, _aapl()) is True
     assert len(fake_journal.posted_executions) == 2
 
 
-def test_journal_sink_duplicate_fill_without_distinct_id_collides(
+def test_retry_of_same_event_is_one_journal_row_and_confirms(
     fake_journal: _FakeJournalServer,
 ) -> None:
-    """Two executions with identical fill_id collide in hash deduplication."""
-    port = fake_journal.server_port
-    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+    """A retry after an unconfirmed delivery lands on the same row (journal dedup) and confirms."""
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{fake_journal.server_port}", account_id="acc_50k")
 
-    ex1 = JournalExecution(
-        symbol="AAPL",
-        side=Side.BUY,
-        quantity=Decimal("10"),
-        price=Decimal("150.00"),
-        fee=Decimal("1.00"),
-        executed_at=T0,
-        account_id="acc_50k",
-        asset_class="equity",
-        fill_id="fill-same",
-    )
-    ex2 = JournalExecution(
-        symbol="AAPL",
-        side=Side.BUY,
-        quantity=Decimal("10"),
-        price=Decimal("150.00"),
-        fee=Decimal("1.00"),
-        executed_at=T0,
-        account_id="acc_50k",
-        asset_class="equity",
-        fill_id="fill-same",
-    )
+    assert sink.publish(7, _aapl()) is True
+    assert sink.publish(7, _aapl()) is True
+    assert len(fake_journal.posted_executions) == 1
 
-    assert sink.publish(1, ex1) is True
-    assert len(fake_journal.posted_executions) == 1
-    # Second publish is detected as duplicate by hash, and confirm_delivery still verifies it
-    assert sink.publish(2, ex2) is True
-    assert len(fake_journal.posted_executions) == 1
+
+def test_no_notes_are_omitted_not_sent_as_null(fake_journal: _FakeJournalServer) -> None:
+    """The route refuses `notes: null`; a fill without notes must still deliver."""
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{fake_journal.server_port}", account_id="acc_50k")
+
+    assert sink.publish(1, _aapl(notes=None)) is True
+    assert "notes" not in fake_journal.post_bodies[0]
+
+
+def test_unreadable_settings_never_write_multipliers(fake_journal: _FakeJournalServer) -> None:
+    """PATCH replaces the whole map, so without a map read first nothing may be written."""
+    fake_journal.settings_multipliers = {"ES": 50, "NQ": 20}
+    fake_journal.mode = "settings_unreadable"
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{fake_journal.server_port}", account_id="acc_50k")
+
+    assert sink.publish(1, _aapl(symbol="AAPL260116C150", asset_class="option", multiplier=100)) is False
+    assert fake_journal.settings_multipliers == {"ES": 50, "NQ": 20}
+    assert fake_journal.posted_executions == []
+
+
+def test_multiplier_readback_refuses_trade_without_it(fake_journal: _FakeJournalServer) -> None:
+    """Delivery of a derivative fill is confirmed only when the trade carries its multiplier."""
+    fake_journal.mode = "multiplier_not_applied"
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{fake_journal.server_port}", account_id="acc_50k")
+
+    assert sink.publish(1, _aapl(symbol="AAPL260116C150", asset_class="option", multiplier=100)) is False
+
+
+def test_zero_fee_confirms_when_journal_applies_its_default_fee(fake_journal: _FakeJournalServer) -> None:
+    """The journal replaces a zero fee with its default rule; that must not block delivery."""
+    fake_journal.default_fee = 0.65
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{fake_journal.server_port}", account_id="acc_50k")
+
+    assert sink.publish(1, _aapl(fee=Decimal("0"))) is True
+
+
+def test_password_protected_journal_raises_and_outbox_records_why(
+    tmp_path: Path, fake_journal: _FakeJournalServer
+) -> None:
+    """A 401 is not a silent False: the drain records that the journal needs a login."""
+    from trade_engine.domain.instruments import Equity
+    from trade_engine.domain.orders import Order, OrderType
+    from trade_engine.ledger.events import Event, EventKind
+
+    fake_journal.mode = "auth"
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{fake_journal.server_port}", account_id="acc_50k")
+    with pytest.raises(JournalAuthError):
+        sink.publish(1, _aapl())
+
+    with Ledger(tmp_path / "auth.db") as lg:
+        order = Order("o1", "acc_50k", Equity("AAPL"), OrderType.LIMIT, Side.BUY, Decimal("10"), "c1", T0, limit_price=Decimal("150"))
+        payload = {
+            "symbol": "AAPL", "side": "BUY", "quantity": "10", "price": "150.00", "fee": "1",
+            "executed_at": T0.isoformat(), "account_id": "acc_50k", "asset_class": "equity", "multiplier": 1,
+        }
+        lg.append(Event("acc_50k", EventKind.ORDER_SUBMITTED, order, T0, command_id="c1"), outbox={"journal": payload})
+        res = lg.drain_outbox("journal", lambda it: sink.publish(it.event_seq, it.payload), ReplayClock(T0))
+        assert res.failed_item is not None
+        assert "password" in (res.failed_item.last_error or "")
 
 
 def test_dict_payload_missing_required_fields_refused_i5() -> None:

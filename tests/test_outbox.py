@@ -283,3 +283,40 @@ def test_outbox_foreign_key_enforced(ledger: Ledger) -> None:
     with pytest.raises(ValueError, match="Unknown event sequence"):
         ledger.enqueue_outbox(999999, "journal", {"data": 1}, created_at=T0)
 
+
+
+def test_replayed_command_writes_no_second_outbox_row(ledger: Ledger) -> None:
+    """I3 + I12: a replayed command_id returns the original event and queues nothing new."""
+    order = Order(
+        order_id="ord-r", account_id="ACC_A", instrument=Equity("AAPL"), order_type=OrderType.LIMIT,
+        side=Side.BUY, quantity=Decimal("10"), command_id="cmd-ord-r", created_at=T0,
+        limit_price=Decimal("150.00"),
+    )
+    ev = Event(account="ACC_A", kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=T0, command_id="r1")
+    first = ledger.append(ev, outbox={"journal": {"n": 1}})
+    again = ledger.append(ev, outbox={"journal": {"n": 1}})
+    assert again.seq == first.seq
+    assert [item.event_seq for item in ledger.pending_outbox("journal")] == [first.seq]
+
+
+def test_listeners_run_after_commit_only(ledger: Ledger) -> None:
+    """Commit-then-publish: a rolled-back append notifies nobody; a replay notifies nobody."""
+    seen: list[int] = []
+    ledger.add_listener(lambda e: seen.append(e.seq))
+    order = Order(
+        order_id="ord-l", account_id="ACC_A", instrument=Equity("AAPL"), order_type=OrderType.LIMIT,
+        side=Side.BUY, quantity=Decimal("10"), command_id="cmd-ord-l", created_at=T0,
+        limit_price=Decimal("150.00"),
+    )
+    ev = Event(account="ACC_A", kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=T0, command_id="l1")
+
+    original = ledger._commit
+    ledger._commit = lambda: (_ for _ in ()).throw(RuntimeError("crash before COMMIT"))  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        ledger.append(ev)
+    ledger._commit = original  # type: ignore[method-assign]
+    assert seen == []
+
+    written = ledger.append(ev)
+    ledger.append(ev)
+    assert seen == [written.seq]

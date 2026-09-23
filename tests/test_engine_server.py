@@ -340,42 +340,37 @@ def test_live_events_auto_broadcast_on_ledger_append(server: EngineHttpServer, l
 
 
 def test_sse_duplicate_check_pins_mutation(server: EngineHttpServer, ledger: Ledger) -> None:
-    """Pins mutation: Removing event.seq <= max_seq_sent duplicate check MUST cause duplicate delivery failure."""
-    import time
-
-    # Seed event 1 into ledger
-    o = Order("o1", "ACC_P", Equity("AAPL"), OrderType.LIMIT, Side.BUY, Decimal("1"), "c_p1", T0, limit_price=Decimal("150"))
-    ev1 = ledger.append(Event("ACC_P", EventKind.ORDER_SUBMITTED, o, T0, command_id="c_p1"))
+    """A live frame for a seq the backlog already sent is dropped, not sent twice."""
+    o1 = Order("o1", "ACC_P", Equity("AAPL"), OrderType.LIMIT, Side.BUY, Decimal("1"), "c_p1", T0, limit_price=Decimal("150"))
+    ev1 = ledger.append(Event("ACC_P", EventKind.ORDER_SUBMITTED, o1, T0, command_id="c_p1"))
 
     url = f"http://127.0.0.1:{server.port}/events?after=0"
     received_ids: list[int] = []
-    stop = threading.Event()
+    got_backlog = threading.Event()
 
-    def client():
+    def client() -> None:
         with urllib.request.urlopen(urllib.request.Request(url), timeout=5.0) as resp:
-            while not stop.is_set():
+            while True:
                 line = resp.readline().decode("utf-8")
                 if not line:
                     break
-                line_str = line.strip()
-                if line_str.startswith("id: "):
-                    received_ids.append(int(line_str.split(":", 1)[1].strip()))
-                    if len(received_ids) >= 1:
-                        # Give time for any duplicate live frames to arrive
-                        time.sleep(0.2)
+                if line.startswith("id: "):
+                    received_ids.append(int(line.split(":", 1)[1].strip()))
+                    got_backlog.set()
+                    if received_ids[-1] >= 2:
                         break
 
     t = threading.Thread(target=client, daemon=True)
     t.start()
-    time.sleep(0.05)
+    assert got_backlog.wait(3.0)
 
-    # Concurrently broadcast ev1 into subscriber queue (simulating queue delivery after backlog delivered ev1)
+    # The subscriber is registered before the backlog is read, so a live copy of seq 1
+    # can arrive after the backlog already sent it. Replay that race deterministically.
     server.broadcast(ev1)
+    o2 = Order("o2", "ACC_P", Equity("AAPL"), OrderType.LIMIT, Side.BUY, Decimal("1"), "c_p2", T0, limit_price=Decimal("150"))
+    ledger.append(Event("ACC_P", EventKind.ORDER_SUBMITTED, o2, T0, command_id="c_p2"))
 
     t.join(timeout=3.0)
-    stop.set()
-
-    # The client must receive event 1 exactly once, not twice
-    assert received_ids == [1]
+    assert received_ids == [1, 2]
 
 

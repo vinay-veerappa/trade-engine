@@ -77,7 +77,7 @@ class _EngineHandler(BaseHTTPRequestHandler):
     def _validate_host(self) -> bool:
         host_header = self.headers.get("Host", "")
         host_name = host_header.split(":")[0].strip().lower() if host_header else ""
-        if host_name not in ("127.0.0.1", "localhost", "testserver"):
+        if host_name not in ("127.0.0.1", "localhost"):
             self.send_error(HTTPStatus.FORBIDDEN, "Forbidden: Invalid Host header")
             return False
         return True
