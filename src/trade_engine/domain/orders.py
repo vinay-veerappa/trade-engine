@@ -119,6 +119,55 @@ def validate_order_transition(current_state: OrderState, next_state: OrderState)
         )
 
 
+def validate_order_prices(
+    order_type: OrderType,
+    limit_price: Decimal | None,
+    stop_price: Decimal | None,
+    trail_amount: Decimal | None,
+) -> None:
+    """Validate that the prices present match what the order type requires.
+
+    Shared by strategy orders (Order) and venue orders (VenueOrder).
+    """
+    if order_type == OrderType.MARKET:
+        if limit_price is not None:
+            raise ValueError("MARKET order cannot have a limit_price")
+        if stop_price is not None:
+            raise ValueError("MARKET order cannot have a stop_price")
+        if trail_amount is not None:
+            raise ValueError("MARKET order cannot have a trail_amount")
+    elif order_type == OrderType.LIMIT:
+        if limit_price is None:
+            raise ValueError("LIMIT order must have a limit_price")
+        if stop_price is not None:
+            raise ValueError("LIMIT order cannot have a stop_price")
+        if trail_amount is not None:
+            raise ValueError("LIMIT order cannot have a trail_amount")
+    elif order_type == OrderType.STOP:
+        if stop_price is None:
+            raise ValueError("STOP order must have a stop_price")
+        if limit_price is not None:
+            raise ValueError("STOP order cannot have a limit_price")
+        if trail_amount is not None:
+            raise ValueError("STOP order cannot have a trail_amount")
+    elif order_type == OrderType.STOP_LIMIT:
+        if limit_price is None or stop_price is None:
+            raise ValueError("STOP_LIMIT order must have both limit_price and stop_price")
+        if trail_amount is not None:
+            raise ValueError("STOP_LIMIT order cannot have a trail_amount")
+    elif order_type == OrderType.TRAIL:
+        if trail_amount is None or trail_amount <= Decimal("0"):
+            raise ValueError("TRAIL order must have a positive trail_amount (I5)")
+        if limit_price is not None:
+            raise ValueError("TRAIL order cannot have a limit_price")
+        if stop_price is not None:
+            raise ValueError("TRAIL order cannot have a stop_price")
+
+    if limit_price is not None and limit_price <= Decimal("0"):
+        raise ValueError(f"limit_price must be positive, got {limit_price}")
+    if stop_price is not None and stop_price <= Decimal("0"):
+        raise ValueError(f"stop_price must be positive, got {stop_price}")
+
 
 @dataclass(frozen=True)
 class Order:
@@ -152,44 +201,7 @@ class Order:
         if self.created_at.tzinfo is None or self.created_at.tzinfo.utcoffset(self.created_at) is None:
             raise ValueError("Order created_at must be timezone-aware UTC datetime (I7)")
 
-        if self.order_type == OrderType.MARKET:
-            if self.limit_price is not None:
-                raise ValueError("MARKET order cannot have a limit_price")
-            if self.stop_price is not None:
-                raise ValueError("MARKET order cannot have a stop_price")
-            if self.trail_amount is not None:
-                raise ValueError("MARKET order cannot have a trail_amount")
-        elif self.order_type == OrderType.LIMIT:
-            if self.limit_price is None:
-                raise ValueError("LIMIT order must have a limit_price")
-            if self.stop_price is not None:
-                raise ValueError("LIMIT order cannot have a stop_price")
-            if self.trail_amount is not None:
-                raise ValueError("LIMIT order cannot have a trail_amount")
-        elif self.order_type == OrderType.STOP:
-            if self.stop_price is None:
-                raise ValueError("STOP order must have a stop_price")
-            if self.limit_price is not None:
-                raise ValueError("STOP order cannot have a limit_price")
-            if self.trail_amount is not None:
-                raise ValueError("STOP order cannot have a trail_amount")
-        elif self.order_type == OrderType.STOP_LIMIT:
-            if self.limit_price is None or self.stop_price is None:
-                raise ValueError("STOP_LIMIT order must have both limit_price and stop_price")
-            if self.trail_amount is not None:
-                raise ValueError("STOP_LIMIT order cannot have a trail_amount")
-        elif self.order_type == OrderType.TRAIL:
-            if self.trail_amount is None or self.trail_amount <= Decimal("0"):
-                raise ValueError("TRAIL order must have a positive trail_amount (I5)")
-            if self.limit_price is not None:
-                raise ValueError("TRAIL order cannot have a limit_price")
-            if self.stop_price is not None:
-                raise ValueError("TRAIL order cannot have a stop_price")
-
-        if self.limit_price is not None and self.limit_price <= Decimal("0"):
-            raise ValueError(f"limit_price must be positive, got {self.limit_price}")
-        if self.stop_price is not None and self.stop_price <= Decimal("0"):
-            raise ValueError(f"stop_price must be positive, got {self.stop_price}")
+        validate_order_prices(self.order_type, self.limit_price, self.stop_price, self.trail_amount)
 
     def transition_to(self, next_state: OrderState) -> Order:
         """Return a new Order instance with the updated state after validating transition."""

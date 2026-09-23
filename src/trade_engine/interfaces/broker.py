@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 from trade_engine.domain.instruments import Instrument, Side
-from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
+from trade_engine.domain.orders import OrderState, OrderType, TimeInForce, validate_order_prices
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,8 @@ class VenueIdentity:
     broker_name: str
 
     def __post_init__(self) -> None:
+        if self.env not in ("sim", "paper", "live"):
+            raise ValueError(f"Invalid venue env '{self.env}' (I10)")
         if self.connected_at.tzinfo is None or self.connected_at.tzinfo.utcoffset(self.connected_at) is None:
             raise ValueError("connected_at must be timezone-aware UTC datetime (I7)")
 
@@ -80,6 +82,15 @@ class VenueOrder:
             raise ValueError("submitted_at must be timezone-aware UTC datetime (I7)")
         if not isinstance(self.side, Side):
             raise ValueError(f"Invalid side '{self.side}'")
+        validate_order_prices(self.order_type, self.limit_price, self.stop_price, self.trail_amount)
+        # Every venue order must allocate back to strategy orders, or its fills are orphaned (§4.4)
+        if not self.allocations:
+            raise ValueError("VenueOrder must carry at least one strategy-order allocation")
+        allocated = sum((a.quantity for a in self.allocations), Decimal("0"))
+        if allocated != self.quantity:
+            raise ValueError(
+                f"VenueOrder allocations total {allocated} but order quantity is {self.quantity}"
+            )
 
 
 @dataclass(frozen=True)
@@ -130,10 +141,14 @@ class VenueFill:
     quantity: Decimal
     price: Decimal
     filled_at: datetime
-    side: Side = Side.BUY
+    side: Side  # Required: a defaulted side would guess the direction (I5)
     fee: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
+        if self.quantity <= Decimal("0"):
+            raise ValueError(f"VenueFill quantity must be strictly positive, got {self.quantity}")
+        if self.price <= Decimal("0"):
+            raise ValueError(f"VenueFill price must be strictly positive, got {self.price} (I5)")
         if self.filled_at.tzinfo is None or self.filled_at.tzinfo.utcoffset(self.filled_at) is None:
             raise ValueError("filled_at must be timezone-aware UTC datetime (I7)")
         if not isinstance(self.side, Side):

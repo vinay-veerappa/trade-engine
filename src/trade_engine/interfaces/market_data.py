@@ -38,6 +38,8 @@ class Bar:
             raise ValueError("Bar prices must be strictly positive (I5)")
         if self.high < self.low:
             raise ValueError(f"Bar high ({self.high}) cannot be lower than low ({self.low})")
+        if not (self.low <= self.open <= self.high and self.low <= self.close <= self.high):
+            raise ValueError("Bar open and close must lie within [low, high]")
         if self.volume < Decimal("0"):
             raise ValueError("Bar volume must be non-negative")
 

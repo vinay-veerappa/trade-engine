@@ -9,6 +9,10 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+# Root plus optional share-class suffix, ASCII only: AAPL, BRK.B. Rejects /NQ, spaces, OCC strings.
+_EQUITY_SYMBOL = re.compile(r"[A-Z0-9]+(\.[A-Z]{1,2})?")
+_OPTION_ROOT = re.compile(r"[A-Z0-9]{1,6}")
+
 
 class OptionRight(StrEnum):
     """Option contract right: Call or Put."""
@@ -54,7 +58,7 @@ class Equity(Instrument):
             raise ValueError("Equity symbol must be non-empty")
         if len(sym) > 10:
             raise ValueError(f"Equity symbol exceeds maximum length of 10 characters: '{sym}'")
-        if not sym.isalnum():
+        if not _EQUITY_SYMBOL.fullmatch(sym):
             raise ValueError(f"Equity symbol must be alphanumeric without slashes or spaces, got '{sym}'")
         object.__setattr__(self, "_symbol", sym)
 
@@ -82,15 +86,15 @@ class OptionContract(Instrument):
             raise ValueError("Option underlying must be non-empty")
         if len(und) > 6:
             raise ValueError(f"Option underlying must be at most 6 characters, got '{und}' (length {len(und)})")
-        if not und.isalnum():
+        if not _OPTION_ROOT.fullmatch(und):
             raise ValueError(f"Option underlying must be alphanumeric, got '{und}'")
 
         # Ensure strike is Decimal
         if not isinstance(self.strike, Decimal):
             object.__setattr__(self, "strike", Decimal(str(self.strike)))
 
-        if self.strike <= Decimal("0"):
-            raise ValueError(f"Strike must be positive, got {self.strike}")
+        if not self.strike.is_finite() or self.strike <= Decimal("0"):
+            raise ValueError(f"Strike must be positive and finite, got {self.strike}")
 
         if (self.strike * Decimal("1000")) != (self.strike * Decimal("1000")).to_integral_value():
             raise ValueError(f"Strike cannot have more than 3 decimal places (thousandths), got {self.strike} (I5)")
@@ -207,14 +211,18 @@ class Combo(Instrument):
         legs_tuple = tuple(legs)
         if not legs_tuple:
             raise ValueError("Combo must have at least one leg")
-        mults = {leg.contract.multiplier for leg in legs_tuple}
-        if len(mults) != 1:
-            raise ValueError(f"Combo has mixed leg multipliers: {mults} (I6)")
         object.__setattr__(self, "legs", legs_tuple)
 
     @property
     def multiplier(self) -> int:
-        """Derive multiplier from legs; all legs guaranteed uniform (I6)."""
+        """Uniform leg multiplier (I6).
+
+        Stock + option combos (buy-write, collar) have mixed multipliers and no single
+        multiplier; they must be valued per leg, so asking for one refuses (I5).
+        """
+        mults = {leg.contract.multiplier for leg in self.legs}
+        if len(mults) != 1:
+            raise ValueError(f"Combo has mixed leg multipliers {sorted(mults)}; value it per leg (I6)")
         return self.legs[0].contract.multiplier
 
     @property

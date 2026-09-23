@@ -40,6 +40,7 @@ def test_fill_creation_and_validation() -> None:
             price=Decimal("0"),
             venue_env="sim",
             filled_at=now,
+            side=Side.SELL,
         )
 
     # Refuses invalid venue_env (fire test)
@@ -53,6 +54,7 @@ def test_fill_creation_and_validation() -> None:
             price=Decimal("150.00"),
             venue_env="sandbox",  # type: ignore[arg-type]
             filled_at=now,
+            side=Side.SELL,
         )
 
     # Refuses naive datetime (fire test)
@@ -67,6 +69,7 @@ def test_fill_creation_and_validation() -> None:
             price=Decimal("150.00"),
             venue_env="sim",
             filled_at=naive_dt,
+            side=Side.SELL,
         )
 
 
@@ -99,6 +102,7 @@ def test_lot_validation() -> None:
             quantity=Decimal("100"),
             cost_basis=Decimal("150.00"),
             acquired_at=datetime(2026, 9, 23, 12, 0, 0),
+            side=Side.BUY,
         )
 
 

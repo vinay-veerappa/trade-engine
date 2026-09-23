@@ -24,7 +24,7 @@ class Fill:
     price: Decimal
     venue_env: VenueEnv  # Must be proven at connect (I10)
     filled_at: datetime
-    side: Side = Side.BUY
+    side: Side  # Required: a defaulted side would guess the direction (I5)
     fee: Decimal = Decimal("0")
     leg_id: str | None = None
     venue_order_id: str | None = None
@@ -57,7 +57,7 @@ class Lot:
     quantity: Decimal
     cost_basis: Decimal
     acquired_at: datetime
-    side: Side = Side.BUY
+    side: Side  # BUY = long lot, SELL = short lot; required (I5)
 
     def __post_init__(self) -> None:
         if not self.lot_id:
@@ -82,6 +82,19 @@ class Position:
     avg_cost: Decimal
     realized_pnl: Decimal = Decimal("0")
     open_lots: tuple[Lot, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not self.account_id:
+            raise ValueError("account_id must be non-empty")
+        if self.open_lots:
+            signed = sum(
+                (lot.quantity if lot.side == Side.BUY else -lot.quantity for lot in self.open_lots),
+                Decimal("0"),
+            )
+            if signed != self.quantity:
+                raise ValueError(
+                    f"Position quantity {self.quantity} disagrees with open lots total {signed} (I2)"
+                )
 
     @property
     def is_long(self) -> bool:

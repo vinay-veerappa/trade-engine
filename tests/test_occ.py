@@ -193,8 +193,8 @@ def test_option_contract_multiplier_custom() -> None:
     assert contract.multiplier == 50
 
 
-def test_combo_multiplier_derivation_and_mixed_rejection() -> None:
-    """Test Combo derives multiplier from legs and refuses mixed multipliers (I6)."""
+def test_combo_multiplier_derivation_and_mixed_refusal() -> None:
+    """Combo derives a uniform multiplier; a stock + option combo is buildable but has none (I6)."""
     leg1 = ComboLeg(
         contract=OptionContract("AAPL", date(2026, 9, 18), Decimal("150"), OptionRight.CALL, multiplier=100),
         ratio=1,
@@ -208,14 +208,19 @@ def test_combo_multiplier_derivation_and_mixed_rejection() -> None:
     combo = Combo(legs=(leg1, leg2))
     assert combo.multiplier == 100
 
-    # Mixed multipliers refused (fire test)
+    # Buy-write (stock + short call) is a legal combo...
     stock_leg = ComboLeg(
         contract=Equity("AAPL"),
         ratio=100,
         side=Side.BUY,
     )
+    short_call = ComboLeg(contract=leg2.contract, ratio=1, side=Side.SELL)
+    buy_write = Combo(legs=(stock_leg, short_call))
+    assert len(buy_write.legs) == 2
+
+    # ...but has no single multiplier: asking for one refuses (fire test)
     with pytest.raises(ValueError, match="mixed leg multipliers"):
-        Combo(legs=(leg1, stock_leg))
+        _ = buy_write.multiplier
 
 
 def test_equity_symbol_validation() -> None:
@@ -235,3 +240,17 @@ def test_equity_symbol_validation() -> None:
     with pytest.raises(ValueError, match="exceeds maximum length"):
         Equity("VERYLONGTICKERNAME")
 
+
+
+def test_equity_symbol_share_class_and_ascii() -> None:
+    """Class shares are real tickers; non-ASCII look-alikes are not (I6)."""
+    assert Equity("brk.b").symbol == "BRK.B"
+    for bad in ("BRK..B", ".B", "BRK.", "AAPL²", "ÄPPL"):
+        with pytest.raises(ValueError):
+            Equity(bad)
+
+
+def test_option_strike_must_be_finite() -> None:
+    for bad in ("Infinity", "NaN"):
+        with pytest.raises(ValueError, match="positive and finite"):
+            OptionContract("SPY", date(2026, 9, 18), Decimal(bad), OptionRight.CALL)
