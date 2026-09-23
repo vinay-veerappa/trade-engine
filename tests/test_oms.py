@@ -1,90 +1,399 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from trade_engine.domain.instruments import Equity, Side
+from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
+from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.signals import OrderIntent
-from trade_engine.domain.orders import Order, OrderType
-from trade_engine.interfaces.broker import Capabilities, VenueAck
-from trade_engine.oms import OrderManager, TrailingStopEmulator
+from trade_engine.interfaces.broker import (
+    Capabilities,
+    OrderChanges,
+    VenueAck,
+    VenueOrder,
+    VenueOrderState,
+)
+from trade_engine.ledger import EmulatedOrderState, Event, EventKind, Ledger
+from trade_engine.ledger.codec import decode_payload, encode_payload
+from trade_engine.oms import (
+    BrokerOutcomeUnknownError,
+    IdempotencyConflictError,
+    OCOOutcomeUnknownError,
+    OrderManagementError,
+    OrderManager,
+    OrderPendingReconciliationError,
+    TrailingStopEmulator,
+    UnsupportedOrderCapabilityError,
+)
+
+NOW = datetime(2026, 9, 23, 20, 0, tzinfo=timezone.utc)
 
 
 class FakeClock:
-    def now_utc(self):
-        return datetime(2026, 9, 23, 20, 0, tzinfo=timezone.utc)
+    def now_utc(self) -> datetime:
+        return NOW
 
-    def sleep(self, seconds):
-        raise AssertionError("sleep is not used by OMS tests")
+    def sleep(self, seconds: float) -> None:
+        raise AssertionError("OMS must not sleep")
 
 
 class FakeBroker:
     name = "fake"
     env = "sim"
-    capabilities = Capabilities(
-        supported_order_types=frozenset({"LIMIT", "STOP"}),
-        supported_tifs=frozenset({"DAY"}),
-        supports_multi_leg=False,
-        supports_native_stops=True,
-        supports_streaming=False,
-    )
 
-    def __init__(self):
-        self.submitted = []
-        self.cancelled = []
+    def __init__(
+        self,
+        *,
+        order_types: frozenset[OrderType] | None = None,
+        tifs: frozenset[TimeInForce] | None = None,
+    ) -> None:
+        self.capabilities = Capabilities(
+            supported_order_types=order_types
+            if order_types is not None
+            else frozenset({OrderType.MARKET, OrderType.LIMIT, OrderType.STOP}),
+            supported_tifs=tifs if tifs is not None else frozenset({TimeInForce.DAY}),
+            supports_multi_leg=False,
+            supports_native_stops=True,
+            supports_streaming=True,
+        )
+        self.submitted: list[VenueOrder] = []
+        self.cancelled: list[str] = []
+        self.replaced: list[tuple[str, OrderChanges]] = []
+        self.submit_status = "ACCEPTED"
+        self.cancel_status = "ACCEPTED"
+        self.replace_status = "ACCEPTED"
+        self.submit_error: Exception | None = None
+        self.order_readback: list[VenueOrderState] = []
+        self.fill_readback = []
 
-    def submit(self, order):
+    def connect(self):
+        raise AssertionError("connect is not used in OMS tests")
+
+    def submit(self, order: VenueOrder) -> VenueAck:
         self.submitted.append(order)
-        return VenueAck(order.venue_order_id, "ACCEPTED", datetime.now(timezone.utc))
+        if self.submit_error is not None:
+            raise self.submit_error
+        return VenueAck(order.venue_order_id, self.submit_status, NOW, "test ack")
 
-    def cancel(self, venue_order_id):
+    def cancel(self, venue_order_id: str) -> VenueAck:
         self.cancelled.append(venue_order_id)
-        return VenueAck(venue_order_id, "ACCEPTED", datetime.now(timezone.utc))
+        return VenueAck(venue_order_id, self.cancel_status, NOW, "test cancel")
+
+    def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
+        self.replaced.append((venue_order_id, changes))
+        return VenueAck(venue_order_id, self.replace_status, NOW, "test replace")
+
+    def orders(self, since: datetime):
+        return self.order_readback
+
+    def fills(self, since: datetime):
+        return self.fill_readback
 
 
-def _intent():
+def make_intent(
+    *,
+    command_id: str = "command-1",
+    side: Side = Side.BUY,
+    reason: str = "breakout",
+    targets: tuple[Decimal, ...] = (Decimal("105"), Decimal("110")),
+) -> OrderIntent:
     return OrderIntent(
         intent_id="intent-1",
         account_id="account-1",
         instrument=Equity("AAPL"),
-        side=Side.BUY,
+        side=side,
         quantity_rule="fixed_10",
         entry_price=Decimal("100"),
-        stop_loss=Decimal("95"),
-        profit_targets=(Decimal("105"), Decimal("110")),
-        reason="breakout",
-        command_id="command-1",
+        stop_loss=Decimal("95") if side is Side.BUY else Decimal("105"),
+        profit_targets=targets
+        if side is Side.BUY
+        else tuple(Decimal("100") - (target - Decimal("100")) for target in targets),
+        reason=reason,
+        command_id=command_id,
     )
 
 
-def test_bracket_is_deterministic_and_oco_cancels_siblings():
+def make_manager(path, broker: FakeBroker, clock: FakeClock | None = None):
+    ledger = Ledger(path)
+    ledger.open()
+    return OrderManager(broker, clock or FakeClock(), ledger), ledger
+
+
+def make_fill(
+    order: Order,
+    fill_id: str,
+    quantity: str,
+    price: str,
+) -> Fill:
+    return Fill(
+        fill_id=fill_id,
+        order_id=order.order_id,
+        account_id=order.account_id,
+        instrument=order.instrument,
+        quantity=Decimal(quantity),
+        price=Decimal(price),
+        venue_env="sim",
+        filled_at=NOW,
+        side=order.side,
+        venue_order_id=order.order_id,
+        venue_execution_id=fill_id,
+    )
+
+
+@pytest.fixture
+def manager_factory(tmp_path):
+    opened = []
+
+    def create(broker: FakeBroker | None = None, name: str = "orders.db"):
+        instance, ledger = make_manager(tmp_path / name, broker or FakeBroker())
+        opened.append(ledger)
+        return instance, ledger, broker or instance._broker
+
+    yield create
+    for ledger in opened:
+        ledger.close()
+
+
+def test_bracket_replay_is_persisted_and_payload_conflicts_are_refused(manager_factory):
     broker = FakeBroker()
-    manager = OrderManager(broker, FakeClock())
-    bracket = manager.create_bracket(_intent(), Decimal("10"))
-    assert manager.create_bracket(_intent(), Decimal("10")) == bracket
+    first, ledger, _ = manager_factory(broker)
+    bracket = first.create_bracket(make_intent(), Decimal("10"))
+    before = ledger.count()
 
-    manager.submit(bracket.stop)
-    manager.submit(bracket.targets[0])
-    resolved = manager.resolve(bracket.targets[0].order_id, filled=True)
+    second = OrderManager(broker, FakeClock(), ledger)
+    replay = second.create_bracket(make_intent(), Decimal("10"))
 
-    assert any(order.order_id == bracket.targets[0].order_id and order.state.value == "FILLED" for order in resolved)
-    assert any(order.order_id == bracket.stop.order_id and order.state.value == "CANCELLED" for order in resolved)
-    assert broker.cancelled == [bracket.stop.order_id]
-
-
-def test_trailing_stop_emulator_tracks_extreme_and_triggers():
-    emulator = TrailingStopEmulator(Side.BUY, Decimal("5"))
-    assert not emulator.update(Decimal("100"))
-    assert emulator.stop_price == Decimal("95")
-    assert not emulator.update(Decimal("110"))
-    assert emulator.stop_price == Decimal("105")
-    assert emulator.update(Decimal("104"))
-    assert emulator.triggered
+    assert replay == bracket
+    assert ledger.count() == before
+    with pytest.raises(IdempotencyConflictError):
+        second.create_bracket(make_intent(), Decimal("50"))
 
 
-def test_trailing_order_is_emulated_when_venue_lacks_native_support():
-    broker = FakeBroker()
-    manager = OrderManager(broker, FakeClock())
+def test_children_are_held_and_target_quantity_is_split(manager_factory):
+    manager, ledger, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+
+    with pytest.raises(OrderManagementError, match="held"):
+        manager.submit(bracket.stop)
+    assert broker.submitted == []
+
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "entry-fill", "10", "100"))
+
+    assert [order.venue_order_id for order in broker.submitted] == [
+        bracket.entry.order_id,
+        bracket.stop.order_id,
+        bracket.targets[0].order_id,
+        bracket.targets[1].order_id,
+    ]
+    assert [order.quantity for order in broker.submitted[2:]] == [
+        Decimal("5"),
+        Decimal("5"),
+    ]
+    assert ledger.state("account-1").orders[bracket.targets[0].order_id].state is OrderState.ACCEPTED
+
+
+def test_partial_entry_protects_only_filled_quantity_and_scales_targets_on_cancel(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "entry-part", "4", "100"))
+
+    assert [item.quantity for item in broker.submitted] == [Decimal("10"), Decimal("4")]
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.ACCEPTED
+    assert all(target.order_id not in [item.venue_order_id for item in broker.submitted] for target in bracket.targets)
+
+    manager.cancel(bracket.entry.order_id, command_id="cancel-entry")
+
+    assert [item.quantity for item in broker.submitted[2:]] == [
+        Decimal("2"),
+        Decimal("2"),
+    ]
+
+
+def test_partial_target_fill_reduces_stop_without_cancelling_other_target(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "entry-fill", "10", "100"))
+
+    manager.record_fill(make_fill(bracket.targets[0], "target-part", "2", "105"))
+
+    assert manager.get_order(bracket.targets[0].order_id).state is OrderState.PARTIALLY_FILLED
+    assert manager.get_order(bracket.stop.order_id).quantity == Decimal("8")
+    assert broker.replaced == [
+        (bracket.stop.order_id, OrderChanges(new_quantity=Decimal("8")))
+    ]
+    assert manager.get_order(bracket.targets[1].order_id).state is OrderState.ACCEPTED
+    assert broker.cancelled == []
+
+
+def test_full_target_fill_resizes_stop_and_keeps_other_target_working(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "entry-fill", "10", "100"))
+
+    manager.record_fill(make_fill(bracket.targets[0], "target-one", "5", "105"))
+
+    assert manager.get_order(bracket.targets[0].order_id).state is OrderState.FILLED
+    assert manager.get_order(bracket.stop.order_id).quantity == Decimal("5")
+    assert manager.get_order(bracket.targets[1].order_id).state is OrderState.ACCEPTED
+    assert broker.cancelled == []
+
+
+def test_stop_fill_cancels_target_siblings_only_after_confirmed_ack(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "entry-fill", "10", "100"))
+
+    manager.record_fill(make_fill(bracket.stop, "stop-fill", "10", "95"))
+
+    assert broker.cancelled == [target.order_id for target in bracket.targets]
+    assert all(
+        manager.get_order(target.order_id).state is OrderState.CANCELLED
+        for target in bracket.targets
+    )
+
+
+def test_rejected_oco_cancel_remains_pending_and_surfaces_conflict(manager_factory):
+    manager, ledger, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "entry-fill", "10", "100"))
+    broker.cancel_status = "REJECTED"
+
+    with pytest.raises(OCOOutcomeUnknownError, match="rejected cancel"):
+        manager.record_fill(make_fill(bracket.stop, "stop-fill", "10", "95"))
+
+    target_state = manager.get_order(bracket.targets[0].order_id).state
+    assert target_state is OrderState.PENDING_UNKNOWN
+    assert target_state is not OrderState.CANCELLED
+    assert any(event.kind is EventKind.ORDER_REFUSED for event in ledger.events())
+
+
+def test_rejected_child_does_not_break_target_resolution_with_illegal_transition(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    broker.submit_status = "REJECTED"
+    with pytest.raises(OrderManagementError, match="Protective stop"):
+        manager.record_fill(make_fill(bracket.entry, "entry-fill", "10", "100"))
+
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.REJECTED
+    assert all(
+        target.order_id not in {order.venue_order_id for order in broker.submitted}
+        for target in bracket.targets
+    )
+
+
+def test_cancel_pending_ack_is_not_reported_cancelled(manager_factory):
+    manager, _, broker = manager_factory()
     order = Order(
-        order_id="trail-1",
+        order_id="standalone",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        command_id="standalone-command",
+        created_at=NOW,
+        limit_price=Decimal("100"),
+    )
+    manager.submit(order)
+    broker.cancel_status = "PENDING"
+
+    cancelled = manager.cancel(order.order_id, command_id="cancel-1")
+
+    assert cancelled.state is OrderState.PENDING_UNKNOWN
+    assert manager.get_order(order.order_id).state is OrderState.PENDING_UNKNOWN
+
+
+def test_entry_cancel_cancels_unrouted_children_locally(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+
+    manager.cancel(bracket.entry.order_id, command_id="cancel-entry")
+
+    assert manager.get_order(bracket.entry.order_id).state is OrderState.CANCELLED
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.CANCELLED
+    assert all(manager.get_order(target.order_id).state is OrderState.CANCELLED for target in bracket.targets)
+    assert broker.cancelled == [bracket.entry.order_id]
+
+
+def test_submit_exception_is_persistently_unknown_and_never_resent(manager_factory):
+    manager, ledger, broker = manager_factory()
+    order = Order(
+        order_id="timeout-order",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.MARKET,
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        command_id="timeout-command",
+        created_at=NOW,
+    )
+    broker.submit_error = TimeoutError("socket timed out")
+
+    with pytest.raises(BrokerOutcomeUnknownError):
+        manager.submit(order)
+    assert manager.get_order(order.order_id).state is OrderState.PENDING_UNKNOWN
+    assert len(broker.submitted) == 1
+
+    broker.submit_error = None
+    assert manager.submit(order).state is OrderState.PENDING_UNKNOWN
+    assert len(broker.submitted) == 1
+    assert ledger.state("account-1").orders[order.order_id].state is OrderState.PENDING_UNKNOWN
+
+
+def test_unsupported_order_type_and_tif_are_refused_before_venue_submission(manager_factory):
+    broker = FakeBroker(order_types=frozenset({OrderType.LIMIT}), tifs=frozenset({TimeInForce.DAY}))
+    manager, ledger, _ = manager_factory(broker)
+    market = Order(
+        order_id="market",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.MARKET,
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        command_id="market-command",
+        created_at=NOW,
+    )
+    with pytest.raises(UnsupportedOrderCapabilityError, match="MARKET"):
+        manager.submit(market)
+    assert broker.submitted == []
+
+    gtc = replace_order_tif(
+        Order(
+            order_id="limit-order",
+            account_id="account-1",
+            instrument=Equity("AAPL"),
+            order_type=OrderType.LIMIT,
+            side=Side.BUY,
+            quantity=Decimal("1"),
+            command_id="limit-command",
+            created_at=NOW,
+            limit_price=Decimal("100"),
+        ),
+        TimeInForce.GTC,
+        "gtc-order",
+    )
+    with pytest.raises(UnsupportedOrderCapabilityError, match="GTC"):
+        manager.submit(gtc)
+    assert broker.submitted == []
+    assert len([event for event in ledger.events() if event.kind is EventKind.ORDER_REFUSED]) == 2
+
+
+def test_trailing_stop_sell_protects_long_and_emits_market_or_limit_not_stop(manager_factory):
+    broker = FakeBroker(order_types=frozenset({OrderType.LIMIT, OrderType.STOP}))
+    manager, ledger, _ = manager_factory(broker)
+    order = Order(
+        order_id="long-trail",
         account_id="account-1",
         instrument=Equity("AAPL"),
         order_type=OrderType.TRAIL,
@@ -92,9 +401,304 @@ def test_trailing_order_is_emulated_when_venue_lacks_native_support():
         quantity=Decimal("10"),
         trail_amount=Decimal("5"),
         command_id="trail-command",
-        created_at=FakeClock().now_utc(),
+        created_at=NOW,
     )
 
-    assert manager.submit_trailing(order, (Decimal("100"), Decimal("110"), Decimal("104")))
-    assert broker.submitted[-1].order_type == OrderType.STOP
-    assert broker.submitted[-1].stop_price == Decimal("105")
+    assert manager.submit_trailing(order).state is OrderState.NEW
+    assert broker.submitted == []
+    manager.update_trailing(order.order_id, Decimal("100"), command_id="tick-1")
+    manager = OrderManager(broker, FakeClock(), ledger)
+    manager.update_trailing(order.order_id, Decimal("110"), command_id="tick-2")
+    triggered = manager.update_trailing(order.order_id, Decimal("104"), command_id="tick-3")
+
+    assert triggered.state is OrderState.ACCEPTED
+    assert broker.submitted[-1].order_type is OrderType.LIMIT
+    assert broker.submitted[-1].limit_price == Decimal("104")
+    assert broker.submitted[-1].stop_price is None
+    assert ledger.state("account-1").emulated_orders[order.order_id].stop_price == Decimal("105")
+
+
+def test_trailing_stop_buy_protects_short_and_native_capability_is_honored(manager_factory):
+    emulator = TrailingStopEmulator(Side.BUY, Decimal("5"))
+    assert not emulator.update(Decimal("100"))
+    assert not emulator.update(Decimal("90"))
+    assert emulator.stop_price == Decimal("95")
+    assert emulator.update(Decimal("96"))
+
+    broker = FakeBroker(
+        order_types=frozenset({OrderType.TRAIL, OrderType.MARKET}),
+    )
+    manager, _, _ = manager_factory(broker)
+    order = Order(
+        order_id="native-trail",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.TRAIL,
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        trail_amount=Decimal("2"),
+        command_id="native-command",
+        created_at=NOW,
+    )
+
+    assert manager.submit_trailing(order).state is OrderState.ACCEPTED
+    assert broker.submitted[-1].order_type is OrderType.TRAIL
+
+
+def test_replace_refuses_terminal_order_and_pending_result_is_not_success(manager_factory):
+    manager, _, broker = manager_factory()
+    order = Order(
+        order_id="replace-order",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("2"),
+        command_id="replace-command",
+        created_at=NOW,
+        limit_price=Decimal("100"),
+    )
+    manager.submit(order)
+    broker.replace_status = "PENDING"
+    pending = manager.replace(
+        order.order_id,
+        OrderChanges(new_quantity=Decimal("3")),
+        command_id="replace-pending",
+    )
+
+    assert pending.state is OrderState.PENDING_UNKNOWN
+    assert pending.quantity == Decimal("2")
+    assert len(broker.replaced) == 1
+    with pytest.raises(OrderPendingReconciliationError):
+        manager.replace(
+            order.order_id,
+            OrderChanges(new_quantity=Decimal("3")),
+            command_id="replace-pending",
+        )
+    with pytest.raises(IdempotencyConflictError, match="different replace changes"):
+        manager.replace(
+            order.order_id,
+            OrderChanges(new_quantity=Decimal("4")),
+            command_id="replace-pending",
+        )
+    assert len(broker.replaced) == 1
+    with pytest.raises(OrderPendingReconciliationError):
+        manager.replace(
+            order.order_id,
+            OrderChanges(new_quantity=Decimal("3")),
+            command_id="replace-again",
+        )
+    with pytest.raises(OrderPendingReconciliationError, match="pending reconciliation"):
+        manager.replace(
+            order.order_id,
+            OrderChanges(new_quantity=Decimal("4")),
+            command_id="replace-terminal",
+        )
+
+
+def test_noop_replace_command_is_idempotent_and_payload_bound(manager_factory):
+    manager, _, broker = manager_factory()
+    order = Order(
+        order_id="noop-replace",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("2"),
+        command_id="noop-replace-order",
+        created_at=NOW,
+        limit_price=Decimal("100"),
+    )
+    manager.submit(order)
+    changes = OrderChanges(new_quantity=Decimal("2"))
+
+    first = manager.replace(
+        order.order_id, changes, command_id="noop-replace-command"
+    )
+    assert broker.replaced == []
+    replay = manager.replace(
+        order.order_id, changes, command_id="noop-replace-command"
+    )
+    assert first == replay == manager.get_order(order.order_id)
+    with pytest.raises(IdempotencyConflictError, match="different replace changes"):
+        manager.replace(
+            order.order_id,
+            OrderChanges(new_quantity=Decimal("3")),
+            command_id="noop-replace-command",
+        )
+
+
+def test_emulated_trailing_state_round_trips_through_event_codec(manager_factory):
+    manager, ledger, _ = manager_factory(
+        FakeBroker(order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}))
+    )
+    order = Order(
+        order_id="codec-trail",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.TRAIL,
+        side=Side.SELL,
+        quantity=Decimal("1"),
+        trail_amount=Decimal("2"),
+        command_id="codec-trail-command",
+        created_at=NOW,
+    )
+    manager.submit_trailing(order)
+    manager.update_trailing(order.order_id, Decimal("10"), command_id="codec-tick")
+
+    payload = ledger.events()[-1].payload
+    assert decode_payload(encode_payload(payload)) == payload
+
+
+def test_unsupported_stop_is_emulated_and_routes_limit_only_on_trigger(manager_factory):
+    broker = FakeBroker(order_types=frozenset({OrderType.LIMIT}))
+    manager, ledger, _ = manager_factory(broker)
+    order = Order(
+        order_id="emulated-stop",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.STOP,
+        side=Side.SELL,
+        quantity=Decimal("3"),
+        stop_price=Decimal("95"),
+        command_id="emulated-stop-command",
+        created_at=NOW,
+    )
+
+    assert manager.submit(order).state is OrderState.NEW
+    assert broker.submitted == []
+    assert manager.update_emulated_order(
+        order.order_id, Decimal("100"), command_id="stop-tick-1"
+    ).state is OrderState.NEW
+    assert broker.submitted == []
+
+    triggered = manager.update_emulated_order(
+        order.order_id, Decimal("95"), command_id="stop-tick-2"
+    )
+
+    assert triggered.state is OrderState.ACCEPTED
+    assert len(broker.submitted) == 1
+    assert broker.submitted[0].order_type is OrderType.LIMIT
+    assert broker.submitted[0].limit_price == Decimal("95")
+    assert broker.submitted[0].stop_price is None
+    assert ledger.state("account-1").emulated_orders[order.order_id].triggered
+
+
+def test_unsupported_stop_limit_routes_original_limit_price(manager_factory):
+    broker = FakeBroker(order_types=frozenset({OrderType.LIMIT}))
+    manager, _, _ = manager_factory(broker)
+    order = Order(
+        order_id="emulated-stop-limit",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.STOP_LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("2"),
+        stop_price=Decimal("105"),
+        limit_price=Decimal("106"),
+        command_id="emulated-stop-limit-command",
+        created_at=NOW,
+    )
+
+    assert manager.submit(order).state is OrderState.NEW
+    assert broker.submitted == []
+
+    triggered = manager.update_emulated_order(
+        order.order_id, Decimal("105"), command_id="stop-limit-tick"
+    )
+
+    assert triggered.state is OrderState.ACCEPTED
+    assert len(broker.submitted) == 1
+    assert broker.submitted[0].order_type is OrderType.LIMIT
+    assert broker.submitted[0].limit_price == Decimal("106")
+    assert broker.submitted[0].stop_price is None
+
+
+def test_triggered_emulation_is_resumed_after_restart_before_submit(manager_factory):
+    broker = FakeBroker(order_types=frozenset({OrderType.LIMIT}))
+    manager, ledger, _ = manager_factory(broker)
+    order = Order(
+        order_id="resumed-stop",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.STOP,
+        side=Side.SELL,
+        quantity=Decimal("1"),
+        stop_price=Decimal("95"),
+        command_id="resumed-stop-command",
+        created_at=NOW,
+    )
+    manager.submit(order)
+    ledger.append(
+        Event(
+            account="account-1",
+            kind=EventKind.ORDER_EMULATION_UPDATED,
+            payload=EmulatedOrderState(
+                order_id=order.order_id,
+                observed_price=Decimal("94"),
+                extreme=None,
+                stop_price=Decimal("95"),
+                triggered=True,
+                reason="trigger persisted before venue submission",
+            ),
+            ts_utc=NOW,
+            command_id="resumed-trigger",
+        )
+    )
+    manager = OrderManager(broker, FakeClock(), ledger)
+
+    submitted = manager.update_emulated_order(
+        order.order_id, Decimal("94"), command_id="resumed-trigger"
+    )
+
+    assert submitted.state is OrderState.ACCEPTED
+    assert len(broker.submitted) == 1
+    assert broker.submitted[0].order_type is OrderType.LIMIT
+
+
+def test_reused_standalone_order_id_with_different_payload_is_refused(manager_factory):
+    manager, _, broker = manager_factory()
+    order = Order(
+        order_id="payload-conflict",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        command_id="payload-conflict-command",
+        created_at=NOW,
+        limit_price=Decimal("100"),
+    )
+    manager.submit(order)
+    changed = Order(
+        order_id=order.order_id,
+        account_id=order.account_id,
+        instrument=order.instrument,
+        order_type=order.order_type,
+        side=order.side,
+        quantity=Decimal("2"),
+        command_id=order.command_id,
+        created_at=order.created_at,
+        limit_price=Decimal("101"),
+    )
+
+    with pytest.raises(IdempotencyConflictError, match="different order payload"):
+        manager.submit(changed)
+    assert len(broker.submitted) == 1
+
+
+def replace_order_tif(order: Order, tif: TimeInForce, order_id: str) -> Order:
+    return Order(
+        order_id=order_id,
+        account_id=order.account_id,
+        instrument=order.instrument,
+        order_type=order.order_type,
+        side=order.side,
+        quantity=order.quantity,
+        command_id=f"{order.command_id}-{order_id}",
+        created_at=order.created_at,
+        limit_price=order.limit_price,
+        stop_price=order.stop_price,
+        trail_amount=order.trail_amount,
+        tif=tif,
+    )

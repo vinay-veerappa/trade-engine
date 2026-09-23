@@ -30,11 +30,16 @@ class EventKind(StrEnum):
 
     SIGNAL_SEEN = "SignalSeen"
     RISK_VERDICT = "RiskVerdict"
+    ORDERS_CREATED = "OrdersCreated"
     ORDER_SUBMITTED = "OrderSubmitted"
+    ORDER_UPDATED = "OrderUpdated"
+    ORDER_PENDING = "OrderPending"
     ORDER_ACCEPTED = "OrderAccepted"
     ORDER_REJECTED = "OrderRejected"
     ORDER_CANCELLED = "OrderCancelled"
+    ORDER_REFUSED = "OrderRefused"
     ORDER_EXPIRED = "OrderExpired"
+    ORDER_EMULATION_UPDATED = "OrderEmulationUpdated"
     FILL = "Fill"
     ASSIGNMENT = "Assignment"
     EXERCISE = "Exercise"
@@ -89,6 +94,75 @@ class OrderStateChange:
     def __post_init__(self) -> None:
         if not self.order_id:
             raise EventPayloadError("OrderStateChange.order_id must be non-empty")
+        if self.reason is not None and not self.reason:
+            raise EventPayloadError("OrderStateChange.reason must be non-empty when provided")
+
+
+@dataclass(frozen=True)
+class OrdersCreated:
+    """A bracket's orders and payload fingerprint, appended atomically as one command."""
+
+    orders: tuple[Order, ...]
+    fingerprint: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.orders:
+            raise EventPayloadError("OrdersCreated.orders must not be empty")
+        if not self.fingerprint:
+            raise EventPayloadError("OrdersCreated.fingerprint must be non-empty")
+        if not self.reason:
+            raise EventPayloadError("OrdersCreated.reason must be non-empty")
+        if len({order.order_id for order in self.orders}) != len(self.orders):
+            raise EventPayloadError("OrdersCreated.order_id values must be unique")
+        accounts = {order.account_id for order in self.orders}
+        if len(accounts) != 1:
+            raise EventPayloadError("OrdersCreated orders must belong to one account")
+
+
+@dataclass(frozen=True)
+class OrderUpdated:
+    """A complete immutable order replacement with its decision reason."""
+
+    order: Order
+    reason: str
+    venue_order_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.reason:
+            raise EventPayloadError("OrderUpdated.reason must be non-empty")
+
+
+@dataclass(frozen=True)
+class EmulatedOrderState:
+    """Persisted working state for a locally emulated order."""
+
+    order_id: str
+    observed_price: Decimal | None
+    extreme: Decimal | None
+    stop_price: Decimal | None
+    triggered: bool
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.order_id:
+            raise EventPayloadError("EmulatedOrderState.order_id must be non-empty")
+        if self.observed_price is not None:
+            object.__setattr__(
+                self, "observed_price", _as_decimal(self.observed_price, "observed_price")
+            )
+            if self.observed_price <= 0:
+                raise EventPayloadError("EmulatedOrderState.observed_price must be positive")
+        if self.extreme is not None:
+            object.__setattr__(self, "extreme", _as_decimal(self.extreme, "extreme"))
+            if self.extreme <= 0:
+                raise EventPayloadError("EmulatedOrderState.extreme must be positive")
+        if self.stop_price is not None:
+            object.__setattr__(self, "stop_price", _as_decimal(self.stop_price, "stop_price"))
+            if self.stop_price <= 0:
+                raise EventPayloadError("EmulatedOrderState.stop_price must be positive")
+        if not self.reason:
+            raise EventPayloadError("EmulatedOrderState.reason must be non-empty")
 
 
 @dataclass(frozen=True)
@@ -182,11 +256,16 @@ class LifecycleNotice:
 PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.SIGNAL_SEEN: Signal,
     EventKind.RISK_VERDICT: RiskVerdict,
+    EventKind.ORDERS_CREATED: OrdersCreated,
     EventKind.ORDER_SUBMITTED: Order,
+    EventKind.ORDER_UPDATED: OrderUpdated,
+    EventKind.ORDER_PENDING: OrderStateChange,
     EventKind.ORDER_ACCEPTED: OrderStateChange,
     EventKind.ORDER_REJECTED: OrderStateChange,
     EventKind.ORDER_CANCELLED: OrderStateChange,
+    EventKind.ORDER_REFUSED: OrderStateChange,
     EventKind.ORDER_EXPIRED: OrderStateChange,
+    EventKind.ORDER_EMULATION_UPDATED: EmulatedOrderState,
     EventKind.FILL: Fill,
     EventKind.ASSIGNMENT: LifecycleNotice,
     EventKind.EXERCISE: LifecycleNotice,
@@ -244,8 +323,16 @@ class Event:
             )
 
         payload_account = getattr(self.payload, "account_id", None)
+        if isinstance(self.payload, OrderUpdated):
+            payload_account = self.payload.order.account_id
         if payload_account is not None and payload_account != self.account:
             raise EventPayloadError(
                 f"{self.kind.value} payload belongs to account '{payload_account}' but the "
                 f"event is filed under '{self.account}' (I8)"
+            )
+        if isinstance(self.payload, OrdersCreated) and any(
+            order.account_id != self.account for order in self.payload.orders
+        ):
+            raise EventPayloadError(
+                f"{self.kind.value} contains orders for a different account (I8)"
             )
