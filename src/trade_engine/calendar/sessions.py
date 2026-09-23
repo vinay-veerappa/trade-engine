@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Literal, Union
+from typing import Iterable, Literal, Union
 import zoneinfo
 
 import exchange_calendars as xcals
@@ -94,7 +94,7 @@ class ExchangeCalendar:
         if not self.is_session(session_date):
             raise ValueError(f"Date {iso_str} is not a valid trading session of {self.exchange} (I5)")
         open_ts = self._cal.session_open(iso_str)
-        return open_ts.to_pydatetime()
+        return open_ts.to_pydatetime().astimezone(timezone.utc)
 
     def session_close(self, d: DateLike) -> datetime:
         """Return market close timestamp as timezone-aware UTC datetime.
@@ -107,7 +107,7 @@ class ExchangeCalendar:
         if not self.is_session(session_date):
             raise ValueError(f"Date {iso_str} is not a valid trading session of {self.exchange} (I5)")
         close_ts = self._cal.session_close(iso_str)
-        return close_ts.to_pydatetime()
+        return close_ts.to_pydatetime().astimezone(timezone.utc)
 
     def next_session(self, d: DateLike) -> date:
         """Return the next active trading session strictly after d."""
@@ -159,3 +159,24 @@ class ExchangeCalendar:
             raise ValueError(f"Datetime must be timezone-aware (I7): {dt!r}")
         ts = pd.Timestamp(dt)
         return bool(self._cal.is_open_at_time(ts))
+
+    def missing_sessions(
+        self,
+        dates: Iterable[DateLike],
+        as_of_session: DateLike,
+        window: int = 60,
+    ) -> list[date]:
+        """Return exchange sessions missing from dates within the last window sessions up to as_of_session.
+
+        Counts only from the first date present (a newly listed instrument is not missing
+        sessions prior to its inception).
+        """
+        if window <= 0:
+            raise ValueError(f"window must be positive, got {window}")
+        target_session = self.roll_to_session(as_of_session, direction="previous")
+        have = {self._to_date(d) for d in dates}
+        if not have:
+            return []
+        first = min(have)
+        wanted = [ts.date() for ts in self._cal.sessions_window(pd.Timestamp(target_session), -window)]
+        return [d for d in wanted if d >= first and d not in have]

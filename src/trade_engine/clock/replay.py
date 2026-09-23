@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import math
 from typing import Union
 
 from trade_engine.interfaces.clock import Clock
@@ -40,9 +41,9 @@ class ReplayClock(Clock):
 
     def advance_by(self, duration: Union[timedelta, float, int]) -> None:
         """Advance simulated time by a timedelta or float/int seconds."""
-        if isinstance(duration, (float, int)):
-            if duration < 0:
-                raise ValueError(f"Cannot advance clock by negative duration: {duration}")
+        if isinstance(duration, (float, int)) and not isinstance(duration, bool):
+            if not math.isfinite(duration) or duration < 0:
+                raise ValueError(f"Cannot advance clock by non-finite or negative duration: {duration!r}")
             delta = timedelta(seconds=duration)
         elif isinstance(duration, timedelta):
             if duration.total_seconds() < 0:
@@ -57,6 +58,6 @@ class ReplayClock(Clock):
 
         In replay, sleep does not block wall-clock execution; it advances simulated time.
         """
-        if seconds < 0:
-            raise ValueError(f"sleep seconds cannot be negative: {seconds}")
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(f"sleep seconds cannot be negative or non-finite, got: {seconds!r}")
         self.advance_by(seconds)

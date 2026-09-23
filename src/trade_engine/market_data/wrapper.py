@@ -53,7 +53,10 @@ class StampingMarketDataWrapper(MarketData):
     def provider(self) -> Any:
         return self._provider
 
-    def _verify_item(self, item: T, max_age_seconds: float) -> T:
+    def _verify_item(self, item: T, max_age_seconds: float | None = None) -> T:
+        if item is None:
+            raise ValueError("Market data item is None (I5: refuse, never guess)")
+
         now = self._clock.now_utc()
         if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
             raise ValueError("Clock.now_utc() returned a naive datetime (I7)")
@@ -70,7 +73,7 @@ class StampingMarketDataWrapper(MarketData):
                 f"Market data timestamp is in the future relative to clock: as_of={as_of.isoformat()} > now={now.isoformat()} (I5)"
             )
 
-        if age > max_age_seconds:
+        if max_age_seconds is not None and age > max_age_seconds:
             symbol = getattr(
                 item,
                 "instrument",
@@ -110,7 +113,7 @@ class StampingMarketDataWrapper(MarketData):
             )
 
         effective_end = min(end, now)
-        raw_bars: Sequence[Bar] = self._provider.bars(
+        raw_bars: Sequence[Bar] | None = self._provider.bars(
             instrument=instrument,
             tf=tf,
             start=start,
@@ -118,13 +121,28 @@ class StampingMarketDataWrapper(MarketData):
             max_age_seconds=max_age_seconds,
         )
 
+        if raw_bars is None:
+            raise ValueError(f"Provider returned None for bars({instrument}, {tf}) (I5: refuse, never guess)")
+
         verified: list[Bar] = []
         for b in raw_bars:
+            if b is None:
+                raise ValueError(f"Provider returned None item in bars for {instrument} (I5: refuse, never guess)")
             if b.timestamp > now:
                 raise ValueError(
                     f"Bar timestamp {b.timestamp.isoformat()} is in the future relative to clock {now.isoformat()} (I5)"
                 )
-            verified.append(self._verify_item(b, max_age_seconds))
+            verified.append(self._verify_item(b, max_age_seconds=None))
+
+        if verified:
+            newest_as_of = max(b.as_of for b in verified)
+            age = (now - newest_as_of).total_seconds()
+            if age > max_age_seconds:
+                symbol = getattr(instrument, "symbol", repr(instrument))
+                raise StaleDataError(
+                    f"Market data for {symbol} ({tf}) is stale: latest as_of {newest_as_of.isoformat()} "
+                    f"is {age:.3f}s old, exceeds allowed max_age {max_age_seconds:.3f}s (now={now.isoformat()}) (I5)"
+                )
 
         return verified
 
@@ -134,10 +152,12 @@ class StampingMarketDataWrapper(MarketData):
         max_age_seconds: float,
     ) -> Quote:
         self._validate_max_age(max_age_seconds)
-        raw_quote: Quote = self._provider.quote(
+        raw_quote: Quote | None = self._provider.quote(
             instrument=instrument,
             max_age_seconds=max_age_seconds,
         )
+        if raw_quote is None:
+            raise ValueError(f"Provider returned None for quote({instrument}) (I5: refuse, never guess)")
         return self._verify_item(raw_quote, max_age_seconds)
 
     def chain(
@@ -151,12 +171,14 @@ class StampingMarketDataWrapper(MarketData):
         if expiry_start > expiry_end:
             raise ValueError(f"expiry_start {expiry_start} cannot be after expiry_end {expiry_end} (I5)")
 
-        raw_chain: Sequence[OptionQuote] = self._provider.chain(
+        raw_chain: Sequence[OptionQuote] | None = self._provider.chain(
             underlying=underlying,
             expiry_start=expiry_start,
             expiry_end=expiry_end,
             max_age_seconds=max_age_seconds,
         )
+        if raw_chain is None:
+            raise ValueError(f"Provider returned None for chain({underlying}) (I5: refuse, never guess)")
         return [self._verify_item(q, max_age_seconds) for q in raw_chain]
 
     def corporate_actions(
@@ -165,8 +187,10 @@ class StampingMarketDataWrapper(MarketData):
         max_age_seconds: float,
     ) -> list[CorporateAction]:
         self._validate_max_age(max_age_seconds)
-        raw_actions: Sequence[CorporateAction] = self._provider.corporate_actions(
+        raw_actions: Sequence[CorporateAction] | None = self._provider.corporate_actions(
             symbol=symbol,
             max_age_seconds=max_age_seconds,
         )
+        if raw_actions is None:
+            raise ValueError(f"Provider returned None for corporate_actions({symbol}) (I5: refuse, never guess)")
         return [self._verify_item(a, max_age_seconds) for a in raw_actions]

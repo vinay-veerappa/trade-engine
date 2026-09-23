@@ -22,12 +22,16 @@ BANNED_QUALIFIED: frozenset[str] = frozenset(
         "time.localtime",
         "time.gmtime",
         "time.ctime",
+        "time.sleep",
         "datetime.datetime.now",
         "datetime.datetime.utcnow",
         "datetime.datetime.today",
         "datetime.date.today",
     }
 )
+
+# Default allowlist: only WallClock is permitted to read host time and sleep
+DEFAULT_I7_ALLOWLIST: frozenset[str] = frozenset({"trade_engine/clock/wall.py"})
 
 # Methods that read the wall clock on any receiver (e.g. pandas Timestamp.now()).
 # The Clock protocol exposes now_utc(), which does not collide with these.
@@ -66,14 +70,14 @@ def _qualified_name(func: ast.expr, aliases: dict[str, str]) -> str | None:
     return ".".join([base, *reversed(parts)])
 
 
-def check_i7_invariants(src_dir: Path, allowlist: set[str] | None = None) -> list[str]:
+def check_i7_invariants(src_dir: Path, allowlist: set[str] | frozenset[str] | None = None) -> list[str]:
     """Return clock-read violations in src_dir.
 
     allowlist holds POSIX paths relative to src_dir (e.g. "trade_engine/clock/wall.py"),
     so only the real Clock implementation can be exempted, not every file of that name.
     """
     violations: list[str] = []
-    allow = allowlist or set()
+    allow = DEFAULT_I7_ALLOWLIST if allowlist is None else set(allowlist)
 
     for py_file in sorted(src_dir.rglob("*.py")):
         rel = py_file.relative_to(src_dir).as_posix()

@@ -133,3 +133,39 @@ def test_leaps_expiry_handled_and_date_range_independent_of_wall_clock() -> None
     assert cal.is_session("2028-01-17") is False
     assert cal.is_holiday("2028-01-17") is True
 
+
+def test_session_open_close_utc_tzinfo() -> None:
+    cal = get_calendar("XNYS")
+    open_dt = cal.session_open("2026-11-27")
+    close_dt = cal.session_close("2026-11-27")
+    assert open_dt.tzinfo == timezone.utc
+    assert close_dt.tzinfo == timezone.utc
+
+
+def test_missing_sessions_helper() -> None:
+    cal = get_calendar("XNYS")
+    # Thanksgiving week 2026:
+    # 2026-11-23 (Mon), 2026-11-24 (Tue), 2026-11-25 (Wed), 2026-11-26 (Closed), 2026-11-27 (Fri early close)
+    dates = [
+        date(2026, 11, 23),
+        # 2026-11-24 missing!
+        date(2026, 11, 25),
+        date(2026, 11, 27),
+    ]
+    missing = cal.missing_sessions(dates, as_of_session=date(2026, 11, 27), window=5)
+    assert missing == [date(2026, 11, 24)]
+
+    # Complete series has 0 missing
+    full_dates = [
+        date(2026, 11, 23),
+        date(2026, 11, 24),
+        date(2026, 11, 25),
+        date(2026, 11, 27),
+    ]
+    assert cal.missing_sessions(full_dates, as_of_session=date(2026, 11, 27), window=5) == []
+
+    # Invalid window <= 0
+    with pytest.raises(ValueError, match="window must be positive"):
+        cal.missing_sessions(dates, as_of_session=date(2026, 11, 27), window=0)
+
+

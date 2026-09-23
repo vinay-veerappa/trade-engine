@@ -104,3 +104,18 @@ def test_replay_clock_normalizes_to_utc() -> None:
     assert now_adv.tzinfo == timezone.utc
     assert now_adv == datetime(2026, 11, 27, 15, 0, 0, tzinfo=timezone.utc)
 
+
+def test_clock_nan_and_inf_and_bool_rejected() -> None:
+    wall = WallClock()
+    for bad in [float("nan"), float("inf"), float("-inf"), -1.0]:
+        with pytest.raises(ValueError, match="cannot be negative or non-finite"):
+            wall.sleep(bad)
+
+    replay = ReplayClock(datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc))
+    for bad in [float("nan"), float("inf"), float("-inf"), -5.0, True, False]:
+        with pytest.raises((ValueError, TypeError)):
+            replay.advance_by(bad)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            replay.sleep(bad)  # type: ignore[arg-type]
+
+

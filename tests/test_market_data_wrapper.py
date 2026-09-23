@@ -16,7 +16,7 @@ from trade_engine.interfaces.market_data import (
     StaleData,
     StaleDataError,
 )
-from trade_engine.market_data import StampingMarketDataWrapper
+from trade_engine.market_data import MarketDataWrapper, StampingMarketDataWrapper
 
 
 class FakeProvider:
@@ -315,4 +315,125 @@ def test_wrapper_requires_clock() -> None:
     provider = FakeProvider()
     with pytest.raises(ValueError, match="requires an injected Clock"):
         StampingMarketDataWrapper(provider, clock=None)  # type: ignore[arg-type]
+
+
+def test_market_data_wrapper_alias() -> None:
+    assert MarketDataWrapper is StampingMarketDataWrapper
+
+
+def test_multi_bar_historical_series_freshness() -> None:
+    """Historical bar series where older bars have past as_of, but latest bar is fresh."""
+    t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
+    clock = ReplayClock(t0)
+    eq = Equity("AAPL")
+
+    class MultiBarProvider:
+        def bars(self, instrument, tf, start, end, max_age_seconds):
+            return [
+                Bar(
+                    eq,
+                    t0 - timedelta(minutes=15),
+                    Decimal("100"),
+                    Decimal("101"),
+                    Decimal("99"),
+                    Decimal("100.5"),
+                    Decimal("1000"),
+                    as_of=t0 - timedelta(minutes=15),
+                ),
+                Bar(
+                    eq,
+                    t0 - timedelta(minutes=5),
+                    Decimal("100.5"),
+                    Decimal("102"),
+                    Decimal("100"),
+                    Decimal("101.5"),
+                    Decimal("1000"),
+                    as_of=t0 - timedelta(minutes=5),
+                ),
+                Bar(
+                    eq,
+                    t0 - timedelta(seconds=10),
+                    Decimal("101.5"),
+                    Decimal("103"),
+                    Decimal("101"),
+                    Decimal("102.5"),
+                    Decimal("1000"),
+                    as_of=t0 - timedelta(seconds=10),  # 10s old <= 60s
+                ),
+            ]
+
+    wrapper = MarketDataWrapper(MultiBarProvider(), clock=clock)
+    bars = wrapper.bars(eq, "1m", t0 - timedelta(minutes=20), t0, max_age_seconds=60.0)
+    assert len(bars) == 3
+
+
+def test_multi_bar_historical_series_stale_latest_bar() -> None:
+    """Historical bar series where the newest bar is stale raises StaleDataError."""
+    t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
+    clock = ReplayClock(t0)
+    eq = Equity("AAPL")
+
+    class StaleLatestBarProvider:
+        def bars(self, instrument, tf, start, end, max_age_seconds):
+            return [
+                Bar(
+                    eq,
+                    t0 - timedelta(minutes=15),
+                    Decimal("100"),
+                    Decimal("101"),
+                    Decimal("99"),
+                    Decimal("100.5"),
+                    Decimal("1000"),
+                    as_of=t0 - timedelta(minutes=15),
+                ),
+                Bar(
+                    eq,
+                    t0 - timedelta(minutes=5),
+                    Decimal("100.5"),
+                    Decimal("102"),
+                    Decimal("100"),
+                    Decimal("101.5"),
+                    Decimal("1000"),
+                    as_of=t0 - timedelta(minutes=5),  # 300s old > 60s
+                ),
+            ]
+
+    wrapper = MarketDataWrapper(StaleLatestBarProvider(), clock=clock)
+    with pytest.raises(StaleDataError, match="is stale: latest as_of"):
+        wrapper.bars(eq, "1m", t0 - timedelta(minutes=20), t0, max_age_seconds=60.0)
+
+
+def test_provider_returning_none_refused() -> None:
+    """Underlying provider returning None is strictly refused (I5: refuse, never guess)."""
+    t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
+    clock = ReplayClock(t0)
+
+    class NoneProvider:
+        def bars(self, instrument, tf, start, end, max_age_seconds):
+            return None
+
+        def quote(self, instrument, max_age_seconds):
+            return None
+
+        def chain(self, underlying, expiry_start, expiry_end, max_age_seconds):
+            return None
+
+        def corporate_actions(self, symbol, max_age_seconds):
+            return None
+
+    wrapper = MarketDataWrapper(NoneProvider(), clock=clock)
+    eq = Equity("AAPL")
+
+    with pytest.raises(ValueError, match="Provider returned None for bars"):
+        wrapper.bars(eq, "1m", t0 - timedelta(minutes=5), t0, max_age_seconds=60.0)
+
+    with pytest.raises(ValueError, match="Provider returned None for quote"):
+        wrapper.quote(eq, max_age_seconds=60.0)
+
+    with pytest.raises(ValueError, match="Provider returned None for chain"):
+        wrapper.chain("AAPL", date(2026, 10, 1), date(2026, 10, 31), max_age_seconds=60.0)
+
+    with pytest.raises(ValueError, match="Provider returned None for corporate_actions"):
+        wrapper.corporate_actions("AAPL", max_age_seconds=60.0)
+
 

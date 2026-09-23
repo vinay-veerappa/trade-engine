@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import time
 
 from trade_engine.interfaces.clock import Clock
@@ -20,7 +21,7 @@ class WallClock(Clock):
 
     def sleep(self, seconds: float) -> None:
         """Sleep for the given number of seconds."""
-        if seconds < 0:
-            raise ValueError(f"sleep seconds cannot be negative: {seconds}")
+        if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds < 0:
+            raise ValueError(f"sleep seconds cannot be negative or non-finite, got: {seconds!r}")
         if seconds > 0:
             time.sleep(seconds)

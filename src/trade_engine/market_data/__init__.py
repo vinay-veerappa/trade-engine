@@ -11,10 +11,13 @@ from trade_engine.interfaces.market_data import (
 )
 from trade_engine.market_data.wrapper import StampingMarketDataWrapper
 
+MarketDataWrapper = StampingMarketDataWrapper
+
 __all__ = [
     "Bar",
     "CorporateAction",
     "MarketData",
+    "MarketDataWrapper",
     "OptionQuote",
     "Quote",
     "StaleData",
