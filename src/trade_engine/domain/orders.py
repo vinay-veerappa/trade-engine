@@ -155,6 +155,14 @@ class Order:
             self.limit_price is None or self.stop_price is None
         ):
             raise ValueError("STOP_LIMIT order must have both limit_price and stop_price")
+        if self.order_type == OrderType.TRAIL and (
+            self.trail_amount is None or self.trail_amount <= Decimal("0")
+        ):
+            raise ValueError("TRAIL order must have a positive trail_amount (I5)")
+        if self.limit_price is not None and self.limit_price <= Decimal("0"):
+            raise ValueError(f"limit_price must be positive, got {self.limit_price}")
+        if self.stop_price is not None and self.stop_price <= Decimal("0"):
+            raise ValueError(f"stop_price must be positive, got {self.stop_price}")
 
     def transition_to(self, next_state: OrderState) -> Order:
         """Return a new Order instance with the updated state after validating transition."""

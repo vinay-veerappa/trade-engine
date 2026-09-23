@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from types import MappingProxyType
 
 from trade_engine.domain.instruments import Instrument, Side
 
@@ -18,7 +20,7 @@ class Signal:
     symbol: str
     session_date: date
     direction: str  # "long" or "short"
-    metrics: dict[str, Decimal] = field(default_factory=dict)
+    metrics: Mapping[str, Decimal] = field(default_factory=dict)
     next_earnings_date: date | None = None  # None when unknown, NEVER a guessed date (I5)
     created_at: datetime | None = None
 
@@ -31,6 +33,26 @@ class Signal:
             raise ValueError("symbol must be non-empty")
         if self.direction not in ("long", "short"):
             raise ValueError(f"direction must be 'long' or 'short', got '{self.direction}'")
+
+        if self.metrics is not None and not isinstance(self.metrics, MappingProxyType):
+            object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
+        elif self.metrics is None:
+            object.__setattr__(self, "metrics", MappingProxyType({}))
+
+    def __hash__(self) -> int:
+        metrics_tuple = tuple(sorted(self.metrics.items())) if self.metrics else ()
+        return hash(
+            (
+                self.signal_id,
+                self.scan_id,
+                self.symbol,
+                self.session_date,
+                self.direction,
+                metrics_tuple,
+                self.next_earnings_date,
+                self.created_at,
+            )
+        )
 
 
 @dataclass(frozen=True)

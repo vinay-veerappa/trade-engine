@@ -112,3 +112,76 @@ def test_order_requires_command_id() -> None:
             command_id="",
             created_at=datetime.now(timezone.utc),
         )
+
+
+def test_trail_order_validation() -> None:
+    """Assert TRAIL order requires positive trail_amount (I5)."""
+    with pytest.raises(ValueError, match="TRAIL order must have a positive trail_amount"):
+        Order(
+            order_id="ord-trail-bad",
+            account_id="acc-test",
+            instrument=Equity("AAPL"),
+            order_type=OrderType.TRAIL,
+            side=Side.SELL,
+            quantity=Decimal("10"),
+            command_id="cmd-trail-bad",
+            created_at=datetime.now(timezone.utc),
+            trail_amount=None,
+        )
+
+    with pytest.raises(ValueError, match="TRAIL order must have a positive trail_amount"):
+        Order(
+            order_id="ord-trail-bad",
+            account_id="acc-test",
+            instrument=Equity("AAPL"),
+            order_type=OrderType.TRAIL,
+            side=Side.SELL,
+            quantity=Decimal("10"),
+            command_id="cmd-trail-bad",
+            created_at=datetime.now(timezone.utc),
+            trail_amount=Decimal("0"),
+        )
+
+    # Valid TRAIL order
+    order = Order(
+        order_id="ord-trail-ok",
+        account_id="acc-test",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.TRAIL,
+        side=Side.SELL,
+        quantity=Decimal("10"),
+        command_id="cmd-trail-ok",
+        created_at=datetime.now(timezone.utc),
+        trail_amount=Decimal("2.50"),
+    )
+    assert order.trail_amount == Decimal("2.50")
+
+
+def test_order_price_validation() -> None:
+    """Assert negative limit or stop prices are rejected (I5)."""
+    with pytest.raises(ValueError, match="limit_price must be positive"):
+        Order(
+            order_id="ord-lim-neg",
+            account_id="acc-test",
+            instrument=Equity("AAPL"),
+            order_type=OrderType.LIMIT,
+            side=Side.BUY,
+            quantity=Decimal("10"),
+            command_id="cmd-lim-neg",
+            created_at=datetime.now(timezone.utc),
+            limit_price=Decimal("-10.00"),
+        )
+
+    with pytest.raises(ValueError, match="stop_price must be positive"):
+        Order(
+            order_id="ord-stop-neg",
+            account_id="acc-test",
+            instrument=Equity("AAPL"),
+            order_type=OrderType.STOP,
+            side=Side.SELL,
+            quantity=Decimal("10"),
+            command_id="cmd-stop-neg",
+            created_at=datetime.now(timezone.utc),
+            stop_price=Decimal("0"),
+        )
+

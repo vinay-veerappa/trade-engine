@@ -79,9 +79,34 @@ def check_invariants() -> bool:
     return True
 
 
+def resolve_python() -> str:
+    """Resolve the python interpreter to use, prioritizing local .venv if current interpreter lacks package."""
+    try:
+        res = subprocess.run(
+            [sys.executable, "-c", "import trade_engine"],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode == 0:
+            return sys.executable
+    except Exception:
+        pass
+
+    windows_venv = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+    if windows_venv.is_file():
+        return str(windows_venv)
+
+    posix_venv = REPO_ROOT / ".venv" / "bin" / "python"
+    if posix_venv.is_file():
+        return str(posix_venv)
+
+    return sys.executable
+
+
 def check_version() -> bool:
-    say("Checking python -m trade_engine --version...")
-    code, out = run_command([sys.executable, "-m", "trade_engine", "--version"])
+    py_exe = resolve_python()
+    say(f"Checking {py_exe} -m trade_engine --version...")
+    code, out = run_command([py_exe, "-m", "trade_engine", "--version"])
     print(out.strip())
     if code != 0:
         say(f"FAIL: --version returned exit code {code}")
@@ -94,8 +119,9 @@ def check_version() -> bool:
 
 
 def run_tests() -> bool:
-    say("Running test suite (pytest -q)...")
-    code, out = run_command([sys.executable, "-m", "pytest", "-q"])
+    py_exe = resolve_python()
+    say(f"Running test suite ({py_exe} -m pytest -q)...")
+    code, out = run_command([py_exe, "-m", "pytest", "-q"])
     print(out.strip())
     if code != 0:
         say(f"FAIL: pytest returned exit code {code}")

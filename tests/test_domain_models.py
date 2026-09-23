@@ -67,6 +67,27 @@ def test_signal_and_order_intent() -> None:
     )
     assert sig.direction == "long"
     assert sig.next_earnings_date is None
+    assert sig.metrics["close"] == Decimal("165.50")
+
+    # Immutability: direct item assignment to metrics must raise TypeError
+    with pytest.raises(TypeError):
+        sig.metrics["close"] = Decimal("200.00")  # type: ignore[index]
+
+    # Hashability: Signal must be hashable and usable in sets/dicts
+    sig2 = Signal(
+        signal_id="sig-01",
+        scan_id="scan-breakout",
+        symbol="GOOG",
+        session_date=date(2026, 9, 23),
+        direction="long",
+        metrics={"close": Decimal("165.50"), "atr14": Decimal("3.20")},
+        next_earnings_date=None,
+    )
+    assert hash(sig) == hash(sig2)
+    assert sig == sig2
+    signal_set = {sig, sig2}
+    assert len(signal_set) == 1
+
 
     intent = OrderIntent(
         intent_id="intent-01",

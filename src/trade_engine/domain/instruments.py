@@ -78,14 +78,20 @@ class OptionContract(Instrument):
     expiry: date
     strike: Decimal
     right: OptionRight
-    _multiplier: int = 100
+    multiplier: int = 100
 
     def __post_init__(self) -> None:
         und = self.underlying.strip().upper()
         if not und:
             raise ValueError("Option underlying must be non-empty")
+        if len(und) > 6:
+            raise ValueError(f"Option underlying must be at most 6 characters, got '{und}' (length {len(und)})")
+        if not und.isalnum():
+            raise ValueError(f"Option underlying must be alphanumeric, got '{und}'")
         if self.strike <= Decimal("0"):
             raise ValueError(f"Strike must be positive, got {self.strike}")
+        if self.multiplier <= 0:
+            raise ValueError(f"Multiplier must be positive, got {self.multiplier}")
         if not isinstance(self.right, OptionRight):
             if isinstance(self.right, str) and self.right.upper() in ("C", "CALL"):
                 object.__setattr__(self, "right", OptionRight.CALL)
@@ -102,10 +108,6 @@ class OptionContract(Instrument):
     @property
     def symbol(self) -> str:
         return self.to_occ()
-
-    @property
-    def multiplier(self) -> int:
-        return self._multiplier
 
     @property
     def occ(self) -> str:
@@ -168,7 +170,7 @@ class OptionContract(Instrument):
             expiry=exp_date,
             strike=strike,
             right=right,
-            _multiplier=multiplier,
+            multiplier=multiplier,
         )
 
 

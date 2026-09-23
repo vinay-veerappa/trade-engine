@@ -121,3 +121,41 @@ def test_option_contract_validation() -> None:
             strike=Decimal("-10"),
             right=OptionRight.CALL,
         )
+
+    with pytest.raises(ValueError, match="at most 6 characters"):
+        OptionContract(
+            underlying="TOOLONGTICKER",
+            expiry=date(2026, 9, 18),
+            strike=Decimal("150"),
+            right=OptionRight.CALL,
+        )
+
+    with pytest.raises(ValueError, match="must be alphanumeric"):
+        OptionContract(
+            underlying="BRK.B",
+            expiry=date(2026, 9, 18),
+            strike=Decimal("450"),
+            right=OptionRight.CALL,
+        )
+
+    with pytest.raises(ValueError, match="Multiplier must be positive"):
+        OptionContract(
+            underlying="AAPL",
+            expiry=date(2026, 9, 18),
+            strike=Decimal("150"),
+            right=OptionRight.CALL,
+            multiplier=0,
+        )
+
+
+def test_option_contract_multiplier_custom() -> None:
+    """Assert multiplier argument can be customized (Architecture §4.1)."""
+    contract = OptionContract(
+        underlying="AAPL",
+        expiry=date(2026, 9, 18),
+        strike=Decimal("150"),
+        right=OptionRight.CALL,
+        multiplier=50,
+    )
+    assert contract.multiplier == 50
+
