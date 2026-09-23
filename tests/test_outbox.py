@@ -200,3 +200,86 @@ def test_enqueue_validations(ledger: Ledger) -> None:
 
     with pytest.raises(ValueError, match="Unknown event sequence"):
         ledger.enqueue_outbox(999999, "journal", {"data": 1})
+
+
+def test_append_with_outbox_atomic(ledger: Ledger) -> None:
+    """Must-Fix 4: Appending an event with outbox enqueues atomically in one transaction."""
+    order = Order(
+        order_id="ord-atomic-1",
+        account_id="ACC_A",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        command_id="cmd-atomic-1",
+        created_at=T0,
+        limit_price=Decimal("150.00"),
+    )
+    ev = Event(
+        account="ACC_A",
+        kind=EventKind.ORDER_SUBMITTED,
+        payload=order,
+        ts_utc=T0,
+        command_id="cmd-atomic-1",
+    )
+
+    appended = ledger.append(ev, outbox={"journal": {"symbol": "AAPL", "qty": 10}})
+    assert appended.seq is not None
+
+    pending = ledger.pending_outbox("journal")
+    assert len(pending) == 1
+    assert pending[0].event_seq == appended.seq
+    assert pending[0].payload == {"symbol": "AAPL", "qty": 10}
+
+
+def test_append_with_outbox_rolls_back_atomically_on_crash(ledger: Ledger) -> None:
+    """Must-Fix 4: If commit fails, both the event and outbox row roll back together."""
+    order = Order(
+        order_id="ord-atomic-fail",
+        account_id="ACC_A",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        command_id="cmd-atomic-fail",
+        created_at=T0,
+        limit_price=Decimal("150.00"),
+    )
+    ev = Event(
+        account="ACC_A",
+        kind=EventKind.ORDER_SUBMITTED,
+        payload=order,
+        ts_utc=T0,
+        command_id="cmd-atomic-fail",
+    )
+
+    def failing_commit() -> None:
+        raise RuntimeError("Simulated crash right before commit")
+
+    ledger._commit = failing_commit  # type: ignore
+
+    with pytest.raises(RuntimeError, match="Simulated crash"):
+        ledger.append(ev, outbox={"journal": {"symbol": "AAPL"}})
+
+    # Ledger must have 0 events and 0 outbox entries (atomic rollback)
+    assert ledger.count() == 0
+    assert ledger.pending_outbox("journal") == []
+
+
+def test_outbox_unique_constraint_rejects_duplicate_destination(ledger: Ledger) -> None:
+    """Must-Fix 4: UNIQUE(event_seq, destination) prevents queuing same event twice for destination."""
+    seq = _seed_event(ledger, "c1")
+
+    # First enqueue succeeds
+    ledger.enqueue_outbox(seq, "journal", {"data": 1}, created_at=T0)
+
+    # Second enqueue for same (event_seq, destination) must be refused
+    with pytest.raises(ValueError, match="violates constraint"):
+        ledger.enqueue_outbox(seq, "journal", {"data": 2}, created_at=T0)
+
+
+def test_outbox_foreign_key_enforced(ledger: Ledger) -> None:
+    """Should-Fix: Enforce foreign key on outbox event_seq."""
+    with pytest.raises(ValueError, match="Unknown event sequence"):
+        ledger.enqueue_outbox(999999, "journal", {"data": 1}, created_at=T0)
+

@@ -10,17 +10,22 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import socket
+import sqlite3
 import threading
 import urllib.parse
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from trade_engine.ledger import codec
 from trade_engine.ledger.events import Event
-from trade_engine.ledger.state import AccountState
+from trade_engine.ledger.state import AccountState, fold
 from trade_engine.ledger.store import Ledger
+
+ALLOWED_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", re.IGNORECASE)
 
 
 def _state_to_dict(state: AccountState) -> dict[str, Any]:
@@ -59,7 +64,44 @@ class _EngineHandler(BaseHTTPRequestHandler):
 
     server: _EngineServerInternal
 
+    @contextmanager
+    def _open_reader(self):
+        conn = sqlite3.connect(self.server.ledger_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def _validate_host(self) -> bool:
+        host_header = self.headers.get("Host", "")
+        host_name = host_header.split(":")[0].strip().lower() if host_header else ""
+        if host_name not in ("127.0.0.1", "localhost", "testserver"):
+            self.send_error(HTTPStatus.FORBIDDEN, "Forbidden: Invalid Host header")
+            return False
+        return True
+
+    def _get_allowed_origin(self) -> str | None:
+        origin = self.headers.get("Origin")
+        if origin and ALLOWED_ORIGIN.match(origin.strip()):
+            return origin.strip()
+        return None
+
+    def do_OPTIONS(self) -> None:
+        if not self._validate_host():
+            return
+        allowed_origin = self._get_allowed_origin()
+        self.send_response(HTTPStatus.NO_CONTENT)
+        if allowed_origin:
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID")
+        self.end_headers()
+
     def do_GET(self) -> None:
+        if not self._validate_host():
+            return
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
         query = urllib.parse.parse_qs(parsed_url.query)
@@ -74,19 +116,24 @@ class _EngineHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
 
     def _handle_health(self) -> None:
-        next_seq = self.server.ledger.next_seq()
-        current_seq = next_seq - 1
+        with self._open_reader() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(seq), 0) AS max_seq, COUNT(*) AS cnt FROM events").fetchone()
+            current_seq = int(row["max_seq"])
+            count = int(row["cnt"])
         data = {
             "ok": True,
             "seq": current_seq,
-            "count": self.server.ledger.count(),
+            "count": count,
         }
         self._send_json(HTTPStatus.OK, data)
 
     def _handle_snapshot(self) -> None:
-        next_seq = self.server.ledger.next_seq()
-        current_seq = next_seq - 1
-        folded = self.server.ledger.fold()
+        with self._open_reader() as conn:
+            rows = conn.execute("SELECT * FROM events ORDER BY seq ASC").fetchall()
+            events = [Ledger._row_to_event(r) for r in rows]
+            current_seq = events[-1].seq if events and events[-1].seq is not None else 0
+            folded = fold(events)
+
         data = {
             "seq": current_seq,
             "accounts": {
@@ -97,19 +144,32 @@ class _EngineHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, data)
 
     def _handle_events(self, query: dict[str, list[str]]) -> None:
+        # Validate 'after' query parameter
+        after_param = query.get("after")
+        if after_param is not None:
+            val = after_param[0]
+            if not val.isdigit():
+                self.send_error(HTTPStatus.BAD_REQUEST, "Bad Request: 'after' parameter must be a non-negative integer")
+                return
+            after_seq = int(val)
+        else:
+            after_seq = 0
+
         # Reconnect header 'Last-Event-ID' wins over 'after' query param
         last_event_id = self.headers.get("Last-Event-ID")
-        if last_event_id is not None and last_event_id.isdigit():
+        if last_event_id is not None:
+            if not last_event_id.isdigit():
+                self.send_error(HTTPStatus.BAD_REQUEST, "Bad Request: 'Last-Event-ID' header must be a non-negative integer")
+                return
             after_seq = int(last_event_id)
-        else:
-            after_param = query.get("after", ["0"])[0]
-            after_seq = int(after_param) if after_param.isdigit() else 0
 
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        allowed_origin = self._get_allowed_origin()
+        if allowed_origin:
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)
         self.end_headers()
 
         # Send reconnection retry advice
@@ -122,8 +182,11 @@ class _EngineHandler(BaseHTTPRequestHandler):
         max_seq_sent = after_seq
 
         try:
-            # 2. Backlog events from ledger
-            backlog = self.server.ledger.events(after=after_seq)
+            # 2. Backlog events from dedicated reader connection
+            with self._open_reader() as conn:
+                rows = conn.execute("SELECT * FROM events WHERE seq > ? ORDER BY seq ASC", (after_seq,)).fetchall()
+                backlog = [Ledger._row_to_event(r) for r in rows]
+
             for ev in backlog:
                 self._write_sse_event(ev)
                 if ev.seq is not None and ev.seq > max_seq_sent:
@@ -162,7 +225,9 @@ class _EngineHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        allowed_origin = self._get_allowed_origin()
+        if allowed_origin:
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -184,6 +249,7 @@ class _EngineServerInternal(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.ledger = ledger
+        self.ledger_path = str(ledger.path)
         self.ping_interval = ping_interval
         self.is_running = True
         self._subscribers: set[queue.Queue[Event | None]] = set()
@@ -248,6 +314,7 @@ class EngineHttpServer:
             self.ledger,
             ping_interval=self.ping_interval,
         )
+        self.ledger.add_listener(self.broadcast)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self
@@ -260,6 +327,7 @@ class EngineHttpServer:
     def stop(self) -> None:
         """Stop server, disconnect subscribers, and close listening socket."""
         if self._server is not None:
+            self.ledger.remove_listener(self.broadcast)
             self._server.is_running = False
             self._server.shutdown_subscribers()
             self._server.shutdown()

@@ -30,6 +30,7 @@ class JournalExecution:
     profit_target: Decimal | None = None
     strategy_tag: str | None = None
     notes: str | None = None
+    fill_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol or not self.symbol.strip():
@@ -48,6 +49,8 @@ class JournalExecution:
             raise ValueError("multiplier must be positive integer")
         if self.executed_at.tzinfo is None or self.executed_at.tzinfo.utcoffset(self.executed_at) is None:
             raise ValueError("executed_at must be timezone-aware UTC datetime (I7)")
+        if self.fill_id is not None and not self.fill_id.strip():
+            raise ValueError("fill_id must be non-empty string if provided")
 
 
 @runtime_checkable

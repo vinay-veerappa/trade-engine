@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import urllib.parse
@@ -41,28 +42,41 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
                 return
 
             executions = body.get("executions", [])
-            server.posted_executions.extend(executions)
+            inserted = 0
+            duplicates = 0
+            for ex in executions:
+                h = server.calc_hash(ex)
+                if h in server.hashes:
+                    duplicates += 1
+                else:
+                    server.hashes.add(h)
+                    inserted += 1
+                    server.posted_executions.append(ex)
 
-            # Store trade for read-back unless mode is read_back_miss
-            if server.mode != "read_back_miss":
-                for ex in executions:
-                    sym = ex["symbol"]
-                    trade_key = f"trade-{sym}"
-                    server.trades[trade_key] = {
-                        "key": trade_key,
-                        "symbol": sym,
-                        "accountId": body.get("accountId"),
-                        "status": "open",
-                        "tags": [],
-                        "stopLoss": None,
-                        "profitTarget": None,
-                    }
-                    if server.mode == "price_mismatch":
-                        server.trade_executions[trade_key] = [{**ex, "price": 999.0}]
-                    else:
-                        server.trade_executions[trade_key] = [ex]
+                    # Store trade for read-back unless mode is read_back_miss
+                    if server.mode != "read_back_miss":
+                        sym = ex["symbol"]
+                        trade_key = f"trade-{sym}"
+                        if trade_key not in server.trades:
+                            server.trades[trade_key] = {
+                                "key": trade_key,
+                                "symbol": sym,
+                                "accountId": body.get("accountId"),
+                                "status": "open",
+                                "tags": [],
+                                "stopLoss": None,
+                                "profitTarget": None,
+                            }
+                        if server.mode == "price_mismatch":
+                            server.trade_executions.setdefault(trade_key, []).append({**ex, "price": 999.0})
+                        elif server.mode == "fee_mismatch":
+                            server.trade_executions.setdefault(trade_key, []).append({**ex, "fee": 999.0})
+                        elif server.mode == "asset_class_mismatch":
+                            server.trade_executions.setdefault(trade_key, []).append({**ex, "assetClass": "crypto"})
+                        else:
+                            server.trade_executions.setdefault(trade_key, []).append(ex)
 
-            self._send_json(HTTPStatus.OK, {"inserted": len(executions), "duplicates": 0, "skipped": 0})
+            self._send_json(HTTPStatus.OK, {"inserted": inserted, "duplicates": duplicates, "skipped": 0})
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -76,7 +90,8 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/settings":
-            server.settings_multipliers.update(body.get("multipliers", {}))
+            # Real journal replaces the entire map!
+            server.settings_multipliers = dict(body.get("multipliers", {}))
             self._send_json(HTTPStatus.OK, {"updated": True})
         elif self.path.startswith("/api/trades/"):
             trade_key = urllib.parse.unquote(self.path.split("/")[-1])
@@ -98,15 +113,22 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         server: _FakeJournalServer = self.server  # type: ignore
 
-        if parsed.path == "/api/trades":
+        if parsed.path == "/api/settings":
+            self._send_json(HTTPStatus.OK, {"settings": {"multipliers": server.settings_multipliers}})
+        elif parsed.path == "/api/trades":
             self._send_json(HTTPStatus.OK, {"trades": list(server.trades.values())})
         elif parsed.path.startswith("/api/trades/"):
             trade_key = urllib.parse.unquote(parsed.path.split("/")[-1])
             if trade_key in server.trades:
+                raw_trade = dict(server.trades[trade_key])
+                # Real journal detail endpoint returns tagsJson as JSON string and contractMultiplier
+                tags = raw_trade.pop("tags", [])
+                raw_trade["tagsJson"] = json.dumps(tags)
+                raw_trade["contractMultiplier"] = server.settings_multipliers.get(raw_trade.get("symbol"), 1)
                 self._send_json(
                     HTTPStatus.OK,
                     {
-                        "trade": server.trades[trade_key],
+                        "trade": raw_trade,
                         "executions": server.trade_executions.get(trade_key, []),
                     },
                 )
@@ -135,6 +157,20 @@ class _FakeJournalServer(HTTPServer):
         self.trades: dict[str, dict[str, Any]] = {}
         self.trade_executions: dict[str, list[dict[str, Any]]] = {}
         self.settings_multipliers: dict[str, int] = {}
+        self.hashes: set[str] = set()
+
+    def calc_hash(self, ex: dict[str, Any]) -> str:
+        meta = ex.get("importMetadata")
+        parts = [
+            str(ex.get("symbol")),
+            str(ex.get("side")),
+            f"{float(ex.get('quantity', 0)):.12g}",
+            f"{float(ex.get('price', 0)):.12g}",
+            str(ex.get("executedAt")),
+        ]
+        if meta and "id" in meta:
+            parts.extend(["history", meta.get("group", ""), str(meta["id"])])
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
 
 
 @pytest.fixture
@@ -305,8 +341,12 @@ def test_outbox_drain_with_journal_sink_stops_on_failure(
 
         o1 = Order("o1", "acc_50k", Equity("AAPL"), OrderType.LIMIT, Side.BUY, Decimal("10"), "c1", T0, limit_price=Decimal("150"))
         o2 = Order("o2", "acc_50k", Equity("MSFT"), OrderType.LIMIT, Side.BUY, Decimal("10"), "c2", T0, limit_price=Decimal("400"))
+        o3 = Order("o3", "acc_50k", Equity("TSLA"), OrderType.LIMIT, Side.BUY, Decimal("2"), "c3", T0, limit_price=Decimal("200"))
+        o4 = Order("o4", "acc_50k", Equity("GOOG"), OrderType.LIMIT, Side.BUY, Decimal("4"), "c4", T0, limit_price=Decimal("170"))
         ev1 = lg.append(Event("acc_50k", EventKind.ORDER_SUBMITTED, o1, T0, command_id="c1"))
         ev2 = lg.append(Event("acc_50k", EventKind.ORDER_SUBMITTED, o2, T0, command_id="c2"))
+        ev3 = lg.append(Event("acc_50k", EventKind.ORDER_SUBMITTED, o3, T0, command_id="c3"))
+        ev4 = lg.append(Event("acc_50k", EventKind.ORDER_SUBMITTED, o4, T0, command_id="c4"))
 
         item1 = lg.enqueue_outbox(
             ev1.seq,
@@ -320,6 +360,7 @@ def test_outbox_drain_with_journal_sink_stops_on_failure(
                 "executed_at": T0.isoformat(),
                 "account_id": "acc_50k",
                 "asset_class": "equity",
+                "multiplier": 1,
             },
         )
         item2 = lg.enqueue_outbox(
@@ -334,6 +375,7 @@ def test_outbox_drain_with_journal_sink_stops_on_failure(
                 "executed_at": T0.isoformat(),
                 "account_id": "acc_50k",
                 "asset_class": "equity",
+                "multiplier": 1,
             },
         )
 
@@ -346,7 +388,7 @@ def test_outbox_drain_with_journal_sink_stops_on_failure(
         # 2. Add another item, but make journal fail
         fake_journal.mode = "skipped"
         item3 = lg.enqueue_outbox(
-            ev1.seq,
+            ev3.seq,
             "journal",
             {
                 "symbol": "TSLA",
@@ -357,10 +399,11 @@ def test_outbox_drain_with_journal_sink_stops_on_failure(
                 "executed_at": T0.isoformat(),
                 "account_id": "acc_50k",
                 "asset_class": "equity",
+                "multiplier": 1,
             },
         )
         item4 = lg.enqueue_outbox(
-            ev2.seq,
+            ev4.seq,
             "journal",
             {
                 "symbol": "GOOG",
@@ -371,6 +414,7 @@ def test_outbox_drain_with_journal_sink_stops_on_failure(
                 "executed_at": T0.isoformat(),
                 "account_id": "acc_50k",
                 "asset_class": "equity",
+                "multiplier": 1,
             },
         )
 
@@ -485,4 +529,202 @@ def test_journal_sink_delivery_refused_when_annotation_readback_mismatches(fake_
     )
     # PATCH fails, so stopLoss is not applied -> confirm_delivery must reject!
     assert sink.publish(1, execution) is False
+
+
+def test_journal_sink_delivery_refused_when_strategy_tag_mismatches_on_readback(
+    fake_journal: _FakeJournalServer,
+) -> None:
+    """Pins mutation: Removing strategy_tag check from readback MUST fail."""
+    fake_journal.mode = "patch_fail"
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    execution = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("0"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+        strategy_tag="breakout_vol",
+    )
+    # PATCH fails, so tag is not applied -> confirm_delivery must reject!
+    assert sink.publish(1, execution) is False
+
+
+def test_journal_sink_preserves_existing_multipliers_on_update(
+    fake_journal: _FakeJournalServer,
+) -> None:
+    """Must-Fix 1: Setting a multiplier must merge with existing multipliers, not wipe them."""
+    # Pre-populate settings multipliers in the fake journal
+    fake_journal.settings_multipliers = {"ES": 50, "NQ": 20}
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    execution = JournalExecution(
+        symbol="AAPL260116C150",
+        side=Side.BUY,
+        quantity=Decimal("5"),
+        price=Decimal("12.50"),
+        fee=Decimal("2.00"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="option",
+        multiplier=100,
+    )
+
+    ok = sink.publish(1, execution)
+    assert ok is True
+
+    # Multipliers map must still have ES and NQ preserved, plus the new option multiplier
+    assert fake_journal.settings_multipliers == {
+        "ES": 50,
+        "NQ": 20,
+        "AAPL260116C150": 100,
+    }
+
+
+def test_journal_sink_identical_fills_with_distinct_fill_ids_both_succeed(
+    fake_journal: _FakeJournalServer,
+) -> None:
+    """Must-Fix 3: Two identical fills at the same time with distinct fill_ids both insert."""
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    ex1 = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("1.00"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+        fill_id="fill-001",
+    )
+    ex2 = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("1.00"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+        fill_id="fill-002",
+    )
+
+    assert sink.publish(1, ex1) is True
+    assert sink.publish(2, ex2) is True
+    assert len(fake_journal.posted_executions) == 2
+
+
+def test_journal_sink_duplicate_fill_without_distinct_id_collides(
+    fake_journal: _FakeJournalServer,
+) -> None:
+    """Two executions with identical fill_id collide in hash deduplication."""
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    ex1 = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("1.00"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+        fill_id="fill-same",
+    )
+    ex2 = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("1.00"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+        fill_id="fill-same",
+    )
+
+    assert sink.publish(1, ex1) is True
+    assert len(fake_journal.posted_executions) == 1
+    # Second publish is detected as duplicate by hash, and confirm_delivery still verifies it
+    assert sink.publish(2, ex2) is True
+    assert len(fake_journal.posted_executions) == 1
+
+
+def test_dict_payload_missing_required_fields_refused_i5() -> None:
+    """Must-Fix 7: Missing fields in dict payload must raise ValueError (Invariant I5: Refuse, never guess)."""
+    sink = HttpJournalSink(base_url="http://127.0.0.1:3300", account_id="acc_50k")
+
+    incomplete_dict = {
+        "symbol": "AAPL",
+        "side": "BUY",
+        "quantity": "10",
+        "price": "150.00",
+        "fee": "0",
+        "executed_at": T0.isoformat(),
+        # Missing account_id, asset_class, multiplier!
+    }
+
+    with pytest.raises(ValueError, match="Missing required field 'account_id'"):
+        sink.publish(1, incomplete_dict)
+
+    incomplete_dict["account_id"] = "acc_50k"
+    with pytest.raises(ValueError, match="Missing required field 'asset_class'"):
+        sink.publish(1, incomplete_dict)
+
+    incomplete_dict["asset_class"] = "equity"
+    with pytest.raises(ValueError, match="Missing required field 'multiplier'"):
+        sink.publish(1, incomplete_dict)
+
+
+def test_dict_payload_cross_account_refused_i8(fake_journal: _FakeJournalServer) -> None:
+    """Must-Fix 7 / Invariant I8: Cross-account dict payload is refused."""
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    dict_payload = {
+        "symbol": "AAPL",
+        "side": "BUY",
+        "quantity": "10",
+        "price": "150.00",
+        "fee": "0",
+        "executed_at": T0.isoformat(),
+        "account_id": "other_account",
+        "asset_class": "equity",
+        "multiplier": 1,
+    }
+
+    assert sink.publish(1, dict_payload) is False
+    assert len(fake_journal.posted_executions) == 0
+
+
+def test_readback_verifies_fee_and_asset_class(fake_journal: _FakeJournalServer) -> None:
+    """Should-Fix: Readback verification checks fee and assetClass."""
+    port = fake_journal.server_port
+    sink = HttpJournalSink(base_url=f"http://127.0.0.1:{port}", account_id="acc_50k")
+
+    execution = JournalExecution(
+        symbol="AAPL",
+        side=Side.BUY,
+        quantity=Decimal("10"),
+        price=Decimal("150.00"),
+        fee=Decimal("1.50"),
+        executed_at=T0,
+        account_id="acc_50k",
+        asset_class="equity",
+    )
+
+    fake_journal.mode = "fee_mismatch"
+    assert sink.publish(1, execution) is False
+
+    fake_journal.mode = "asset_class_mismatch"
+    assert sink.publish(1, execution) is False
+
 

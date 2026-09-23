@@ -82,19 +82,24 @@ class HttpJournalSink(JournalSink):
             return False
 
         # 1. Post raw execution
+        exec_payload: dict[str, Any] = {
+            "symbol": execution.symbol,
+            "side": execution.side.value.lower(),
+            "quantity": float(execution.quantity),
+            "price": float(execution.price),
+            "fee": float(execution.fee),
+            "executedAt": execution.executed_at.isoformat(),
+            "assetClass": execution.asset_class,
+        }
+        if execution.fill_id:
+            exec_payload["importMetadata"] = {
+                "id": execution.fill_id,
+                "order": 0,
+            }
+
         payload = {
             "accountId": self.account_id,
-            "executions": [
-                {
-                    "symbol": execution.symbol,
-                    "side": execution.side.value.lower(),
-                    "quantity": float(execution.quantity),
-                    "price": float(execution.price),
-                    "fee": float(execution.fee),
-                    "executedAt": execution.executed_at.isoformat(),
-                    "assetClass": execution.asset_class,
-                }
-            ],
+            "executions": [exec_payload],
             "notes": execution.notes,
         }
 
@@ -113,16 +118,27 @@ class HttpJournalSink(JournalSink):
         if inserted + duplicates < 1 or skipped > 0:
             return False
 
-        # 2. Configure multiplier if derivative
+        # 2. Configure multiplier if derivative: GET existing multipliers first, merge, then PATCH
         if execution.multiplier > 1:
             try:
-                self._http(
-                    f"{self.base_url}/api/settings",
-                    "PATCH",
-                    {"multipliers": {execution.symbol: execution.multiplier}},
-                )
+                status_s, body_s = self._http(f"{self.base_url}/api/settings", "GET", None)
+                if status_s != 200 or not isinstance(body_s, dict):
+                    return False
+                existing_multipliers = body_s.get("settings", {}).get("multipliers", {})
+                if not isinstance(existing_multipliers, dict):
+                    existing_multipliers = {}
+                if existing_multipliers.get(execution.symbol) != execution.multiplier:
+                    merged = dict(existing_multipliers)
+                    merged[execution.symbol] = execution.multiplier
+                    patch_status, _ = self._http(
+                        f"{self.base_url}/api/settings",
+                        "PATCH",
+                        {"multipliers": merged},
+                    )
+                    if patch_status < 200 or patch_status >= 300:
+                        return False
             except Exception:
-                pass  # Non-fatal if setting multiplier endpoint fails; continue to trade annotation
+                return False
 
         # 3. Patch trade annotations (stopLoss, profitTarget, strategy tag)
         self._patch_trade_annotations(execution)
@@ -160,31 +176,60 @@ class HttpJournalSink(JournalSink):
                     fill_time = str(fill.get("executedAt", ""))
                     fill_qty = float(fill.get("quantity", 0))
                     fill_price = float(fill.get("price", 0))
+                    fill_fee = float(fill.get("fee", 0))
+                    fill_asset_class = fill.get("assetClass")
                     fill_side = str(fill.get("side", "")).lower()
                     target_time = execution.executed_at.isoformat()
 
-                    # Match by timestamp prefix, quantity, price, and side
-                    if (
+                    # Match by timestamp prefix, quantity, price, side, and fee
+                    if not (
                         fill_time.startswith(target_time[:19])
                         and abs(fill_qty - float(execution.quantity)) < 1e-6
                         and abs(fill_price - float(execution.price)) < 1e-4
                         and fill_side == execution.side.value.lower()
+                        and abs(fill_fee - float(execution.fee)) < 1e-4
                     ):
-                        # Verify annotations if specified on execution
-                        trade_detail = dt_body.get("trade", {})
-                        if execution.stop_loss is not None:
-                            sl = trade_detail.get("stopLoss")
-                            if sl is None or abs(float(sl) - float(execution.stop_loss)) > 1e-4:
-                                continue
-                        if execution.profit_target is not None:
-                            pt = trade_detail.get("profitTarget")
-                            if pt is None or abs(float(pt) - float(execution.profit_target)) > 1e-4:
-                                continue
-                        if execution.strategy_tag:
-                            tags = trade_detail.get("tags") or []
-                            if execution.strategy_tag not in tags:
-                                continue
-                        return True
+                        continue
+
+                    # Verify asset class if present on fill
+                    if fill_asset_class is not None and execution.asset_class is not None:
+                        if fill_asset_class != execution.asset_class:
+                            continue
+
+                    trade_detail = dt_body.get("trade", {})
+
+                    # Verify multiplier if derivative
+                    if execution.multiplier > 1:
+                        cm = trade_detail.get("contractMultiplier")
+                        if cm is None or abs(float(cm) - float(execution.multiplier)) > 1e-4:
+                            continue
+
+                    # Verify annotations if specified on execution
+                    if execution.stop_loss is not None:
+                        sl = trade_detail.get("stopLoss")
+                        if sl is None or abs(float(sl) - float(execution.stop_loss)) > 1e-4:
+                            continue
+                    if execution.profit_target is not None:
+                        pt = trade_detail.get("profitTarget")
+                        if pt is None or abs(float(pt) - float(execution.profit_target)) > 1e-4:
+                            continue
+                    if execution.strategy_tag:
+                        tags = trade_detail.get("tags")
+                        if tags is None:
+                            tags_json = trade_detail.get("tagsJson")
+                            if isinstance(tags_json, str):
+                                try:
+                                    tags = json.loads(tags_json)
+                                except Exception:
+                                    tags = []
+                            elif isinstance(tags_json, list):
+                                tags = tags_json
+                            else:
+                                tags = []
+                        if execution.strategy_tag not in tags:
+                            continue
+
+                    return True
 
             return False
         except Exception:
@@ -220,7 +265,18 @@ class HttpJournalSink(JournalSink):
             if execution.profit_target is not None:
                 patch_data["profitTarget"] = float(execution.profit_target)
             if execution.strategy_tag:
-                existing_tags = matching_trade.get("tags") or []
+                existing_tags = matching_trade.get("tags")
+                if existing_tags is None:
+                    tags_json = matching_trade.get("tagsJson")
+                    if isinstance(tags_json, str):
+                        try:
+                            existing_tags = json.loads(tags_json)
+                        except Exception:
+                            existing_tags = []
+                    elif isinstance(tags_json, list):
+                        existing_tags = tags_json
+                    else:
+                        existing_tags = []
                 if execution.strategy_tag not in existing_tags:
                     patch_data["tags"] = [*existing_tags, execution.strategy_tag]
 
@@ -231,7 +287,22 @@ class HttpJournalSink(JournalSink):
             pass
 
     def _dict_to_execution(self, d: dict[str, Any]) -> JournalExecution:
-        """Convert a dictionary payload into a JournalExecution domain instance."""
+        """Convert a dictionary payload into a JournalExecution domain instance (I5: Refuse, never guess)."""
+        required_fields = (
+            "symbol",
+            "side",
+            "quantity",
+            "price",
+            "fee",
+            "executed_at",
+            "account_id",
+            "asset_class",
+            "multiplier",
+        )
+        for field in required_fields:
+            if field not in d or d[field] is None:
+                raise ValueError(f"Missing required field '{field}' in execution payload (I5)")
+
         executed_at_val = d["executed_at"]
         if isinstance(executed_at_val, str):
             executed_at = datetime.fromisoformat(executed_at_val)
@@ -251,13 +322,14 @@ class HttpJournalSink(JournalSink):
             side=side,
             quantity=Decimal(str(d["quantity"])),
             price=Decimal(str(d["price"])),
-            fee=Decimal(str(d.get("fee", 0))),
+            fee=Decimal(str(d["fee"])),
             executed_at=executed_at,
-            account_id=str(d.get("account_id", self.account_id)),
-            asset_class=str(d.get("asset_class", "equity")),
-            multiplier=int(d.get("multiplier", 1)),
+            account_id=str(d["account_id"]),
+            asset_class=str(d["asset_class"]),
+            multiplier=int(d["multiplier"]),
             stop_loss=Decimal(str(d["stop_loss"])) if d.get("stop_loss") is not None else None,
             profit_target=Decimal(str(d["profit_target"])) if d.get("profit_target") is not None else None,
             strategy_tag=str(d["strategy_tag"]) if d.get("strategy_tag") is not None else None,
             notes=str(d["notes"]) if d.get("notes") is not None else None,
+            fill_id=str(d["fill_id"]) if d.get("fill_id") is not None else None,
         )

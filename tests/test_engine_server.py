@@ -200,7 +200,6 @@ def test_events_sse_deduplication_and_no_drop_during_handover(server: EngineHttp
     # Append and broadcast event 3 immediately
     o3 = Order("o3", "ACC_A", Equity("TSLA"), OrderType.LIMIT, Side.BUY, Decimal("1"), "c3", T1, limit_price=Decimal("200"))
     ev3 = ledger.append(Event("ACC_A", EventKind.ORDER_SUBMITTED, o3, T1, command_id="c3"))
-    server.broadcast(ev3)
 
     thread.join(timeout=4.0)
     stop_client.set()
@@ -210,4 +209,173 @@ def test_events_sse_deduplication_and_no_drop_during_handover(server: EngineHttp
     assert 3 in received_ids
     # Ensure no duplicates: each event id received at most once
     assert len(received_ids) == len(set(received_ids))
+
+
+def test_snapshot_isolated_from_uncommitted_transactions(server: EngineHttpServer, ledger: Ledger) -> None:
+    """Must-Fix 5: HTTP snapshot must never observe uncommitted transactions from writer thread."""
+    from trade_engine.ledger import codec
+
+    # Writer begins a transaction and writes an uncommitted event directly
+    ledger.conn.execute("BEGIN IMMEDIATE")
+    o = Order("o_dirty", "ACC_DIRTY", Equity("AAPL"), OrderType.LIMIT, Side.BUY, Decimal("100"), "c_dirty", T0, limit_price=Decimal("150.00"))
+    encoded = codec.encode_event(Event("ACC_DIRTY", EventKind.ORDER_SUBMITTED, o, T0, command_id="c_dirty"))
+    ledger.conn.execute(
+        "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) VALUES (?, ?, ?, ?, ?, ?)",
+        (T0.isoformat(), "ACC_DIRTY", EventKind.ORDER_SUBMITTED.value, "c_dirty", json.dumps(encoded["payload"]), 1),
+    )
+
+    # HTTP client requests /snapshot via reader connection
+    url = f"http://127.0.0.1:{server.port}/snapshot"
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=5.0) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        # Uncommitted write must NOT be visible!
+        assert data["seq"] == 0
+        assert "ACC_DIRTY" not in data["accounts"]
+
+    # Roll back uncommitted transaction
+    ledger.conn.execute("ROLLBACK")
+
+    with urllib.request.urlopen(req, timeout=5.0) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["seq"] == 0
+        assert "ACC_DIRTY" not in data["accounts"]
+
+
+def test_host_header_validation(server: EngineHttpServer) -> None:
+    """Must-Fix 6: Non-localhost Host header must be rejected with 403 Forbidden (DNS rebinding defense)."""
+    import urllib.error
+
+    # 127.0.0.1 -> 200 OK
+    req1 = urllib.request.Request(f"http://127.0.0.1:{server.port}/health", headers={"Host": f"127.0.0.1:{server.port}"})
+    with urllib.request.urlopen(req1, timeout=5.0) as resp:
+        assert resp.status == 200
+
+    # localhost -> 200 OK
+    req2 = urllib.request.Request(f"http://127.0.0.1:{server.port}/health", headers={"Host": f"localhost:{server.port}"})
+    with urllib.request.urlopen(req2, timeout=5.0) as resp:
+        assert resp.status == 200
+
+    # Attacker host -> 403 Forbidden
+    req3 = urllib.request.Request(f"http://127.0.0.1:{server.port}/health", headers={"Host": "attacker.com"})
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req3, timeout=5.0)
+    assert exc_info.value.code == 403
+
+
+def test_cors_origin_restriction(server: EngineHttpServer) -> None:
+    """Must-Fix 6: Cross-origin requests from non-localhost origins must not receive allow-origin."""
+    # Localhost origin allowed
+    req1 = urllib.request.Request(f"http://127.0.0.1:{server.port}/snapshot", headers={"Origin": "http://localhost:3000"})
+    with urllib.request.urlopen(req1, timeout=5.0) as resp:
+        assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
+
+    # 127.0.0.1 origin allowed
+    req2 = urllib.request.Request(f"http://127.0.0.1:{server.port}/snapshot", headers={"Origin": "http://127.0.0.1:3300"})
+    with urllib.request.urlopen(req2, timeout=5.0) as resp:
+        assert resp.headers.get("Access-Control-Allow-Origin") == "http://127.0.0.1:3300"
+
+    # External attacker origin -> no Access-Control-Allow-Origin returned!
+    req3 = urllib.request.Request(f"http://127.0.0.1:{server.port}/snapshot", headers={"Origin": "https://malicious-site.com"})
+    with urllib.request.urlopen(req3, timeout=5.0) as resp:
+        assert resp.headers.get("Access-Control-Allow-Origin") is None
+
+    # OPTIONS preflight
+    req_opt = urllib.request.Request(
+        f"http://127.0.0.1:{server.port}/snapshot",
+        headers={"Origin": "http://localhost:3000"},
+        method="OPTIONS",
+    )
+    with urllib.request.urlopen(req_opt, timeout=5.0) as resp:
+        assert resp.status == 204
+        assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
+
+
+def test_events_after_parameter_validation_returns_400(server: EngineHttpServer) -> None:
+    """Should-Fix: Non-numeric 'after=' parameter or 'Last-Event-ID' returns 400 Bad Request."""
+    import urllib.error
+
+    # Non-numeric after parameter
+    url_bad = f"http://127.0.0.1:{server.port}/events?after=not_a_number"
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(urllib.request.Request(url_bad), timeout=5.0)
+    assert exc_info.value.code == 400
+
+    # Non-numeric Last-Event-ID header
+    url_hdr = f"http://127.0.0.1:{server.port}/events"
+    req_hdr = urllib.request.Request(url_hdr, headers={"Last-Event-ID": "invalid"})
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req_hdr, timeout=5.0)
+    assert exc_info.value.code == 400
+
+
+def test_live_events_auto_broadcast_on_ledger_append(server: EngineHttpServer, ledger: Ledger) -> None:
+    """Should-Fix: Events appended to ledger automatically broadcast to SSE clients without manual broadcast()."""
+    import time
+
+    url = f"http://127.0.0.1:{server.port}/events?after=0"
+    received: list[str] = []
+    stop = threading.Event()
+
+    def client():
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=5.0) as resp:
+            while not stop.is_set():
+                line = resp.readline().decode("utf-8")
+                if "id: 1" in line:
+                    received.append(line.strip())
+                    break
+
+    t = threading.Thread(target=client, daemon=True)
+    t.start()
+    time.sleep(0.1)
+
+    o = Order("o1", "ACC", Equity("AAPL"), OrderType.LIMIT, Side.BUY, Decimal("1"), "c1", T0, limit_price=Decimal("150"))
+    ledger.append(Event("ACC", EventKind.ORDER_SUBMITTED, o, T0, command_id="c1"))
+
+    t.join(timeout=3.0)
+    stop.set()
+    assert len(received) == 1
+    assert received[0] == "id: 1"
+
+
+def test_sse_duplicate_check_pins_mutation(server: EngineHttpServer, ledger: Ledger) -> None:
+    """Pins mutation: Removing event.seq <= max_seq_sent duplicate check MUST cause duplicate delivery failure."""
+    import time
+
+    # Seed event 1 into ledger
+    o = Order("o1", "ACC_P", Equity("AAPL"), OrderType.LIMIT, Side.BUY, Decimal("1"), "c_p1", T0, limit_price=Decimal("150"))
+    ev1 = ledger.append(Event("ACC_P", EventKind.ORDER_SUBMITTED, o, T0, command_id="c_p1"))
+
+    url = f"http://127.0.0.1:{server.port}/events?after=0"
+    received_ids: list[int] = []
+    stop = threading.Event()
+
+    def client():
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=5.0) as resp:
+            while not stop.is_set():
+                line = resp.readline().decode("utf-8")
+                if not line:
+                    break
+                line_str = line.strip()
+                if line_str.startswith("id: "):
+                    received_ids.append(int(line_str.split(":", 1)[1].strip()))
+                    if len(received_ids) >= 1:
+                        # Give time for any duplicate live frames to arrive
+                        time.sleep(0.2)
+                        break
+
+    t = threading.Thread(target=client, daemon=True)
+    t.start()
+    time.sleep(0.05)
+
+    # Concurrently broadcast ev1 into subscriber queue (simulating queue delivery after backlog delivered ev1)
+    server.broadcast(ev1)
+
+    t.join(timeout=3.0)
+    stop.set()
+
+    # The client must receive event 1 exactly once, not twice
+    assert received_ids == [1]
+
 

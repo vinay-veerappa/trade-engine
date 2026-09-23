@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS outbox (
     last_error   TEXT,
     created_at   TEXT    NOT NULL,
     delivered_at TEXT,
-    FOREIGN KEY(event_seq) REFERENCES events(seq)
+    FOREIGN KEY(event_seq) REFERENCES events(seq),
+    UNIQUE(event_seq, destination)
 );
 CREATE INDEX IF NOT EXISTS ix_outbox_dest_status_id
     ON outbox(destination, status, id);
@@ -72,6 +73,24 @@ class Ledger:
         self._lock = SingleInstanceLock(self.path) if lock else None
         self._lock_held = False
         self._conn: sqlite3.Connection | None = None
+        self._listeners: list[Callable[[Event], None]] = []
+
+    def add_listener(self, callback: Callable[[Event], None]) -> None:
+        """Register a callback invoked immediately after each committed append."""
+        if callback not in self._listeners:
+            self._listeners.append(callback)
+
+    def remove_listener(self, callback: Callable[[Event], None]) -> None:
+        """Unregister a committed append listener callback."""
+        if callback in self._listeners:
+            self._listeners.remove(callback)
+
+    def _notify_listeners(self, event: Event) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(event)
+            except Exception:
+                pass
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -132,7 +151,12 @@ class Ledger:
 
     # -- append ------------------------------------------------------------------
 
-    def append(self, event: Event) -> Event:
+    def append(
+        self,
+        event: Event,
+        *,
+        outbox: list[tuple[str, dict[str, Any]]] | dict[str, dict[str, Any]] | None = None,
+    ) -> Event:
         """Append one event. A replayed `command_id` is a no-op returning the original (I3)."""
         if event.seq is not None:
             raise ValueError("Event.seq is assigned by the ledger; pass seq=None to append")
@@ -168,13 +192,32 @@ class Ledger:
                 ),
             )
             seq = int(cursor.lastrowid)
+
+            if outbox:
+                items = outbox.items() if isinstance(outbox, dict) else outbox
+                for dest, payload in items:
+                    conn.execute(
+                        "INSERT INTO outbox (event_seq, destination, payload_json, status, attempts, created_at) "
+                        "VALUES (?, ?, ?, ?, 0, ?)",
+                        (
+                            seq,
+                            dest.strip(),
+                            json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                            OutboxStatus.PENDING.value,
+                            event.ts_utc.isoformat(),
+                        ),
+                    )
+
             self._commit()
             in_transaction = False
         except Exception:
             if in_transaction:
                 self._rollback()
             raise
-        return replace(event, seq=seq)
+
+        committed_event = replace(event, seq=seq)
+        self._notify_listeners(committed_event)
+        return committed_event
 
     def extend(self, events: Iterable[Event]) -> list[Event]:
         return [self.append(event) for event in events]
@@ -289,26 +332,42 @@ class Ledger:
         """Enqueue an outbox item for delivery to an external sink."""
         if not destination or not destination.strip():
             raise ValueError("Outbox destination must be non-empty string")
+        row = self.conn.execute("SELECT ts_utc FROM events WHERE seq = ?", (event_seq,)).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown event sequence {event_seq}")
         if created_at is None:
-            row = self.conn.execute("SELECT ts_utc FROM events WHERE seq = ?", (event_seq,)).fetchone()
-            if row is None:
-                raise ValueError(f"Unknown event sequence {event_seq}")
             created_at = datetime.fromisoformat(row["ts_utc"])
         elif created_at.tzinfo is None or created_at.tzinfo.utcoffset(created_at) is None:
             raise ValueError("Outbox created_at must be timezone-aware UTC datetime (I7)")
 
-        cursor = self.conn.execute(
-            "INSERT INTO outbox (event_seq, destination, payload_json, status, attempts, created_at) "
-            "VALUES (?, ?, ?, ?, 0, ?)",
-            (
-                event_seq,
-                destination.strip(),
-                json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                OutboxStatus.PENDING.value,
-                created_at.isoformat(),
-            ),
-        )
-        outbox_id = int(cursor.lastrowid)
+        conn = self.conn
+        in_transaction = False
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            in_transaction = True
+            cursor = conn.execute(
+                "INSERT INTO outbox (event_seq, destination, payload_json, status, attempts, created_at) "
+                "VALUES (?, ?, ?, ?, 0, ?)",
+                (
+                    event_seq,
+                    destination.strip(),
+                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                    OutboxStatus.PENDING.value,
+                    created_at.isoformat(),
+                ),
+            )
+            outbox_id = int(cursor.lastrowid)
+            self._commit()
+            in_transaction = False
+        except sqlite3.IntegrityError as e:
+            if in_transaction:
+                self._rollback()
+            raise ValueError(f"Outbox entry violates constraint (e.g. duplicate or missing foreign key): {e}") from e
+        except Exception:
+            if in_transaction:
+                self._rollback()
+            raise
+
         return OutboxItem(
             id=outbox_id,
             event_seq=event_seq,
@@ -346,17 +405,39 @@ class Ledger:
         """Mark an outbox item delivered with confirmation timestamp."""
         if delivered_at.tzinfo is None or delivered_at.tzinfo.utcoffset(delivered_at) is None:
             raise ValueError("delivered_at must be timezone-aware UTC datetime (I7)")
-        self.conn.execute(
-            "UPDATE outbox SET status = ?, delivered_at = ? WHERE id = ?",
-            (OutboxStatus.DELIVERED.value, delivered_at.isoformat(), outbox_id),
-        )
+        conn = self.conn
+        in_transaction = False
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            in_transaction = True
+            conn.execute(
+                "UPDATE outbox SET status = ?, delivered_at = ? WHERE id = ?",
+                (OutboxStatus.DELIVERED.value, delivered_at.isoformat(), outbox_id),
+            )
+            self._commit()
+            in_transaction = False
+        except Exception:
+            if in_transaction:
+                self._rollback()
+            raise
 
     def mark_outbox_failed(self, outbox_id: int, error: str) -> None:
         """Mark an outbox item failed and record error message."""
-        self.conn.execute(
-            "UPDATE outbox SET status = ?, attempts = attempts + 1, last_error = ? WHERE id = ?",
-            (OutboxStatus.FAILED.value, str(error), outbox_id),
-        )
+        conn = self.conn
+        in_transaction = False
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            in_transaction = True
+            conn.execute(
+                "UPDATE outbox SET status = ?, attempts = attempts + 1, last_error = ? WHERE id = ?",
+                (OutboxStatus.FAILED.value, str(error), outbox_id),
+            )
+            self._commit()
+            in_transaction = False
+        except Exception:
+            if in_transaction:
+                self._rollback()
+            raise
 
     def drain_outbox(
         self,
