@@ -265,6 +265,31 @@ def test_bars_lookahead_and_future_bars_rejected() -> None:
         wrapper.bars(eq, "1m", past_start, t0 + timedelta(minutes=10), max_age_seconds=60.0)
 
 
+def test_bars_end_clipped_to_clock_before_provider_call() -> None:
+    """A request whose end is past the clock must reach the provider clipped to now (no lookahead)."""
+    t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
+    seen: dict[str, datetime] = {}
+
+    class RecordingProvider(FakeProvider):
+        def bars(self, instrument, tf, start, end, max_age_seconds):
+            seen["end"] = end
+            return []
+
+    wrapper = StampingMarketDataWrapper(RecordingProvider(), clock=ReplayClock(t0))
+    wrapper.bars(Equity("SPY"), "1m", t0 - timedelta(minutes=10), t0 + timedelta(hours=1), max_age_seconds=60.0)
+    assert seen["end"] == t0
+
+
+def test_bool_max_age_and_tolerance_rejected() -> None:
+    """bool is an int subclass; True must not be read as a 1-second max age."""
+    clock = ReplayClock(datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc))
+    wrapper = StampingMarketDataWrapper(FakeProvider(), clock=clock)
+    with pytest.raises(ValueError, match="finite positive number"):
+        wrapper.quote(Equity("SPY"), max_age_seconds=True)
+    with pytest.raises(ValueError, match="future_tolerance_seconds"):
+        StampingMarketDataWrapper(FakeProvider(), clock=clock, future_tolerance_seconds=False)
+
+
 def test_bars_start_after_end_rejected() -> None:
     """Finding 8: start > end in bars() must be rejected."""
     t0 = datetime(2026, 9, 23, 14, 30, 0, tzinfo=timezone.utc)
