@@ -39,14 +39,6 @@ class Instrument:
     def multiplier(self) -> int:
         return 1
 
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Instrument):
-            return False
-        return (type(self), self.symbol) == (type(other), other.symbol)
-
-    def __hash__(self) -> int:
-        return hash((type(self), self.symbol))
-
 
 @dataclass(frozen=True)
 class Equity(Instrument):
@@ -60,6 +52,10 @@ class Equity(Instrument):
         sym = symbol.strip().upper()
         if not sym:
             raise ValueError("Equity symbol must be non-empty")
+        if len(sym) > 10:
+            raise ValueError(f"Equity symbol exceeds maximum length of 10 characters: '{sym}'")
+        if not sym.isalnum():
+            raise ValueError(f"Equity symbol must be alphanumeric without slashes or spaces, got '{sym}'")
         object.__setattr__(self, "_symbol", sym)
 
     @property
@@ -88,8 +84,21 @@ class OptionContract(Instrument):
             raise ValueError(f"Option underlying must be at most 6 characters, got '{und}' (length {len(und)})")
         if not und.isalnum():
             raise ValueError(f"Option underlying must be alphanumeric, got '{und}'")
+
+        # Ensure strike is Decimal
+        if not isinstance(self.strike, Decimal):
+            object.__setattr__(self, "strike", Decimal(str(self.strike)))
+
         if self.strike <= Decimal("0"):
             raise ValueError(f"Strike must be positive, got {self.strike}")
+
+        if (self.strike * Decimal("1000")) != (self.strike * Decimal("1000")).to_integral_value():
+            raise ValueError(f"Strike cannot have more than 3 decimal places (thousandths), got {self.strike} (I5)")
+
+        strike_millis = int((self.strike * Decimal("1000")).to_integral_value())
+        if strike_millis <= 0 or strike_millis > 99999999:
+            raise ValueError(f"Strike {self.strike} out of bounds for OCC representation")
+
         if self.multiplier <= 0:
             raise ValueError(f"Multiplier must be positive, got {self.multiplier}")
         if not isinstance(self.right, OptionRight):
@@ -101,9 +110,6 @@ class OptionContract(Instrument):
                 raise ValueError(f"Invalid option right: {self.right}")
 
         object.__setattr__(self, "underlying", und)
-        # Ensure strike is Decimal
-        if not isinstance(self.strike, Decimal):
-            object.__setattr__(self, "strike", Decimal(str(self.strike)))
 
     @property
     def symbol(self) -> str:
@@ -123,7 +129,7 @@ class OptionContract(Instrument):
         - Strike price * 1000 (8 digits, zero-padded)
         """
         strike_millis = int((self.strike * Decimal("1000")).to_integral_value())
-        if strike_millis < 0 or strike_millis > 99999999:
+        if strike_millis <= 0 or strike_millis > 99999999:
             raise ValueError(f"Strike {self.strike} out of bounds for OCC representation")
 
         exp_str = self.expiry.strftime("%y%m%d")
@@ -178,11 +184,13 @@ class OptionContract(Instrument):
 class ComboLeg:
     """A single leg in a multi-leg combo order or position."""
 
-    contract: OptionContract
+    contract: OptionContract | Equity
     ratio: int
     side: Side
 
     def __post_init__(self) -> None:
+        if not isinstance(self.contract, (OptionContract, Equity)):
+            raise ValueError(f"Combo leg contract must be OptionContract or Equity, got {type(self.contract)}")
         if self.ratio <= 0:
             raise ValueError(f"Combo leg ratio must be positive, got {self.ratio}")
         if not isinstance(self.side, Side):
@@ -199,12 +207,20 @@ class Combo(Instrument):
         legs_tuple = tuple(legs)
         if not legs_tuple:
             raise ValueError("Combo must have at least one leg")
+        mults = {leg.contract.multiplier for leg in legs_tuple}
+        if len(mults) != 1:
+            raise ValueError(f"Combo has mixed leg multipliers: {mults} (I6)")
         object.__setattr__(self, "legs", legs_tuple)
+
+    @property
+    def multiplier(self) -> int:
+        """Derive multiplier from legs; all legs guaranteed uniform (I6)."""
+        return self.legs[0].contract.multiplier
 
     @property
     def symbol(self) -> str:
         return "/".join(
-            f"{leg.side.value}:{leg.ratio}x{leg.contract.occ.strip()}" for leg in self.legs
+            f"{leg.side.value}:{leg.ratio}x{leg.contract.symbol.strip()}" for leg in self.legs
         )
 
 

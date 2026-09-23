@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
-from trade_engine.domain.instruments import Instrument
-from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
+from trade_engine.domain.instruments import Instrument, Side
+from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
 
 
 @dataclass(frozen=True)
@@ -31,14 +33,53 @@ class VenueIdentity:
     connected_at: datetime
     broker_name: str
 
+    def __post_init__(self) -> None:
+        if self.connected_at.tzinfo is None or self.connected_at.tzinfo.utcoffset(self.connected_at) is None:
+            raise ValueError("connected_at must be timezone-aware UTC datetime (I7)")
+
+
+@dataclass(frozen=True)
+class VenueOrderAllocation:
+    """Allocation of a venue order portion back to a specific strategy order (Architecture §4.4)."""
+
+    strategy_order_id: str
+    account_id: str
+    quantity: Decimal
+
+    def __post_init__(self) -> None:
+        if not self.strategy_order_id:
+            raise ValueError("strategy_order_id must be non-empty")
+        if not self.account_id:
+            raise ValueError("account_id must be non-empty")
+        if self.quantity <= Decimal("0"):
+            raise ValueError(f"quantity must be positive, got {self.quantity}")
+
 
 @dataclass(frozen=True)
 class VenueOrder:
-    """Order submitted to a specific venue."""
+    """Order submitted to a specific venue (supports 1:1 or netted strategy orders, Architecture §4.4)."""
 
     venue_order_id: str
-    order: Order
+    instrument: Instrument
+    order_type: OrderType
+    side: Side
+    quantity: Decimal
     submitted_at: datetime
+    tif: TimeInForce = TimeInForce.DAY
+    limit_price: Decimal | None = None
+    stop_price: Decimal | None = None
+    trail_amount: Decimal | None = None
+    allocations: tuple[VenueOrderAllocation, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.venue_order_id:
+            raise ValueError("venue_order_id must be non-empty")
+        if self.quantity <= Decimal("0"):
+            raise ValueError(f"quantity must be positive, got {self.quantity}")
+        if self.submitted_at.tzinfo is None or self.submitted_at.tzinfo.utcoffset(self.submitted_at) is None:
+            raise ValueError("submitted_at must be timezone-aware UTC datetime (I7)")
+        if not isinstance(self.side, Side):
+            raise ValueError(f"Invalid side '{self.side}'")
 
 
 @dataclass(frozen=True)
@@ -49,6 +90,10 @@ class VenueAck:
     status: Literal["ACCEPTED", "REJECTED", "PENDING"]
     timestamp: datetime
     message: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.timestamp.tzinfo is None or self.timestamp.tzinfo.utcoffset(self.timestamp) is None:
+            raise ValueError("timestamp must be timezone-aware UTC datetime (I7)")
 
 
 @dataclass(frozen=True)
@@ -70,6 +115,10 @@ class VenueOrderState:
     remaining_quantity: Decimal
     updated_at: datetime
 
+    def __post_init__(self) -> None:
+        if self.updated_at.tzinfo is None or self.updated_at.tzinfo.utcoffset(self.updated_at) is None:
+            raise ValueError("updated_at must be timezone-aware UTC datetime (I7)")
+
 
 @dataclass(frozen=True)
 class VenueFill:
@@ -81,7 +130,14 @@ class VenueFill:
     quantity: Decimal
     price: Decimal
     filled_at: datetime
+    side: Side = Side.BUY
     fee: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        if self.filled_at.tzinfo is None or self.filled_at.tzinfo.utcoffset(self.filled_at) is None:
+            raise ValueError("filled_at must be timezone-aware UTC datetime (I7)")
+        if not isinstance(self.side, Side):
+            raise ValueError(f"Invalid side '{self.side}'")
 
 
 @dataclass(frozen=True)
@@ -93,6 +149,10 @@ class VenuePosition:
     avg_price: Decimal
     as_of: datetime
 
+    def __post_init__(self) -> None:
+        if self.as_of.tzinfo is None or self.as_of.tzinfo.utcoffset(self.as_of) is None:
+            raise ValueError("as_of must be timezone-aware UTC datetime (I7)")
+
 
 @dataclass(frozen=True)
 class VenueCashEvent:
@@ -102,7 +162,15 @@ class VenueCashEvent:
     event_type: str  # dividend, assignment, exercise, interest, fee
     amount: Decimal
     timestamp: datetime
-    details: dict[str, str] = field(default_factory=dict)
+    details: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.timestamp.tzinfo is None or self.timestamp.tzinfo.utcoffset(self.timestamp) is None:
+            raise ValueError("timestamp must be timezone-aware UTC datetime (I7)")
+        if self.details is not None and not isinstance(self.details, MappingProxyType):
+            object.__setattr__(self, "details", MappingProxyType(dict(self.details)))
+        elif self.details is None:
+            object.__setattr__(self, "details", MappingProxyType({}))
 
 
 @runtime_checkable

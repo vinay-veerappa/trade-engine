@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from trade_engine.domain.instruments import Instrument
+from trade_engine.domain.instruments import Instrument, Side
 
 VenueEnv = Literal["sim", "paper", "live"]
 
@@ -20,10 +20,11 @@ class Fill:
     order_id: str
     account_id: str
     instrument: Instrument
-    quantity: Decimal  # Signed or unsigned? Executed quantity (positive)
+    quantity: Decimal  # Executed quantity (strictly positive)
     price: Decimal
     venue_env: VenueEnv  # Must be proven at connect (I10)
     filled_at: datetime
+    side: Side = Side.BUY
     fee: Decimal = Decimal("0")
     leg_id: str | None = None
     venue_order_id: str | None = None
@@ -42,6 +43,10 @@ class Fill:
             raise ValueError(f"Fill price must be strictly positive, got {self.price} (I5)")
         if self.venue_env not in ("sim", "paper", "live"):
             raise ValueError(f"Invalid venue_env '{self.venue_env}'")
+        if not isinstance(self.side, Side):
+            raise ValueError(f"Invalid side '{self.side}'")
+        if self.filled_at.tzinfo is None or self.filled_at.tzinfo.utcoffset(self.filled_at) is None:
+            raise ValueError("Fill filled_at must be timezone-aware UTC datetime (I7)")
 
 
 @dataclass(frozen=True)
@@ -52,12 +57,19 @@ class Lot:
     quantity: Decimal
     cost_basis: Decimal
     acquired_at: datetime
+    side: Side = Side.BUY
 
     def __post_init__(self) -> None:
+        if not self.lot_id:
+            raise ValueError("lot_id must be non-empty")
         if self.quantity <= Decimal("0"):
             raise ValueError(f"Lot quantity must be positive, got {self.quantity}")
         if self.cost_basis <= Decimal("0"):
             raise ValueError(f"Lot cost_basis must be positive, got {self.cost_basis}")
+        if not isinstance(self.side, Side):
+            raise ValueError(f"Invalid side '{self.side}'")
+        if self.acquired_at.tzinfo is None or self.acquired_at.tzinfo.utcoffset(self.acquired_at) is None:
+            raise ValueError("Lot acquired_at must be timezone-aware UTC datetime (I7)")
 
 
 @dataclass(frozen=True)

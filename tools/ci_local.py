@@ -6,14 +6,17 @@ Runs the same checks as GitHub Actions on this machine before pushing.
 from __future__ import annotations
 
 import argparse
-import ast
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.invariant_checks import check_i7_invariants
 
 
 def say(msg: str) -> None:
@@ -52,23 +55,7 @@ def check_git_clean(include_uncommitted: bool) -> bool:
 
 def check_invariants() -> bool:
     say("Checking invariants (I7: no uncontrolled clock reads in src/)...")
-    violations: list[str] = []
-    for py_file in SRC_DIR.rglob("*.py"):
-        code = py_file.read_text(encoding="utf-8")
-        try:
-            tree = ast.parse(code, filename=str(py_file))
-        except SyntaxError as e:
-            violations.append(f"{py_file}: SyntaxError: {e}")
-            continue
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Attribute) and node.func.attr == "now":
-                    violations.append(f"{py_file.name}:{node.lineno} calls datetime.now()")
-                if isinstance(node.func, ast.Attribute) and node.func.attr == "time":
-                    if isinstance(node.func.value, ast.Name) and node.func.value.id == "time":
-                        violations.append(f"{py_file.name}:{node.lineno} calls time.time()")
-
+    violations = check_i7_invariants(SRC_DIR)
     if violations:
         say("FAIL: Invariant violations found:")
         for v in violations:
@@ -81,16 +68,13 @@ def check_invariants() -> bool:
 
 def resolve_python() -> str:
     """Resolve the python interpreter to use, prioritizing local .venv if current interpreter lacks package."""
-    try:
-        res = subprocess.run(
-            [sys.executable, "-c", "import trade_engine"],
-            capture_output=True,
-            text=True,
-        )
-        if res.returncode == 0:
-            return sys.executable
-    except Exception:
-        pass
+    res = subprocess.run(
+        [sys.executable, "-c", "import trade_engine"],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode == 0:
+        return sys.executable
 
     windows_venv = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
     if windows_venv.is_file():

@@ -14,8 +14,8 @@ class Sink(Protocol):
 
     name: str
 
-    def publish(self, event: Any) -> bool:
-        """Publish an event to the destination sink. Returns True if accepted."""
+    def publish(self, event_seq: int, event: Any) -> bool:
+        """Publish an event with its sequence number to the destination sink. Returns True if accepted."""
         ...
 
     def confirm_delivery(self, event_seq: int) -> bool:

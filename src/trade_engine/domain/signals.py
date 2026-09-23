@@ -33,6 +33,10 @@ class Signal:
             raise ValueError("symbol must be non-empty")
         if self.direction not in ("long", "short"):
             raise ValueError(f"direction must be 'long' or 'short', got '{self.direction}'")
+        if self.created_at is not None and (
+            self.created_at.tzinfo is None or self.created_at.tzinfo.utcoffset(self.created_at) is None
+        ):
+            raise ValueError("Signal created_at must be timezone-aware UTC datetime (I7)")
 
         if self.metrics is not None and not isinstance(self.metrics, MappingProxyType):
             object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
@@ -77,12 +81,37 @@ class OrderIntent:
             raise ValueError("account_id must be non-empty")
         if not self.command_id:
             raise ValueError("command_id must be non-empty (I3)")
+        if not isinstance(self.side, Side):
+            raise ValueError(f"Invalid side '{self.side}'")
         if self.entry_price <= Decimal("0"):
             raise ValueError(f"entry_price must be positive, got {self.entry_price}")
         if self.stop_loss <= Decimal("0"):
             raise ValueError(f"stop_loss must be positive, got {self.stop_loss}")
-        for pt in self.profit_targets:
-            if pt <= Decimal("0"):
-                raise ValueError(f"profit_target must be positive, got {pt}")
+
+        if self.side == Side.BUY:
+            if self.stop_loss >= self.entry_price:
+                raise ValueError(
+                    f"For BUY intent, stop_loss ({self.stop_loss}) must be strictly below entry_price ({self.entry_price})"
+                )
+            for pt in self.profit_targets:
+                if pt <= Decimal("0"):
+                    raise ValueError(f"profit_target must be positive, got {pt}")
+                if pt <= self.entry_price:
+                    raise ValueError(
+                        f"For BUY intent, profit target ({pt}) must be strictly above entry_price ({self.entry_price})"
+                    )
+        elif self.side == Side.SELL:
+            if self.stop_loss <= self.entry_price:
+                raise ValueError(
+                    f"For SELL intent, stop_loss ({self.stop_loss}) must be strictly above entry_price ({self.entry_price})"
+                )
+            for pt in self.profit_targets:
+                if pt <= Decimal("0"):
+                    raise ValueError(f"profit_target must be positive, got {pt}")
+                if pt >= self.entry_price:
+                    raise ValueError(
+                        f"For SELL intent, profit target ({pt}) must be strictly below entry_price ({self.entry_price})"
+                    )
+
         if not self.reason:
             raise ValueError("reason must be non-empty (I11)")

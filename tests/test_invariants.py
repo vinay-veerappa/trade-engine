@@ -1,27 +1,17 @@
 """AST / Static invariant tests (Architecture §2, I7)."""
 
-import ast
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.invariant_checks import check_i7_invariants
 
 
 def test_no_uncontrolled_clock_reads_in_src() -> None:
-    """Assert no datetime.now() or time.time() calls in src/ outside Clock implementations (I7)."""
-    src_dir = Path(__file__).resolve().parent.parent / "src"
-    violations: list[str] = []
-
-    for py_file in src_dir.rglob("*.py"):
-        # When Clock implementation is created in E2, clock.py will be allowed
-        code = py_file.read_text(encoding="utf-8")
-        tree = ast.parse(code, filename=str(py_file))
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                # Check for datetime.now(...)
-                if isinstance(node.func, ast.Attribute) and node.func.attr == "now":
-                    violations.append(f"{py_file.name}:{node.lineno} calls datetime.now()")
-                # Check for time.time(...)
-                if isinstance(node.func, ast.Attribute) and node.func.attr == "time":
-                    if isinstance(node.func.value, ast.Name) and node.func.value.id == "time":
-                        violations.append(f"{py_file.name}:{node.lineno} calls time.time()")
-
-    assert not violations, f"Forbidden uncontrolled clock reads found:\n" + "\n".join(violations)
+    """Assert no datetime.now(), date.today(), time.monotonic(), etc. calls in src/ (I7)."""
+    src_dir = REPO_ROOT / "src"
+    violations = check_i7_invariants(src_dir)
+    assert not violations, "Forbidden uncontrolled clock reads found:\n" + "\n".join(violations)

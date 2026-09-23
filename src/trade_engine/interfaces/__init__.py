@@ -9,6 +9,7 @@ from trade_engine.interfaces.broker import (
     VenueFill,
     VenueIdentity,
     VenueOrder,
+    VenueOrderAllocation,
     VenueOrderState,
     VenuePosition,
 )
@@ -17,6 +18,7 @@ from trade_engine.interfaces.market_data import (
     Bar,
     CorporateAction,
     MarketData,
+    OptionQuote,
     Quote,
     StaleDataError,
 )
@@ -31,6 +33,7 @@ __all__ = [
     "Clock",
     "CorporateAction",
     "MarketData",
+    "OptionQuote",
     "OrderChanges",
     "Quote",
     "SignalAdapter",
@@ -42,6 +45,7 @@ __all__ = [
     "VenueFill",
     "VenueIdentity",
     "VenueOrder",
+    "VenueOrderAllocation",
     "VenueOrderState",
     "VenuePosition",
 ]

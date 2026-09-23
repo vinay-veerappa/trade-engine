@@ -5,8 +5,12 @@ from decimal import Decimal
 
 import pytest
 from trade_engine.domain.instruments import (
+    Combo,
+    ComboLeg,
+    Equity,
     OptionContract,
     OptionRight,
+    Side,
 )
 
 
@@ -52,11 +56,12 @@ def test_occ_roundtrip_spxw_and_index() -> None:
 
 
 def test_occ_roundtrip_decimal_strikes() -> None:
-    """Test fractional and decimal strikes (e.g. 5900.5, 23.5, 125.25)."""
+    """Test fractional and decimal strikes (e.g. 5900.5, 23.5, 125.25, 150.125)."""
     test_cases = [
         ("SPXW", date(2026, 10, 15), Decimal("5900.5"), OptionRight.CALL, "SPXW  261015C05900500"),
         ("SOFI", date(2026, 11, 20), Decimal("23.5"), OptionRight.PUT, "SOFI  261120P00023500"),
         ("IWM", date(2026, 6, 19), Decimal("215.25"), OptionRight.CALL, "IWM   260619C00215250"),
+        ("SPY", date(2026, 9, 18), Decimal("150.125"), OptionRight.CALL, "SPY   260918C00150125"),
     ]
 
     for und, exp, strike, right, expected_occ in test_cases:
@@ -122,9 +127,20 @@ def test_option_contract_validation() -> None:
             right=OptionRight.CALL,
         )
 
+    # Underlying length boundaries (fire + pass)
+    # Length 6 passes
+    contract_len6 = OptionContract(
+        underlying="SPXW12",
+        expiry=date(2026, 9, 18),
+        strike=Decimal("150"),
+        right=OptionRight.CALL,
+    )
+    assert contract_len6.underlying == "SPXW12"
+
+    # Length 7 fails (fire test)
     with pytest.raises(ValueError, match="at most 6 characters"):
         OptionContract(
-            underlying="TOOLONGTICKER",
+            underlying="ABCDEFG",
             expiry=date(2026, 9, 18),
             strike=Decimal("150"),
             right=OptionRight.CALL,
@@ -135,6 +151,23 @@ def test_option_contract_validation() -> None:
             underlying="BRK.B",
             expiry=date(2026, 9, 18),
             strike=Decimal("450"),
+            right=OptionRight.CALL,
+        )
+
+    # Refuse strikes with > 3 decimal places (I5) (fire tests)
+    with pytest.raises(ValueError, match="cannot have more than 3 decimal places"):
+        OptionContract(
+            underlying="SPY",
+            expiry=date(2026, 9, 18),
+            strike=Decimal("150.0005"),
+            right=OptionRight.CALL,
+        )
+
+    with pytest.raises(ValueError, match="cannot have more than 3 decimal places"):
+        OptionContract(
+            underlying="SPY",
+            expiry=date(2026, 9, 18),
+            strike=Decimal("0.0004"),
             right=OptionRight.CALL,
         )
 
@@ -158,4 +191,47 @@ def test_option_contract_multiplier_custom() -> None:
         multiplier=50,
     )
     assert contract.multiplier == 50
+
+
+def test_combo_multiplier_derivation_and_mixed_rejection() -> None:
+    """Test Combo derives multiplier from legs and refuses mixed multipliers (I6)."""
+    leg1 = ComboLeg(
+        contract=OptionContract("AAPL", date(2026, 9, 18), Decimal("150"), OptionRight.CALL, multiplier=100),
+        ratio=1,
+        side=Side.BUY,
+    )
+    leg2 = ComboLeg(
+        contract=OptionContract("AAPL", date(2026, 9, 18), Decimal("160"), OptionRight.CALL, multiplier=100),
+        ratio=1,
+        side=Side.SELL,
+    )
+    combo = Combo(legs=(leg1, leg2))
+    assert combo.multiplier == 100
+
+    # Mixed multipliers refused (fire test)
+    stock_leg = ComboLeg(
+        contract=Equity("AAPL"),
+        ratio=100,
+        side=Side.BUY,
+    )
+    with pytest.raises(ValueError, match="mixed leg multipliers"):
+        Combo(legs=(leg1, stock_leg))
+
+
+def test_equity_symbol_validation() -> None:
+    """Test Equity enforces valid ticker symbols and rejects slashes/OCC formats."""
+    eq = Equity("AAPL")
+    assert eq.symbol == "AAPL"
+
+    with pytest.raises(ValueError, match="alphanumeric without slashes"):
+        Equity("/NQ")
+
+    with pytest.raises(ValueError, match="alphanumeric without slashes"):
+        Equity("A B")
+
+    with pytest.raises(ValueError, match="exceeds maximum length"):
+        Equity("SPY   260918C00150000")
+
+    with pytest.raises(ValueError, match="exceeds maximum length"):
+        Equity("VERYLONGTICKERNAME")
 
