@@ -68,6 +68,19 @@ class AccountState:
     last_seq: int = 0
 
 
+def _require_finite(value: Decimal, name: str) -> Decimal:
+    """Refuse a non-finite quantity, price or fee before it poisons the fold.
+
+    A NaN or Infinity in a fill would propagate into cash and realised P&L, and NaN
+    breaks state equality itself (NaN != NaN), so snapshot == fold could never be
+    asserted again. The domain objects guard sign, not finiteness, and only the codec
+    refuses non-finite values, so in-memory folds were unguarded (I5).
+    """
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise LedgerFoldError(f"{name} must be a finite Decimal, got {value} (I5)")
+    return value
+
+
 def _multiplier(instrument: Instrument) -> int:
     try:
         return instrument.multiplier
@@ -75,6 +88,12 @@ def _multiplier(instrument: Instrument) -> int:
         raise LedgerFoldError(
             f"Cannot value a mixed-multiplier combo in E1; per-leg accounting is O4's: {err}"
         ) from err
+
+
+def _check_fill_finite(fill: Fill) -> None:
+    _require_finite(fill.quantity, f"Fill {fill.fill_id} quantity")
+    _require_finite(fill.price, f"Fill {fill.fill_id} price")
+    _require_finite(fill.fee, f"Fill {fill.fill_id} fee")
 
 
 def _consume_lots(lots: list[Lot], quantity: Decimal, exit_price: Decimal, multiplier: int) -> tuple[list[Lot], Decimal]:
@@ -127,6 +146,10 @@ def apply_fill(
     signed_delta = fill.quantity if fill.side == Side.BUY else -fill.quantity
 
     if position is None or position.quantity == ZERO:
+        # A flat position keeps its realised history: P&L already booked must survive
+        # the next round trip, or the account total drifts away from cash (I11) and a
+        # strategy that closes and re-opens looks less profitable than it is.
+        carried_realized = position.realized_pnl if position is not None else ZERO
         lot = Lot(
             lot_id=fill.fill_id,
             quantity=fill.quantity,
@@ -139,7 +162,7 @@ def apply_fill(
             instrument=fill.instrument,
             quantity=signed_delta,
             avg_cost=fill.price,
-            realized_pnl=ZERO,
+            realized_pnl=carried_realized,
             open_lots=(lot,),
         )
 
@@ -265,6 +288,8 @@ def _on_fill(state: AccountState, event: Event) -> AccountState:
             f"'{state.account_id}'; a replayed venue fill is a no-op, not a second "
             f"position (I3)"
         )
+
+    _check_fill_finite(fill)
 
     multiplier = _multiplier(fill.instrument)
     gross = fill.quantity * fill.price * multiplier
@@ -464,6 +489,12 @@ class FoldCache:
 
     def extend(self, events: Iterable[Event]) -> None:
         for event in events:
+            if event.seq is not None and event.seq <= self._base_seq:
+                raise LedgerFoldError(
+                    f"Event seq {event.seq} is already folded into the seed "
+                    f"(base_seq={self._base_seq}); replaying it would double-apply "
+                    f"the event (I3)"
+                )
             self._events.append(event)
             current = self._states.get(event.account, AccountState(account_id=event.account))
             state = _dispatch(current, event)

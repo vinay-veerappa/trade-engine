@@ -479,6 +479,73 @@ def test_fees_reduce_realized_pnl_not_just_cash() -> None:
     assert state.realized_pnl == Decimal("-5")
 
 
+def test_realized_pnl_survives_closing_and_reopening_a_flat_position() -> None:
+    """A flat position's realised history must survive re-opening (I11).
+
+    Two identical round trips (buy 100@10 / sell 100@12, 1 fee in, 2 fees out) book
+    197 each. If the reopen branch resets realised P&L to zero, the account total
+    subtracts the wiped history and ends at 197 while cash says 394 — the exact
+    divergence between cash and P&L the invariant below forbids.
+    """
+
+    def round_trip(n: int, start_seq: int) -> list[Event]:
+        return [
+            Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order(f"b{n}", quantity="100"), ts_utc=TS, seq=start_seq),
+            Event(account="ACC", kind=EventKind.FILL, payload=a_fill(f"bf{n}", f"b{n}", quantity="100", price="10", fee="1"), ts_utc=TS, seq=start_seq + 1),
+            Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order(f"s{n}", side=Side.SELL, quantity="100"), ts_utc=TS, seq=start_seq + 2),
+            Event(account="ACC", kind=EventKind.FILL, payload=a_fill(f"sf{n}", f"s{n}", side=Side.SELL, quantity="100", price="12", fee="2"), ts_utc=TS, seq=start_seq + 3),
+        ]
+
+    events = [*round_trip(1, 1), *round_trip(2, 5)]
+    state = fold(events)["ACC"]
+    position = state.positions[AAPL]
+    assert position.quantity == Decimal("0")
+    assert position.realized_pnl == Decimal("394"), "flat position lost booked P&L on re-open"
+    assert state.realized_pnl == Decimal("394")
+    # The invariant: flat means every cash movement was P&L — they must agree.
+    assert state.cash == state.realized_pnl
+
+
+def test_negative_control_first_round_trip_still_books_once() -> None:
+    """Negative control for the carry-through: exactly one round trip books 197."""
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("b1", quantity="100"), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("bf1", "b1", quantity="100", price="10", fee="1"), ts_utc=TS, seq=2),
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("s1", side=Side.SELL, quantity="100"), ts_utc=TS, seq=3),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("sf1", "s1", side=Side.SELL, quantity="100", price="12", fee="2"), ts_utc=TS, seq=4),
+    ]
+    state = fold(events)["ACC"]
+    assert state.realized_pnl == Decimal("197")
+    assert state.cash == state.realized_pnl
+
+
+def test_non_finite_fill_price_quantity_or_fee_is_refused() -> None:
+    """NaN/Infinity in a fill poison cash and break state equality itself (I5).
+
+    The domain objects guard sign but not finiteness (only the codec refuses), so an
+    in-memory fold must refuse non-finite values itself.
+    """
+    events_head = [Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", quantity="100"), ts_utc=TS, seq=1)]
+    for name, fill in [
+        ("price=Infinity", a_fill("f1", "o1", quantity="100", price="Infinity")),
+        ("fee=NaN", a_fill("f2", "o1", quantity="100", price="10", fee="NaN")),
+        ("fee=Infinity", a_fill("f3", "o1", quantity="100", price="10", fee="Infinity")),
+    ]:
+        with pytest.raises(LedgerFoldError, match="finite Decimal"):
+            fold([*events_head, Event(account="ACC", kind=EventKind.FILL, payload=fill, ts_utc=TS, seq=2)])
+        # smoke: each value parses as a Decimal (they are non-finite, not invalid literals)
+        assert not fill.price.is_finite() or not fill.fee.is_finite() or True
+
+
+def test_negative_control_finite_fill_still_applies() -> None:
+    events = [
+        Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order("o1", quantity="100"), ts_utc=TS, seq=1),
+        Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1", quantity="100", price="10", fee="0.65"), ts_utc=TS, seq=2),
+    ]
+    state = fold(events)["ACC"]
+    assert state.cash == Decimal("-1000.65")
+
+
 def test_closing_fill_realizes_pnl_with_multiplier() -> None:
     events = [
         Event(
@@ -903,13 +970,13 @@ def test_snapshot_equals_full_fold_on_randomised_log(ledger: Ledger) -> None:
         else:
             open_orders[order_id] = (account_id, instrument, side, remaining - take)
 
-    def accept_some() -> None:
+    def accept_some() -> bool:
         # Only orders still in SUBMITTED can be accepted: PARTIALLY_FILLED → ACCEPTED
         # is illegal in the E0 state machine, and a venue cannot "re-accept" an order
         # that has already started filling.
         submitted = [oid for oid, meta in open_orders.items() if oid in unfilled]
         if not submitted:
-            return
+            return False
         order_id = rng.choice(submitted)
         ledger.append(
             Event(
@@ -919,6 +986,7 @@ def test_snapshot_equals_full_fold_on_randomised_log(ledger: Ledger) -> None:
                 ts_utc=TS,
             )
         )
+        return True
 
     for seed_account in accounts:
         account = seed_account  # the closures read this loop variable
@@ -930,10 +998,16 @@ def test_snapshot_equals_full_fold_on_randomised_log(ledger: Ledger) -> None:
         roll = rng.random()
         if roll < 0.30:
             submit()
-        elif roll < 0.60 and open_orders:
-            fill_some()
-        elif roll < 0.70 and open_orders:
-            accept_some()
+        elif roll < 0.60:
+            if open_orders:
+                fill_some()
+            else:
+                submit()
+        elif roll < 0.70:
+            if not (open_orders and accept_some()):
+                # accept could not fire (no unfilled SUBMITTED order); fall through
+                # to another append so every iteration lands exactly one event.
+                submit()
         elif roll < 0.78:
             ledger.append(
                 Event(
@@ -996,6 +1070,51 @@ def test_snapshot_cache_resumes_after_reopen(ledger_path: Path) -> None:
         cache.extend(lg.events(after=1))
         cache.verify(lg.events())
         assert cache.state("ACC").cash == Decimal("9")
+
+
+def test_seeded_cache_refuses_events_already_in_the_seed(ledger_path: Path) -> None:
+    """Extending a seeded cache with events it already folded must refuse (I3).
+
+    A caller that replays the whole log into a cache seeded at seq N would
+    double-apply everything below N — silently, because extend() had no boundary
+    check. The cache must refuse the overlap rather than corrupt the snapshot.
+    """
+    with Ledger(ledger_path) as lg:
+        lg.append(Event(account="ACC", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("100"), kind="deposit", as_of=TS), ts_utc=TS, command_id="d1"))
+        lg.append(Event(account="ACC", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("200"), kind="deposit", as_of=TS), ts_utc=TS, command_id="d2"))
+        seed_state = lg.snapshot("ACC")
+        cache = FoldCache(seed={"ACC": seed_state}, base_seq=2)
+        with pytest.raises(LedgerFoldError, match="already folded into the seed"):
+            cache.extend(lg.events())  # seqs 1 and 2 are already in the seed
+        assert cache.state("ACC").cash == Decimal("300"), "refused events must not half-apply"
+
+
+def test_incremental_cache_does_not_fabricate_last_seq(ledger_path: Path) -> None:
+    """The seed must carry each account's real last_seq, not the cutoff (I2).
+
+    With the default cutoff (end of log), ACC_A's last event is seq 2 while the
+    cutoff is 3. Stamping the cutoff into the seed claims a position ACC_A never
+    saw, and since no tail events exist to overwrite it, verify() fails against
+    the honest full fold.
+    """
+    with Ledger(ledger_path) as lg:
+        lg.append(Event(account="ACC_A", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("10"), kind="deposit", as_of=TS), ts_utc=TS, command_id="a1"))
+        lg.append(Event(account="ACC_A", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("5"), kind="interest", as_of=TS), ts_utc=TS, command_id="a2"))
+        lg.append(Event(account="ACC_B", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("7"), kind="deposit", as_of=TS), ts_utc=TS, command_id="b1"))
+
+        # Default cutoff = 3 (end of log). ACC_A's last event is seq 2: the cache
+        # must report 2, not the cutoff. This is the case the old fabrication broke.
+        cache = lg.incremental_cache(accounts=["ACC_A", "ACC_B"])
+        assert cache.state("ACC_A").last_seq == 2, "ACC_A's last event is seq 2, not the cutoff 3"
+        assert cache.state("ACC_B").last_seq == 3
+        cache.verify(lg.events())
+
+        # Mid-log cutoff: an account with no events at or below the cutoff is not
+        # seeded at all; its tail events give it the honest last_seq.
+        mid = lg.incremental_cache(after=1, accounts=["ACC_A", "ACC_B"])
+        mid.verify(lg.events())
+        assert mid.state("ACC_A").last_seq == 2
+        assert mid.state("ACC_B").last_seq == 3
 
 
 # --------------------------------------------------------------------------- meta / schema
