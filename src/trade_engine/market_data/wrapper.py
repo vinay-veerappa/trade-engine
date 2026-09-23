@@ -39,7 +39,7 @@ class StampingMarketDataWrapper(MarketData):
     ) -> None:
         if clock is None or not isinstance(clock, Clock):
             raise ValueError("StampingMarketDataWrapper requires an injected Clock protocol instance (I7)")
-        if not isinstance(future_tolerance_seconds, (int, float)) or not math.isfinite(future_tolerance_seconds) or future_tolerance_seconds < 0:
+        if not isinstance(future_tolerance_seconds, (int, float)) or isinstance(future_tolerance_seconds, bool) or not math.isfinite(future_tolerance_seconds) or future_tolerance_seconds < 0:
             raise ValueError(f"future_tolerance_seconds must be a finite non-negative number: {future_tolerance_seconds!r}")
         self._provider = provider
         self._clock = clock
@@ -87,7 +87,7 @@ class StampingMarketDataWrapper(MarketData):
         return item
 
     def _validate_max_age(self, max_age_seconds: float) -> None:
-        if not isinstance(max_age_seconds, (int, float)) or not math.isfinite(max_age_seconds) or max_age_seconds <= 0:
+        if not isinstance(max_age_seconds, (int, float)) or isinstance(max_age_seconds, bool) or not math.isfinite(max_age_seconds) or max_age_seconds <= 0:
             raise ValueError(f"max_age_seconds must be a finite positive number (I5), got: {max_age_seconds!r}")
 
     def bars(

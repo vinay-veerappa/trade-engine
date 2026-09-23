@@ -132,6 +132,8 @@ def test_leaps_expiry_handled_and_date_range_independent_of_wall_clock() -> None
     # Check MLK Day holiday in 2028
     assert cal.is_session("2028-01-17") is False
     assert cal.is_holiday("2028-01-17") is True
+    # The constructor default range must cover it too, not only get_calendar()'s arguments
+    assert ExchangeCalendar().session_close("2028-01-21") == close_2028
 
 
 def test_session_open_close_utc_tzinfo() -> None:
