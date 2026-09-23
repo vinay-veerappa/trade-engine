@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 
-from trade_engine.domain.instruments import Side
+from trade_engine.domain.instruments import Equity, Instrument, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.signals import OrderIntent
@@ -123,7 +123,10 @@ class OrderManager:
             parent_order_id=entry.order_id,
             oco_group=f"{prefix}:exits",
         )
-        target_quantities = self._split_quantity(quantity, len(intent.profit_targets))
+        self._validate_quantity(intent.instrument, quantity)
+        target_quantities = self._split_quantity(
+            quantity, len(intent.profit_targets), intent.instrument
+        )
         targets = tuple(
             Order(
                 order_id=f"{prefix}:target:{index}",
@@ -171,10 +174,11 @@ class OrderManager:
                 raise OrderManagementError(
                     f"Child order '{current.order_id}' is held until its entry fills"
                 )
-        if (
-            current.order_type in (OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAIL)
-            and current.order_type not in self._broker.capabilities.supported_order_types
-        ):
+        if current.order_type in (
+            OrderType.STOP,
+            OrderType.STOP_LIMIT,
+            OrderType.TRAIL,
+        ) and not self._supports_native_type(current.order_type):
             return self._start_emulation(current)
         return self._submit_native(current)
 
@@ -208,7 +212,7 @@ class OrderManager:
         emulation = context.emulation
         if emulation is None:
             raise OrderManagementError(f"Emulated order '{order_id}' has not been started")
-        if order.order_type in self._broker.capabilities.supported_order_types:
+        if self._supports_native_type(order.order_type):
             raise OrderManagementError(
                 f"Order '{order_id}' is native at this venue; no local emulation is running"
             )
@@ -301,6 +305,7 @@ class OrderManager:
             venue_type = self._trigger_order_type(order)
             limit_price = trigger_price if venue_type is OrderType.LIMIT else None
         self._require_tif(order, venue_type)
+        self._cancel_emulated_siblings(order, command_id)
         return self._submit_emulated(
             order,
             trigger_price,
@@ -308,6 +313,18 @@ class OrderManager:
             venue_type=venue_type,
             limit_price=limit_price,
         )
+
+    def _cancel_emulated_siblings(self, order: Order, command_id: str) -> None:
+        if order.parent_order_id is None or order.oco_group is None:
+            return
+        siblings = [
+            candidate
+            for candidate in self._account_state(order.account_id).orders.values()
+            if candidate.order_id != order.order_id
+            and candidate.parent_order_id == order.parent_order_id
+            and candidate.oco_group == order.oco_group
+        ]
+        self._cancel_exits(siblings, f"{command_id}:{order.order_id}:trigger")
 
     def record_fill(self, fill: Fill) -> Order:
         """Persist a venue fill and synchronize bracket protection from folded state."""
@@ -317,6 +334,7 @@ class OrderManager:
             raise OrderManagementError(
                 f"Fill '{fill.fill_id}' account or venue environment does not match order '{order.order_id}'"
             )
+        self._validate_quantity(order.instrument, fill.quantity)
         self._append(order.account_id, EventKind.FILL, fill, f"fill:{fill.fill_id}")
         self._synchronize_bracket(order, fill.fill_id)
         return self.get_order(order.order_id)
@@ -360,6 +378,13 @@ class OrderManager:
         """Replace a live order; pending/unknown acknowledgements remain unknown."""
         order = self.get_order(order_id)
         context = self._context(order_id)
+        if (
+            order.state is OrderState.NEW
+            and order.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+            and context.emulation is not None
+            and not context.emulation.triggered
+        ):
+            return self._replace_emulated_stop(order, changes, command_id)
         request_reason = f"Replace pending: {changes!r}"
         pending_command_id = f"{command_id}:pending"
         prior_request = self._ledger.event_by_command(pending_command_id)
@@ -412,6 +437,8 @@ class OrderManager:
             raise ValueError(
                 f"replacement quantity must be finite, positive, and at least filled quantity {filled}"
             )
+        if changes.new_quantity is not None:
+            self._validate_quantity(order.instrument, changes.new_quantity)
         updated = replace(
             order,
             quantity=changes.new_quantity if changes.new_quantity is not None else order.quantity,
@@ -490,10 +517,56 @@ class OrderManager:
         )
         return self.get_order(order_id)
 
+    def _replace_emulated_stop(
+        self, order: Order, changes: OrderChanges, command_id: str
+    ) -> Order:
+        reason = f"Local emulated stop replaced: {changes!r}"
+        local_command_id = f"{command_id}:local"
+        prior = self._ledger.event_by_command(local_command_id)
+        if prior is not None:
+            if (
+                prior.account != order.account_id
+                or prior.kind is not EventKind.ORDER_UPDATED
+                or prior.payload.order.order_id != order.order_id
+                or prior.payload.reason != reason
+            ):
+                raise IdempotencyConflictError(
+                    f"command_id '{command_id}' was replayed with different emulated stop changes"
+                )
+            return self.get_order(order.order_id)
+        context = self._context(order.order_id)
+        if changes.new_quantity is not None:
+            if (
+                not changes.new_quantity.is_finite()
+                or changes.new_quantity <= 0
+                or changes.new_quantity < context.filled
+            ):
+                raise ValueError(
+                    f"replacement quantity must be finite, positive, and at least filled quantity {context.filled}"
+                )
+            self._validate_quantity(order.instrument, changes.new_quantity)
+        updated = replace(
+            order,
+            quantity=changes.new_quantity if changes.new_quantity is not None else order.quantity,
+            limit_price=changes.new_limit_price if changes.new_limit_price is not None else order.limit_price,
+            stop_price=changes.new_stop_price if changes.new_stop_price is not None else order.stop_price,
+        )
+        self._append(
+            order.account_id,
+            EventKind.ORDER_UPDATED,
+            OrderUpdated(updated, reason),
+            local_command_id,
+        )
+        return self.get_order(order.order_id)
+
     def reconcile_order(self, order_id: str) -> Order:
         """Read back an ambiguous venue order; never resend it."""
         context = self._context(order_id)
         order = context.order
+        if order.state is OrderState.PENDING_UNKNOWN and self._has_unresolved_replace(order_id):
+            raise OrderReconciliationError(
+                f"Pending replace terms for '{order_id}' cannot be resolved from status-only venue read-back"
+            )
         states = self._broker.orders(order.created_at)
         venue_id = context.venue_order_id or order_id
         found = next(
@@ -533,11 +606,32 @@ class OrderManager:
                     )
                 )
             return self.get_order(order_id)
-        if found.state in (OrderState.ACCEPTED, OrderState.CANCELLED, OrderState.REJECTED):
+        if found.state is OrderState.SUBMITTED:
+            self._append(
+                order.account_id,
+                EventKind.ORDER_UPDATED,
+                OrderUpdated(
+                    replace(order, state=OrderState.SUBMITTED),
+                    "Venue reconciliation confirmed SUBMITTED",
+                    found.venue_order_id,
+                ),
+                f"{order.command_id}:reconcile:{found.updated_at.isoformat()}:SUBMITTED",
+            )
+            resolved = self.get_order(order_id)
+            self._synchronize_bracket(resolved, f"{order_id}:reconcile-submitted")
+            return resolved
+        if found.state in (
+            OrderState.ACCEPTED,
+            OrderState.CANCELLED,
+            OrderState.REJECTED,
+            OrderState.EXPIRED,
+        ):
             if found.state is OrderState.CANCELLED:
                 kind = EventKind.ORDER_CANCELLED
             elif found.state is OrderState.REJECTED:
                 kind = EventKind.ORDER_REJECTED
+            elif found.state is OrderState.EXPIRED:
+                kind = EventKind.ORDER_EXPIRED
             else:
                 kind = EventKind.ORDER_ACCEPTED
             self._append(
@@ -550,7 +644,9 @@ class OrderManager:
                 ),
                 f"{order.command_id}:reconcile:{found.updated_at.isoformat()}:{found.state.value}",
             )
-            return self.get_order(order_id)
+            resolved = self.get_order(order_id)
+            self._synchronize_bracket(resolved, f"{order_id}:reconcile-{found.state.value}")
+            return resolved
         raise OrderReconciliationError(
             f"Venue state {found.state.value} does not resolve order '{order_id}'"
         )
@@ -560,7 +656,7 @@ class OrderManager:
             if order.state in (OrderState.SUBMITTED, OrderState.PENDING_UNKNOWN):
                 return order
             return order
-        if order.order_type not in self._broker.capabilities.supported_order_types:
+        if not self._supports_native_type(order.order_type):
             self._refuse(
                 order,
                 f"Venue does not support {order.order_type.value}; no native order was sent",
@@ -570,14 +666,15 @@ class OrderManager:
                 f"Venue does not support order type {order.order_type.value}"
             )
         self._require_tif(order)
+        submitted = replace(order, state=OrderState.SUBMITTED)
         self._append(
             order.account_id,
-            EventKind.ORDER_SUBMITTED,
-            order,
+            EventKind.ORDER_UPDATED,
+            OrderUpdated(submitted, "Order submission requested"),
             f"{order.command_id}:submit",
         )
         self._mark_pending(
-            order,
+            submitted,
             "Submit outcome is pending until the venue responds",
             f"{order.command_id}:submit-pending",
         )
@@ -644,14 +741,18 @@ class OrderManager:
                 )
             return current
         self._require_tif(current, venue_type)
+        submitted = replace(current, state=OrderState.SUBMITTED)
         self._append(
             current.account_id,
-            EventKind.ORDER_SUBMITTED,
-            current,
+            EventKind.ORDER_UPDATED,
+            OrderUpdated(
+                submitted,
+                f"Emulated {current.order_type.value} submission requested",
+            ),
             f"{current.command_id}:emulated-submit",
         )
         self._mark_pending(
-            current,
+            submitted,
             f"Emulated {current.order_type.value} triggered at {trigger_price} by {command_id}",
             f"{current.command_id}:emulated-pending",
         )
@@ -707,6 +808,17 @@ class OrderManager:
         targets = [order for order in children if order.order_type is OrderType.LIMIT]
         if stop is None:
             return
+        entry_terminal = context.order.state in (
+            OrderState.FILLED,
+            OrderState.CANCELLED,
+            OrderState.REJECTED,
+            OrderState.EXPIRED,
+        )
+        if (
+            state.filled_quantity.get(entry.order_id, Decimal("0")) == 0
+            and not entry_terminal
+        ):
+            return
 
         stop_filled = state.filled_quantity.get(stop.order_id, Decimal("0"))
         target_filled = sum(
@@ -720,28 +832,20 @@ class OrderManager:
             )
 
         if entry_filled > 0 and open_quantity > 0:
-            desired_stop_total = stop_filled + open_quantity
             self._ensure_child_quantity(
                 stop,
-                desired_stop_total,
+                open_quantity,
                 f"{cause_id}:{stop.order_id}:protective-stop",
             )
-            entry_terminal = context.order.state in (
-                OrderState.FILLED,
-                OrderState.CANCELLED,
-                OrderState.REJECTED,
-                OrderState.EXPIRED,
-            )
-            if stop_filled > 0:
-                self._cancel_targets(
-                    targets,
-                    f"{cause_id}:{stop.order_id}:partial-stop",
+            if stop_filled == 0 and entry_terminal:
+                target_weights = tuple(
+                    self._planned_quantity(target.order_id) for target in targets
                 )
-            elif entry_terminal:
-                for target in targets:
+                target_budgets = self._allocate_quantity(
+                    entry_filled, target_weights, entry.instrument
+                )
+                for target, budget in zip(targets, target_budgets, strict=True):
                     if target.state is OrderState.NEW:
-                        planned = self._planned_quantity(target.order_id)
-                        budget = planned * entry_filled / entry.quantity
                         if budget <= 0:
                             self._cancel_order(
                                 target,
@@ -781,6 +885,7 @@ class OrderManager:
                 f"Protective child '{current.order_id}' is terminal in state {current.state.value}"
             )
         filled = context.filled
+        self._validate_quantity(current.instrument, quantity)
         total_quantity = filled + quantity
         if current.quantity == total_quantity:
             if current.state is OrderState.NEW:
@@ -825,12 +930,21 @@ class OrderManager:
                 OrderState.EXPIRED,
             ):
                 continue
-            self._cancel_order(
+            cancelled = self._cancel_order(
                 current,
                 f"{command_id}:cancel:{current.order_id}",
                 f"Exit sibling cancelled after bracket resolution ({command_id})",
                 oco=True,
             )
+            if cancelled.state not in (
+                OrderState.CANCELLED,
+                OrderState.FILLED,
+                OrderState.REJECTED,
+                OrderState.EXPIRED,
+            ):
+                raise OCOOutcomeUnknownError(
+                    f"Could not confirm cancellation of OCO sibling '{current.order_id}'"
+                )
 
     def _cancel_order(
         self,
@@ -850,6 +964,10 @@ class OrderManager:
         ):
             return current
         if current.state is OrderState.PENDING_UNKNOWN:
+            if oco:
+                raise OCOOutcomeUnknownError(
+                    f"OCO sibling '{current.order_id}' is already pending reconciliation"
+                )
             return current
         if current.state is OrderState.NEW:
             self._append(
@@ -904,6 +1022,10 @@ class OrderManager:
                 ),
                 f"{command_id}:venue-pending",
             )
+            if oco:
+                raise OCOOutcomeUnknownError(
+                    f"Venue has not confirmed cancellation of OCO sibling '{current.order_id}'"
+                )
             return self.get_order(current.order_id)
         raise OrderManagementError(f"Unrecognized venue cancel status {ack.status!r}")
 
@@ -974,6 +1096,15 @@ class OrderManager:
             "Emulated stops require MARKET or LIMIT capability"
         )
 
+    def _supports_native_type(self, order_type: OrderType) -> bool:
+        capabilities = self._broker.capabilities
+        if (
+            order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+            and not capabilities.supports_native_stops
+        ):
+            return False
+        return order_type in capabilities.supported_order_types
+
     def _require_tif(self, order: Order, venue_type: OrderType | None = None) -> None:
         if order.tif not in self._broker.capabilities.supported_tifs:
             self._refuse(
@@ -998,6 +1129,7 @@ class OrderManager:
         )
 
     def _ensure_stored(self, order: Order) -> None:
+        self._validate_quantity(order.instrument, order.quantity)
         try:
             self.get_order(order.order_id)
         except KeyError:
@@ -1053,6 +1185,25 @@ class OrderManager:
                         return order
         raise KeyError(f"No creation event contains order '{order_id}'")
 
+    def _has_unresolved_replace(self, order_id: str) -> bool:
+        for event in self._ledger.events():
+            if (
+                event.kind is not EventKind.ORDER_PENDING
+                or event.payload.order_id != order_id
+                or event.payload.reason is None
+                or not event.payload.reason.startswith("Replace pending:")
+                or event.command_id is None
+                or not event.command_id.endswith(":pending")
+            ):
+                continue
+            command_id = event.command_id.removesuffix(":pending")
+            if (
+                self._ledger.event_by_command(f"{command_id}:accepted") is None
+                and self._ledger.event_by_command(f"{command_id}:rejected") is None
+            ):
+                return True
+        return False
+
     def _append(
         self, account_id: str, kind: EventKind, payload: object, command_id: str
     ) -> Event:
@@ -1100,15 +1251,56 @@ class OrderManager:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _split_quantity(quantity: Decimal, count: int) -> tuple[Decimal, ...]:
+    def _validate_quantity(instrument: Instrument, quantity: Decimal) -> None:
+        if isinstance(instrument, Equity) and quantity != quantity.to_integral_value():
+            raise ValueError(f"Equity order quantity must be a whole number of shares, got {quantity}")
+
+    @classmethod
+    def _split_quantity(
+        cls, quantity: Decimal, count: int, instrument: Instrument
+    ) -> tuple[Decimal, ...]:
         if count == 0:
             return ()
-        portion = quantity / count
-        portions = [portion] * count
-        portions[-1] = quantity - sum(portions[:-1], Decimal("0"))
+        cls._validate_quantity(instrument, quantity)
+        portions = cls._allocate_quantity(
+            quantity, tuple(Decimal("1") for _ in range(count)), instrument
+        )
         if any(portion <= 0 for portion in portions):
             raise ValueError("quantity is too small to allocate a positive amount to each target")
-        return tuple(portions)
+        return portions
+
+    @staticmethod
+    def _allocate_quantity(
+        quantity: Decimal, weights: tuple[Decimal, ...], instrument: Instrument
+    ) -> tuple[Decimal, ...]:
+        if not weights:
+            return ()
+        if any(weight <= 0 for weight in weights):
+            raise ValueError("target allocation weights must be positive")
+        total_weight = sum(weights, Decimal("0"))
+        if isinstance(instrument, Equity):
+            OrderManager._validate_quantity(instrument, quantity)
+            if any(weight != weight.to_integral_value() for weight in weights):
+                raise ValueError("Equity target allocation weights must be whole shares")
+            shares = int(quantity)
+            integer_weights = tuple(int(weight) for weight in weights)
+            denominator = sum(integer_weights)
+            allocations, remainders = zip(
+                *(divmod(shares * weight, denominator) for weight in integer_weights),
+                strict=True,
+            )
+            remaining = shares - sum(allocations)
+            order = sorted(
+                range(len(weights)),
+                key=lambda index: (-remainders[index], index),
+            )
+            adjusted = list(allocations)
+            for index in order[:remaining]:
+                adjusted[index] += 1
+            return tuple(Decimal(value) for value in adjusted)
+
+        portions = tuple(quantity * weight / total_weight for weight in weights)
+        return (*portions[:-1], quantity - sum(portions[:-1], Decimal("0")))
 
     def _bracket_from_orders(self, orders: tuple[Order, ...]) -> Bracket:
         by_id = {order.order_id: self._stored_order(order) for order in orders}

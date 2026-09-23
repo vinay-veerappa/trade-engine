@@ -22,6 +22,7 @@ from trade_engine.domain.orders import (
     IllegalOrderStateTransitionError,
     Order,
     OrderState,
+    OrderType,
     validate_order_transition,
 )
 from trade_engine.domain.portfolio import Fill, Lot, Position
@@ -418,10 +419,30 @@ def _on_order_updated(state: AccountState, event: Event) -> AccountState:
     venue_ids = dict(state.venue_order_ids)
     if update.venue_order_id is not None:
         venue_ids[current.order_id] = update.venue_order_id
+    emulated_orders = dict(state.emulated_orders)
+    emulation = emulated_orders.get(current.order_id)
+    if (
+        emulation is not None
+        and current.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+        and current.stop_price != previous.stop_price
+    ):
+        if emulation.triggered or current.stop_price is None:
+            raise LedgerFoldError(
+                f"Cannot change stop price for triggered emulated order '{current.order_id}' (I5)"
+            )
+        emulated_orders[current.order_id] = EmulatedOrderState(
+            order_id=current.order_id,
+            observed_price=emulation.observed_price,
+            extreme=None,
+            stop_price=current.stop_price,
+            triggered=False,
+            reason=update.reason,
+        )
     return _replace(
         state,
         orders=MappingProxyType(orders),
         venue_order_ids=MappingProxyType(venue_ids),
+        emulated_orders=MappingProxyType(emulated_orders),
     )
 
 
@@ -434,12 +455,10 @@ def _order_state_handler(target: OrderState) -> Callable[[AccountState, Event], 
         venue_ids = dict(state.venue_order_ids)
         if change.venue_order_id is not None:
             venue_ids[change.order_id] = change.venue_order_id
-        refusals = state.refusals + (1 if event.kind is EventKind.ORDER_REFUSED else 0)
         return _replace(
             state,
             orders=MappingProxyType(orders),
             venue_order_ids=MappingProxyType(venue_ids),
-            refusals=refusals,
         )
     return handler
 

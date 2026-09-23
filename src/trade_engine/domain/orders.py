@@ -88,6 +88,7 @@ VALID_ORDER_TRANSITIONS: dict[OrderState, frozenset[OrderState]] = {
     ),
     OrderState.PENDING_UNKNOWN: frozenset(
         {
+            OrderState.SUBMITTED,
             OrderState.ACCEPTED,
             OrderState.PARTIALLY_FILLED,
             OrderState.FILLED,

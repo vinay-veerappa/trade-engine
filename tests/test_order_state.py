@@ -116,6 +116,7 @@ def test_exhaustive_order_state_transition_matrix() -> None:
             OrderState.PENDING_UNKNOWN,
         },
         OrderState.PENDING_UNKNOWN: {
+            OrderState.SUBMITTED,
             OrderState.ACCEPTED,
             OrderState.PARTIALLY_FILLED,
             OrderState.FILLED,

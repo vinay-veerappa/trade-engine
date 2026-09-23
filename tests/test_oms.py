@@ -25,6 +25,7 @@ from trade_engine.oms import (
     OrderManagementError,
     OrderManager,
     OrderPendingReconciliationError,
+    OrderReconciliationError,
     TrailingStopEmulator,
     UnsupportedOrderCapabilityError,
 )
@@ -49,6 +50,7 @@ class FakeBroker:
         *,
         order_types: frozenset[OrderType] | None = None,
         tifs: frozenset[TimeInForce] | None = None,
+        native_stops: bool = True,
     ) -> None:
         self.capabilities = Capabilities(
             supported_order_types=order_types
@@ -56,7 +58,7 @@ class FakeBroker:
             else frozenset({OrderType.MARKET, OrderType.LIMIT, OrderType.STOP}),
             supported_tifs=tifs if tifs is not None else frozenset({TimeInForce.DAY}),
             supports_multi_leg=False,
-            supports_native_stops=True,
+            supports_native_stops=native_stops,
             supports_streaming=True,
         )
         self.submitted: list[VenueOrder] = []
@@ -172,6 +174,37 @@ def test_bracket_replay_is_persisted_and_payload_conflicts_are_refused(manager_f
         second.create_bracket(make_intent(), Decimal("50"))
 
 
+def test_replaying_full_command_sequence_after_restart_is_stable(manager_factory):
+    broker = FakeBroker()
+    manager, ledger, _ = manager_factory(broker)
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "restart-entry-fill", "10", "100"))
+    before = ledger.count()
+    expected = tuple(manager.get_order(order.order_id) for order in (
+        bracket.entry,
+        bracket.stop,
+        *bracket.targets,
+    ))
+
+    ledger.close()
+    ledger.open()
+    restarted = OrderManager(broker, FakeClock(), ledger)
+    replayed = restarted.create_bracket(make_intent(), Decimal("10"))
+    restarted.submit(replayed.entry)
+    restarted.record_fill(
+        make_fill(replayed.entry, "restart-entry-fill", "10", "100")
+    )
+
+    actual = tuple(
+        restarted.get_order(order.order_id)
+        for order in (replayed.entry, replayed.stop, *replayed.targets)
+    )
+    assert actual == expected
+    assert ledger.count() == before
+    assert len(broker.submitted) == 4
+
+
 def test_children_are_held_and_target_quantity_is_split(manager_factory):
     manager, ledger, broker = manager_factory()
     bracket = manager.create_bracket(make_intent(), Decimal("10"))
@@ -194,6 +227,56 @@ def test_children_are_held_and_target_quantity_is_split(manager_factory):
         Decimal("5"),
     ]
     assert ledger.state("account-1").orders[bracket.targets[0].order_id].state is OrderState.ACCEPTED
+
+
+def test_equity_bracket_allocates_whole_shares_and_refuses_unallocatable_targets(manager_factory):
+    manager, ledger, _ = manager_factory()
+    intent = make_intent(
+        command_id="three-targets",
+        targets=(Decimal("105"), Decimal("110"), Decimal("115")),
+    )
+
+    bracket = manager.create_bracket(intent, Decimal("10"))
+
+    assert [target.quantity for target in bracket.targets] == [
+        Decimal("4"),
+        Decimal("3"),
+        Decimal("3"),
+    ]
+    with pytest.raises(ValueError, match="too small"):
+        manager.create_bracket(
+            make_intent(
+                command_id="too-many-targets",
+                targets=(Decimal("105"), Decimal("110"), Decimal("115")),
+            ),
+            Decimal("2"),
+        )
+    with pytest.raises(ValueError, match="whole number"):
+        manager.create_bracket(
+            make_intent(command_id="fractional-equity"), Decimal("10.5")
+        )
+    assert ledger.count() == 1
+
+
+def test_partial_entry_allocates_whole_shares_across_three_targets(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(
+        make_intent(
+            command_id="partial-three-targets",
+            targets=(Decimal("105"), Decimal("110"), Decimal("115")),
+        ),
+        Decimal("10"),
+    )
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "partial-three-fill", "4", "100"))
+
+    manager.cancel(bracket.entry.order_id, command_id="partial-three-cancel")
+
+    assert [order.quantity for order in broker.submitted[-3:]] == [
+        Decimal("2"),
+        Decimal("1"),
+        Decimal("1"),
+    ]
 
 
 def test_partial_entry_protects_only_filled_quantity_and_scales_targets_on_cancel(manager_factory):
@@ -260,6 +343,37 @@ def test_stop_fill_cancels_target_siblings_only_after_confirmed_ack(manager_fact
     )
 
 
+def test_partial_stop_fill_keeps_stop_at_total_size_and_cancels_targets(manager_factory):
+    manager, ledger, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "partial-stop-entry", "10", "100"))
+
+    manager.record_fill(make_fill(bracket.stop, "partial-stop-exit", "4", "95"))
+
+    assert manager.get_order(bracket.stop.order_id).quantity == Decimal("10")
+    assert ledger.state("account-1").filled_quantity[bracket.stop.order_id] == Decimal("4")
+    assert broker.replaced == []
+    assert broker.cancelled == [target.order_id for target in bracket.targets]
+    assert all(
+        manager.get_order(target.order_id).state is OrderState.CANCELLED
+        for target in bracket.targets
+    )
+
+
+def test_only_protective_stop_cannot_be_cancelled_while_position_is_open(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "guard-entry-fill", "10", "100"))
+
+    with pytest.raises(OrderManagementError, match="protective stop"):
+        manager.cancel(bracket.stop.order_id, command_id="cancel-only-stop")
+
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.ACCEPTED
+    assert broker.cancelled == []
+
+
 def test_rejected_oco_cancel_remains_pending_and_surfaces_conflict(manager_factory):
     manager, ledger, broker = manager_factory()
     bracket = manager.create_bracket(make_intent(), Decimal("10"))
@@ -311,6 +425,56 @@ def test_cancel_pending_ack_is_not_reported_cancelled(manager_factory):
 
     assert cancelled.state is OrderState.PENDING_UNKNOWN
     assert manager.get_order(order.order_id).state is OrderState.PENDING_UNKNOWN
+
+
+def test_pending_entry_cancel_preserves_children_until_entry_is_terminal(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    broker.cancel_status = "PENDING"
+
+    pending = manager.cancel(bracket.entry.order_id, command_id="pending-entry-cancel")
+
+    assert pending.state is OrderState.PENDING_UNKNOWN
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.NEW
+    assert all(
+        manager.get_order(target.order_id).state is OrderState.NEW
+        for target in bracket.targets
+    )
+    assert broker.cancelled == [bracket.entry.order_id]
+
+    manager.record_fill(make_fill(bracket.entry, "late-entry-fill", "4", "100"))
+
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.ACCEPTED
+    assert manager.get_order(bracket.stop.order_id).quantity == Decimal("4")
+    assert all(
+        manager.get_order(target.order_id).state is OrderState.NEW
+        for target in bracket.targets
+    )
+
+
+def test_reconcile_confirmed_entry_cancel_cancels_unrouted_children(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    broker.cancel_status = "PENDING"
+    manager.cancel(bracket.entry.order_id, command_id="pending-entry-cancel")
+    broker.order_readback = [
+        VenueOrderState(
+            venue_order_id=bracket.entry.order_id,
+            state=OrderState.CANCELLED,
+            filled_quantity=Decimal("0"),
+            remaining_quantity=Decimal("10"),
+            updated_at=NOW,
+        )
+    ]
+
+    assert manager.reconcile_order(bracket.entry.order_id).state is OrderState.CANCELLED
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.CANCELLED
+    assert all(
+        manager.get_order(target.order_id).state is OrderState.CANCELLED
+        for target in bracket.targets
+    )
 
 
 def test_entry_cancel_cancels_unrouted_children_locally(manager_factory):
@@ -496,6 +660,72 @@ def test_replace_refuses_terminal_order_and_pending_result_is_not_success(manage
         )
 
 
+def test_reconcile_does_not_accept_pending_replace_with_old_terms(manager_factory):
+    manager, _, broker = manager_factory()
+    order = Order(
+        order_id="pending-replace-readback",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("2"),
+        command_id="pending-replace-readback-command",
+        created_at=NOW,
+        limit_price=Decimal("100"),
+    )
+    manager.submit(order)
+    broker.replace_status = "PENDING"
+    pending = manager.replace(
+        order.order_id,
+        OrderChanges(new_limit_price=Decimal("101")),
+        command_id="pending-limit-update",
+    )
+    broker.order_readback = [
+        VenueOrderState(
+            venue_order_id=order.order_id,
+            state=OrderState.ACCEPTED,
+            filled_quantity=Decimal("0"),
+            remaining_quantity=Decimal("2"),
+            updated_at=NOW,
+        )
+    ]
+
+    with pytest.raises(OrderReconciliationError, match="replace terms"):
+        manager.reconcile_order(order.order_id)
+
+    assert pending.state is OrderState.PENDING_UNKNOWN
+    assert manager.get_order(order.order_id).state is OrderState.PENDING_UNKNOWN
+    assert manager.get_order(order.order_id).limit_price == Decimal("100")
+
+
+@pytest.mark.parametrize("venue_state", [OrderState.SUBMITTED, OrderState.EXPIRED])
+def test_reconcile_handles_submitted_and_expired_states(manager_factory, venue_state):
+    manager, _, broker = manager_factory()
+    order = Order(
+        order_id=f"reconcile-{venue_state.value.lower()}",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.MARKET,
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        command_id=f"reconcile-{venue_state.value.lower()}-command",
+        created_at=NOW,
+    )
+    broker.submit_status = "PENDING"
+    manager.submit(order)
+    broker.order_readback = [
+        VenueOrderState(
+            venue_order_id=order.order_id,
+            state=venue_state,
+            filled_quantity=Decimal("0"),
+            remaining_quantity=Decimal("1"),
+            updated_at=NOW,
+        )
+    ]
+
+    assert manager.reconcile_order(order.order_id).state is venue_state
+
+
 def test_noop_replace_command_is_idempotent_and_payload_bound(manager_factory):
     manager, _, broker = manager_factory()
     order = Order(
@@ -612,6 +842,65 @@ def test_unsupported_stop_limit_routes_original_limit_price(manager_factory):
     assert broker.submitted[0].order_type is OrderType.LIMIT
     assert broker.submitted[0].limit_price == Decimal("106")
     assert broker.submitted[0].stop_price is None
+
+
+def test_emulated_bracket_stop_can_be_replaced_and_cancels_targets_before_exit(manager_factory):
+    broker = FakeBroker(order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}))
+    manager, ledger, _ = manager_factory(broker)
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "emulated-entry-fill", "10", "100"))
+
+    moved = manager.replace(
+        bracket.stop.order_id,
+        OrderChanges(new_stop_price=Decimal("100")),
+        command_id="move-emulated-stop",
+    )
+
+    assert moved.state is OrderState.NEW
+    assert moved.stop_price == Decimal("100")
+    assert ledger.state("account-1").emulated_orders[
+        bracket.stop.order_id
+    ].stop_price == Decimal("100")
+    assert broker.replaced == []
+
+    triggered = manager.update_emulated_order(
+        bracket.stop.order_id, Decimal("100"), command_id="emulated-stop-trigger"
+    )
+
+    assert triggered.state is OrderState.ACCEPTED
+    assert broker.cancelled == [target.order_id for target in bracket.targets]
+    assert all(
+        manager.get_order(target.order_id).state is OrderState.CANCELLED
+        for target in bracket.targets
+    )
+    assert broker.submitted[-1].order_type is OrderType.MARKET
+
+
+def test_supports_native_stops_flag_overrides_order_type_list(manager_factory):
+    broker = FakeBroker(
+        order_types=frozenset({OrderType.MARKET, OrderType.LIMIT, OrderType.STOP}),
+        native_stops=False,
+    )
+    manager, _, _ = manager_factory(broker)
+    order = Order(
+        order_id="flag-emulated-stop",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.STOP,
+        side=Side.SELL,
+        quantity=Decimal("1"),
+        command_id="flag-emulated-stop-command",
+        created_at=NOW,
+        stop_price=Decimal("95"),
+    )
+
+    assert manager.submit(order).state is OrderState.NEW
+    assert broker.submitted == []
+    assert manager.update_emulated_order(
+        order.order_id, Decimal("95"), command_id="flag-emulated-stop-trigger"
+    ).state is OrderState.ACCEPTED
+    assert broker.submitted[-1].order_type is OrderType.MARKET
 
 
 def test_triggered_emulation_is_resumed_after_restart_before_submit(manager_factory):
