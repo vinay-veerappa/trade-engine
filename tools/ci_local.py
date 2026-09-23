@@ -54,8 +54,8 @@ def check_git_clean(include_uncommitted: bool) -> bool:
 
 
 def check_invariants() -> bool:
-    say("Checking invariants (I7: no uncontrolled clock reads in src/)...")
-    violations = check_i7_invariants(SRC_DIR)
+    say("Checking invariants (I7: no uncontrolled clock reads in src/ outside WallClock)...")
+    violations = check_i7_invariants(SRC_DIR, allowlist={"trade_engine/clock/wall.py"})
     if violations:
         say("FAIL: Invariant violations found:")
         for v in violations:
