@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -13,14 +14,17 @@ from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
 from trade_engine.domain.signals import OrderIntent
 from trade_engine.interfaces.broker import (
     OrderChanges,
+    VenueFill,
     VenueOrder,
     VenueOrderAllocation,
+    VenuePosition,
 )
 from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import Bar
 from trade_engine.ledger import Ledger
 from trade_engine.oms.manager import OrderManagementError, OrderManager
 from trade_engine.sim import MissingBarError, SimBroker
+from trade_engine.sim.broker import SimBrokerError
 
 UTC = timezone.utc
 ACCOUNT = "sim-account"
@@ -1096,3 +1100,164 @@ def test_rejected_late_exit_stays_rejected_when_resubmitted() -> None:
         assert ack.status == "REJECTED"
         state = next(s for s in broker.orders(START) if s.venue_order_id == "late:stop")
         assert state.state is OrderState.REJECTED
+
+
+# -- restore: an empty simulator reloaded from the ledger's fold ---------------------
+
+
+def _venue_order(
+    order_id: str,
+    *,
+    side: Side,
+    order_type: OrderType,
+    quantity: str = "2",
+    limit_price: str | None = None,
+    stop_price: str | None = None,
+    parent_order_id: str | None = None,
+    oco_group: str | None = None,
+    submitted_at: datetime = START,
+) -> VenueOrder:
+    return VenueOrder(
+        venue_order_id=order_id,
+        instrument=INSTRUMENT,
+        order_type=order_type,
+        side=side,
+        quantity=Decimal(quantity),
+        submitted_at=submitted_at,
+        tif=TimeInForce.GTC,
+        limit_price=None if limit_price is None else Decimal(limit_price),
+        stop_price=None if stop_price is None else Decimal(stop_price),
+        allocations=(VenueOrderAllocation(order_id, ACCOUNT, Decimal(quantity)),),
+        parent_order_id=parent_order_id,
+        oco_group=oco_group,
+    )
+
+
+def _venue_fill(order_id: str, number: int, quantity: str, side: Side) -> VenueFill:
+    return VenueFill(
+        venue_fill_id=f"{order_id}:fill:{number}",
+        venue_order_id=order_id,
+        instrument=INSTRUMENT,
+        quantity=Decimal(quantity),
+        price=Decimal("100"),
+        filled_at=START + timedelta(minutes=1),
+        side=side,
+    )
+
+
+def _held_bracket() -> tuple[list[tuple[VenueOrder, OrderState]], list[VenueFill]]:
+    """A filled 2-share entry whose stop has already sold 1 share."""
+    entry = _venue_order("b:entry", side=Side.BUY, order_type=OrderType.LIMIT, limit_price="100")
+    stop = _venue_order(
+        "b:stop",
+        side=Side.SELL,
+        order_type=OrderType.STOP,
+        stop_price="95",
+        parent_order_id="b:entry",
+        oco_group="b:exits",
+    )
+    return (
+        [(stop, OrderState.PARTIALLY_FILLED), (entry, OrderState.FILLED)],
+        [_venue_fill("b:entry", 1, "2", Side.BUY), _venue_fill("b:stop", 1, "1", Side.SELL)],
+    )
+
+
+def _position(quantity: str) -> VenuePosition:
+    return VenuePosition(
+        instrument=INSTRUMENT,
+        quantity=Decimal(quantity),
+        avg_price=Decimal("100"),
+        as_of=START + timedelta(minutes=1),
+    )
+
+
+def test_restored_bracket_keeps_working_and_continues_fill_numbering() -> None:
+    clock = ReplayClock(datetime(2026, 9, 24, 13, 29, tzinfo=UTC))
+    broker, _ = broker_fixture(clock=clock)
+    orders, fills = _held_bracket()
+    broker.restore(orders, fills, [_position("1")])
+
+    session_open = datetime(2026, 9, 24, 13, 30, tzinfo=UTC)
+    clock.set(session_open)
+    produced = broker.process_bar(bar(session_open, open_="96", high="96", low="94", close="95"))
+
+    # The stop sells the one share still held, under a fresh id: ":fill:1" is taken.
+    assert [(fill.venue_fill_id, fill.quantity) for fill in produced] == [
+        ("b:stop:fill:2", Decimal("1"))
+    ]
+    assert {state.venue_order_id: state.state for state in broker.orders(START)} == {
+        "b:entry": OrderState.FILLED,
+        "b:stop": OrderState.FILLED,
+    }
+    assert broker.positions() == []
+
+
+def test_restore_refuses_a_simulator_that_already_holds_orders() -> None:
+    broker, clock = broker_fixture()
+    place_order(
+        broker, clock, "live", side=Side.BUY, order_type=OrderType.LIMIT,
+        limit_price=Decimal("100"),
+    )
+    orders, fills = _held_bracket()
+    with pytest.raises(SimBrokerError, match="empty SimBroker"):
+        broker.restore(orders, fills, [])
+
+
+@pytest.mark.parametrize("state", [OrderState.NEW, OrderState.SUBMITTED, OrderState.PENDING_UNKNOWN])
+def test_restore_refuses_orders_the_venue_never_confirmed(state: OrderState) -> None:
+    broker, _ = broker_fixture()
+    entry = _venue_order("e", side=Side.BUY, order_type=OrderType.LIMIT, limit_price="100")
+    with pytest.raises(SimBrokerError, match=f"state {state.value}"):
+        broker.restore([(entry, state)], [], [])
+
+
+def test_restore_refuses_an_order_given_twice() -> None:
+    broker, _ = broker_fixture()
+    entry = _venue_order("e", side=Side.BUY, order_type=OrderType.LIMIT, limit_price="100")
+    with pytest.raises(SimBrokerError, match="restored twice"):
+        broker.restore([(entry, OrderState.ACCEPTED), (entry, OrderState.ACCEPTED)], [], [])
+
+
+def test_restore_refuses_a_fill_for_an_order_it_was_not_given() -> None:
+    broker, _ = broker_fixture()
+    with pytest.raises(SimBrokerError, match="unrestored order"):
+        broker.restore([], [_venue_fill("ghost", 1, "1", Side.BUY)], [])
+
+
+def test_restore_refuses_a_fill_id_outside_the_simulator_numbering() -> None:
+    broker, _ = broker_fixture()
+    entry = _venue_order("e", side=Side.BUY, order_type=OrderType.LIMIT, limit_price="100")
+    foreign = replace(_venue_fill("e", 1, "2", Side.BUY), venue_fill_id="exec-123")
+    with pytest.raises(SimBrokerError, match="not a SimBroker fill id"):
+        broker.restore([(entry, OrderState.FILLED)], [foreign], [])
+
+
+def test_restore_refuses_a_fill_on_the_wrong_side() -> None:
+    broker, _ = broker_fixture()
+    entry = _venue_order("e", side=Side.BUY, order_type=OrderType.LIMIT, limit_price="100")
+    with pytest.raises(SimBrokerError, match="does not match order"):
+        broker.restore([(entry, OrderState.FILLED)], [_venue_fill("e", 1, "2", Side.SELL)], [])
+
+
+@pytest.mark.parametrize(
+    ("state", "filled"),
+    [
+        (OrderState.ACCEPTED, "1"),
+        (OrderState.PARTIALLY_FILLED, "2"),
+        (OrderState.FILLED, "1"),
+        (OrderState.CANCELLED, "3"),
+    ],
+)
+def test_restore_refuses_a_state_its_fills_contradict(state: OrderState, filled: str) -> None:
+    broker, _ = broker_fixture()
+    entry = _venue_order("e", side=Side.BUY, order_type=OrderType.LIMIT, limit_price="100")
+    fills = [_venue_fill("e", number + 1, "1", Side.BUY) for number in range(int(filled))]
+    with pytest.raises(SimBrokerError, match=f"is {state.value} with {filled}"):
+        broker.restore([(entry, state)], fills, [])
+
+
+def test_restore_refuses_a_position_given_twice() -> None:
+    broker, _ = broker_fixture()
+    orders, fills = _held_bracket()
+    with pytest.raises(SimBrokerError, match="Position AAPL restored twice"):
+        broker.restore(orders, fills, [_position("1"), _position("1")])

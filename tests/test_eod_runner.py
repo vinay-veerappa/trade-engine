@@ -897,3 +897,211 @@ def test_session_must_be_a_date_not_a_datetime(tmp_path: Path) -> None:
             EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
         ).run(SESSION_OPEN)  # datetime, not date
     ledger.close()
+
+# -- a new process: the in-memory SimBroker is restored from the ledger --------------
+
+NEXT_OPEN = datetime(2026, 9, 24, 13, 30, tzinfo=UTC)
+
+
+def _minute_of(timestamp: datetime) -> int:
+    """FakeMarketData scripts count minutes from SESSION_OPEN, across sessions."""
+    return int((timestamp - SESSION_OPEN).total_seconds() // 60)
+
+
+def test_fresh_simbroker_works_the_ledgers_d_plus_one_entry(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    seeding_broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    seeding_broker.connect()
+    bracket = _seed_bracket(ledger, seeding_broker, clock, command_id="e7-restore")
+
+    # The EOD job is a new process: its SimBroker has never seen the entry.
+    fresh_broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    result = EodRunner(
+        ledger,
+        clock,
+        CALENDAR,
+        FakeMarketData(),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: fresh_broker}),
+    ).run(SESSION)
+
+    state = ledger.state(ACCOUNT)
+    assert result.accounts[0].fills_recorded == 1
+    assert state.orders[bracket.entry.order_id].state is OrderState.FILLED
+    assert state.positions[INSTRUMENT].quantity == Decimal("2")
+    assert {state.orders[order.order_id].state for order in (bracket.stop, *bracket.targets)} == {
+        OrderState.ACCEPTED
+    }
+    ledger.close()
+
+
+def test_fresh_simbroker_keeps_yesterdays_gtc_stop_protecting(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    bracket = _seed_bracket(ledger, broker, clock, command_id="e7-swing")
+    stop_minute = _minute_of(NEXT_OPEN + timedelta(minutes=60))
+    market_data = FakeMarketData({stop_minute: ("96", "96", "94", "95")})
+    EodRunner(
+        ledger, clock, CALENDAR, market_data,
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+    assert ledger.state(ACCOUNT).positions[INSTRUMENT].quantity == Decimal("2")
+
+    clock.set(NEXT_OPEN - timedelta(minutes=1))
+    fresh_broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    EodRunner(
+        ledger, clock, CALENDAR, market_data,
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: fresh_broker}),
+    ).run(NEXT_SESSION)
+
+    state = ledger.state(ACCOUNT)
+    stop, target = bracket.stop, bracket.targets[0]
+    assert state.orders[stop.order_id].state is OrderState.FILLED
+    assert state.orders[target.order_id].state is OrderState.CANCELLED
+    assert state.positions[INSTRUMENT].quantity == Decimal("0")
+    exit_fill = next(fill for fill in state.fills if fill.order_id == stop.order_id)
+    assert exit_fill.filled_at == NEXT_OPEN + timedelta(minutes=60)
+    assert exit_fill.price == Decimal("95")
+    ledger.close()
+
+
+class _ReadOnlyVenue:
+    """A venue that reports a fixed book; lets a test show what the runner demands."""
+
+    env = "paper"
+
+    def __init__(self, states=()) -> None:
+        self._states = list(states)
+
+    def connect(self) -> None:
+        return None
+
+    def orders(self, since):
+        return list(self._states)
+
+    def fills(self, since):
+        return []
+
+
+def test_venue_missing_a_working_order_refuses(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    seeding_broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    seeding_broker.connect()
+    bracket = _seed_bracket(ledger, seeding_broker, clock, command_id="e7-missing")
+    with pytest.raises(EodRunnerError, match=f"does not hold working order '{bracket.entry.order_id}'"):
+        EodRunner(
+            ledger, clock, CALENDAR, FakeMarketData(),
+            EodRunnerConfig(job_name="eod", brokers={ACCOUNT: _ReadOnlyVenue()}),
+        ).run(SESSION)
+    ledger.close()
+
+
+def test_venue_reporting_fewer_fills_than_the_ledger_refuses(tmp_path: Path) -> None:
+    from trade_engine.interfaces.broker import VenueOrderState
+
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    seeding_broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    seeding_broker.connect()
+    bracket = _seed_bracket(ledger, seeding_broker, clock, command_id="e7-short")
+    entry_id = bracket.entry.order_id
+    OrderManager(seeding_broker, clock, ledger).record_fill(
+        Fill(
+            fill_id="partial-1",
+            order_id=entry_id,
+            account_id=ACCOUNT,
+            instrument=INSTRUMENT,
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+            venue_env="sim",
+            filled_at=clock.now_utc(),
+            side=Side.BUY,
+        )
+    )
+    assert ledger.state(ACCOUNT).orders[entry_id].state is OrderState.PARTIALLY_FILLED
+    venue = _ReadOnlyVenue(
+        [
+            VenueOrderState(
+                venue_order_id=entry_id,
+                state=OrderState.ACCEPTED,
+                filled_quantity=Decimal("0"),
+                remaining_quantity=Decimal("2"),
+                updated_at=PREV_EOD,
+            )
+        ]
+    )
+    with pytest.raises(EodRunnerError, match="reports 0 filled .* ledger records 1"):
+        EodRunner(
+            ledger, clock, CALENDAR, FakeMarketData(),
+            EodRunnerConfig(job_name="eod", brokers={ACCOUNT: venue}),
+        ).run(SESSION)
+    ledger.close()
+
+
+class _LostAckBroker(SimBroker):
+    def submit(self, order):
+        raise ConnectionError("ack lost")
+
+
+def test_pending_unknown_order_is_not_restored(tmp_path: Path) -> None:
+    from trade_engine.oms.manager import BrokerOutcomeUnknownError
+
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    lossy = _LostAckBroker(ACCOUNT, clock, Decimal("0"))
+    lossy.connect()
+    with pytest.raises(BrokerOutcomeUnknownError):
+        _seed_bracket(ledger, lossy, clock, command_id="e7-pending")
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    with pytest.raises(EodRunnerError, match="PENDING_UNKNOWN"):
+        EodRunner(
+            ledger, clock, CALENDAR, FakeMarketData(),
+            EodRunnerConfig(
+                job_name="eod", brokers={ACCOUNT: SimBroker(ACCOUNT, clock, Decimal("0"))}
+            ),
+        ).run(SESSION)
+    ledger.close()
+
+
+def test_order_without_a_submission_event_is_not_restored(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    order = Order(
+        order_id="manual-entry",
+        account_id=ACCOUNT,
+        instrument=INSTRUMENT,
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        command_id="manual:entry",
+        created_at=PREV_EOD,
+        limit_price=Decimal("100"),
+        tif=TimeInForce.GTC,
+    )
+    ledger.append(
+        Event(
+            account=ACCOUNT,
+            kind=EventKind.ORDER_SUBMITTED,
+            payload=order,
+            ts_utc=PREV_EOD,
+            command_id="manual:entry",
+        )
+    )
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    with pytest.raises(EodRunnerError, match="no submission event"):
+        EodRunner(
+            ledger, clock, CALENDAR, FakeMarketData(),
+            EodRunnerConfig(
+                job_name="eod", brokers={ACCOUNT: SimBroker(ACCOUNT, clock, Decimal("0"))}
+            ),
+        ).run(SESSION)
+    ledger.close()

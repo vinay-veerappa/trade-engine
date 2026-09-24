@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -98,6 +99,89 @@ class SimBroker(BrokerAdapter):
             connected_at=self._now(),
             broker_name=self.name,
         )
+
+    def restore(
+        self,
+        orders: Iterable[tuple[VenueOrder, OrderState]],
+        fills: Iterable[VenueFill],
+        positions: Iterable[VenuePosition],
+    ) -> None:
+        """Load resting orders, their fills and positions into an empty simulator.
+
+        SimBroker keeps its book in memory, so a new process starts empty while the
+        ledger still holds working orders from earlier sessions (a DAY entry for D+1, a
+        GTC stop protecting a swing position). The ledger is the source of truth (I2):
+        the host folds it and hands the simulator what a real venue would still hold.
+        Anything inconsistent refuses rather than being patched up (I5).
+        """
+        if self._orders or self._fills or self._last_bars or self._positions:
+            raise SimBrokerError("restore() requires an empty SimBroker")
+        restored = sorted(orders, key=lambda item: item[0].parent_order_id is not None)
+        allowed = {
+            OrderState.ACCEPTED,
+            OrderState.PARTIALLY_FILLED,
+            OrderState.FILLED,
+            OrderState.CANCELLED,
+            OrderState.EXPIRED,
+            OrderState.REJECTED,
+        }
+        for order, state in restored:
+            if state not in allowed:
+                raise SimBrokerError(
+                    f"Cannot restore '{order.venue_order_id}' in state {state.value}"
+                )
+            if order.venue_order_id in self._orders:
+                raise SimBrokerError(f"Order '{order.venue_order_id}' restored twice")
+            self._validate_venue_order(order)
+            self._orders[order.venue_order_id] = _WorkingOrder(
+                order=order, state=state, filled_quantity=ZERO, updated_at=order.submitted_at
+            )
+        for fill in sorted(fills, key=lambda item: (item.filled_at, item.venue_fill_id)):
+            working = self._orders.get(fill.venue_order_id)
+            if working is None:
+                raise SimBrokerError(
+                    f"Fill '{fill.venue_fill_id}' references unrestored order "
+                    f"'{fill.venue_order_id}'"
+                )
+            prefix, separator, number = fill.venue_fill_id.rpartition(":fill:")
+            if prefix != fill.venue_order_id or not separator or not number.isdecimal():
+                # A new fill id must never collide with a recorded one, so every restored
+                # id must follow the simulator's own numbering.
+                raise SimBrokerError(
+                    f"Fill id '{fill.venue_fill_id}' is not a SimBroker fill id"
+                )
+            if fill.instrument != working.order.instrument or fill.side is not working.order.side:
+                raise SimBrokerError(
+                    f"Fill '{fill.venue_fill_id}' does not match order '{fill.venue_order_id}'"
+                )
+            self._fill_counts[fill.venue_order_id] = max(
+                self._fill_counts.get(fill.venue_order_id, 0), int(number)
+            )
+            working.filled_quantity += fill.quantity
+            working.updated_at = max(working.updated_at, fill.filled_at)
+            self._fills.append(fill)
+        for venue_order_id, working in self._orders.items():
+            filled = working.filled_quantity
+            quantity = working.order.quantity
+            consistent = {
+                OrderState.ACCEPTED: filled == ZERO,
+                OrderState.PARTIALLY_FILLED: ZERO < filled < quantity,
+                OrderState.FILLED: filled == quantity,
+            }.get(working.state, filled <= quantity)
+            if not consistent:
+                raise SimBrokerError(
+                    f"Order '{venue_order_id}' is {working.state.value} with {filled} of "
+                    f"{quantity} filled"
+                )
+        for position in positions:
+            if position.instrument in self._positions:
+                raise SimBrokerError(f"Position {position.instrument.symbol} restored twice")
+            if position.quantity != ZERO:
+                self._positions[position.instrument] = (
+                    position.quantity,
+                    position.avg_price,
+                    position.as_of,
+                )
 
     def submit(self, order: VenueOrder) -> VenueAck:
         self._require_connected()
