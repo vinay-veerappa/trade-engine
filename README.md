@@ -67,6 +67,16 @@ Set `entry_type=OrderType.STOP` for a breakout trigger: the entry rests as a sto
 A venue without native stops refuses a stop entry before anything is persisted; an emulated
 entry would need a live price feed that an EOD bracket does not have.
 
+Set `entry_type=OrderType.STOP_LIMIT` with `entry_limit_price` for a breakout with a chase
+limit ("buy-stop above the high, skip if it opens more than 0.5 ATR over the trigger"):
+the stop triggers at `entry_price`, then the order works as a limit at `entry_limit_price`.
+A gap open over the limit does not fill; if price later trades back to or under the limit
+while the order is working, it fills. `entry_limit_price` is required for `STOP_LIMIT` and
+refused for other entry types; a buy's limit must be at or above `entry_price`, a sell's
+at or below it. The limit joins the bracket fingerprint only for `STOP_LIMIT`, so existing
+brackets keep theirs. A venue without native stop-limit orders refuses the entry before
+anything is persisted, for the same reason as a stop entry.
+
 ## Target Fractions
 
 `OrderIntent.target_fractions` sets the share of the position each profit target exits,
@@ -120,6 +130,12 @@ entry price when the entry was already through it); targets the entry bar reache
 for a later bar, since the bar may have reached them before the entry.
 Callers must reconcile after every bar: an exit submitted after bars following its entry
 fill were simulated is rejected, because those bars can no longer be matched.
+A stop-limit triggers on a bar that trades at or through its stop and then works as a
+limit for the rest of its life. When the bar opens at or through the stop it fills at the
+open if that is within the limit, at the limit if the bar's range comes back to it, and
+not at all otherwise. A stop first reached inside the bar fills at the stop (or, with a
+limit short of the stop, waits for a later bar). Like limit fills, stop-limit fills take
+the configured slippage but never fill past the limit.
 Time-stop exits use market-on-open orders (`TimeInForce.OPG`) and fill only at the first
 eligible 09:30 ET session open after submission; they expire if that open passes
 without being simulated. A missing expected open raises `MissingBarError`.
@@ -129,7 +145,10 @@ restores an empty SimBroker from the ledger before replay: working orders (with 
 original submit times), the rest of their brackets, those orders' fills, and open
 positions. The runner then checks that the venue holds every order the ledger says is
 working, and refuses if it doesn't. An order left `PENDING_UNKNOWN`, or one with no
-recorded submission, can't be restored and is refused too.
+recorded submission, can't be restored and is refused too. So is an unfilled stop-limit
+that bars since its submission may already have triggered (a GTC one that lived through a
+session): whether it triggered is not in the ledger. A DAY stop-limit entry placed after
+the close restores untriggered and is simulated from the next open.
 
 ## Development
 

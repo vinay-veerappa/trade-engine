@@ -51,6 +51,8 @@ class _WorkingOrder:
     state: OrderState
     filled_quantity: Decimal
     updated_at: datetime
+    # A STOP_LIMIT whose stop has traded works as a limit from then on, across bars.
+    triggered: bool = False
 
 
 class SimBroker(BrokerAdapter):
@@ -60,7 +62,7 @@ class SimBroker(BrokerAdapter):
     env = "sim"
     capabilities = Capabilities(
         supported_order_types=frozenset(
-            {OrderType.MARKET, OrderType.LIMIT, OrderType.STOP}
+            {OrderType.MARKET, OrderType.LIMIT, OrderType.STOP, OrderType.STOP_LIMIT}
         ),
         supported_tifs=frozenset({TimeInForce.DAY, TimeInForce.GTC, TimeInForce.OPG}),
         supports_multi_leg=False,
@@ -133,6 +135,18 @@ class SimBroker(BrokerAdapter):
             if order.venue_order_id in self._orders:
                 raise SimBrokerError(f"Order '{order.venue_order_id}' restored twice")
             self._validate_venue_order(order)
+            if (
+                order.order_type is OrderType.STOP_LIMIT
+                and state is OrderState.ACCEPTED
+                and not self._has_expired(order, self._now())
+                and self._now() > self._first_eligible_bar(order.submitted_at)
+            ):
+                # Bars an earlier process simulated may have triggered it; that state is
+                # not in the ledger, so restoring it untriggered would be a guess (I5).
+                raise SimBrokerError(
+                    f"Cannot restore stop-limit '{order.venue_order_id}': bars since its "
+                    "submission may have triggered it"
+                )
             self._orders[order.venue_order_id] = _WorkingOrder(
                 order=order, state=state, filled_quantity=ZERO, updated_at=order.submitted_at
             )
@@ -159,6 +173,9 @@ class SimBroker(BrokerAdapter):
             )
             working.filled_quantity += fill.quantity
             working.updated_at = max(working.updated_at, fill.filled_at)
+            # A fill proves a stop-limit triggered. One without fills restores untriggered,
+            # which the check above allows only before any bar could have triggered it.
+            working.triggered = True
             self._fills.append(fill)
         for venue_order_id, working in self._orders.items():
             filled = working.filled_quantity
@@ -357,7 +374,7 @@ class SimBroker(BrokerAdapter):
         ]
         candidates: list[tuple[str, _WorkingOrder, Decimal]] = []
         for venue_id, working in active:
-            price = self._execution_price(working.order, bar)
+            price = self._execution_price(working, bar)
             if price is not None:
                 candidates.append((venue_id, working, price))
 
@@ -390,7 +407,8 @@ class SimBroker(BrokerAdapter):
         self._last_bars[bar.instrument] = bar
         return tuple(fills)
 
-    def _execution_price(self, order: VenueOrder, bar: Bar) -> Decimal | None:
+    def _execution_price(self, working: _WorkingOrder, bar: Bar) -> Decimal | None:
+        order = working.order
         if bar.timestamp <= order.submitted_at:
             return None
         if order.tif is TimeInForce.OPG:
@@ -426,16 +444,60 @@ class SimBroker(BrokerAdapter):
                 if bar.low > stop_price:
                     return None
                 base = min(bar.open, stop_price)
+        elif order.order_type is OrderType.STOP_LIMIT:
+            stop_limit_base = self._stop_limit_base(working, bar)
+            if stop_limit_base is None:
+                return None
+            base = stop_limit_base
         else:
             raise SimBrokerError(
                 f"Unsupported accepted order type {order.order_type.value}"
             )
         slipped = self._slipped(base, order.side)
-        if order.order_type is OrderType.LIMIT and order.limit_price is not None:
+        if (
+            order.order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT)
+            and order.limit_price is not None
+        ):
             if order.side is Side.BUY:
                 return min(slipped, order.limit_price)
             return max(slipped, order.limit_price)
         return slipped
+
+    def _stop_limit_base(self, working: _WorkingOrder, bar: Bar) -> Decimal | None:
+        """Trigger a stop-limit on its stop, then work it as a limit at its limit price.
+
+        A bar opening at or through the stop triggers at the open, so the whole bar can
+        reach the limit: it fills at the open when that is within the limit (a gap over
+        the trigger but not the limit), else at the limit if the range comes back to it.
+        A stop first reached inside the bar fills at the stop, the price it triggered at;
+        with a limit short of the stop the bar does not reveal whether price came back to
+        it after the trigger, so it waits for a later bar. A triggered order stays
+        triggered for the rest of its life.
+        """
+        order = working.order
+        stop_price = order.stop_price
+        limit_price = order.limit_price
+        if stop_price is None or limit_price is None:
+            raise SimBrokerError("Accepted stop-limit order has no stop or limit price")
+        if order.side is Side.BUY:
+            if not working.triggered:
+                if bar.high < stop_price:
+                    return None
+                working.triggered = True
+                if bar.open < stop_price:
+                    return None if stop_price > limit_price else stop_price
+            if bar.low > limit_price:
+                return None
+            return min(bar.open, limit_price)
+        if not working.triggered:
+            if bar.low > stop_price:
+                return None
+            working.triggered = True
+            if bar.open > stop_price:
+                return None if stop_price < limit_price else stop_price
+        if bar.high < limit_price:
+            return None
+        return max(bar.open, limit_price)
 
     def _slipped(self, base: Decimal, side: Side) -> Decimal:
         return base * (
@@ -648,6 +710,13 @@ class SimBroker(BrokerAdapter):
                 return submitted_date
             return self._calendar.next_session(submitted_date)
         return self._calendar.roll_to_session(submitted_date, "next")
+
+    def _first_eligible_bar(self, submitted_at: datetime) -> datetime:
+        """The first regular bar that can match an order: bars at or before submission cannot."""
+        session_open = self._calendar.session_open(self._day_session(submitted_at))
+        if submitted_at < session_open:
+            return session_open
+        return submitted_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
 
     def _opg_session_open(self, submitted_at: datetime) -> datetime:
         submitted_date = submitted_at.astimezone(NEW_YORK).date()

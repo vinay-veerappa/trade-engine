@@ -14,8 +14,10 @@ from trade_engine.domain.orders import OrderType, TimeInForce
 # Bracket orders rest until filled or cancelled; OPG/MOC/GTD need terms an intent does not carry.
 BRACKET_TIFS = frozenset({TimeInForce.DAY, TimeInForce.GTC})
 # LIMIT buys at or below entry_price; STOP buys only once price trades up through it
-# (a breakout trigger), so an untriggered breakout never fills.
-BRACKET_ENTRY_TYPES = frozenset({OrderType.LIMIT, OrderType.STOP})
+# (a breakout trigger), so an untriggered breakout never fills. STOP_LIMIT triggers like
+# STOP, then buys no higher than entry_limit_price, so a gap past that chase limit does
+# not fill.
+BRACKET_ENTRY_TYPES = frozenset({OrderType.LIMIT, OrderType.STOP, OrderType.STOP_LIMIT})
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,9 @@ class OrderIntent:
     entry_tif: TimeInForce = TimeInForce.DAY
     exit_tif: TimeInForce = TimeInForce.GTC
     entry_type: OrderType = OrderType.LIMIT
+    # The limit of a STOP_LIMIT entry, whose stop trigger is entry_price: at or above it
+    # for a BUY, at or below it for a SELL. Required for STOP_LIMIT, refused otherwise.
+    entry_limit_price: Decimal | None = None
     # Share of the position each profit target exits, in target order. None splits the
     # whole position evenly across the targets. Fractions summing below 1 leave a runner
     # that only the protective stop (or a strategy exit) closes.
@@ -113,6 +118,27 @@ class OrderIntent:
             raise ValueError(
                 "entry_type must be one of "
                 f"{sorted(value.value for value in BRACKET_ENTRY_TYPES)}, got {self.entry_type!r}"
+            )
+        if self.entry_type is OrderType.STOP_LIMIT:
+            limit = self.entry_limit_price
+            if not isinstance(limit, Decimal) or not limit.is_finite() or limit <= 0:
+                raise ValueError(
+                    "A STOP_LIMIT entry requires entry_limit_price as a finite positive "
+                    f"Decimal, got {limit!r}"
+                )
+            if self.side is Side.BUY and limit < self.entry_price:
+                raise ValueError(
+                    f"For BUY intent, entry_limit_price ({limit}) must be at or above the "
+                    f"stop trigger entry_price ({self.entry_price})"
+                )
+            if self.side is Side.SELL and limit > self.entry_price:
+                raise ValueError(
+                    f"For SELL intent, entry_limit_price ({limit}) must be at or below the "
+                    f"stop trigger entry_price ({self.entry_price})"
+                )
+        elif self.entry_limit_price is not None:
+            raise ValueError(
+                f"entry_limit_price is only for STOP_LIMIT entries, not {self.entry_type.value}"
             )
         for name in ("entry_tif", "exit_tif"):
             tif = getattr(self, name)
