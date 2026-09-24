@@ -67,6 +67,33 @@ Set `entry_type=OrderType.STOP` for a breakout trigger: the entry rests as a sto
 A venue without native stops refuses a stop entry before anything is persisted; an emulated
 entry would need a live price feed that an EOD bracket does not have.
 
+## Target Fractions
+
+`OrderIntent.target_fractions` sets the share of the position each profit target exits,
+in target order. Left as `None`, the whole position splits evenly across the targets.
+Fractions summing below 1 leave a runner that only the protective stop (or a strategy exit)
+closes: `target_fractions=(Decimal("1") / 3,)` sells a third at the target and trails the
+rest. Whole shares round by largest remainder over the targets and the runner; a bracket
+too small to give every target at least one share is refused. A partial entry fill keeps
+the same proportions, so the runner is never absorbed into the targets.
+
+## Strategy Exits at the Close
+
+A strategy may define `manage_positions(brackets, context)`. The EOD runner calls it once
+per account after marks and before D+1 entries, passing an `OpenBracket` for every bracket
+that still holds open quantity: average entry, entry session, `sessions_held`, current stop,
+targets filled and still open, and the session's last close. It returns exit actions from
+`trade_engine.domain.exits`, which the OMS applies:
+
+- `MoveStop(entry_order_id, stop_price, reason, command_id)` replaces the protective stop.
+  Stops only tighten; one that would widen the bracket's risk refuses and fails the run.
+- `ClosePosition(entry_order_id, reason, command_id)` sends a DAY market order for the whole
+  open quantity, which fills at the next session's open. The stop keeps protecting until it
+  fills; its fill cancels the remaining stop and targets, and a stop fill first cancels it.
+
+An action naming anything but an open bracket of the account refuses. Command ids make a
+replayed action a no-op (I3).
+
 ## Equity Simulation
 
 `trade_engine.sim.SimBroker` is a single-account paper venue driven only by explicit
