@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import math
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -205,6 +206,19 @@ def test_store_put_is_idempotent_and_never_overwrites(tmp_path) -> None:
         store.put(snapshot(price="611"))
     assert store.load("SPY", T0).underlying_price == Decimal("610")
 
+
+
+def test_store_keeps_each_snapshot_gzipped_with_no_timestamp_in_the_header(tmp_path) -> None:
+    store = ChainSnapshotStore(tmp_path)
+    path = store.put(snapshot())
+    assert path.name == "20260924T194500000000Z.json.gz"
+    raw = path.read_bytes()
+    assert raw[:2] == bytes((0x1F, 0x8B))  # the gzip magic number
+    assert gzip.decompress(raw).decode("utf-8") == snapshot().to_json()
+    assert raw[4:8] == bytes(4)  # MTIME 0: the bytes depend on the snapshot alone
+    (path.parent / "20260924T200000000000Z.json").write_text(snapshot().to_json(), encoding="utf-8")
+    (path.parent / "20260924T201500000000Z.json.tmp").write_bytes(raw)  # a write that crashed
+    assert store.stamps("SPY") == (T0,)  # only the store's own finished files count
 
 # -- greeks --------------------------------------------------------------------
 

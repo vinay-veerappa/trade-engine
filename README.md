@@ -160,9 +160,10 @@ snapshot's underlying. `require_fresh(now, max_age_seconds)` refuses a snapshot 
 than the caller allows, and one from after `now`. `split_by_quote_age` separates quotes
 nobody has updated lately from the rest.
 
-`ChainSnapshotStore` keeps one JSON file per snapshot under
-`<root>/<UNDERLYING>/<as_of>.json`. Storing the same snapshot again is a no-op; a
-different snapshot at the same instant refuses. `latest(underlying, now, max_age_seconds)`
+`ChainSnapshotStore` keeps one gzipped JSON file per snapshot under
+`<root>/<UNDERLYING>/<as_of>.json.gz`; a full SPX chain is about 0.46 MB, against 4.4 MB
+uncompressed. Storing the same snapshot again is a no-op; a different snapshot at the
+same instant refuses. `latest(underlying, now, max_age_seconds)`
 returns the newest snapshot taken at or before `now`, so a replay cannot see a later chain
 from its own day. Nothing stored, or a stale snapshot, raises `StaleDataError`.
 
