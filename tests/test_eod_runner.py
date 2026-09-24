@@ -1105,3 +1105,161 @@ def test_order_without_a_submission_event_is_not_restored(tmp_path: Path) -> Non
             ),
         ).run(SESSION)
     ledger.close()
+
+
+# -- one timeline: every account and instrument, minute by minute --------------------
+
+MSFT = Equity("MSFT")
+
+
+def _seed_symbol_bracket(ledger, broker, clock, *, account: str, symbol: Equity, command_id: str):
+    intent = OrderIntent(
+        intent_id=f"intent-{command_id}",
+        account_id=account,
+        instrument=symbol,
+        side=Side.BUY,
+        quantity_rule="fixed_2",
+        entry_price=Decimal("100"),
+        stop_loss=Decimal("95"),
+        profit_targets=(Decimal("110"),),
+        reason="E7 timeline seed",
+        command_id=command_id,
+    )
+    manager = OrderManager(broker, clock, ledger)
+    bracket = manager.create_bracket(intent, Decimal("2"))
+    manager.submit(bracket.entry)
+    return bracket
+
+
+class _SymbolMarketData(FakeMarketData):
+    """Flat bars, overridden per (symbol, minute since SESSION_OPEN)."""
+
+    def __init__(self, script: dict[tuple[str, int], tuple[str, str, str, str]]) -> None:
+        super().__init__()
+        self._by_symbol = script
+
+    def bars(self, instrument, tf, start, end, max_age_seconds):
+        count = int((end - start).total_seconds() // 60)
+        return [
+            _bar_for(
+                instrument,
+                start + timedelta(minutes=index),
+                *self._by_symbol.get(
+                    (instrument.symbol, _minute_of(start + timedelta(minutes=index))),
+                    ("100", "101", "99", "100"),
+                ),
+            )
+            for index in range(count)
+        ]
+
+
+def test_accounts_sharing_one_clock_all_replay(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    brokers = {}
+    for account in (ACCOUNT, SECOND_ACCOUNT):
+        brokers[account] = SimBroker(account, clock, Decimal("0"))
+        brokers[account].connect()
+        _seed_symbol_bracket(
+            ledger, brokers[account], clock, account=account, symbol=INSTRUMENT,
+            command_id=f"e7-{account}",
+        )
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    result = EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(),
+        EodRunnerConfig(job_name="eod", brokers=brokers),
+    ).run(SESSION)
+
+    assert [(item.account_id, item.bars_processed, item.fills_recorded) for item in result.accounts] == [
+        (SECOND_ACCOUNT, 390, 1),
+        (ACCOUNT, 390, 1),
+    ]
+    for account in (ACCOUNT, SECOND_ACCOUNT):
+        assert ledger.event_by_command(_marker_command(SESSION, account)) is not None
+        assert ledger.state(account).positions[INSTRUMENT].quantity == Decimal("2")
+    ledger.close()
+
+
+def test_fills_across_instruments_are_recorded_in_time_order(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    for symbol in (INSTRUMENT, MSFT):
+        _seed_symbol_bracket(
+            ledger, broker, clock, account=ACCOUNT, symbol=symbol, command_id=f"e7-{symbol.symbol}"
+        )
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    # AAPL's stop hits at 15:00 ET; MSFT only enters at 09:30 like AAPL.
+    market_data = _SymbolMarketData({("AAPL", 330): ("96", "96", "94", "95")})
+    EodRunner(
+        ledger, clock, CALENDAR, market_data,
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+
+    fills = [event for event in ledger.events(account=ACCOUNT) if event.kind is EventKind.FILL]
+    assert [(event.payload.instrument.symbol, event.payload.side) for event in fills] == [
+        ("AAPL", Side.BUY),
+        ("MSFT", Side.BUY),
+        ("AAPL", Side.SELL),
+    ]
+    # Each fill is recorded at the minute it happened, not when its symbol's replay ended.
+    assert all(event.ts_utc == event.payload.filled_at for event in fills)
+    ledger.close()
+
+
+def test_d_plus_one_entry_from_a_replayed_account_works_the_next_session(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    # A held MSFT position forces a replay, so the clock walks through the session.
+    _seed_symbol_bracket(ledger, broker, clock, account=ACCOUNT, symbol=MSFT, command_id="e7-held")
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(),
+        EodRunnerConfig(
+            job_name="eod",
+            brokers={ACCOUNT: broker},
+            risk_engines={ACCOUNT: FixedRiskEngine()},
+            signal_adapters={ACCOUNT: SessionSignalAdapter([_signal()])},
+            strategies={ACCOUNT: DeterministicStrategy(INSTRUMENT)},
+            context_builder=_fixed_context_builder(),
+        ),
+    ).run(SESSION)
+
+    entry_id = "d1:sig-1:entry"
+    submitted = ledger.event_by_command(f"{entry_id}:submit")
+    assert submitted is not None and submitted.ts_utc == SESSION_CLOSE
+    mark = ledger.event_by_command(f"eod:mark:{ACCOUNT}:{SESSION.isoformat()}:MSFT")
+    assert mark is not None and mark.payload.as_of == SESSION_CLOSE
+
+    clock.set(NEXT_OPEN - timedelta(minutes=1))
+    EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(NEXT_SESSION)
+    state = ledger.state(ACCOUNT)
+    assert state.orders[entry_id].state is OrderState.FILLED
+    assert next(fill for fill in state.fills if fill.order_id == entry_id).filled_at == NEXT_OPEN
+    ledger.close()
+
+
+def test_replay_refuses_a_clock_already_past_the_open(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    _seed_bracket(ledger, broker, clock, command_id="e7-late-clock")
+    clock.set(EOD_CLOCK)
+    with pytest.raises(EodRunnerError, match="past the session open"):
+        EodRunner(
+            ledger, clock, CALENDAR, FakeMarketData(),
+            EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+        ).run(SESSION)
+    assert ledger.event_by_command(_marker_command(SESSION)) is None
+    ledger.close()
