@@ -34,11 +34,14 @@ from trade_engine.interfaces.market_data import CorporateAction
 
 from trade_engine.ledger.events import (
     CashFlow,
+    EmulatedOrderState,
     Event,
     EventKind,
     LifecycleNotice,
     Mark,
+    OrderUpdated,
     OrderStateChange,
+    OrdersCreated,
     VenueReconcile,
 )
 
@@ -70,6 +73,9 @@ _TAG_TO_TYPE: dict[str, type] = {
     "RiskRuleResult": RiskRuleResult,
     "Order": Order,
     "OrderStateChange": OrderStateChange,
+    "OrdersCreated": OrdersCreated,
+    "OrderUpdated": OrderUpdated,
+    "EmulatedOrderState": EmulatedOrderState,
     "CashFlow": CashFlow,
     "Mark": Mark,
     "VenueReconcile": VenueReconcile,

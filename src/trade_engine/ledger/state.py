@@ -18,16 +18,25 @@ from types import MappingProxyType
 from typing import Any
 
 from trade_engine.domain.instruments import Instrument, Side
-from trade_engine.domain.orders import Order, OrderState
+from trade_engine.domain.orders import (
+    IllegalOrderStateTransitionError,
+    Order,
+    OrderState,
+    OrderType,
+    validate_order_transition,
+)
 from trade_engine.domain.portfolio import Fill, Lot, Position
 from trade_engine.ledger.events import (
     FOLD_OWNERS,
     CashFlow,
+    EmulatedOrderState,
     Event,
     EventKind,
     LifecycleNotice,
     Mark,
+    OrderUpdated,
     OrderStateChange,
+    OrdersCreated,
     RiskControlChange,
     UnhandledEventError,
     VenueReconcile,
@@ -57,6 +66,8 @@ class AccountState:
     positions: Mapping[Instrument, Position] = field(default_factory=lambda: MappingProxyType({}))
     orders: Mapping[str, Order] = field(default_factory=lambda: MappingProxyType({}))
     filled_quantity: Mapping[str, Decimal] = field(default_factory=lambda: MappingProxyType({}))
+    venue_order_ids: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    emulated_orders: Mapping[str, EmulatedOrderState] = field(default_factory=lambda: MappingProxyType({}))
     fills: tuple[Fill, ...] = ()
     fill_ids: frozenset[str] = frozenset()
     marks: Mapping[Instrument, Decimal] = field(default_factory=lambda: MappingProxyType({}))
@@ -231,6 +242,8 @@ def _replace(state: AccountState, **changes: Any) -> AccountState:
         "positions": state.positions,
         "orders": state.orders,
         "filled_quantity": state.filled_quantity,
+        "venue_order_ids": state.venue_order_ids,
+        "emulated_orders": state.emulated_orders,
         "fills": state.fills,
         "fill_ids": state.fill_ids,
         "marks": state.marks,
@@ -370,15 +383,101 @@ def _on_order_submitted(state: AccountState, event: Event) -> AccountState:
     return _replace(state, orders=MappingProxyType(orders))
 
 
+def _on_orders_created(state: AccountState, event: Event) -> AccountState:
+    created: OrdersCreated = event.payload
+    orders = dict(state.orders)
+    for order in created.orders:
+        existing = orders.get(order.order_id)
+        if existing is not None and existing != order:
+            raise LedgerFoldError(
+                f"Order '{order.order_id}' already exists with a different payload; "
+                "refusing to overwrite it (I3)"
+            )
+        orders[order.order_id] = order
+    return _replace(state, orders=MappingProxyType(orders))
+
+
+def _on_order_updated(state: AccountState, event: Event) -> AccountState:
+    update: OrderUpdated = event.payload
+    previous = _require_order(state, update.order.order_id, event.kind)
+    current = update.order
+    identity_fields = ("account_id", "instrument", "side", "command_id", "parent_order_id", "oco_group")
+    if any(getattr(previous, name) != getattr(current, name) for name in identity_fields):
+        raise LedgerFoldError(
+            f"OrderUpdated changed immutable identity fields for '{current.order_id}' (I5)"
+        )
+    if current.state != previous.state:
+        try:
+            validate_order_transition(previous.state, current.state)
+        except IllegalOrderStateTransitionError as err:
+            raise LedgerFoldError(str(err)) from err
+    filled = state.filled_quantity.get(current.order_id, ZERO)
+    if current.quantity < filled:
+        raise LedgerFoldError(
+            f"OrderUpdated quantity {current.quantity} is below already-filled quantity "
+            f"{filled} for '{current.order_id}'"
+        )
+    orders = dict(state.orders)
+    orders[current.order_id] = current
+    venue_ids = dict(state.venue_order_ids)
+    if update.venue_order_id is not None:
+        venue_ids[current.order_id] = update.venue_order_id
+    emulated_orders = dict(state.emulated_orders)
+    emulation = emulated_orders.get(current.order_id)
+    if (
+        emulation is not None
+        and current.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
+        and current.stop_price != previous.stop_price
+    ):
+        if emulation.triggered or current.stop_price is None:
+            raise LedgerFoldError(
+                f"Cannot change stop price for triggered emulated order '{current.order_id}' (I5)"
+            )
+        emulated_orders[current.order_id] = EmulatedOrderState(
+            order_id=current.order_id,
+            observed_price=emulation.observed_price,
+            extreme=None,
+            stop_price=current.stop_price,
+            triggered=False,
+            reason=update.reason,
+        )
+    return _replace(
+        state,
+        orders=MappingProxyType(orders),
+        venue_order_ids=MappingProxyType(venue_ids),
+        emulated_orders=MappingProxyType(emulated_orders),
+    )
+
+
 def _order_state_handler(target: OrderState) -> Callable[[AccountState, Event], AccountState]:
     def handler(state: AccountState, event: Event) -> AccountState:
         change: OrderStateChange = event.payload
         order = _require_order(state, change.order_id, event.kind)
         orders = dict(state.orders)
         orders[change.order_id] = order.transition_to(target)
-        return _replace(state, orders=MappingProxyType(orders))
-
+        venue_ids = dict(state.venue_order_ids)
+        if change.venue_order_id is not None:
+            venue_ids[change.order_id] = change.venue_order_id
+        return _replace(
+            state,
+            orders=MappingProxyType(orders),
+            venue_order_ids=MappingProxyType(venue_ids),
+        )
     return handler
+
+
+def _on_order_refused(state: AccountState, event: Event) -> AccountState:
+    change: OrderStateChange = event.payload
+    _require_order(state, change.order_id, event.kind)
+    return _replace(state, refusals=state.refusals + 1)
+
+
+def _on_emulated_order_updated(state: AccountState, event: Event) -> AccountState:
+    emulation: EmulatedOrderState = event.payload
+    _require_order(state, emulation.order_id, event.kind)
+    emulated_orders = dict(state.emulated_orders)
+    emulated_orders[emulation.order_id] = emulation
+    return _replace(state, emulated_orders=MappingProxyType(emulated_orders))
 
 
 def _on_mark(state: AccountState, event: Event) -> AccountState:
@@ -421,12 +520,17 @@ def _on_risk_control(state: AccountState, event: Event) -> AccountState:
 HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.SIGNAL_SEEN: _on_signal_seen,
     EventKind.RISK_VERDICT: _on_risk_verdict,
+    EventKind.ORDERS_CREATED: _on_orders_created,
     EventKind.RISK_CONTROL: _on_risk_control,
     EventKind.ORDER_SUBMITTED: _on_order_submitted,
+    EventKind.ORDER_UPDATED: _on_order_updated,
+    EventKind.ORDER_PENDING: _order_state_handler(OrderState.PENDING_UNKNOWN),
     EventKind.ORDER_ACCEPTED: _order_state_handler(OrderState.ACCEPTED),
     EventKind.ORDER_REJECTED: _order_state_handler(OrderState.REJECTED),
     EventKind.ORDER_CANCELLED: _order_state_handler(OrderState.CANCELLED),
+    EventKind.ORDER_REFUSED: _on_order_refused,
     EventKind.ORDER_EXPIRED: _order_state_handler(OrderState.EXPIRED),
+    EventKind.ORDER_EMULATION_UPDATED: _on_emulated_order_updated,
     EventKind.FILL: _on_fill,
     EventKind.CASH_FLOW: _on_cash_flow,
     EventKind.MARK: _on_mark,
