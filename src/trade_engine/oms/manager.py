@@ -1105,6 +1105,8 @@ class OrderManager:
             allocations=(
                 VenueOrderAllocation(order.order_id, order.account_id, order.quantity),
             ),
+            parent_order_id=order.parent_order_id,
+            oco_group=order.oco_group,
         )
 
     def _trigger_order_type(self, order: Order) -> OrderType:

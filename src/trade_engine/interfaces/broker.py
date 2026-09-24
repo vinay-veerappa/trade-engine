@@ -72,6 +72,8 @@ class VenueOrder:
     stop_price: Decimal | None = None
     trail_amount: Decimal | None = None
     allocations: tuple[VenueOrderAllocation, ...] = ()
+    parent_order_id: str | None = None
+    oco_group: str | None = None
 
     def __post_init__(self) -> None:
         if not self.venue_order_id:

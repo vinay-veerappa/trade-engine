@@ -46,6 +46,21 @@ drawdown suspension remains latched until the configured recovery threshold is r
 Trading hours are intersected with the configured exchange calendar, including holidays
 and early closes.
 
+## Equity Simulation
+
+`trade_engine.sim.SimBroker` is a single-account paper venue driven only by explicit
+one-minute `Bar` values. Configure slippage in basis points and call `connect()` before
+submitting orders. Bars are stamped at their opening minute; no fill is inferred from a
+cached or prior price. Each session must start with its exchange-calendar open bar, and
+missing intraday bars or skipped sessions raise `MissingBarError`. DAY orders expire at
+the session close and cannot fill in a later session. Parent-linked exits are capped at
+the simulator's current position while the OMS reconciles their fills. If a stop and a
+target are both touched in one bar, the stop wins because the bar does not reveal the
+intrabar price path; when multiple targets are touched, they fill in numeric target order.
+Time-stop exits use market-on-open orders (`TimeInForce.OPG`) and fill only at the first
+eligible 09:30 ET session open after submission. A missing expected open raises
+`MissingBarError`.
+
 ## Development
 
 Requires Python >= 3.13.
