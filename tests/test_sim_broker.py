@@ -867,3 +867,74 @@ def test_gtc_bracket_stop_survives_the_close_and_fires_next_session(tmp_path: Pa
         assert manager.get_order(bracket.stop.order_id).state is OrderState.FILLED
 
     assert broker.positions() == []
+
+
+def test_exit_cannot_close_another_brackets_shares_in_the_same_symbol() -> None:
+    broker, clock = broker_fixture()
+    for entry in ("bracket-a:entry", "bracket-b:entry"):
+        place_order(
+            broker, clock, entry, side=Side.BUY, order_type=OrderType.MARKET, quantity=Decimal("3")
+        )
+    entry_bar = bar(START + timedelta(minutes=1))
+    clock.set(entry_bar.timestamp)
+    broker.process_bar(entry_bar)
+
+    # Bracket A's target filled at 105; the OMS has not yet cancelled A's stop.
+    place_order(
+        broker, clock, "bracket-a:target:1", side=Side.SELL, order_type=OrderType.LIMIT,
+        quantity=Decimal("3"), limit_price=Decimal("105"),
+        parent_order_id="bracket-a:entry", oco_group="bracket-a:exits",
+    )
+    place_order(
+        broker, clock, "bracket-a:stop", side=Side.SELL, order_type=OrderType.STOP,
+        quantity=Decimal("3"), stop_price=Decimal("95"),
+        parent_order_id="bracket-a:entry", oco_group="bracket-a:exits",
+    )
+    target_bar = bar(START + timedelta(minutes=2), open_="104", high="106", low="103", close="105")
+    clock.set(target_bar.timestamp)
+    assert [fill.venue_order_id for fill in broker.process_bar(target_bar)] == [
+        "bracket-a:target:1"
+    ]
+
+    stop_bar = bar(START + timedelta(minutes=3), open_="96", high="96", low="94", close="95")
+    clock.set(stop_bar.timestamp)
+
+    assert broker.process_bar(stop_bar) == ()
+    assert [(p.instrument, p.quantity) for p in broker.positions()] == [
+        (INSTRUMENT, Decimal("3"))
+    ]
+
+
+def test_exit_fills_its_own_brackets_open_quantity() -> None:
+    broker, clock = broker_fixture()
+    place_order(
+        broker, clock, "solo:entry", side=Side.BUY, order_type=OrderType.MARKET, quantity=Decimal("3")
+    )
+    entry_bar = bar(START + timedelta(minutes=1))
+    clock.set(entry_bar.timestamp)
+    broker.process_bar(entry_bar)
+    place_order(
+        broker, clock, "solo:stop", side=Side.SELL, order_type=OrderType.STOP,
+        quantity=Decimal("3"), stop_price=Decimal("95"),
+        parent_order_id="solo:entry", oco_group="solo:exits",
+    )
+
+    stop_bar = bar(START + timedelta(minutes=2), open_="96", high="96", low="94", close="95")
+    clock.set(stop_bar.timestamp)
+    fills = broker.process_bar(stop_bar)
+
+    assert [(fill.venue_order_id, fill.quantity, fill.price) for fill in fills] == [
+        ("solo:stop", Decimal("3"), Decimal("95"))
+    ]
+    assert broker.positions() == []
+
+
+def test_exit_without_a_parent_held_by_the_venue_is_refused() -> None:
+    broker, clock = broker_fixture()
+
+    with pytest.raises(ValueError, match="not held by this SimBroker"):
+        place_order(
+            broker, clock, "orphan:stop", side=Side.SELL, order_type=OrderType.STOP,
+            stop_price=Decimal("95"), parent_order_id="orphan:entry",
+        )
+    assert broker.orders(START) == []

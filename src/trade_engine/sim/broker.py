@@ -356,6 +356,9 @@ class SimBroker(BrokerAdapter):
             return None
         quantity = working.order.quantity - working.filled_quantity
         if working.order.parent_order_id is not None:
+            # Until the OMS reconciles, an exit may close only its own bracket's open
+            # quantity, never another bracket's shares in the same symbol.
+            quantity = min(quantity, self._bracket_open_quantity(working.order.parent_order_id))
             position_quantity = self._positions.get(
                 working.order.instrument, (ZERO, ZERO, filled_at)
             )[0]
@@ -389,6 +392,18 @@ class SimBroker(BrokerAdapter):
         working.updated_at = filled_at
         self._update_position(fill)
         return fill
+
+    def _bracket_open_quantity(self, parent_order_id: str) -> Decimal:
+        parent = self._require_order(parent_order_id)
+        exited = sum(
+            (
+                working.filled_quantity
+                for working in self._orders.values()
+                if working.order.parent_order_id == parent_order_id
+            ),
+            ZERO,
+        )
+        return max(parent.filled_quantity - exited, ZERO)
 
     def _update_position(self, fill: VenueFill) -> None:
         quantity, average_price, _ = self._positions.get(
@@ -532,6 +547,17 @@ class SimBroker(BrokerAdapter):
             raise ValueError("Venue order allocation account does not match SimBroker account")
         if len(order.allocations) != 1:
             raise ValueError("SimBroker requires one-to-one strategy-order allocations")
+        if order.parent_order_id is not None:
+            parent = self._orders.get(order.parent_order_id)
+            if parent is None:
+                raise ValueError(
+                    f"Parent order '{order.parent_order_id}' is not held by this SimBroker"
+                )
+            if parent.order.instrument != order.instrument or parent.order.side is order.side:
+                raise ValueError(
+                    f"Exit '{order.venue_order_id}' must close parent "
+                    f"'{order.parent_order_id}' in the same instrument"
+                )
 
     def _require_connected(self) -> None:
         if not self._connected:
