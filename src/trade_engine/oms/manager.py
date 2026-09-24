@@ -105,6 +105,13 @@ class OrderManager:
             raise UnsupportedOrderCapabilityError(
                 "Venue has no native STOP orders; a stop entry cannot be worked"
             )
+        if intent.entry_type is OrderType.STOP_LIMIT and not self._supports_native_type(
+            OrderType.STOP_LIMIT
+        ):
+            # Same reason: the chase limit must rest at the venue, not in a local watcher.
+            raise UnsupportedOrderCapabilityError(
+                "Venue has no native STOP_LIMIT orders; a stop-limit entry cannot be worked"
+            )
         fingerprint = self._bracket_fingerprint(intent, quantity)
         existing = self._ledger.event_by_command(intent.command_id)
         if existing is not None:
@@ -129,8 +136,12 @@ class OrderManager:
             quantity=quantity,
             command_id=f"{prefix}:entry",
             created_at=now,
-            limit_price=intent.entry_price if intent.entry_type is OrderType.LIMIT else None,
-            stop_price=intent.entry_price if intent.entry_type is OrderType.STOP else None,
+            limit_price=(
+                intent.entry_price
+                if intent.entry_type is OrderType.LIMIT
+                else intent.entry_limit_price
+            ),
+            stop_price=intent.entry_price if intent.entry_type is not OrderType.LIMIT else None,
             tif=intent.entry_tif,
         )
         exit_side = Side.SELL if intent.side is Side.BUY else Side.BUY
@@ -1511,6 +1522,9 @@ class OrderManager:
             # Added only when set, so brackets persisted before stop entries keep their
             # fingerprints and still replay idempotently (I3).
             payload["entry_type"] = intent.entry_type.value
+        if intent.entry_type is OrderType.STOP_LIMIT:
+            # Only a STOP_LIMIT carries a limit, so LIMIT and STOP brackets keep theirs.
+            payload["entry_limit_price"] = str(intent.entry_limit_price)
         if intent.target_fractions is not None:
             payload["target_fractions"] = [str(value) for value in intent.target_fractions]
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
