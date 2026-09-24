@@ -18,6 +18,7 @@ from trade_engine.interfaces.broker import (
     VenueAck,
     VenueOrder,
     VenueOrderAllocation,
+    VenueOrderState,
 )
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import (
@@ -577,39 +578,33 @@ class OrderManager:
             raise OrderReconciliationError(
                 f"Venue has no read-back for order '{order_id}'; it remains {order.state.value}"
             )
+        terminal = found.state in (
+            OrderState.FILLED,
+            OrderState.CANCELLED,
+            OrderState.REJECTED,
+            OrderState.EXPIRED,
+        )
+        # Status-only read-back cannot show which terms a working order carries, so a
+        # pending replace resolves only once the venue reports the order finished.
         if (
             order.state is OrderState.PENDING_UNKNOWN
             and self._has_unresolved_replace(order_id)
-            and found.state is OrderState.ACCEPTED
+            and not terminal
         ):
             raise OrderReconciliationError(
                 f"Pending replace terms for '{order_id}' cannot be resolved from status-only venue read-back"
             )
+        # Fills go in before any terminal state: the ledger refuses a fill on a cancelled
+        # order, so a partial fill dropped here could never be recorded later (I1).
+        if found.filled_quantity > context.filled:
+            self._ingest_venue_fills(order, found)
+        order = self.get_order(order_id)
         if found.state is OrderState.FILLED or found.state is OrderState.PARTIALLY_FILLED:
-            fills = self._broker.fills(order.created_at)
-            matching = [item for item in fills if item.venue_order_id == found.venue_order_id]
-            if not matching:
+            if found.state is OrderState.FILLED and order.state is not OrderState.FILLED:
                 raise OrderReconciliationError(
-                    f"Venue reports fills for '{order_id}' but returned no fill records"
+                    f"Venue reports '{order_id}' FILLED but its fill records do not complete it"
                 )
-            for item in matching:
-                self.record_fill(
-                    Fill(
-                        fill_id=item.venue_fill_id,
-                        order_id=order_id,
-                        account_id=order.account_id,
-                        instrument=item.instrument,
-                        quantity=item.quantity,
-                        price=item.price,
-                        venue_env=self._broker.env,
-                        filled_at=item.filled_at,
-                        side=item.side,
-                        fee=item.fee,
-                        venue_order_id=item.venue_order_id,
-                        venue_execution_id=item.venue_fill_id,
-                    )
-                )
-            return self.get_order(order_id)
+            return order
         if found.state is OrderState.SUBMITTED:
             self._append(
                 order.account_id,
@@ -654,6 +649,33 @@ class OrderManager:
         raise OrderReconciliationError(
             f"Venue state {found.state.value} does not resolve order '{order_id}'"
         )
+
+    def _ingest_venue_fills(self, order: Order, found: VenueOrderState) -> None:
+        fills = self._broker.fills(order.created_at)
+        matching = [item for item in fills if item.venue_order_id == found.venue_order_id]
+        for item in matching:
+            self.record_fill(
+                Fill(
+                    fill_id=item.venue_fill_id,
+                    order_id=order.order_id,
+                    account_id=order.account_id,
+                    instrument=item.instrument,
+                    quantity=item.quantity,
+                    price=item.price,
+                    venue_env=self._broker.env,
+                    filled_at=item.filled_at,
+                    side=item.side,
+                    fee=item.fee,
+                    venue_order_id=item.venue_order_id,
+                    venue_execution_id=item.venue_fill_id,
+                )
+            )
+        recorded = self._context(order.order_id).filled
+        if recorded < found.filled_quantity:
+            raise OrderReconciliationError(
+                f"Venue reports {found.filled_quantity} filled for '{order.order_id}' but its "
+                f"fill records account for {recorded}; it remains {self.get_order(order.order_id).state.value}"
+            )
 
     def _submit_native(self, order: Order) -> Order:
         if order.state is not OrderState.NEW:

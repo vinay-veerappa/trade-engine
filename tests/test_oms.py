@@ -661,7 +661,11 @@ def test_replace_refuses_terminal_order_and_pending_result_is_not_success(manage
         )
 
 
-def test_reconcile_does_not_accept_pending_replace_with_old_terms(manager_factory):
+@pytest.mark.parametrize(
+    "venue_state",
+    [OrderState.ACCEPTED, OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED],
+)
+def test_reconcile_does_not_accept_pending_replace_with_old_terms(manager_factory, venue_state):
     manager, _, broker = manager_factory()
     order = Order(
         order_id="pending-replace-readback",
@@ -684,10 +688,23 @@ def test_reconcile_does_not_accept_pending_replace_with_old_terms(manager_factor
     broker.order_readback = [
         VenueOrderState(
             venue_order_id=order.order_id,
-            state=OrderState.ACCEPTED,
-            filled_quantity=Decimal("0"),
-            remaining_quantity=Decimal("2"),
+            state=venue_state,
+            filled_quantity=(
+                Decimal("1") if venue_state is OrderState.PARTIALLY_FILLED else Decimal("0")
+            ),
+            remaining_quantity=Decimal("1"),
             updated_at=NOW,
+        )
+    ]
+    broker.fill_readback = [
+        VenueFill(
+            venue_fill_id="pending-replace-partial-fill",
+            venue_order_id=order.order_id,
+            instrument=order.instrument,
+            quantity=Decimal("1"),
+            price=Decimal("101"),
+            filled_at=NOW,
+            side=order.side,
         )
     ]
 
@@ -760,6 +777,72 @@ def test_reconcile_resolves_terminal_state_after_pending_replace(
 
     assert reconciled.state is venue_state
 
+
+
+def _cancelled_after_partial_fill(manager_factory, *, fill_records: bool):
+    manager, ledger, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    broker.cancel_status = "PENDING"
+    manager.cancel(bracket.entry.order_id, command_id="cancel-entry")
+    broker.cancel_status = "ACCEPTED"
+    broker.order_readback = [
+        VenueOrderState(
+            venue_order_id=bracket.entry.order_id,
+            state=OrderState.CANCELLED,
+            filled_quantity=Decimal("4"),
+            remaining_quantity=Decimal("0"),
+            updated_at=NOW,
+        )
+    ]
+    broker.fill_readback = (
+        [
+            VenueFill(
+                venue_fill_id="entry-before-cancel",
+                venue_order_id=bracket.entry.order_id,
+                instrument=bracket.entry.instrument,
+                quantity=Decimal("4"),
+                price=Decimal("100"),
+                filled_at=NOW,
+                side=bracket.entry.side,
+            )
+        ]
+        if fill_records
+        else []
+    )
+    return manager, ledger, broker, bracket
+
+
+def test_reconcile_cancelled_entry_records_partial_fill_and_protects_it(manager_factory):
+    manager, ledger, broker, bracket = _cancelled_after_partial_fill(
+        manager_factory, fill_records=True
+    )
+
+    reconciled = manager.reconcile_order(bracket.entry.order_id)
+
+    state = ledger.fold()["account-1"]
+    assert reconciled.state is OrderState.CANCELLED
+    assert state.filled_quantity[bracket.entry.order_id] == Decimal("4")
+    assert state.positions[bracket.entry.instrument].quantity == Decimal("4")
+    stop = manager.get_order(bracket.stop.order_id)
+    assert stop.state is OrderState.ACCEPTED
+    assert stop.quantity == Decimal("4")
+    assert [manager.get_order(t.order_id).quantity for t in bracket.targets] == [
+        Decimal("2"),
+        Decimal("2"),
+    ]
+
+
+def test_reconcile_refuses_terminal_state_when_fill_records_are_missing(manager_factory):
+    manager, ledger, broker, bracket = _cancelled_after_partial_fill(
+        manager_factory, fill_records=False
+    )
+
+    with pytest.raises(OrderReconciliationError, match="fill records account for 0"):
+        manager.reconcile_order(bracket.entry.order_id)
+
+    assert manager.get_order(bracket.entry.order_id).state is OrderState.PENDING_UNKNOWN
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.NEW
 
 @pytest.mark.parametrize("venue_state", [OrderState.SUBMITTED, OrderState.EXPIRED])
 def test_reconcile_handles_submitted_and_expired_states(manager_factory, venue_state):
