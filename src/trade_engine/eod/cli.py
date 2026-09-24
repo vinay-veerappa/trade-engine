@@ -8,12 +8,9 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date
-from decimal import Decimal
-
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.clock.replay import ReplayClock
-from trade_engine.eod import EodRunner, EodRunnerConfig, discover_plugins
+from trade_engine.eod import EodRunner, EodRunnerConfig, PluginDiscoveryError, discover_plugins
 from trade_engine.eod.runner import EodRunnerError
 from trade_engine.ledger import Ledger
 from trade_engine.sim import SimBroker
@@ -47,7 +44,7 @@ def _resolve_market_data(name: str | None) -> object:
 
 
 def run_eod(args: argparse.Namespace) -> int:
-    session = date.fromisoformat(args.session)
+    session = args.session
     ledger_path = args.ledger
     if not ledger_path:
         print("eod: --ledger is required", file=sys.stderr)
@@ -55,10 +52,10 @@ def run_eod(args: argparse.Namespace) -> int:
 
     try:
         market_data = _resolve_market_data(args.market_data)
-    except EodRunnerError as err:
+    except (EodRunnerError, PluginDiscoveryError) as err:
         print(f"eod: refused: {err}", file=sys.stderr)
         return 2
-    slippage_bps = Decimal(args.slippage_bps)
+    slippage_bps = args.slippage_bps
     # The EOD pass is a replay: the clock must sit at the session open so the runner
     # can advance it bar by bar (I7); a wall clock cannot re-derive a session.
     clock = ReplayClock(ExchangeCalendar().session_open(session))

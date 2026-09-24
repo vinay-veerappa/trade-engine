@@ -1,4 +1,4 @@
-﻿"""EOD runner acceptance tests (E7, Architecture Â§4.9).
+"""EOD runner acceptance tests (E7, Architecture §4.9).
 
 The plan's acceptance criteria:
 - running the same session twice changes nothing the second time;
@@ -17,15 +17,6 @@ import pytest
 
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.clock.replay import ReplayClock
-
-
-class SettableClock(ReplayClock):
-    """Replay clock with a set() for test seeding."""
-
-    def set(self, now: datetime) -> None:
-        if now < self._current_time:
-            raise ValueError("cannot move the clock backwards")
-        self._current_time = now.astimezone(UTC)
 from trade_engine.domain.instruments import Equity, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
@@ -52,6 +43,15 @@ SESSION_CLOSE = SESSION_OPEN + timedelta(minutes=390)
 CALENDAR = ExchangeCalendar()
 EOD_CLOCK = datetime(2026, 9, 23, 21, 45, tzinfo=UTC)  # 17:45 ET
 PREV_EOD = datetime(2026, 9, 22, 21, 45, tzinfo=UTC)
+
+
+class SettableClock(ReplayClock):
+    """Replay clock with a set() for test seeding."""
+
+    def set(self, now: datetime) -> None:
+        if now < self._current_time:
+            raise ValueError("cannot move the clock backwards")
+        self._current_time = now.astimezone(UTC)
 
 
 def _bar(
@@ -1262,4 +1262,100 @@ def test_replay_refuses_a_clock_already_past_the_open(tmp_path: Path) -> None:
             EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
         ).run(SESSION)
     assert ledger.event_by_command(_marker_command(SESSION)) is None
+    ledger.close()
+
+
+# -- replay scope: only what the session can still change ---------------------------
+
+
+class _NoBarsFor(FakeMarketData):
+    def __init__(self, symbol: str) -> None:
+        super().__init__()
+        self._symbol = symbol
+
+    def bars(self, instrument, tf, start, end, max_age_seconds):
+        if instrument.symbol == self._symbol:
+            return []
+        return super().bars(instrument, tf, start, end, max_age_seconds)
+
+
+def test_finished_orders_on_a_symbol_without_bars_do_not_block_the_run(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    delisted = Equity("OLDCO")
+    bracket = _seed_symbol_bracket(
+        ledger, broker, clock, account=ACCOUNT, symbol=delisted, command_id="e7-oldco"
+    )
+    OrderManager(broker, clock, ledger).cancel(bracket.entry.order_id, command_id="e7-oldco:cancel")
+    assert ledger.state(ACCOUNT).orders[bracket.entry.order_id].state is OrderState.CANCELLED
+    _seed_bracket(ledger, broker, clock, command_id="e7-live")
+
+    result = EodRunner(
+        ledger, clock, CALENDAR, _NoBarsFor("OLDCO"),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+
+    # Only AAPL, which has a working entry, is replayed.
+    assert result.accounts[0].bars_processed == 390
+    assert ledger.event_by_command(_marker_command(SESSION)) is not None
+    ledger.close()
+
+
+def test_a_working_order_on_a_symbol_without_bars_still_refuses(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    _seed_symbol_bracket(
+        ledger, broker, clock, account=ACCOUNT, symbol=Equity("OLDCO"), command_id="e7-oldco"
+    )
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    with pytest.raises(ReplayDataError, match="No one-minute bars returned for OLDCO"):
+        EodRunner(
+            ledger, clock, CALENDAR, _NoBarsFor("OLDCO"),
+            EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+        ).run(SESSION)
+    ledger.close()
+
+
+def test_a_flat_position_is_not_replayed(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    _seed_bracket(ledger, broker, clock, command_id="e7-flat", entry_prefilled=True)
+    stop_minute = 60
+    EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData({stop_minute: ("96", "96", "94", "95")}),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+    assert ledger.state(ACCOUNT).positions[INSTRUMENT].quantity == Decimal("0")
+
+    clock.set(NEXT_OPEN - timedelta(minutes=1))
+    result = EodRunner(
+        ledger, clock, CALENDAR, _NoBarsFor("AAPL"),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(NEXT_SESSION)
+    assert result.accounts[0].bars_processed == 0
+    ledger.close()
+
+
+def test_fills_recorded_counts_a_stop_filled_inside_its_entry_bar(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    _seed_bracket(ledger, broker, clock, command_id="e7-entry-bar")
+    result = EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData({0: ("100", "100", "94", "95")}),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+    assert result.accounts[0].fills_recorded == 2
+    assert ledger.state(ACCOUNT).positions[INSTRUMENT].quantity == Decimal("0")
     ledger.close()

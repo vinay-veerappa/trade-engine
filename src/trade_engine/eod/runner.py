@@ -162,8 +162,8 @@ class EodRunResult:
 class _Tally:
     """Per-account counters and closes gathered while the session replays."""
 
+    fills_before: int
     bars_processed: int = 0
-    fills_recorded: int = 0
     last_regular_closes: dict[Instrument, Decimal] = field(default_factory=dict)
 
 
@@ -205,7 +205,10 @@ class EodRunner:
             if self._ledger.event_by_command(self._run_command(account_id, session)) is None
         ]
         replays = {account_id: self._prepare_account(account_id) for account_id in pending}
-        tallies = {account_id: _Tally() for account_id in pending}
+        tallies = {
+            account_id: _Tally(fills_before=self._fill_count(account_id))
+            for account_id in pending
+        }
         self._replay_session(session, replays, tallies)
 
         # The session is over before anything is marked or entered: a DAY entry for D+1
@@ -300,7 +303,7 @@ class EodRunner:
                 broker.process_bar(bar)
                 if is_regular:
                     tally.last_regular_closes[bar.instrument] = bar.close
-                tally.fills_recorded += self._reconcile_after_bar(
+                self._reconcile_after_bar(
                     account_id, broker, self._manager_for(account_id, broker), timestamp
                 )
                 tally.bars_processed += 1
@@ -316,7 +319,7 @@ class EodRunner:
         if instruments:
             # A closing sweep with no bar: confirms every terminal state the venue
             # reached during the session (DAY expiry at the close, cancelled exits).
-            tally.fills_recorded += self._reconcile_after_bar(
+            self._reconcile_after_bar(
                 account_id, broker, self._manager_for(account_id, broker), None
             )
         self._mark_positions(account_id, tally.last_regular_closes, session)
@@ -325,9 +328,16 @@ class EodRunner:
         return AccountRunResult(
             account_id=account_id,
             bars_processed=tally.bars_processed,
-            fills_recorded=tally.fills_recorded,
+            # Counted from the ledger: the OMS records some fills itself, such as a
+            # stop filled inside its entry's bar while the entry fill is recorded.
+            fills_recorded=self._fill_count(account_id) - tally.fills_before,
             marks_appended=self._marks_appended(account_id, session),
             orders_submitted=orders_submitted,
+        )
+
+    def _fill_count(self, account_id: str) -> int:
+        return sum(
+            1 for event in self._ledger.events(account=account_id) if event.kind is EventKind.FILL
         )
 
     def _marks_appended(self, account_id: str, session: date) -> int:
@@ -468,9 +478,19 @@ class EodRunner:
         return positions
 
     def _replay_instruments(self, state: AccountState) -> tuple[Instrument, ...]:
-        instruments: set[Instrument] = set(state.positions)
+        """Instruments the session can change: open positions and working orders.
+
+        A finished order has nothing left to fill; replaying its symbol forever would
+        grow every run and let one delisted name with no bars block the account.
+        """
+        instruments: set[Instrument] = {
+            instrument
+            for instrument, position in state.positions.items()
+            if position.quantity != Decimal("0")
+        }
         for order in state.orders.values():
-            instruments.add(order.instrument)
+            if order.state in _VENUE_WORKING:
+                instruments.add(order.instrument)
         ordered = tuple(sorted(instruments, key=lambda value: value.symbol))
         for instrument in ordered:
             if not isinstance(instrument, Equity):

@@ -6,6 +6,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from trade_engine.cli import main
 from trade_engine.domain.instruments import Equity
 from trade_engine.eod import DiscoveredPlugins
@@ -73,3 +75,30 @@ def test_eod_cli_runs_a_session_and_reports_counts(monkeypatch, tmp_path: Path) 
         ]
     )
     assert code == 0
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--session", "2026-13-01"], "--session: expected YYYY-MM-DD"),
+        (["--session", SESSION.isoformat(), "--slippage-bps", "abc"], "expected a number"),
+        (["--session", SESSION.isoformat(), "--slippage-bps", "-1"], "non-negative"),
+        (["--session", SESSION.isoformat(), "--slippage-bps", "NaN"], "must be finite"),
+    ],
+)
+def test_eod_rejects_malformed_arguments(extra, message, tmp_path: Path, capsys) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["eod", "--ledger", str(tmp_path / "l.db"), *extra])
+    assert exit_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_eod_refuses_when_a_plugin_fails_to_load(monkeypatch, tmp_path: Path, capsys) -> None:
+    from trade_engine.eod import PluginDiscoveryError
+
+    def broken():
+        raise PluginDiscoveryError("Plugin 'bad' in group 'trade_engine.marketdata' failed to load")
+
+    monkeypatch.setattr("trade_engine.eod.cli.discover_plugins", broken)
+    code = main(["eod", "--session", SESSION.isoformat(), "--ledger", str(tmp_path / "l.db")])
+    assert code == 2
+    assert "refused: Plugin 'bad'" in capsys.readouterr().err
