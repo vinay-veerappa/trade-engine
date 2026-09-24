@@ -2,9 +2,28 @@
 
 import argparse
 import sys
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import trade_engine
+
+
+def _session_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {value!r}") from err
+
+
+def _slippage_bps(value: str) -> Decimal:
+    try:
+        slippage = Decimal(value)
+    except InvalidOperation as err:
+        raise argparse.ArgumentTypeError(f"expected a number, got {value!r}") from err
+    if not slippage.is_finite() or slippage < 0:
+        raise argparse.ArgumentTypeError(f"must be finite and non-negative, got {value!r}")
+    return slippage
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,7 +41,9 @@ def main(argv: list[str] | None = None) -> int:
     eod_parser = subparsers.add_parser(
         "eod", help="Run the end-of-day job for one session (E7, Architecture §4.9)"
     )
-    eod_parser.add_argument("--session", required=True, help="Session date YYYY-MM-DD")
+    eod_parser.add_argument(
+        "--session", required=True, type=_session_date, help="Session date YYYY-MM-DD"
+    )
     eod_parser.add_argument("--ledger", required=True, help="Path to the ledger database")
     eod_parser.add_argument(
         "--market-data",
@@ -35,7 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     eod_parser.add_argument(
         "--slippage-bps",
-        default="0",
+        default=Decimal("0"),
+        type=_slippage_bps,
         help="SimBroker slippage in basis points (default 0)",
     )
 
