@@ -9,10 +9,13 @@ from decimal import Decimal
 from types import MappingProxyType
 
 from trade_engine.domain.instruments import Instrument, Side
-from trade_engine.domain.orders import TimeInForce
+from trade_engine.domain.orders import OrderType, TimeInForce
 
 # Bracket orders rest until filled or cancelled; OPG/MOC/GTD need terms an intent does not carry.
 BRACKET_TIFS = frozenset({TimeInForce.DAY, TimeInForce.GTC})
+# LIMIT buys at or below entry_price; STOP buys only once price trades up through it
+# (a breakout trigger), so an untriggered breakout never fills.
+BRACKET_ENTRY_TYPES = frozenset({OrderType.LIMIT, OrderType.STOP})
 
 
 @dataclass(frozen=True)
@@ -81,10 +84,16 @@ class OrderIntent:
     # so a multi-day (equity or options) swing trade keeps its stop overnight.
     entry_tif: TimeInForce = TimeInForce.DAY
     exit_tif: TimeInForce = TimeInForce.GTC
+    entry_type: OrderType = OrderType.LIMIT
 
     def __post_init__(self) -> None:
         if not self.intent_id:
             raise ValueError("intent_id must be non-empty")
+        if self.entry_type not in BRACKET_ENTRY_TYPES:
+            raise ValueError(
+                "entry_type must be one of "
+                f"{sorted(value.value for value in BRACKET_ENTRY_TYPES)}, got {self.entry_type!r}"
+            )
         for name in ("entry_tif", "exit_tif"):
             tif = getattr(self, name)
             if tif not in BRACKET_TIFS:

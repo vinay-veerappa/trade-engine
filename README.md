@@ -54,6 +54,15 @@ targets of a multi-day swing trade (equity or option) stay live after the close.
 accept only `DAY` and `GTC`; `OrderManager.create_bracket` refuses the whole bracket before
 the entry is placed when the venue does not support either value.
 
+## Entry Type
+
+`OrderIntent.entry_type` defaults to `LIMIT`: buy at or below `entry_price` (sell at or
+above it for a short), which fills at once when the market is already through that price.
+Set `entry_type=OrderType.STOP` for a breakout trigger: the entry rests as a stop at
+`entry_price` and fills only once price trades through it (at the open when it gaps over).
+A venue without native stops refuses a stop entry before anything is persisted; an emulated
+entry would need a live price feed that an EOD bracket does not have.
+
 ## Equity Simulation
 
 `trade_engine.sim.SimBroker` is a single-account paper venue driven only by explicit
