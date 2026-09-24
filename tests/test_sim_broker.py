@@ -19,7 +19,7 @@ from trade_engine.interfaces.broker import (
 from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import Bar
 from trade_engine.ledger import Ledger
-from trade_engine.oms.manager import OrderManager
+from trade_engine.oms.manager import OrderManagementError, OrderManager
 from trade_engine.sim import MissingBarError, SimBroker
 
 UTC = timezone.utc
@@ -938,3 +938,161 @@ def test_exit_without_a_parent_held_by_the_venue_is_refused() -> None:
             stop_price=Decimal("95"), parent_order_id="orphan:entry",
         )
     assert broker.orders(START) == []
+
+
+def _entry_bar_bracket(
+    tmp_path: Path,
+    entry_bar_prices: dict[str, str],
+    *,
+    side: Side = Side.BUY,
+) -> tuple[OrderManager, object, Ledger, SimBroker, ReplayClock]:
+    clock = ReplayClock()
+    broker, _ = broker_fixture(clock=clock)
+    long = side is Side.BUY
+    intent = OrderIntent(
+        intent_id="entry-bar",
+        account_id=ACCOUNT,
+        instrument=INSTRUMENT,
+        side=side,
+        quantity_rule="fixed_2",
+        entry_price=Decimal("100"),
+        stop_loss=Decimal("95") if long else Decimal("105"),
+        profit_targets=(Decimal("105") if long else Decimal("95"),),
+        reason="Known-answer entry-bar exit",
+        command_id="entry-bar-command",
+    )
+    ledger = Ledger(tmp_path / "ledger.db")
+    ledger.open()
+    manager = OrderManager(broker, clock, ledger)
+    bracket = manager.create_bracket(intent, Decimal("2"))
+    manager.submit(bracket.entry)
+    entry_bar = bar(START + timedelta(minutes=1), **entry_bar_prices)
+    clock.set(entry_bar.timestamp)
+    broker.process_bar(entry_bar)
+    manager.reconcile_order(bracket.entry.order_id)
+    return manager, bracket, ledger, broker, clock
+
+
+def test_long_stop_touched_in_the_entry_bar_fills_in_that_bar(tmp_path: Path) -> None:
+    manager, bracket, ledger, broker, _ = _entry_bar_bracket(
+        tmp_path, {"open_": "101", "high": "101", "low": "94", "close": "96"}
+    )
+    try:
+        manager.reconcile_order(bracket.stop.order_id)
+        assert [(f.venue_order_id, f.price, f.filled_at) for f in broker.fills(START)] == [
+            (bracket.entry.order_id, Decimal("100"), START + timedelta(minutes=1)),
+            (bracket.stop.order_id, Decimal("95"), START + timedelta(minutes=1)),
+        ]
+        assert manager.get_order(bracket.stop.order_id).state is OrderState.FILLED
+        assert manager.get_order(bracket.targets[0].order_id).state is OrderState.CANCELLED
+    finally:
+        ledger.close()
+    assert broker.positions() == []
+
+
+def test_short_stop_touched_in_the_entry_bar_fills_in_that_bar(tmp_path: Path) -> None:
+    manager, bracket, ledger, broker, _ = _entry_bar_bracket(
+        tmp_path,
+        {"open_": "99", "high": "106", "low": "98", "close": "104"},
+        side=Side.SELL,
+    )
+    try:
+        stop_fills = [f for f in broker.fills(START) if f.venue_order_id == bracket.stop.order_id]
+        assert [(f.side, f.price) for f in stop_fills] == [(Side.BUY, Decimal("105"))]
+    finally:
+        ledger.close()
+    assert broker.positions() == []
+
+
+def test_entry_already_through_the_stop_exits_at_the_entry_price(tmp_path: Path) -> None:
+    manager, bracket, ledger, broker, _ = _entry_bar_bracket(
+        tmp_path, {"open_": "93", "high": "94", "low": "92", "close": "93"}
+    )
+    try:
+        assert [(f.venue_order_id, f.price) for f in broker.fills(START)] == [
+            (bracket.entry.order_id, Decimal("93")),
+            (bracket.stop.order_id, Decimal("93")),
+        ]
+    finally:
+        ledger.close()
+
+
+def test_target_reached_in_the_entry_bar_waits_for_a_later_bar(tmp_path: Path) -> None:
+    manager, bracket, ledger, broker, clock = _entry_bar_bracket(
+        tmp_path, {"open_": "99", "high": "106", "low": "98", "close": "104"}
+    )
+    try:
+        assert [f.venue_order_id for f in broker.fills(START)] == [bracket.entry.order_id]
+        assert manager.get_order(bracket.stop.order_id).state is OrderState.ACCEPTED
+
+        next_bar = bar(START + timedelta(minutes=2), open_="104", high="106", low="103", close="105")
+        clock.set(next_bar.timestamp)
+        fills = broker.process_bar(next_bar)
+        assert [(f.venue_order_id, f.price) for f in fills] == [
+            (bracket.targets[0].order_id, Decimal("105"))
+        ]
+    finally:
+        ledger.close()
+
+
+def test_exit_submitted_after_later_bars_is_rejected_not_silently_late(tmp_path: Path) -> None:
+    clock = ReplayClock()
+    broker, _ = broker_fixture(clock=clock)
+    intent = OrderIntent(
+        intent_id="late-exit",
+        account_id=ACCOUNT,
+        instrument=INSTRUMENT,
+        side=Side.BUY,
+        quantity_rule="fixed_2",
+        entry_price=Decimal("100"),
+        stop_loss=Decimal("95"),
+        profit_targets=(Decimal("105"),),
+        reason="Known-answer late reconciliation",
+        command_id="late-exit-command",
+    )
+
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        manager = OrderManager(broker, clock, ledger)
+        bracket = manager.create_bracket(intent, Decimal("2"))
+        manager.submit(bracket.entry)
+        entry_bar = bar(START + timedelta(minutes=1), open_="101", high="101", low="94", close="96")
+        clock.set(entry_bar.timestamp)
+        broker.process_bar(entry_bar)
+        # The runner processes another bar before reconciling the entry.
+        later = START + timedelta(minutes=2)
+        clock.set(later)
+        broker.process_bar(bar(later, open_="96", high="97", low="93", close="94"))
+
+        with pytest.raises(OrderManagementError, match="Protective stop"):
+            manager.reconcile_order(bracket.entry.order_id)
+
+        assert manager.get_order(bracket.stop.order_id).state is OrderState.REJECTED
+    stop_state = next(
+        state for state in broker.orders(START) if state.venue_order_id == bracket.stop.order_id
+    )
+    assert stop_state.state is OrderState.REJECTED
+    assert [fill.venue_order_id for fill in broker.fills(START)] == [bracket.entry.order_id]
+
+
+def test_rejected_late_exit_stays_rejected_when_resubmitted() -> None:
+    broker, clock = broker_fixture()
+    place_order(broker, clock, "late:entry", side=Side.BUY, order_type=OrderType.MARKET)
+    feed_session(broker, clock, START + timedelta(minutes=1), minutes=2)
+
+    for _ in range(2):
+        ack = broker.submit(
+            VenueOrder(
+                venue_order_id="late:stop",
+                instrument=INSTRUMENT,
+                order_type=OrderType.STOP,
+                side=Side.SELL,
+                quantity=Decimal("1"),
+                submitted_at=START,
+                stop_price=Decimal("95"),
+                allocations=(VenueOrderAllocation("late:stop", ACCOUNT, Decimal("1")),),
+                parent_order_id="late:entry",
+            )
+        )
+        assert ack.status == "REJECTED"
+        state = next(s for s in broker.orders(START) if s.venue_order_id == "late:stop")
+        assert state.state is OrderState.REJECTED
