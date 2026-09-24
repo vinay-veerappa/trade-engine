@@ -76,6 +76,13 @@ Time-stop exits use market-on-open orders (`TimeInForce.OPG`) and fill only at t
 eligible 09:30 ET session open after submission; they expire if that open passes
 without being simulated. A missing expected open raises `MissingBarError`.
 
+SimBroker keeps its book in memory, so every new process starts empty. The EOD runner
+restores an empty SimBroker from the ledger before replay: working orders (with their
+original submit times), the rest of their brackets, those orders' fills, and open
+positions. The runner then checks that the venue holds every order the ledger says is
+working, and refuses if it doesn't. An order left `PENDING_UNKNOWN`, or one with no
+recorded submission, can't be restored and is refused too.
+
 ## Development
 
 Requires Python >= 3.13.

@@ -39,13 +39,20 @@ from trade_engine.domain.orders import OrderState, OrderType
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.risk import RiskVerdict
 from trade_engine.domain.signals import OrderIntent, Signal
-from trade_engine.interfaces.broker import BrokerAdapter, VenueFill
+from trade_engine.interfaces.broker import (
+    BrokerAdapter,
+    VenueFill,
+    VenueOrder,
+    VenueOrderAllocation,
+    VenuePosition,
+)
 from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import MarketData
 from trade_engine.ledger import EodRun, Event, EventKind, Ledger, Mark
 from trade_engine.ledger.state import AccountState
 from trade_engine.oms.manager import OrderManager
 from trade_engine.risk import RiskContext, RiskEngine
+from trade_engine.sim import SimBroker
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 _MARK_COMMAND = "eod:mark:{account}:{session}:{symbol}"
@@ -56,6 +63,15 @@ _TERMINAL = frozenset(
         OrderState.CANCELLED,
         OrderState.EXPIRED,
         OrderState.REJECTED,
+    }
+)
+# States in which the ledger says the venue holds the order.
+_VENUE_WORKING = frozenset(
+    {
+        OrderState.SUBMITTED,
+        OrderState.ACCEPTED,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.PENDING_UNKNOWN,
     }
 )
 
@@ -214,6 +230,7 @@ class EodRunner:
         broker.connect()
         state = self._ledger.state(account_id)
         instruments = self._replay_instruments(state)
+        self._rehydrate_venue(account_id, broker, state)
 
         bars_processed = 0
         fills_recorded = 0
@@ -265,6 +282,132 @@ class EodRunner:
             ):
                 count += 1
         return count
+
+    def _rehydrate_venue(
+        self, account_id: str, broker: BrokerAdapter, state: AccountState
+    ) -> None:
+        """Make sure the venue holds every order the ledger says is working.
+
+        A SimBroker lives in memory, so a new process starts with an empty book while
+        the ledger still holds yesterday's D+1 entries and GTC stops. An empty
+        SimBroker is restored from the fold (I2). Any venue is then checked: a working
+        order it does not hold would silently never fill, so the run refuses (I5).
+        """
+        if (
+            isinstance(broker, SimBroker)
+            and not broker.orders(MIN_TIME)
+            and not broker.fills(MIN_TIME)
+        ):
+            orders, fills = self._restorable(account_id, state)
+            if orders:
+                broker.restore(orders, fills, self._restorable_positions(state))
+        held = {item.venue_order_id: item for item in broker.orders(MIN_TIME)}
+        for order in sorted(state.orders.values(), key=lambda value: value.order_id):
+            if order.state not in _VENUE_WORKING:
+                continue
+            venue_id = state.venue_order_ids.get(order.order_id, order.order_id)
+            found = held.get(venue_id)
+            if found is None:
+                raise EodRunnerError(
+                    f"Venue for '{account_id}' does not hold working order "
+                    f"'{order.order_id}' ({order.state.value}); refusing to replay a "
+                    f"session it could never fill in (I5)"
+                )
+            recorded = state.filled_quantity.get(order.order_id, Decimal("0"))
+            if found.filled_quantity < recorded:
+                raise EodRunnerError(
+                    f"Venue reports {found.filled_quantity} filled for '{order.order_id}' "
+                    f"but the ledger records {recorded} (I5)"
+                )
+
+    def _restorable(
+        self, account_id: str, state: AccountState
+    ) -> tuple[list[tuple[VenueOrder, OrderState]], list[VenueFill]]:
+        """Working orders plus their brackets: a child's cap needs its parent's fills
+        and its siblings' exits. NEW orders were never sent, so they stay out."""
+        wanted: set[str] = set()
+        for order in state.orders.values():
+            if order.state not in _VENUE_WORKING:
+                continue
+            if order.state is OrderState.PENDING_UNKNOWN:
+                raise EodRunnerError(
+                    f"Order '{order.order_id}' for '{account_id}' is PENDING_UNKNOWN; the "
+                    f"simulated venue's answer is gone, reconcile it before replay (I5)"
+                )
+            root = order.parent_order_id or order.order_id
+            wanted.add(root)
+            wanted.update(
+                candidate.order_id
+                for candidate in state.orders.values()
+                if candidate.parent_order_id == root and candidate.state is not OrderState.NEW
+            )
+        orders: list[tuple[VenueOrder, OrderState]] = []
+        for order_id in sorted(wanted):
+            order = state.orders[order_id]
+            submission = self._ledger.event_by_command(f"{order.command_id}:submit")
+            if submission is None:
+                raise EodRunnerError(
+                    f"Order '{order_id}' for '{account_id}' has no submission event; cannot "
+                    f"restore when it reached the venue (I5)"
+                )
+            orders.append(
+                (
+                    VenueOrder(
+                        venue_order_id=state.venue_order_ids.get(order_id, order_id),
+                        instrument=order.instrument,
+                        order_type=order.order_type,
+                        side=order.side,
+                        quantity=order.quantity,
+                        submitted_at=submission.ts_utc,
+                        tif=order.tif,
+                        limit_price=order.limit_price,
+                        stop_price=order.stop_price,
+                        trail_amount=order.trail_amount,
+                        allocations=(
+                            VenueOrderAllocation(order_id, order.account_id, order.quantity),
+                        ),
+                        parent_order_id=order.parent_order_id,
+                        oco_group=order.oco_group,
+                    ),
+                    order.state,
+                )
+            )
+        fills = [
+            VenueFill(
+                venue_fill_id=fill.venue_execution_id or fill.fill_id,
+                venue_order_id=state.venue_order_ids.get(fill.order_id, fill.order_id),
+                instrument=fill.instrument,
+                quantity=fill.quantity,
+                price=fill.price,
+                filled_at=fill.filled_at,
+                side=fill.side,
+                fee=fill.fee,
+            )
+            for fill in state.fills
+            if fill.order_id in wanted
+        ]
+        return orders, fills
+
+    @staticmethod
+    def _restorable_positions(state: AccountState) -> list[VenuePosition]:
+        positions = []
+        for instrument, position in state.positions.items():
+            if position.quantity == Decimal("0"):
+                continue
+            # SimBroker reads only the quantity; as_of dates it by its latest fill.
+            as_of = max(
+                (fill.filled_at for fill in state.fills if fill.instrument == instrument),
+                default=MIN_TIME,
+            )
+            positions.append(
+                VenuePosition(
+                    instrument=instrument,
+                    quantity=position.quantity,
+                    avg_price=position.avg_cost,
+                    as_of=as_of,
+                )
+            )
+        return positions
 
     def _replay_instruments(self, state: AccountState) -> tuple[Instrument, ...]:
         instruments: set[Instrument] = set(state.positions)
