@@ -17,6 +17,7 @@ from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import (
     Bar,
     CorporateAction,
+    Greeks,
     MarketData,
     OptionQuote,
     Quote,
@@ -32,6 +33,7 @@ __all__ = [
     "Capabilities",
     "Clock",
     "CorporateAction",
+    "Greeks",
     "MarketData",
     "OptionQuote",
     "OrderChanges",
