@@ -1,0 +1,29 @@
+- generic [active] [ref=e1]:
+  - alert [ref=e2]
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - button "Open navigation" [ref=e5]
+      - link "LuxAlgo Trade Journal" [ref=e6] [cursor=pointer]:
+        - /url: /
+        - img "LuxAlgo" [ref=e7]
+        - generic [ref=e10]: Trade Journal
+      - button "Privacy mode off" [ref=e12]:
+        - text: Privacy
+        - generic [ref=e13]: "Off"
+      - button "Switch to light mode" [ref=e14]
+    - main [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]:
+          - heading "Daily journal" [level=1] [ref=e18]
+          - combobox "Select account" [ref=e20]:
+            - generic [ref=e24]: All accounts
+          - generic [ref=e27]:
+            - button "7D" [ref=e28]
+            - button "30D" [ref=e29]
+            - button "90D" [ref=e30]
+            - button "YTD" [ref=e31]
+            - button "All" [ref=e32]
+          - button "Filters" [ref=e33]
+          - link "View my day" [ref=e35] [cursor=pointer]:
+            - /url: /journal/2026-09-24?
+        - status "Loading journal" [ref=e37]
