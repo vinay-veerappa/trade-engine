@@ -1433,3 +1433,39 @@ def test_stop_entry_gapping_over_the_trigger_fills_at_the_open(tmp_path: Path) -
     fill = next(fill for fill in ledger.state(ACCOUNT).fills if fill.order_id == "brk:entry")
     assert fill.price == Decimal("104")
     ledger.close()
+
+
+def test_partial_target_in_replay_leaves_the_runner_protected(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    intent = OrderIntent(
+        intent_id="intent-third",
+        account_id=ACCOUNT,
+        instrument=INSTRUMENT,
+        side=Side.BUY,
+        quantity_rule="fixed_3",
+        entry_price=Decimal("100"),
+        stop_loss=Decimal("95"),
+        profit_targets=(Decimal("105"),),
+        reason="a third at +1R",
+        command_id="third",
+        target_fractions=(Decimal("1") / 3,),
+    )
+    manager = OrderManager(broker, clock, ledger)
+    manager.submit(manager.create_bracket(intent, Decimal("3")).entry)
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData({10: ("104", "106", "103", "105.5")}),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+
+    state = ledger.state(ACCOUNT)
+    assert state.orders["third:target:1"].state is OrderState.FILLED
+    assert state.positions[INSTRUMENT].quantity == Decimal("2")
+    stop = state.orders["third:stop"]
+    assert (stop.state, stop.quantity) == (OrderState.ACCEPTED, Decimal("2"))
+    assert ledger.event_by_command(f"eod:mark:{ACCOUNT}:{SESSION.isoformat()}:AAPL") is not None
+    ledger.close()

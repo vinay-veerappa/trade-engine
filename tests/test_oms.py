@@ -1285,3 +1285,86 @@ def test_stop_entry_is_refused_before_persisting_without_native_stops(manager_fa
     assert broker.submitted == []
     # A limit entry at the same venue still works; its protective stop is emulated.
     assert manager.create_bracket(make_intent(command_id="limit-ok"), Decimal("10"))
+
+
+# -- target fractions: partial exits leave a runner on the stop -----------------------
+
+
+def _fraction_intent(fractions, targets=(Decimal("110"),), command_id="partial"):
+    return replace(
+        make_intent(command_id=command_id, targets=targets), target_fractions=fractions
+    )
+
+
+def test_target_fractions_are_validated():
+    assert make_intent().target_fractions is None
+    assert _fraction_intent((Decimal("1"),)).target_fractions == (Decimal("1"),)
+    with pytest.raises(ValueError, match="entries for"):
+        _fraction_intent((Decimal("0.5"), Decimal("0.5")))
+    for bad in (Decimal("0"), Decimal("-0.1"), Decimal("NaN"), 0.5):
+        with pytest.raises(ValueError, match="finite positive"):
+            _fraction_intent((bad,))
+    with pytest.raises(ValueError, match="more than the whole position"):
+        _fraction_intent(
+            (Decimal("0.6"), Decimal("0.5")), targets=(Decimal("105"), Decimal("110"))
+        )
+
+
+def test_a_third_at_the_target_leaves_a_runner_on_the_stop(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(_fraction_intent((Decimal("1") / 3,)), Decimal("10"))
+
+    assert [target.quantity for target in bracket.targets] == [Decimal("3")]
+    assert bracket.stop.quantity == Decimal("10")
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "partial-entry", "10", "100"))
+    assert [(item.venue_order_id, item.quantity) for item in broker.submitted[1:]] == [
+        ("partial:stop", Decimal("10")),
+        ("partial:target:1", Decimal("3")),
+    ]
+
+    manager.record_fill(make_fill(bracket.targets[0], "partial-target", "3", "110"))
+    assert manager.get_order("partial:target:1").state is OrderState.FILLED
+    stop = manager.get_order("partial:stop")
+    assert stop.quantity == Decimal("7")
+    assert stop.state is OrderState.ACCEPTED
+    assert broker.cancelled == []
+
+
+def test_whole_share_fractions_round_by_largest_remainder(manager_factory):
+    manager, _, _ = manager_factory()
+    halves = manager.create_bracket(
+        _fraction_intent(
+            (Decimal("0.5"), Decimal("0.5")), targets=(Decimal("105"), Decimal("110"))
+        ),
+        Decimal("5"),
+    )
+    assert [target.quantity for target in halves.targets] == [Decimal("3"), Decimal("2")]
+    half_and_runner = manager.create_bracket(
+        _fraction_intent((Decimal("0.5"),), command_id="half"), Decimal("5")
+    )
+    assert [target.quantity for target in half_and_runner.targets] == [Decimal("3")]
+    with pytest.raises(ValueError, match="too small"):
+        manager.create_bracket(
+            _fraction_intent((Decimal("0.1"),), command_id="tiny"), Decimal("4")
+        )
+
+
+def test_partial_entry_fill_keeps_the_runners_share(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(_fraction_intent((Decimal("1") / 3,)), Decimal("9"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "part-entry", "6", "100"))
+    manager.cancel(bracket.entry.order_id, command_id="cancel-rest")
+
+    # Planned 3 of 9; of the 6 filled the target gets its third, not all six.
+    target = next(item for item in broker.submitted if item.venue_order_id == "partial:target:1")
+    assert target.quantity == Decimal("2")
+    assert manager.get_order("partial:stop").quantity == Decimal("6")
+
+
+def test_fractions_join_the_fingerprint_only_when_set(manager_factory):
+    manager, _, _ = manager_factory()
+    manager.create_bracket(make_intent(targets=(Decimal("110"),)), Decimal("10"))
+    with pytest.raises(IdempotencyConflictError):
+        manager.create_bracket(_fraction_intent((Decimal("1"),), command_id="command-1"), Decimal("10"))

@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 
 from trade_engine.domain.instruments import Equity, Instrument, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
@@ -144,9 +144,14 @@ class OrderManager:
             oco_group=f"{prefix}:exits",
         )
         self._validate_quantity(intent.instrument, quantity)
-        target_quantities = self._split_quantity(
-            quantity, len(intent.profit_targets), intent.instrument
-        )
+        if intent.target_fractions is None:
+            target_quantities = self._split_quantity(
+                quantity, len(intent.profit_targets), intent.instrument
+            )
+        else:
+            target_quantities = self._fraction_quantities(
+                quantity, intent.target_fractions, intent.instrument
+            )
         targets = tuple(
             Order(
                 order_id=f"{prefix}:target:{index}",
@@ -887,9 +892,15 @@ class OrderManager:
                 target_weights = tuple(
                     self._planned_quantity(target.order_id) for target in targets
                 )
-                target_budgets = self._allocate_quantity(
-                    entry_filled, target_weights, entry.instrument
+                # Targets planned below the entry size leave a runner; it keeps its share
+                # of a partial entry fill instead of the targets absorbing all of it.
+                runner = self._planned_quantity(entry.order_id) - sum(
+                    target_weights, Decimal("0")
                 )
+                weights = (*target_weights, runner) if runner > 0 else target_weights
+                target_budgets = self._allocate_quantity(
+                    entry_filled, weights, entry.instrument
+                )[: len(targets)]
                 for target, budget in zip(targets, target_budgets, strict=True):
                     if target.state is OrderState.NEW:
                         if budget <= 0:
@@ -1296,6 +1307,8 @@ class OrderManager:
             # Added only when set, so brackets persisted before stop entries keep their
             # fingerprints and still replay idempotently (I3).
             payload["entry_type"] = intent.entry_type.value
+        if intent.target_fractions is not None:
+            payload["target_fractions"] = [str(value) for value in intent.target_fractions]
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -1322,6 +1335,36 @@ class OrderManager:
         if any(portion <= 0 for portion in portions):
             raise ValueError("quantity is too small to allocate a positive amount to each target")
         return portions
+
+    @classmethod
+    def _fraction_quantities(
+        cls, quantity: Decimal, fractions: tuple[Decimal, ...], instrument: Instrument
+    ) -> tuple[Decimal, ...]:
+        """Size each target to its share of the position; any remainder is the runner.
+
+        Equities round by largest remainder over the targets plus the runner, so the
+        shares always add up to the entry and no target silently rounds to zero.
+        """
+        cls._validate_quantity(instrument, quantity)
+        runner = Decimal("1") - sum(fractions, Decimal("0"))
+        weights = (*fractions, runner) if runner > 0 else fractions
+        if isinstance(instrument, Equity):
+            exact = [quantity * weight for weight in weights]
+            portions = [value.to_integral_value(rounding=ROUND_FLOOR) for value in exact]
+            remaining = int(quantity - sum(portions, Decimal("0")))
+            by_remainder = sorted(
+                range(len(weights)), key=lambda index: (-(exact[index] - portions[index]), index)
+            )
+            for index in by_remainder[:remaining]:
+                portions[index] += 1
+        else:
+            portions = [quantity * weight for weight in weights]
+        targets = tuple(portions[: len(fractions)])
+        if any(portion <= 0 for portion in targets):
+            raise ValueError(
+                f"quantity {quantity} is too small to give every target its fraction"
+            )
+        return targets
 
     @staticmethod
     def _allocate_quantity(

@@ -63,6 +63,16 @@ Set `entry_type=OrderType.STOP` for a breakout trigger: the entry rests as a sto
 A venue without native stops refuses a stop entry before anything is persisted; an emulated
 entry would need a live price feed that an EOD bracket does not have.
 
+## Target Fractions
+
+`OrderIntent.target_fractions` sets the share of the position each profit target exits,
+in target order. Left as `None`, the whole position splits evenly across the targets.
+Fractions summing below 1 leave a runner that only the protective stop (or a strategy exit)
+closes: `target_fractions=(Decimal("1") / 3,)` sells a third at the target and trails the
+rest. Whole shares round by largest remainder over the targets and the runner; a bracket
+too small to give every target at least one share is refused. A partial entry fill keeps
+the same proportions, so the runner is never absorbed into the targets.
+
 ## Equity Simulation
 
 `trade_engine.sim.SimBroker` is a single-account paper venue driven only by explicit
