@@ -70,6 +70,8 @@ intrabar price path; when multiple targets are touched, they fill in numeric tar
 A protective stop the entry's own bar reached fills in that bar (at the stop, or at the
 entry price when the entry was already through it); targets the entry bar reached wait
 for a later bar, since the bar may have reached them before the entry.
+Callers must reconcile after every bar: an exit submitted after bars following its entry
+fill were simulated is rejected, because those bars can no longer be matched.
 Time-stop exits use market-on-open orders (`TimeInForce.OPG`) and fill only at the first
 eligible 09:30 ET session open after submission; they expire if that open passes
 without being simulated. A missing expected open raises `MissingBarError`.

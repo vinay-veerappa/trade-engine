@@ -108,17 +108,22 @@ class SimBroker(BrokerAdapter):
                 raise SimBrokerError(
                     f"venue_order_id '{order.venue_order_id}' was reused with different terms"
                 )
-            if existing.state is not OrderState.CANCELLED:
-                return self._ack(order.venue_order_id, "ACCEPTED")
-            return self._ack(order.venue_order_id, "REJECTED", "Order is already cancelled")
+            if existing.state is OrderState.CANCELLED:
+                return self._ack(order.venue_order_id, "REJECTED", "Order is already cancelled")
+            if existing.state is OrderState.REJECTED:
+                return self._ack(order.venue_order_id, "REJECTED", "Order was rejected")
+            return self._ack(order.venue_order_id, "ACCEPTED")
         now = self._now()
+        late_reason = self._late_exit_reason(order)
         working = _WorkingOrder(
             order=order,
-            state=OrderState.ACCEPTED,
+            state=OrderState.ACCEPTED if late_reason is None else OrderState.REJECTED,
             filled_quantity=ZERO,
             updated_at=now,
         )
         self._orders[order.venue_order_id] = working
+        if late_reason is not None:
+            return self._ack(order.venue_order_id, "REJECTED", late_reason)
         self._fill_stop_inside_entry_bar(order.venue_order_id, working)
         return self._ack(order.venue_order_id, "ACCEPTED")
 
@@ -347,6 +352,27 @@ class SimBroker(BrokerAdapter):
             Decimal("1") + self._slippage_bps / BPS
             if side is Side.BUY
             else Decimal("1") - self._slippage_bps / BPS
+        )
+
+    def _late_exit_reason(self, order: VenueOrder) -> str | None:
+        """Refuse an exit that arrives after bars following its entry fill were simulated.
+
+        Those bars are gone, so the exit cannot be matched against them; accepting it
+        would silently skip any stop or target they reached (I5). The caller must
+        reconcile after every bar.
+        """
+        if order.parent_order_id is None:
+            return None
+        entry_fills = [
+            fill.filled_at for fill in self._fills if fill.venue_order_id == order.parent_order_id
+        ]
+        latest_bar = self._last_bars.get(order.instrument)
+        if not entry_fills or latest_bar is None or latest_bar.timestamp <= max(entry_fills):
+            return None
+        return (
+            f"Exit arrived after bars following entry '{order.parent_order_id}' filled at "
+            f"{max(entry_fills).isoformat()} were simulated (latest bar "
+            f"{latest_bar.timestamp.isoformat()}); reconcile after every bar"
         )
 
     def _fill_stop_inside_entry_bar(self, venue_order_id: str, working: _WorkingOrder) -> None:
