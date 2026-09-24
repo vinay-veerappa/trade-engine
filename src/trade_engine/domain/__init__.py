@@ -28,6 +28,7 @@ from trade_engine.domain.portfolio import (
     VenueEnv,
 )
 from trade_engine.domain.risk import (
+    RiskControlChange,
     RiskRuleResult,
     RiskVerdict,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "OrderType",
     "Position",
     "RiskRuleResult",
+    "RiskControlChange",
     "RiskVerdict",
     "Side",
     "Signal",
