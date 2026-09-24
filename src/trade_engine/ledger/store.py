@@ -275,6 +275,24 @@ class Ledger:
         rows = self.conn.execute(sql, params).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def events_of_kind(self, kind: EventKind, *, account: str | None = None) -> list[Event]:
+        """Events of one kind in append order, filtered in SQL: a scan for one kind
+        does not decode the rest of the log."""
+        sql = "SELECT * FROM events WHERE kind = ?"
+        params: list[Any] = [kind.value]
+        if account is not None:
+            sql += " AND account = ?"
+            params.append(account)
+        rows = self.conn.execute(sql + " ORDER BY seq ASC", params).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
+    def accounts(self) -> list[str]:
+        """Every account with events, in order of its first event."""
+        rows = self.conn.execute(
+            "SELECT account FROM events GROUP BY account ORDER BY MIN(seq)"
+        ).fetchall()
+        return [row["account"] for row in rows]
+
     def event_by_command(self, command_id: str) -> Event | None:
         row = self.conn.execute(
             "SELECT * FROM events WHERE command_id = ?", (command_id,)

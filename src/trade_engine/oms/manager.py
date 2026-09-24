@@ -25,7 +25,6 @@ from trade_engine.ledger import (
     EmulatedOrderState,
     Event,
     EventKind,
-    AccountState,
     Ledger,
     OrderStateChange,
     OrderUpdated,
@@ -1434,7 +1433,10 @@ class OrderManager:
             )
 
     def _context(self, order_id: str) -> _OrderContext:
-        for state in self._ledger.fold().values():
+        # Each account's cached state (the ledger folds every append into it), in
+        # first-event order: the same answer as a full fold without re-reading the log.
+        for account in self._ledger.accounts():
+            state = self._ledger.state(account)
             order = state.orders.get(order_id)
             if order is not None:
                 return _OrderContext(
@@ -1446,13 +1448,13 @@ class OrderManager:
         raise KeyError(f"Unknown order_id '{order_id}'")
 
     def _account_state(self, account_id: str):
-        return self._ledger.fold().get(account_id, AccountState(account_id=account_id))
+        return self._ledger.state(account_id)
 
     def _planned_quantity(self, order_id: str) -> Decimal:
         return self._planned_order(order_id).quantity
 
     def _planned_order(self, order_id: str) -> Order:
-        for event in self._ledger.events():
+        for event in self._ledger.events_of_kind(EventKind.ORDERS_CREATED):
             if event.kind is EventKind.ORDERS_CREATED:
                 for order in event.payload.orders:
                     if order.order_id == order_id:
@@ -1460,7 +1462,7 @@ class OrderManager:
         raise KeyError(f"No creation event contains order '{order_id}'")
 
     def _has_unresolved_replace(self, order_id: str) -> bool:
-        for event in self._ledger.events():
+        for event in self._ledger.events_of_kind(EventKind.ORDER_PENDING):
             if (
                 event.kind is not EventKind.ORDER_PENDING
                 or event.payload.order_id != order_id

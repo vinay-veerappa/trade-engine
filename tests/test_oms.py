@@ -18,7 +18,7 @@ from trade_engine.interfaces.broker import (
     VenueOrder,
     VenueOrderState,
 )
-from trade_engine.ledger import EmulatedOrderState, Event, EventKind, Ledger
+from trade_engine.ledger import CashFlow, EmulatedOrderState, Event, EventKind, Ledger
 from trade_engine.ledger.codec import decode_payload, encode_payload
 from trade_engine.oms import (
     BrokerOutcomeUnknownError,
@@ -1912,3 +1912,30 @@ def test_stop_limit_entry_is_refused_before_persisting_without_native_stop_limit
     assert ledger.event_by_command("emulated") is None
     assert broker.submitted == []
     assert manager.create_bracket(make_intent(command_id="limit-ok"), Decimal("10"))
+
+
+def test_order_lookups_and_submits_do_not_reread_the_whole_log(manager_factory, monkeypatch):
+    # The EOD runner looks orders up for every bracket it touches; a full fold per
+    # lookup made a backfill session spend its time decoding the same events again.
+    manager, ledger, _ = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.get_order(bracket.entry.order_id)
+    monkeypatch.setattr(ledger, "fold", lambda *a, **k: pytest.fail("folded every account"))
+    monkeypatch.setattr(ledger, "events", lambda *a, **k: pytest.fail("read the whole log"))
+    submitted = manager.submit(bracket.entry)
+    assert manager.get_order(bracket.entry.order_id).state is submitted.state
+
+
+def test_ledger_reads_one_kind_and_lists_accounts_in_first_event_order(tmp_path):
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        for account, amount in (("B", "1"), ("A", "2"), ("B", "3")):
+            ledger.append(
+                Event(account=account, kind=EventKind.CASH_FLOW,
+                      payload=CashFlow(amount=Decimal(amount), kind="deposit", as_of=NOW),
+                      ts_utc=NOW, command_id=f"cash:{account}:{amount}")
+            )
+        assert ledger.accounts() == ["B", "A"]
+        assert [e.payload.amount for e in ledger.events_of_kind(EventKind.CASH_FLOW, account="B")] == [
+            Decimal("1"), Decimal("3")
+        ]
+        assert ledger.events_of_kind(EventKind.FILL) == []
