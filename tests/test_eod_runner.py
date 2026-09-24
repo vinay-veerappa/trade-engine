@@ -1656,3 +1656,85 @@ def test_a_bracket_stopped_out_during_the_session_is_not_offered(tmp_path: Path)
     runner.run(SESSION)
     assert strategy.seen == []
     ledger.close()
+
+
+# -- stop-limit entries: the breakout trigger with a chase limit ------------------------
+
+
+def _run_chase(tmp_path: Path, script: dict) -> Ledger:
+    """Buy stop 102 limited to 102.5, submitted the prior evening; replayed in a new process."""
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    seeding = SimBroker(ACCOUNT, clock, Decimal("0"))
+    seeding.connect()
+    intent = OrderIntent(
+        intent_id="intent-chase",
+        account_id=ACCOUNT,
+        instrument=INSTRUMENT,
+        side=Side.BUY,
+        quantity_rule="fixed_2",
+        entry_price=Decimal("102"),
+        stop_loss=Decimal("97"),
+        profit_targets=(Decimal("112"),),
+        reason="breakout above 101.90, chase limit +0.5 ATR",
+        command_id="chase",
+        entry_type=OrderType.STOP_LIMIT,
+        entry_limit_price=Decimal("102.5"),
+    )
+    manager = OrderManager(seeding, clock, ledger)
+    manager.submit(manager.create_bracket(intent, Decimal("2")).entry)
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    # The EOD process starts with an empty simulator and restores the entry from the ledger.
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(script),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+    return ledger
+
+
+def test_stop_limit_entry_gapping_over_its_limit_all_day_expires_unfilled(tmp_path: Path) -> None:
+    above = ("104", "105", "103.5", "104.5")
+    ledger = _run_chase(tmp_path, {minute: above for minute in range(390)})
+    state = ledger.state(ACCOUNT)
+    assert state.orders["chase:entry"].state is OrderState.EXPIRED
+    assert not list(state.fills)
+    assert all(position.quantity == 0 for position in state.positions.values())
+    assert state.orders["chase:stop"].state is not OrderState.ACCEPTED
+    assert state.orders["chase:target:1"].state is not OrderState.ACCEPTED
+    ledger.close()
+
+
+def test_stop_limit_entry_gapping_inside_its_limit_fills_and_arms_its_exits(tmp_path: Path) -> None:
+    ledger = _run_chase(tmp_path, {0: ("102.3", "103", "102", "102.8")})
+    state = ledger.state(ACCOUNT)
+    [fill] = [fill for fill in state.fills if fill.order_id == "chase:entry"]
+    assert (fill.price, fill.filled_at) == (Decimal("102.3"), SESSION_OPEN)
+    assert state.orders["chase:entry"].state is OrderState.FILLED
+    assert state.orders["chase:stop"].state is OrderState.ACCEPTED
+    assert state.orders["chase:stop"].stop_price == Decimal("97")
+    assert state.orders["chase:target:1"].state is OrderState.ACCEPTED
+    assert state.positions[INSTRUMENT].quantity == Decimal("2")
+    ledger.close()
+
+
+def test_triggered_stop_limit_entry_fills_back_under_its_limit_then_exits_at_target(
+    tmp_path: Path,
+) -> None:
+    # Gaps over the chase limit at the open, trades back under it the next minute (the
+    # default 100 bars), and later reaches the target: the target was live at the venue.
+    ledger = _run_chase(
+        tmp_path,
+        {0: ("104", "105", "103.5", "104.5"), 200: ("111", "112.5", "110.5", "112")},
+    )
+    state = ledger.state(ACCOUNT)
+    [entry_fill] = [fill for fill in state.fills if fill.order_id == "chase:entry"]
+    assert (entry_fill.price, entry_fill.filled_at) == (
+        Decimal("100"),
+        SESSION_OPEN + timedelta(minutes=1),
+    )
+    assert state.orders["chase:target:1"].state is OrderState.FILLED
+    assert state.orders["chase:stop"].state is OrderState.CANCELLED
+    assert state.positions[INSTRUMENT].quantity == Decimal("0")
+    ledger.close()

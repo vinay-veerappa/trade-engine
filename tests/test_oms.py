@@ -1210,7 +1210,7 @@ def test_bracket_replay_with_different_tif_is_an_idempotency_conflict(manager_fa
 def test_intent_entry_type_defaults_to_limit_and_refuses_other_types():
     assert make_intent().entry_type is OrderType.LIMIT
     assert replace(make_intent(), entry_type=OrderType.STOP).entry_type is OrderType.STOP
-    for refused in (OrderType.MARKET, OrderType.STOP_LIMIT, OrderType.TRAIL):
+    for refused in (OrderType.MARKET, OrderType.TRAIL):
         with pytest.raises(ValueError, match="entry_type"):
             replace(make_intent(), entry_type=refused)
 
@@ -1494,3 +1494,173 @@ def test_replaying_a_filled_close_returns_it(manager_factory):
     replay = manager.close_bracket(bracket.entry.order_id, command_id="close", reason="day 5")
     assert replay.state is OrderState.FILLED
     assert len(broker.submitted) == sent
+
+
+# -- stop-limit entries (breakout trigger with a chase limit) --------------------------
+
+STOP_LIMIT_TYPES = frozenset(
+    {OrderType.MARKET, OrderType.LIMIT, OrderType.STOP, OrderType.STOP_LIMIT}
+)
+
+
+def stop_limit_intent(
+    *, command_id: str = "chase", side: Side = Side.BUY, limit: str | None = None
+) -> OrderIntent:
+    default = "101.5" if side is Side.BUY else "98.5"
+    return replace(
+        make_intent(command_id=command_id, side=side),
+        entry_type=OrderType.STOP_LIMIT,
+        entry_limit_price=Decimal(limit or default),
+    )
+
+
+def test_stop_limit_intent_requires_a_finite_positive_limit():
+    assert stop_limit_intent().entry_limit_price == Decimal("101.5")
+    for missing in (None, Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity"), 101.5):
+        with pytest.raises(ValueError, match="requires entry_limit_price"):
+            replace(stop_limit_intent(), entry_limit_price=missing)
+
+
+def test_entry_limit_price_is_refused_on_other_entry_types():
+    for entry_type in (OrderType.LIMIT, OrderType.STOP):
+        assert replace(make_intent(), entry_type=entry_type).entry_limit_price is None
+        with pytest.raises(ValueError, match="only for STOP_LIMIT"):
+            replace(make_intent(), entry_type=entry_type, entry_limit_price=Decimal("101"))
+
+
+def test_stop_limit_buy_limit_must_be_at_or_above_the_trigger():
+    # A limit equal to the trigger is a valid (no-chase) stop-limit.
+    assert stop_limit_intent(limit="100").entry_limit_price == Decimal("100")
+    with pytest.raises(ValueError, match="at or above"):
+        stop_limit_intent(limit="99.99")
+
+
+def test_stop_limit_sell_limit_must_be_at_or_below_the_trigger():
+    assert stop_limit_intent(side=Side.SELL, limit="100").entry_limit_price == Decimal("100")
+    assert stop_limit_intent(side=Side.SELL, limit="98").entry_limit_price == Decimal("98")
+    with pytest.raises(ValueError, match="at or below"):
+        stop_limit_intent(side=Side.SELL, limit="100.01")
+
+
+def test_stop_limit_entry_bracket_triggers_at_entry_price_and_limits_at_the_chase(
+    manager_factory,
+):
+    manager, _, broker = manager_factory(FakeBroker(order_types=STOP_LIMIT_TYPES))
+    intent = stop_limit_intent()
+    bracket = manager.create_bracket(intent, Decimal("10"))
+
+    assert bracket.entry.order_type is OrderType.STOP_LIMIT
+    assert bracket.entry.stop_price == Decimal("100")
+    assert bracket.entry.limit_price == Decimal("101.5")
+    assert bracket.stop.order_id == "chase:stop"
+    assert bracket.stop.order_type is OrderType.STOP
+    assert bracket.stop.stop_price == Decimal("95")
+    assert [target.limit_price for target in bracket.targets] == [Decimal("105"), Decimal("110")]
+    manager.submit(bracket.entry)
+    sent = broker.submitted[0]
+    assert (sent.order_type, sent.stop_price, sent.limit_price) == (
+        OrderType.STOP_LIMIT,
+        Decimal("100"),
+        Decimal("101.5"),
+    )
+    manager.record_fill(make_fill(bracket.entry, "chase-fill", "10", "100.80"))
+    assert [order.venue_order_id for order in broker.submitted[1:]] == [
+        "chase:stop",
+        "chase:target:1",
+        "chase:target:2",
+    ]
+    assert manager.create_bracket(intent, Decimal("10")) == manager.create_bracket(
+        intent, Decimal("10")
+    )
+    assert manager.create_bracket(intent, Decimal("10")).entry.state is OrderState.FILLED
+
+
+def test_stop_limit_entry_is_never_taken_for_the_protective_stop(manager_factory):
+    manager, ledger, _ = manager_factory(FakeBroker(order_types=STOP_LIMIT_TYPES))
+    # A stop-limit entry with an equal stop and limit looks most like a stop; the
+    # protective stop is still its STOP child, from the fold as well as the batch.
+    intent = stop_limit_intent(limit="100")
+    bracket = manager.create_bracket(intent, Decimal("10"))
+    replayed = manager.create_bracket(intent, Decimal("10"))
+    assert replayed.stop.order_id == bracket.stop.order_id == "chase:stop"
+    assert replayed.entry.order_id == "chase:entry"
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "chase-fill", "10", "100"))
+    stop, open_quantity = manager._open_bracket_stop(bracket.entry.order_id)
+    assert (stop.order_id, open_quantity) == ("chase:stop", Decimal("10"))
+    assert ledger.state("account-1").orders["chase:stop"].order_type is OrderType.STOP
+
+
+def _legacy_fingerprint(intent: OrderIntent, extra: dict) -> str:
+    import hashlib
+    import json
+
+    payload = {
+        "intent_id": intent.intent_id,
+        "account_id": intent.account_id,
+        "instrument": encode_payload(intent.instrument),
+        "side": intent.side.value,
+        "quantity_rule": intent.quantity_rule,
+        "quantity": "10",
+        "entry_price": str(intent.entry_price),
+        "stop_loss": str(intent.stop_loss),
+        "profit_targets": [str(value) for value in intent.profit_targets],
+        "reason": intent.reason,
+        "command_id": intent.command_id,
+        "entry_tif": intent.entry_tif.value,
+        "exit_tif": intent.exit_tif.value,
+        **extra,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def test_limit_and_stop_bracket_fingerprints_are_unchanged_by_entry_limit_price():
+    limit = make_intent()
+    stop = replace(make_intent(), entry_type=OrderType.STOP)
+    assert OrderManager._bracket_fingerprint(limit, Decimal("10")) == _legacy_fingerprint(
+        limit, {}
+    )
+    assert OrderManager._bracket_fingerprint(stop, Decimal("10")) == _legacy_fingerprint(
+        stop, {"entry_type": "STOP"}
+    )
+
+
+def test_stop_limit_bracket_fingerprint_carries_its_limit():
+    intent = stop_limit_intent()
+    assert OrderManager._bracket_fingerprint(intent, Decimal("10")) == _legacy_fingerprint(
+        intent, {"entry_type": "STOP_LIMIT", "entry_limit_price": "101.5"}
+    )
+
+
+def test_stop_limit_replay_with_a_different_limit_is_an_idempotency_conflict(manager_factory):
+    manager, _, _ = manager_factory(FakeBroker(order_types=STOP_LIMIT_TYPES))
+    manager.create_bracket(stop_limit_intent(), Decimal("10"))
+
+    with pytest.raises(IdempotencyConflictError):
+        manager.create_bracket(stop_limit_intent(limit="102"), Decimal("10"))
+    with pytest.raises(IdempotencyConflictError):
+        manager.create_bracket(
+            replace(make_intent(command_id="chase"), entry_type=OrderType.STOP), Decimal("10")
+        )
+
+
+@pytest.mark.parametrize(
+    "broker_kwargs",
+    [
+        {"order_types": STOP_LIMIT_TYPES, "native_stops": False},
+        {"order_types": frozenset({OrderType.MARKET, OrderType.LIMIT, OrderType.STOP})},
+    ],
+    ids=["no-native-stops", "no-stop-limit-type"],
+)
+def test_stop_limit_entry_is_refused_before_persisting_without_native_stop_limits(
+    manager_factory, broker_kwargs
+):
+    manager, ledger, broker = manager_factory(FakeBroker(**broker_kwargs))
+
+    with pytest.raises(UnsupportedOrderCapabilityError, match="stop-limit entry"):
+        manager.create_bracket(stop_limit_intent(command_id="emulated"), Decimal("10"))
+
+    assert ledger.event_by_command("emulated") is None
+    assert broker.submitted == []
+    assert manager.create_bracket(make_intent(command_id="limit-ok"), Decimal("10"))

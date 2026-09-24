@@ -1370,3 +1370,331 @@ def test_restore_refuses_a_position_given_twice() -> None:
     orders, fills = _held_bracket()
     with pytest.raises(SimBrokerError, match="Position AAPL restored twice"):
         broker.restore(orders, fills, [_position("1"), _position("1")])
+
+
+# -- stop-limit entries: trigger on the stop, then fill no worse than the limit ---------
+
+OPEN = START + timedelta(minutes=1)  # 09:30 ET
+
+
+def _stop_limit(
+    *,
+    side: Side = Side.BUY,
+    stop: str | None = None,
+    limit: str | None = None,
+    slippage_bps: Decimal = Decimal("0"),
+) -> tuple[SimBroker, ReplayClock]:
+    """A resting stop-limit: buy stop 102 limit 103, or sell stop 98 limit 97."""
+    broker, clock = broker_fixture(slippage_bps=slippage_bps)
+    default_stop, default_limit = ("102", "103") if side is Side.BUY else ("98", "97")
+    place_order(
+        broker,
+        clock,
+        "sl",
+        side=side,
+        order_type=OrderType.STOP_LIMIT,
+        stop_price=Decimal(stop or default_stop),
+        limit_price=Decimal(limit or default_limit),
+    )
+    return broker, clock
+
+
+def _feed(
+    broker: SimBroker, clock: ReplayClock, minute: int, open_: str, high: str, low: str
+) -> tuple[VenueFill, ...]:
+    timestamp = OPEN + timedelta(minutes=minute)
+    clock.set(timestamp)
+    return broker.process_bar(bar(timestamp, open_=open_, high=high, low=low, close=open_))
+
+
+def _priced(fills: tuple[VenueFill, ...]) -> list[tuple[str, Decimal]]:
+    return [(fill.venue_order_id, fill.price) for fill in fills]
+
+
+def test_sim_declares_native_stop_limit_orders() -> None:
+    assert OrderType.STOP_LIMIT in SimBroker.capabilities.supported_order_types
+
+
+def test_untriggered_stop_limit_never_fills_and_expires_at_the_close() -> None:
+    broker, clock = _stop_limit()
+    feed_session(broker, clock, OPEN)  # every bar tops out at 101, under the 102 trigger
+
+    assert broker.fills(START) == []
+    clock.set(SESSION_CLOSE)
+    assert broker.orders(START)[0].state is OrderState.EXPIRED
+
+
+def test_stop_limit_gapping_over_its_limit_does_not_fill() -> None:
+    broker, clock = _stop_limit()
+
+    assert _feed(broker, clock, 0, "104", "105", "103.5") == ()
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+
+def test_stop_limit_gapping_between_stop_and_limit_fills_at_the_open() -> None:
+    broker, clock = _stop_limit()
+
+    assert _priced(_feed(broker, clock, 0, "102.5", "104", "102.2")) == [("sl", Decimal("102.5"))]
+    assert broker.orders(START)[0].state is OrderState.FILLED
+
+
+def test_stop_limit_opening_exactly_at_its_limit_fills_there() -> None:
+    broker, clock = _stop_limit()
+
+    assert _priced(_feed(broker, clock, 0, "103", "104", "103")) == [("sl", Decimal("103"))]
+
+
+def test_stop_limit_triggered_inside_the_bar_fills_at_the_stop() -> None:
+    broker, clock = _stop_limit()
+
+    assert _priced(_feed(broker, clock, 0, "101", "102.5", "100.5")) == [("sl", Decimal("102"))]
+
+
+def test_stop_limit_opening_exactly_at_its_stop_fills_at_the_open() -> None:
+    broker, clock = _stop_limit()
+
+    assert _priced(_feed(broker, clock, 0, "102", "102.5", "101")) == [("sl", Decimal("102"))]
+
+
+def test_triggered_stop_limit_fills_at_the_limit_when_price_comes_back_later() -> None:
+    broker, clock = _stop_limit()
+    assert _feed(broker, clock, 0, "104", "105", "103.5") == ()
+    # Working as a buy limit at 103 now, which this bar's range comes back to.
+    assert _priced(_feed(broker, clock, 1, "103.8", "104", "102.9")) == [("sl", Decimal("103"))]
+
+
+def test_triggered_stop_limit_fills_at_the_open_below_its_limit_later() -> None:
+    broker, clock = _stop_limit()
+    assert _feed(broker, clock, 0, "104", "105", "103.5") == ()
+    assert _feed(broker, clock, 1, "103.2", "103.4", "103.1") == ()
+    # Price is back under the 102 trigger now; the triggered order still buys at the open.
+    assert _priced(_feed(broker, clock, 2, "101", "101.5", "100.5")) == [("sl", Decimal("101"))]
+
+
+def test_stop_limit_gapping_over_its_limit_fills_at_the_limit_in_the_same_bar() -> None:
+    broker, clock = _stop_limit()
+
+    # Triggered at the 104 open; the low comes after it and reaches the limit.
+    assert _priced(_feed(broker, clock, 0, "104", "105", "102.9")) == [("sl", Decimal("103"))]
+
+
+def test_stop_limit_triggered_and_above_its_limit_all_day_expires_unfilled() -> None:
+    broker, clock = _stop_limit()
+    for minute in range(390):
+        assert _feed(broker, clock, minute, "104", "105", "103.5") == ()
+
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+    clock.set(SESSION_CLOSE)
+    assert broker.orders(START)[0].state is OrderState.EXPIRED
+    assert broker.fills(START) == []
+
+
+def test_stop_limit_does_not_trigger_on_a_bar_before_its_submission() -> None:
+    broker, clock = broker_fixture()
+    _feed(broker, clock, 0, "100", "101", "99")
+    clock.set(OPEN + timedelta(minutes=1))
+    place_order(
+        broker,
+        clock,
+        "late",
+        side=Side.BUY,
+        order_type=OrderType.STOP_LIMIT,
+        stop_price=Decimal("102"),
+        limit_price=Decimal("103"),
+    )
+    # The 09:31 bar is stamped at the submission instant, so it cannot trigger the order.
+    assert _feed(broker, clock, 1, "104", "105", "103.5") == ()
+    assert _feed(broker, clock, 2, "100", "101", "99") == ()
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+
+def test_stop_limit_fill_slips_but_never_past_its_limit() -> None:
+    broker, clock = _stop_limit(slippage_bps=Decimal("100"))
+    assert _priced(_feed(broker, clock, 0, "102.5", "104", "102.2")) == [("sl", Decimal("103"))]
+
+    broker, clock = _stop_limit(slippage_bps=Decimal("10"))
+    assert _priced(_feed(broker, clock, 0, "101", "102.5", "100.5")) == [
+        ("sl", Decimal("102.102"))
+    ]
+
+
+def test_stop_limit_with_a_limit_short_of_its_stop_waits_after_an_intrabar_trigger() -> None:
+    broker, clock = _stop_limit(stop="102", limit="101.5")
+
+    # Triggered at 102 inside the bar; whether price came back to 101.5 after that is unknown.
+    assert _feed(broker, clock, 0, "101", "102.5", "100.5") == ()
+    assert _priced(_feed(broker, clock, 1, "101.8", "102", "101.2")) == [
+        ("sl", Decimal("101.5"))
+    ]
+
+
+def test_sell_stop_limit_never_triggered_does_not_fill() -> None:
+    broker, clock = _stop_limit(side=Side.SELL)
+    feed_session(broker, clock, OPEN)  # every bar bottoms at 99, over the 98 trigger
+
+    assert broker.fills(START) == []
+
+
+def test_sell_stop_limit_gapping_under_its_limit_does_not_fill() -> None:
+    broker, clock = _stop_limit(side=Side.SELL)
+
+    assert _feed(broker, clock, 0, "96", "96.5", "95") == ()
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+
+def test_sell_stop_limit_gapping_between_stop_and_limit_fills_at_the_open() -> None:
+    broker, clock = _stop_limit(side=Side.SELL)
+
+    assert _priced(_feed(broker, clock, 0, "97.5", "97.8", "96")) == [("sl", Decimal("97.5"))]
+
+
+def test_sell_stop_limit_triggered_inside_the_bar_fills_at_the_stop() -> None:
+    broker, clock = _stop_limit(side=Side.SELL)
+
+    assert _priced(_feed(broker, clock, 0, "99", "99.5", "97.5")) == [("sl", Decimal("98"))]
+
+
+def test_triggered_sell_stop_limit_fills_at_the_limit_when_price_comes_back_later() -> None:
+    broker, clock = _stop_limit(side=Side.SELL)
+    assert _feed(broker, clock, 0, "96", "96.5", "95") == ()
+    assert _priced(_feed(broker, clock, 1, "96.2", "97.1", "96")) == [("sl", Decimal("97"))]
+
+
+def test_triggered_sell_stop_limit_fills_at_the_open_above_its_limit_later() -> None:
+    broker, clock = _stop_limit(side=Side.SELL)
+    assert _feed(broker, clock, 0, "96", "96.5", "95") == ()
+    assert _feed(broker, clock, 1, "96.7", "96.9", "96.6") == ()
+    assert _priced(_feed(broker, clock, 2, "99", "99.5", "98.5")) == [("sl", Decimal("99"))]
+
+
+def test_sell_stop_limit_triggered_and_under_its_limit_all_day_expires_unfilled() -> None:
+    broker, clock = _stop_limit(side=Side.SELL)
+    for minute in range(390):
+        assert _feed(broker, clock, minute, "96", "96.5", "95") == ()
+
+    clock.set(SESSION_CLOSE)
+    assert broker.orders(START)[0].state is OrderState.EXPIRED
+
+
+def test_sell_stop_limit_fill_slips_but_never_past_its_limit() -> None:
+    broker, clock = _stop_limit(side=Side.SELL, slippage_bps=Decimal("100"))
+    assert _priced(_feed(broker, clock, 0, "97.5", "97.8", "96")) == [("sl", Decimal("97"))]
+
+
+def test_sell_stop_limit_with_a_limit_short_of_its_stop_waits_after_an_intrabar_trigger() -> None:
+    broker, clock = _stop_limit(side=Side.SELL, stop="98", limit="98.5")
+
+    assert _feed(broker, clock, 0, "99", "99.5", "97.5") == ()
+    assert _priced(_feed(broker, clock, 1, "98.2", "98.8", "98")) == [("sl", Decimal("98.5"))]
+
+
+@pytest.mark.parametrize(
+    ("side", "stop", "limit", "ohl", "price"),
+    [
+        # The high only touches the buy stop: triggered at it, and it is within the limit.
+        (Side.BUY, "102", "103", ("101", "102", "100.5"), "102"),
+        # No chase room: triggered inside the bar at a stop equal to the limit.
+        (Side.BUY, "102", "102", ("101", "102.5", "100.5"), "102"),
+        # Opening at a stop above the limit triggers at the open; the low comes after.
+        (Side.BUY, "102", "101.5", ("102", "102.2", "101"), "101.5"),
+        (Side.SELL, "98", "97", ("99", "99.5", "98"), "98"),
+        (Side.SELL, "98", "98", ("99", "99.5", "97.5"), "98"),
+        (Side.SELL, "98", "98.5", ("98", "99", "97.8"), "98.5"),
+        (Side.SELL, "98", "97", ("97", "97", "96.5"), "97"),
+    ],
+)
+def test_stop_limit_boundaries(side: Side, stop: str, limit: str, ohl, price: str) -> None:
+    broker, clock = _stop_limit(side=side, stop=stop, limit=limit)
+
+    assert _priced(_feed(broker, clock, 0, *ohl)) == [("sl", Decimal(price))]
+
+
+def _restorable_stop_limit(
+    submitted_at: datetime, tif: TimeInForce = TimeInForce.DAY
+) -> VenueOrder:
+    return VenueOrder(
+        venue_order_id="sl",
+        instrument=INSTRUMENT,
+        order_type=OrderType.STOP_LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("2"),
+        submitted_at=submitted_at,
+        tif=tif,
+        limit_price=Decimal("103"),
+        stop_price=Decimal("102"),
+        allocations=(VenueOrderAllocation("sl", ACCOUNT, Decimal("2")),),
+    )
+
+
+def test_restored_stop_limit_from_the_prior_evening_triggers_from_the_open() -> None:
+    clock = ReplayClock(datetime(2026, 9, 24, 13, 30, tzinfo=UTC))  # at the next open
+    broker, _ = broker_fixture(clock=clock)
+    evening = datetime(2026, 9, 23, 21, 45, tzinfo=UTC)
+    broker.restore([(_restorable_stop_limit(evening), OrderState.ACCEPTED)], [], [])
+
+    next_open = datetime(2026, 9, 24, 13, 30, tzinfo=UTC)
+    assert broker.process_bar(bar(next_open, open_="104", high="105", low="103.5", close="104")) == ()
+    clock.set(next_open + timedelta(minutes=1))
+    fills = broker.process_bar(
+        bar(next_open + timedelta(minutes=1), open_="103.6", high="104", low="102.9", close="103")
+    )
+    assert _priced(fills) == [("sl", Decimal("103"))]
+
+
+def test_restore_refuses_a_working_stop_limit_bars_may_have_triggered() -> None:
+    # A GTC stop-limit that lived through a session: that session may have triggered it.
+    clock = ReplayClock(datetime(2026, 9, 24, 13, 29, tzinfo=UTC))
+    broker, _ = broker_fixture(clock=clock)
+    with pytest.raises(SimBrokerError, match="may have triggered"):
+        broker.restore(
+            [(_restorable_stop_limit(START, TimeInForce.GTC), OrderState.ACCEPTED)], [], []
+        )
+
+
+def test_restore_accepts_a_stop_limit_submitted_mid_session_until_its_next_bar() -> None:
+    submitted = datetime(2026, 9, 23, 17, 45, 30, tzinfo=UTC)  # 13:45:30 ET
+    order = _restorable_stop_limit(submitted, TimeInForce.GTC)
+    broker, _ = broker_fixture(clock=ReplayClock(datetime(2026, 9, 23, 17, 46, tzinfo=UTC)))
+    broker.restore([(order, OrderState.ACCEPTED)], [], [])
+
+    broker, _ = broker_fixture(clock=ReplayClock(datetime(2026, 9, 23, 17, 46, 1, tzinfo=UTC)))
+    with pytest.raises(SimBrokerError, match="may have triggered"):
+        broker.restore([(order, OrderState.ACCEPTED)], [], [])
+
+
+def test_restore_accepts_a_stop_limit_submitted_at_the_open_until_the_next_minute() -> None:
+    # The 09:30 bar is stamped at the submission instant and cannot match it.
+    order = _restorable_stop_limit(datetime(2026, 9, 23, 13, 30, tzinfo=UTC), TimeInForce.GTC)
+    broker, _ = broker_fixture(clock=ReplayClock(datetime(2026, 9, 23, 13, 31, tzinfo=UTC)))
+    broker.restore([(order, OrderState.ACCEPTED)], [], [])
+
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+
+def test_restore_lets_an_expired_day_stop_limit_lapse_rather_than_refusing() -> None:
+    clock = ReplayClock(datetime(2026, 9, 24, 13, 29, tzinfo=UTC))
+    broker, _ = broker_fixture(clock=clock)
+    broker.restore([(_restorable_stop_limit(START), OrderState.ACCEPTED)], [], [])
+
+    assert broker.orders(START)[0].venue_order_id == "sl"
+
+
+def test_restored_partly_filled_stop_limit_is_already_triggered() -> None:
+    clock = ReplayClock(datetime(2026, 9, 23, 13, 29, tzinfo=UTC))
+    broker, _ = broker_fixture(clock=clock)
+    # A GTC entry from Monday evening that part-filled on Tuesday: the fill proves it
+    # triggered, so the sessions it lived through are no reason to refuse it.
+    order = _restorable_stop_limit(datetime(2026, 9, 21, 21, 45, tzinfo=UTC), TimeInForce.GTC)
+    part = VenueFill(
+        venue_fill_id="sl:fill:1",
+        venue_order_id="sl",
+        instrument=INSTRUMENT,
+        quantity=Decimal("1"),
+        price=Decimal("102.5"),
+        filled_at=datetime(2026, 9, 22, 14, 0, tzinfo=UTC),
+        side=Side.BUY,
+    )
+    broker.restore([(order, OrderState.PARTIALLY_FILLED)], [part], [_position("1")])
+
+    # Under the trigger but at the limit: only a triggered order buys here.
+    assert _priced(_feed(broker, clock, 0, "100", "101", "99")) == [("sl", Decimal("100"))]
