@@ -150,6 +150,36 @@ that bars since its submission may already have triggered (a GTC one that lived 
 session): whether it triggered is not in the ledger. A DAY stop-limit entry placed after
 the close restores untriggered and is simulated from the next open.
 
+## Option Chains
+
+No historical intraday option quotes exist, so option decisions and paper fills read a
+`trade_engine.market_data.ChainSnapshot`: one underlying's `OptionQuote`s as they stood
+at the snapshot's `as_of`, with the spot, rate and dividend yield the source quoted. No
+quote may be stamped after its snapshot, and every contract must be listed under the
+snapshot's underlying. `require_fresh(now, max_age_seconds)` refuses a snapshot older
+than the caller allows, and one from after `now`. `split_by_quote_age` separates quotes
+nobody has updated lately from the rest.
+
+`ChainSnapshotStore` keeps one JSON file per snapshot under
+`<root>/<UNDERLYING>/<as_of>.json`. Storing the same snapshot again is a no-op; a
+different snapshot at the same instant refuses. `latest(underlying, now, max_age_seconds)`
+returns the newest snapshot taken at or before `now`, so a replay cannot see a later chain
+from its own day. Nothing stored, or a stale snapshot, raises `StaleDataError`.
+
+`trade_engine.domain.option_roots` says what a root trades. `SPX` (monthlies) is
+European, cash-settled and AM-settled on the expiry-day open, and last trades the
+session before. `SPXW` is the same index, PM-settled on the close. Any other root is an
+equity option: American, physically settled, PM. Other index roots (`NDX`, `RUT`, `VIX`,
+`XSP`, ...) refuse until they are modelled. `settlement_instant` refuses an expiry date
+that is not a session.
+
+`trade_engine.market_data.greeks` gives Black-Scholes-Merton prices, implied volatility and
+greeks through `vollib`. Time runs to the settlement instant, in years of 365 days. Rate
+and dividend yield are required inputs, never defaults. A price below intrinsic, or a
+contract already settled, raises `GreeksUnavailable`. American options are priced as
+European. `OptionQuote.greeks` holds a vendor's published greeks when a quote carries
+them (`source="vendor"`), and `model_greeks` returns `source="model"`.
+
 ## Development
 
 Requires Python >= 3.13.

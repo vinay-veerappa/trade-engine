@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -76,6 +77,32 @@ class Quote:
 
 
 @dataclass(frozen=True)
+class Greeks:
+    """Option sensitivities: theta per calendar day, vega per vol point, rho per rate point.
+
+    ``source`` says who computed them: ``"vendor"`` (published with the quote) or
+    ``"model"`` (Black-Scholes-Merton over the snapshot's own inputs).
+    """
+
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    rho: float
+    source: str
+
+    def __post_init__(self) -> None:
+        for name in ("delta", "gamma", "theta", "vega", "rho"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+                raise ValueError(f"Greek {name} must be a finite number, got {value!r} (I5)")
+        if not -1.0 <= self.delta <= 1.0:
+            raise ValueError(f"Delta {self.delta} is outside [-1, 1] (I5)")
+        if self.source not in ("vendor", "model"):
+            raise ValueError(f"Greeks source must be 'vendor' or 'model', got {self.source!r}")
+
+
+@dataclass(frozen=True)
 class OptionQuote:
     """Top-of-book quote for an option contract stamped with as_of timestamp (Architecture §4.8)."""
 
@@ -87,6 +114,8 @@ class OptionQuote:
     as_of: datetime
     underlying_price: Decimal | None = None
     implied_vol: Decimal | None = None
+    greeks: Greeks | None = None
+    open_interest: int | None = None
 
     def __post_init__(self) -> None:
         if self.as_of.tzinfo is None or self.as_of.tzinfo.utcoffset(self.as_of) is None:
