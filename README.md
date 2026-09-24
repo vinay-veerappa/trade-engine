@@ -34,8 +34,12 @@ percentage-valued keys use explicit strings such as `risk_per_trade: "0.75%"`;
 bare numeric percentages and unknown keys are rejected. Rule-specific sanity caps reject
 slipped decimal points (including per-trade risk above 5%). Measured drawdown is a
 non-negative fraction; signed session P&L remains a separate measurement. The intent's
-`quantity_rule` is honored (`risk_0.75pct` or `fixed_10`), but account risk limits remain
-authoritative.
+`quantity_rule` is honored (`risk_0.75pct`, `notional_5pct` or `fixed_10`), but account risk
+limits remain authoritative: `notional_<x>pct` sizes `floor(equity * x% / entry)`, may not exceed
+the position cap, and its stop-distance risk must still fit the (regime/drawdown-scaled) risk
+budget. By default a `risk_<x>pct` size over the position cap is refused; the optional
+`clamp_to_position_cap: true` rule (a real boolean) reduces it to the cap instead and says so in
+the `max_position` verdict reason. Fixed sizes are never clamped.
 
 Paper/live `VenueRiskRails` require an allowlist, quantity and daily-order caps, daily
 loss limit, trading hours, duplicate protection, and a persistent kill switch. Risk

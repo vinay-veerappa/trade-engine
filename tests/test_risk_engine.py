@@ -619,3 +619,194 @@ def test_short_intent_cannot_request_long_side_risk(tmp_path: Path) -> None:
     quantity_rule = next(r for r in verdict.evaluations if r.rule_name == "quantity_rule")
     assert not verdict.accepted
     assert not quantity_rule.passed
+
+
+def _rule(verdict: RiskVerdict, name: str) -> RiskRuleResult:
+    return next(result for result in verdict.evaluations if result.rule_name == name)
+
+
+# A 0.1 stop at 99 risk-sizes to 3750 shares (371,250 notional); the 20% cap on 50,000
+# equity is 10,000, i.e. floor(10000 / 99) = 101 shares.
+OVERSIZE = {"entry_price": Decimal("99"), "stop_loss": Decimal("98.9")}
+
+
+def test_oversize_risk_intent_is_refused_on_max_position_by_default(tmp_path: Path) -> None:
+    assert rules().clamp_to_position_cap is False
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(ledger, order_intent=intent(**OVERSIZE))
+
+    max_position = _rule(verdict, "max_position")
+    assert not verdict.accepted
+    assert verdict.approved_quantity is None
+    assert not max_position.passed
+    assert max_position.measured_value == Decimal("3750") * Decimal("99")
+    assert max_position.reason == (
+        "Position notional or equity is unknown or exceeds the account cap"
+    )
+
+
+def test_clamp_reduces_oversize_risk_intent_to_the_position_cap(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(
+            ledger,
+            risk_rules=rules(clamp_to_position_cap=True),
+            order_intent=intent(**OVERSIZE),
+        )
+
+    max_position = _rule(verdict, "max_position")
+    risk = _rule(verdict, "risk_per_trade")
+    assert verdict.accepted
+    assert verdict.approved_quantity == Decimal("101")
+    assert risk.measured_value == Decimal("101") * Decimal("0.1")
+    assert max_position.passed
+    assert max_position.measured_value == Decimal("101") * Decimal("99")
+    assert max_position.threshold == Decimal("10000.00")
+    assert "reduced from 3750 to 101" in max_position.reason
+    assert _rule(verdict, "adv_pct").measured_value == Decimal("101") * Decimal("99")
+
+
+def test_clamp_leaves_an_under_cap_intent_unchanged(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(ledger, risk_rules=rules(clamp_to_position_cap=True))
+
+    max_position = _rule(verdict, "max_position")
+    assert verdict.accepted
+    assert verdict.approved_quantity == Decimal("75")
+    assert max_position.reason == "Position notional is within the account cap"
+
+
+def test_clamp_never_shrinks_a_fixed_size(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(
+            ledger,
+            risk_rules=rules(clamp_to_position_cap=True),
+            order_intent=intent(quantity_rule="fixed_200"),
+        )
+
+    assert not verdict.accepted
+    assert verdict.approved_quantity is None
+    assert not _rule(verdict, "max_position").passed
+
+
+def test_clamp_with_unknown_equity_still_refuses(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(
+            ledger,
+            risk_rules=rules(clamp_to_position_cap=True),
+            order_intent=intent(**OVERSIZE),
+            risk_context=context(equity=None),
+        )
+
+    assert not verdict.accepted
+    assert verdict.approved_quantity is None
+    assert not _rule(verdict, "max_position").passed
+    assert not _rule(verdict, "risk_per_trade").passed
+
+
+def test_clamp_config_key_is_optional_and_must_be_a_real_boolean() -> None:
+    assert AccountRiskRules.from_mapping(rule_config()).clamp_to_position_cap is False
+    config = rule_config()
+    config["clamp_to_position_cap"] = True
+    assert AccountRiskRules.from_mapping(config) == rules(clamp_to_position_cap=True)
+    for bad in ("true", 1, None):
+        config["clamp_to_position_cap"] = bad
+        with pytest.raises(RiskConfigurationError, match="clamp_to_position_cap must be a boolean"):
+            AccountRiskRules.from_mapping(config)
+    with pytest.raises(RiskConfigurationError, match="clamp_to_position_cap must be a boolean"):
+        rules(clamp_to_position_cap="true")
+
+
+def test_notional_rule_sizes_by_equity_weight(tmp_path: Path) -> None:
+    order = intent(
+        quantity_rule="notional_5pct",
+        entry_price=Decimal("99"),
+        stop_loss=Decimal("94"),
+    )
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(ledger, order_intent=order)
+
+    # floor(50000 * 0.05 / 99) = floor(25.25) = 25
+    assert verdict.accepted
+    assert verdict.approved_quantity == Decimal("25")
+    assert _rule(verdict, "risk_per_trade").measured_value == Decimal("125")
+    assert "notional_<x>pct" in _rule(verdict, "quantity_rule").threshold
+
+
+def test_notional_rule_at_the_position_cap_is_accepted(tmp_path: Path) -> None:
+    order = intent(quantity_rule="notional_20pct", stop_loss=Decimal("98"))
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(ledger, order_intent=order)
+
+    assert verdict.accepted
+    assert verdict.approved_quantity == Decimal("100")
+
+
+@pytest.mark.parametrize(
+    "quantity_rule",
+    [
+        "notional_20.01pct",
+        "notional_0pct",
+        "notional_-5pct",
+        "notional_abcpct",
+        "notional_pct",
+        "notional_NaNpct",
+        "notional_Infinitypct",
+        "notional_5",
+    ],
+)
+def test_notional_rule_refuses_invalid_or_over_cap_weights(
+    tmp_path: Path, quantity_rule: str
+) -> None:
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(ledger, order_intent=intent(quantity_rule=quantity_rule))
+
+    assert not verdict.accepted
+    assert verdict.approved_quantity is None
+    assert not _rule(verdict, "quantity_rule").passed
+
+
+def test_notional_rule_is_refused_when_its_stop_risk_exceeds_the_budget(
+    tmp_path: Path,
+) -> None:
+    # 20% weight = 100 shares; a 5.00 stop risks 500 against a 375 budget.
+    order = intent(quantity_rule="notional_20pct")
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(ledger, order_intent=order)
+
+    risk = _rule(verdict, "risk_per_trade")
+    assert not verdict.accepted
+    assert not risk.passed
+    assert risk.measured_value == Decimal("500")
+    assert risk.threshold == Decimal("375")
+    assert _rule(verdict, "quantity_rule").passed
+    assert _rule(verdict, "max_position").passed
+
+
+def test_notional_rule_risk_budget_follows_the_regime_scale(tmp_path: Path) -> None:
+    # 10% weight = 50 shares risking 250: inside the 375 bull budget, outside the
+    # halved 187.5 choppy budget.
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        engine = RiskEngine(rules(), rails(), FixedClock(), ledger)
+        bull = engine.evaluate(intent(quantity_rule="notional_10pct"), context())
+        choppy = engine.evaluate(
+            intent(intent_id="chop", command_id="chop-cmd", quantity_rule="notional_10pct"),
+            context(regime="BULL_CHOPIER"),
+        )
+
+    assert bull.accepted
+    assert bull.approved_quantity == Decimal("50")
+    assert not choppy.accepted
+    assert not _rule(choppy, "risk_per_trade").passed
+    assert _rule(choppy, "risk_per_trade").threshold == Decimal("187.5")
+
+
+def test_notional_rule_with_unknown_equity_refuses(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(
+            ledger,
+            order_intent=intent(quantity_rule="notional_5pct"),
+            risk_context=context(equity=None),
+        )
+
+    assert not verdict.accepted
+    assert not _rule(verdict, "risk_per_trade").passed

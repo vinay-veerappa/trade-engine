@@ -71,7 +71,7 @@ class OrderIntent:
     account_id: str
     instrument: Instrument
     side: Side
-    quantity_rule: str  # e.g., "risk_0.75pct", "fixed_1"
+    quantity_rule: str  # "risk_<x>pct", "notional_<x>pct" or "fixed_<n>", e.g. "risk_0.75pct"
     entry_price: Decimal
     stop_loss: Decimal
     profit_targets: tuple[Decimal, ...]

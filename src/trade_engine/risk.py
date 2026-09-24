@@ -45,6 +45,8 @@ class AccountRiskRules:
     drawdown_suspend_frac: Decimal
     drawdown_recovery_frac: Decimal
     daily_loss_block_frac: Decimal
+    # Opt-in: reduce a risk_<x>pct size to the position cap instead of refusing it.
+    clamp_to_position_cap: bool = False
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]) -> AccountRiskRules:
@@ -70,8 +72,10 @@ class AccountRiskRules:
             "drawdown_recovery": "drawdown_recovery_frac",
             "daily_loss_block": "daily_loss_block_frac",
         }
+        # Optional keys: absent means the field's documented default.
+        optional_fields = {"clamp_to_position_cap": "clamp_to_position_cap"}
         expected = set(config_fields)
-        unknown = set(values) - expected
+        unknown = set(values) - expected - set(optional_fields)
         if unknown:
             raise RiskConfigurationError(
                 f"Unknown account risk rule keys: {', '.join(sorted(unknown))}"
@@ -127,6 +131,16 @@ class AccountRiskRules:
                 raise RiskConfigurationError(f"{name} must be an integer")
             parsed[name] = value
 
+        for config_name, field_name in optional_fields.items():
+            if config_name not in values:
+                continue
+            value = values[config_name]
+            if not isinstance(value, bool):
+                raise RiskConfigurationError(
+                    f"{config_name} must be a boolean (true/false), not {type(value).__name__}"
+                )
+            parsed[field_name] = value
+
         return cls(**parsed)  # type: ignore[arg-type]
 
     def __post_init__(self) -> None:
@@ -176,6 +190,8 @@ class AccountRiskRules:
             or self.earnings_blackout_sessions < 0
         ):
             raise RiskConfigurationError("earnings_blackout_sessions must be non-negative")
+        if not isinstance(self.clamp_to_position_cap, bool):
+            raise RiskConfigurationError("clamp_to_position_cap must be a boolean")
         if self.drawdown_recovery_frac >= self.drawdown_half_risk_frac:
             raise RiskConfigurationError("drawdown recovery must be below the half-risk threshold")
         if self.drawdown_half_risk_frac >= self.drawdown_suspend_frac:
@@ -503,8 +519,10 @@ class RiskEngine:
         quantity_rule = intent.quantity_rule
         requested_risk_frac: Decimal | None = None
         fixed_quantity: Decimal | None = None
+        notional_frac: Decimal | None = None
         quantity_rule_ok = False
-        if quantity_rule.startswith("risk_") and quantity_rule.endswith("pct"):
+        risk_sized = quantity_rule.startswith("risk_") and quantity_rule.endswith("pct")
+        if risk_sized:
             raw_pct = quantity_rule[len("risk_") : -len("pct")]
             try:
                 requested_risk_frac = Decimal(raw_pct) / Decimal("100")
@@ -528,6 +546,26 @@ class RiskEngine:
                     fixed_quantity = Decimal(fixed_value)
                     quantity_rule_ok = True
             sizing_risk_frac = risk_frac
+        elif quantity_rule.startswith("notional_") and quantity_rule.endswith("pct"):
+            # Weight sizing: a fraction of equity, capped by the position limit; the
+            # stop-distance risk it implies is still checked against the risk budget.
+            raw_pct = quantity_rule[len("notional_") : -len("pct")]
+            try:
+                requested_notional_frac = Decimal(raw_pct) / Decimal("100")
+            except InvalidOperation:
+                requested_notional_frac = None
+            if (
+                requested_notional_frac is not None
+                and requested_notional_frac.is_finite()
+                and requested_notional_frac > ZERO
+            ):
+                quantity_rule_ok = (
+                    requested_notional_frac <= rules.max_position_notional_frac
+                )
+                notional_frac = min(
+                    requested_notional_frac, rules.max_position_notional_frac
+                )
+            sizing_risk_frac = risk_frac
         else:
             sizing_risk_frac = risk_frac
         regime_scale = Decimal("0.5") if context.regime == "BULL_CHOPIER" else ONE
@@ -540,11 +578,43 @@ class RiskEngine:
             if context.equity is not None
             else ZERO
         )
-        quantity = (
-            fixed_quantity
-            if fixed_quantity is not None
-            else Decimal(int((risk_budget / distance).to_integral_value(rounding=ROUND_FLOOR)))
+        max_position = (
+            context.equity * rules.max_position_notional_frac
+            if context.equity is not None
+            else None
         )
+        if fixed_quantity is not None:
+            quantity = fixed_quantity
+        elif notional_frac is not None:
+            quantity = (
+                Decimal(
+                    int(
+                        (context.equity * notional_frac / intent.entry_price)
+                        .to_integral_value(rounding=ROUND_FLOOR)
+                    )
+                )
+                if context.equity is not None
+                else ZERO
+            )
+        else:
+            quantity = Decimal(
+                int((risk_budget / distance).to_integral_value(rounding=ROUND_FLOOR))
+            )
+        # Opt-in clamp: a risk-sized quantity over the position cap is reduced to the
+        # cap rather than refused. Fixed sizes are explicit requests and never clamped;
+        # unknown equity leaves nothing to clamp to, so its refusal stands.
+        unclamped_quantity: Decimal | None = None
+        if rules.clamp_to_position_cap and risk_sized and max_position is not None:
+            cap_quantity = Decimal(
+                int(
+                    (max_position / intent.entry_price).to_integral_value(
+                        rounding=ROUND_FLOOR
+                    )
+                )
+            )
+            if quantity > cap_quantity:
+                unclamped_quantity = quantity
+                quantity = cap_quantity
         risk_amount = quantity * distance
         notional = quantity * intent.entry_price
         gross_limit_frac = (
@@ -588,23 +658,27 @@ class RiskEngine:
             quantity_rule_ok,
             intent.quantity_rule,
             (
-                f"risk request <= {risk_frac * Decimal('100')}pct "
-                "or positive fixed quantity"
+                f"risk_<x>pct with x <= {risk_frac * Decimal('100')}; "
+                f"notional_<x>pct with x <= "
+                f"{rules.max_position_notional_frac * Decimal('100')}; "
+                "or fixed_<n> with n > 0"
             ),
             "Intent sizing rule is supported and within its configured risk ceiling",
             "Intent sizing rule is invalid or requests more risk than account rules allow",
-        )
-        max_position = (
-            context.equity * rules.max_position_notional_frac
-            if context.equity is not None
-            else None
         )
         compare(
             "max_position",
             max_position is not None and notional <= max_position,
             notional,
             max_position if max_position is not None else "UNKNOWN",
-            "Position notional is within the account cap",
+            (
+                "Position notional is within the account cap"
+                if unclamped_quantity is None
+                else (
+                    f"Quantity reduced from {unclamped_quantity} to {quantity} shares "
+                    "to fit the position cap (clamp_to_position_cap)"
+                )
+            ),
             "Position notional or equity is unknown or exceeds the account cap",
         )
         gross_cap = (
