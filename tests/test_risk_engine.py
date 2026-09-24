@@ -518,10 +518,18 @@ def test_drawdown_brake_reengages_when_an_intent_command_is_replayed(
             intent(intent_id="dd-1", command_id="dd-cmd-1"),
             context(drawdown_from_peak_frac=Decimal("0.09")),
         )
+        # The re-engaged brake must be persisted, not just applied to this verdict: at 6%
+        # (between recovery and the half-risk threshold) the latch keeps half size.
+        assert ledger.snapshot("account-1").risk_controls["drawdown_brake"] is True
+        latched = engine.evaluate(
+            intent(intent_id="dd-3", command_id="dd-cmd-3"),
+            context(drawdown_from_peak_frac=Decimal("0.06")),
+        )
 
     assert high_drawdown.approved_quantity == Decimal("37")
     assert recovered.approved_quantity == Decimal("75")
     assert replayed.approved_quantity == Decimal("37")
+    assert latched.approved_quantity == Decimal("37")
 
 
 def test_kill_switch_survives_restart_and_can_be_released(tmp_path: Path) -> None:
@@ -595,3 +603,19 @@ def test_bear_market_blocks_longs_but_permits_parabolic_short(tmp_path: Path) ->
     assert not long_verdict.accepted
     assert short_verdict.accepted
     assert short_verdict.approved_quantity == Decimal("50")
+
+
+def test_short_intent_cannot_request_long_side_risk(tmp_path: Path) -> None:
+    """Parabolic shorts are capped at 0.5%; a short asking for 0.75% is refused."""
+    short = intent(
+        side=Side.SELL,
+        quantity_rule="risk_0.75pct",
+        stop_loss=Decimal("105"),
+        profit_targets=(Decimal("90"),),
+    )
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(ledger, order_intent=short)
+
+    quantity_rule = next(r for r in verdict.evaluations if r.rule_name == "quantity_rule")
+    assert not verdict.accepted
+    assert not quantity_rule.passed

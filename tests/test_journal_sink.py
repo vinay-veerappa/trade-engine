@@ -38,6 +38,11 @@ class _FakeJournalHandler(BaseHTTPRequestHandler):
     def _auth_refused(self) -> bool:
         server: _FakeJournalServer = self.server  # type: ignore
         if server.mode == "auth":
+            # Consume the body first: answering with unread bytes in the socket makes
+            # Windows reset the connection, and the client sees a network error, not a 401.
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
             return True
         return False
