@@ -1,5 +1,6 @@
 """Pure domain models for trade_engine."""
 
+from trade_engine.domain.exits import ClosePosition, ExitAction, MoveStop, OpenBracket
 from trade_engine.domain.instruments import (
     Combo,
     ComboLeg,
@@ -38,6 +39,10 @@ from trade_engine.domain.signals import (
 )
 
 __all__ = [
+    "ClosePosition",
+    "ExitAction",
+    "MoveStop",
+    "OpenBracket",
     "AccountConfig",
     "Combo",
     "ComboLeg",
