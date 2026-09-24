@@ -85,10 +85,30 @@ class OrderIntent:
     entry_tif: TimeInForce = TimeInForce.DAY
     exit_tif: TimeInForce = TimeInForce.GTC
     entry_type: OrderType = OrderType.LIMIT
+    # Share of the position each profit target exits, in target order. None splits the
+    # whole position evenly across the targets. Fractions summing below 1 leave a runner
+    # that only the protective stop (or a strategy exit) closes.
+    target_fractions: tuple[Decimal, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.intent_id:
             raise ValueError("intent_id must be non-empty")
+        if self.target_fractions is not None:
+            if len(self.target_fractions) != len(self.profit_targets):
+                raise ValueError(
+                    f"target_fractions has {len(self.target_fractions)} entries for "
+                    f"{len(self.profit_targets)} profit targets"
+                )
+            for fraction in self.target_fractions:
+                if not isinstance(fraction, Decimal) or not fraction.is_finite() or fraction <= 0:
+                    raise ValueError(
+                        f"target_fractions must be finite positive Decimals, got {fraction!r}"
+                    )
+            if sum(self.target_fractions, Decimal("0")) > 1:
+                raise ValueError(
+                    f"target_fractions sum to {sum(self.target_fractions, Decimal('0'))}, "
+                    "more than the whole position"
+                )
         if self.entry_type not in BRACKET_ENTRY_TYPES:
             raise ValueError(
                 "entry_type must be one of "

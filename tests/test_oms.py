@@ -1285,3 +1285,212 @@ def test_stop_entry_is_refused_before_persisting_without_native_stops(manager_fa
     assert broker.submitted == []
     # A limit entry at the same venue still works; its protective stop is emulated.
     assert manager.create_bracket(make_intent(command_id="limit-ok"), Decimal("10"))
+
+
+# -- target fractions: partial exits leave a runner on the stop -----------------------
+
+
+def _fraction_intent(fractions, targets=(Decimal("110"),), command_id="partial"):
+    return replace(
+        make_intent(command_id=command_id, targets=targets), target_fractions=fractions
+    )
+
+
+def test_target_fractions_are_validated():
+    assert make_intent().target_fractions is None
+    assert _fraction_intent((Decimal("1"),)).target_fractions == (Decimal("1"),)
+    with pytest.raises(ValueError, match="entries for"):
+        _fraction_intent((Decimal("0.5"), Decimal("0.5")))
+    for bad in (Decimal("0"), Decimal("-0.1"), Decimal("NaN"), 0.5):
+        with pytest.raises(ValueError, match="finite positive"):
+            _fraction_intent((bad,))
+    with pytest.raises(ValueError, match="more than the whole position"):
+        _fraction_intent(
+            (Decimal("0.6"), Decimal("0.5")), targets=(Decimal("105"), Decimal("110"))
+        )
+
+
+def test_a_third_at_the_target_leaves_a_runner_on_the_stop(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(_fraction_intent((Decimal("1") / 3,)), Decimal("10"))
+
+    assert [target.quantity for target in bracket.targets] == [Decimal("3")]
+    assert bracket.stop.quantity == Decimal("10")
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "partial-entry", "10", "100"))
+    assert [(item.venue_order_id, item.quantity) for item in broker.submitted[1:]] == [
+        ("partial:stop", Decimal("10")),
+        ("partial:target:1", Decimal("3")),
+    ]
+
+    manager.record_fill(make_fill(bracket.targets[0], "partial-target", "3", "110"))
+    assert manager.get_order("partial:target:1").state is OrderState.FILLED
+    stop = manager.get_order("partial:stop")
+    assert stop.quantity == Decimal("7")
+    assert stop.state is OrderState.ACCEPTED
+    assert broker.cancelled == []
+
+
+def test_whole_share_fractions_round_by_largest_remainder(manager_factory):
+    manager, _, _ = manager_factory()
+    halves = manager.create_bracket(
+        _fraction_intent(
+            (Decimal("0.5"), Decimal("0.5")), targets=(Decimal("105"), Decimal("110"))
+        ),
+        Decimal("5"),
+    )
+    assert [target.quantity for target in halves.targets] == [Decimal("3"), Decimal("2")]
+    half_and_runner = manager.create_bracket(
+        _fraction_intent((Decimal("0.5"),), command_id="half"), Decimal("5")
+    )
+    assert [target.quantity for target in half_and_runner.targets] == [Decimal("3")]
+    with pytest.raises(ValueError, match="too small"):
+        manager.create_bracket(
+            _fraction_intent((Decimal("0.1"),), command_id="tiny"), Decimal("4")
+        )
+
+
+def test_partial_entry_fill_keeps_the_runners_share(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(_fraction_intent((Decimal("1") / 3,)), Decimal("9"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "part-entry", "6", "100"))
+    manager.cancel(bracket.entry.order_id, command_id="cancel-rest")
+
+    # Planned 3 of 9; of the 6 filled the target gets its third, not all six.
+    target = next(item for item in broker.submitted if item.venue_order_id == "partial:target:1")
+    assert target.quantity == Decimal("2")
+    assert manager.get_order("partial:stop").quantity == Decimal("6")
+
+
+def test_fractions_join_the_fingerprint_only_when_set(manager_factory):
+    manager, _, _ = manager_factory()
+    manager.create_bracket(make_intent(targets=(Decimal("110"),)), Decimal("10"))
+    with pytest.raises(IdempotencyConflictError):
+        manager.create_bracket(_fraction_intent((Decimal("1"),), command_id="command-1"), Decimal("10"))
+
+
+# -- strategy exits: move_stop tightens only; close_bracket exits at the next open ----
+
+
+def _open_bracket(manager, command_id="managed", side=Side.BUY):
+    bracket = manager.create_bracket(make_intent(command_id=command_id, side=side), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, f"{command_id}-fill", "10", "100"))
+    return bracket
+
+
+def test_move_stop_tightens_a_long_stop(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    moved = manager.move_stop(bracket.entry.order_id, Decimal("100"), command_id="to-breakeven")
+    assert moved.stop_price == Decimal("100")
+    assert broker.replaced[-1] == (bracket.stop.order_id, OrderChanges(new_stop_price=Decimal("100")))
+
+
+def test_move_stop_refuses_to_loosen_and_ignores_no_change(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    with pytest.raises(OrderManagementError, match="only tighten"):
+        manager.move_stop(bracket.entry.order_id, Decimal("94"), command_id="loosen")
+    assert manager.move_stop(bracket.entry.order_id, Decimal("95"), command_id="same").stop_price == Decimal("95")
+    assert broker.replaced == []
+
+
+def test_move_stop_on_a_short_tightens_downward(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager, command_id="short", side=Side.SELL)
+    with pytest.raises(OrderManagementError, match="only tighten"):
+        manager.move_stop(bracket.entry.order_id, Decimal("106"), command_id="short-loosen")
+    assert manager.move_stop(
+        bracket.entry.order_id, Decimal("101"), command_id="short-trail"
+    ).stop_price == Decimal("101")
+
+
+def test_exits_refuse_a_bracket_without_open_quantity(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = manager.create_bracket(make_intent(command_id="unfilled"), Decimal("10"))
+    manager.submit(bracket.entry)
+    with pytest.raises(OrderManagementError, match="no open quantity"):
+        manager.move_stop(bracket.entry.order_id, Decimal("99"), command_id="early")
+    with pytest.raises(OrderManagementError, match="no open quantity"):
+        manager.close_bracket(bracket.entry.order_id, command_id="early-close", reason="t")
+    with pytest.raises(OrderManagementError, match="not a bracket entry"):
+        manager.move_stop(bracket.stop.order_id, Decimal("99"), command_id="child")
+
+
+def test_close_bracket_sends_one_day_market_order_for_the_open_quantity(manager_factory):
+    manager, ledger, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    manager.record_fill(make_fill(bracket.targets[0], "t1", "5", "105"))
+
+    close = manager.close_bracket(bracket.entry.order_id, command_id="day-5", reason="day 5 exit")
+    assert (close.order_type, close.tif, close.quantity) == (
+        OrderType.MARKET,
+        TimeInForce.DAY,
+        Decimal("5"),
+    )
+    assert close.side is Side.SELL and close.parent_order_id == bracket.entry.order_id
+    assert broker.submitted[-1].venue_order_id == close.order_id
+    sent = len(broker.submitted)
+    assert manager.close_bracket(bracket.entry.order_id, command_id="day-5", reason="day 5 exit") == close
+    assert len(broker.submitted) == sent
+    with pytest.raises(IdempotencyConflictError):
+        manager.close_bracket(bracket.entry.order_id, command_id="other", reason="again")
+    # The stop keeps protecting until the close fills.
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.ACCEPTED
+
+    manager.record_fill(make_fill(close, "close-fill", "5", "103"))
+    assert ledger.state("account-1").positions[Equity("AAPL")].quantity == Decimal("0")
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.CANCELLED
+    assert manager.get_order(bracket.targets[1].order_id).state is OrderState.CANCELLED
+
+
+def test_stop_fill_cancels_a_pending_close(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    close = manager.close_bracket(bracket.entry.order_id, command_id="close", reason="time stop")
+    manager.record_fill(make_fill(bracket.stop, "stopped", "10", "95"))
+    assert manager.get_order(close.order_id).state is OrderState.CANCELLED
+
+
+def test_exit_actions_validate_their_fields():
+    from trade_engine.domain.exits import ClosePosition, MoveStop
+
+    assert MoveStop("e", Decimal("1"), "r", "c").stop_price == Decimal("1")
+    for price in (Decimal("0"), Decimal("-1"), Decimal("NaN"), 1.5):
+        with pytest.raises(ValueError, match="stop_price"):
+            MoveStop("e", price, "r", "c")
+    for blank in ("entry_order_id", "reason", "command_id"):
+        fields = {"entry_order_id": "e", "reason": "r", "command_id": "c"}
+        fields[blank] = ""
+        with pytest.raises(ValueError, match=blank):
+            ClosePosition(**fields)
+
+
+def test_partial_stop_fill_cancels_a_pending_close(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    close = manager.close_bracket(bracket.entry.order_id, command_id="close", reason="time stop")
+    manager.record_fill(make_fill(bracket.stop, "stopped-part", "4", "95"))
+    assert manager.get_order(close.order_id).state is OrderState.CANCELLED
+
+
+def test_targets_filling_the_position_cancel_a_pending_close(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    close = manager.close_bracket(bracket.entry.order_id, command_id="close", reason="time stop")
+    manager.record_fill(make_fill(bracket.targets[0], "t1", "5", "105"))
+    manager.record_fill(make_fill(bracket.targets[1], "t2", "5", "110"))
+    assert manager.get_order(close.order_id).state is OrderState.CANCELLED
+
+
+def test_replaying_a_filled_close_returns_it(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    close = manager.close_bracket(bracket.entry.order_id, command_id="close", reason="day 5")
+    manager.record_fill(make_fill(close, "closed", "10", "101"))
+    sent = len(broker.submitted)
+    replay = manager.close_bracket(bracket.entry.order_id, command_id="close", reason="day 5")
+    assert replay.state is OrderState.FILLED
+    assert len(broker.submitted) == sent

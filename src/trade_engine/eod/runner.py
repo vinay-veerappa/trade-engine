@@ -15,6 +15,8 @@ The 17:45 ET job per account and session, in order:
    D+1 DAY entry belongs to the next session instead of expiring at its open.
    MTM: one Mark per open position at the last regular bar's close; a missing
    regular bar refuses (I5).
+   Exits: a strategy with ``manage_positions`` sees its open brackets and may tighten
+   stops or close positions at the next open (``domain.exits``); the OMS applies them.
 4. Marker: one ``EodRun`` event per account, claimed by
    ``eod:<job>:<account>:<session>``. A re-run replays deterministically and every
    command id it derives is already claimed, so the second run appends nothing.
@@ -24,7 +26,8 @@ The 17:45 ET job per account and session, in order:
 6. Outbox: every configured destination drains in order (I12).
 
 The runner owns orchestration only. Expiry/assignment semantics stay with O2 (options
-are refused here), EOD exit rules belong to strategy plugins (I13), and market data
+are refused here), EOD exit rules belong to strategy plugins (I13) and reach the venue only through the
+OMS, and market data
 comes from an injected provider (I5: no default source).
 """
 
@@ -35,8 +38,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from trade_engine.calendar.sessions import ExchangeCalendar
+from trade_engine.domain.exits import ClosePosition, MoveStop, OpenBracket
 from trade_engine.domain.instruments import Equity, Instrument
 from trade_engine.domain.orders import OrderState, OrderType
 from trade_engine.domain.portfolio import Fill
@@ -58,6 +63,7 @@ from trade_engine.risk import RiskContext, RiskEngine
 from trade_engine.sim import SimBroker
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
+NEW_YORK = ZoneInfo("America/New_York")
 _MARK_COMMAND = "eod:mark:{account}:{session}:{symbol}"
 _RUN_COMMAND = "eod:{job}:{account}:{session}"
 _TERMINAL = frozenset(
@@ -150,6 +156,7 @@ class AccountRunResult:
     fills_recorded: int = 0
     marks_appended: int = 0
     orders_submitted: int = 0
+    exit_actions: int = 0
 
 
 @dataclass(frozen=True)
@@ -323,6 +330,7 @@ class EodRunner:
                 account_id, broker, self._manager_for(account_id, broker), None
             )
         self._mark_positions(account_id, tally.last_regular_closes, session)
+        exit_actions = self._manage_positions(account_id, session, tally.last_regular_closes)
         orders_submitted = self._submit_new_orders(account_id, session)
         self._append_run_marker(account_id, session, tally.bars_processed)
         return AccountRunResult(
@@ -333,6 +341,7 @@ class EodRunner:
             fills_recorded=self._fill_count(account_id) - tally.fills_before,
             marks_appended=self._marks_appended(account_id, session),
             orders_submitted=orders_submitted,
+            exit_actions=exit_actions,
         )
 
     def _fill_count(self, account_id: str) -> int:
@@ -711,6 +720,120 @@ class EodRunner:
                 command_id=self._run_command(account_id, session),
             )
         )
+
+    # -- exits: strategy exit rules at the close ---------------------------------
+
+    def _manage_positions(
+        self,
+        account_id: str,
+        session: date,
+        last_regular_closes: Mapping[Instrument, Decimal],
+    ) -> int:
+        """Hand the strategy its open brackets and apply the exits it asks for.
+
+        Runs after marks and before D+1 entries. ``manage_positions`` is optional on a
+        strategy; one without it keeps only its stops and targets. Every action goes
+        through the OMS, which refuses a stop that would loosen (I5); a refused action
+        fails the run loudly rather than leaving a position managed by half its rules.
+        """
+        strategy = self._config.strategies.get(account_id)
+        manage = getattr(strategy, "manage_positions", None)
+        if not callable(manage):
+            return 0
+        brackets = self._open_brackets(account_id, session, last_regular_closes)
+        if not brackets:
+            return 0
+        actions = list(manage(brackets, {"session": session, "account_id": account_id}))
+        by_entry = {bracket.entry_order_id: bracket for bracket in brackets}
+        manager = self._manager_for(account_id, self._config.brokers[account_id])
+        applied = 0
+        for action in actions:
+            if action.entry_order_id not in by_entry:
+                raise EodRunnerError(
+                    f"Exit action '{action.command_id}' names '{action.entry_order_id}', "
+                    f"which is not an open bracket of '{account_id}' (I8)"
+                )
+            if isinstance(action, MoveStop):
+                manager.move_stop(
+                    action.entry_order_id, action.stop_price, command_id=action.command_id
+                )
+            elif isinstance(action, ClosePosition):
+                order = manager.close_bracket(
+                    action.entry_order_id, command_id=action.command_id, reason=action.reason
+                )
+                if order.state not in _TERMINAL:
+                    manager.reconcile_order(order.order_id)
+            else:
+                raise EodRunnerError(
+                    f"Strategy for '{account_id}' returned {type(action).__name__}; exit "
+                    "actions are MoveStop or ClosePosition"
+                )
+            applied += 1
+        return applied
+
+    def _open_brackets(
+        self,
+        account_id: str,
+        session: date,
+        last_regular_closes: Mapping[Instrument, Decimal],
+    ) -> list[OpenBracket]:
+        state = self._ledger.state(account_id)
+        brackets: list[OpenBracket] = []
+        for entry in sorted(state.orders.values(), key=lambda order: order.order_id):
+            if entry.parent_order_id is not None:
+                continue
+            children = [
+                order for order in state.orders.values() if order.parent_order_id == entry.order_id
+            ]
+            stop = next((order for order in children if order.order_type is OrderType.STOP), None)
+            entry_fills = [fill for fill in state.fills if fill.order_id == entry.order_id]
+            if stop is None or stop.stop_price is None or not entry_fills:
+                continue
+            filled = sum((fill.quantity for fill in entry_fills), Decimal("0"))
+            exited = sum(
+                (state.filled_quantity.get(order.order_id, Decimal("0")) for order in children),
+                Decimal("0"),
+            )
+            if filled - exited <= 0:
+                continue
+            targets = [order for order in children if order.order_type is OrderType.LIMIT]
+            first_fill = min(fill.filled_at for fill in entry_fills)
+            entry_session = self._calendar.roll_to_session(
+                first_fill.astimezone(NEW_YORK).date(), "next"
+            )
+            brackets.append(
+                OpenBracket(
+                    entry_order_id=entry.order_id,
+                    account_id=account_id,
+                    instrument=entry.instrument,
+                    side=entry.side,
+                    entry_quantity=filled,
+                    open_quantity=filled - exited,
+                    average_entry_price=sum(
+                        (fill.price * fill.quantity for fill in entry_fills), Decimal("0")
+                    )
+                    / filled,
+                    entry_filled_at=first_fill,
+                    entry_session=entry_session,
+                    sessions_held=len(self._calendar.sessions_in_range(entry_session, session))
+                    - 1,
+                    stop_price=stop.stop_price,
+                    targets_filled=sum(
+                        1 for order in targets if order.state is OrderState.FILLED
+                    ),
+                    open_targets=tuple(
+                        (
+                            order.limit_price,
+                            order.quantity
+                            - state.filled_quantity.get(order.order_id, Decimal("0")),
+                        )
+                        for order in targets
+                        if order.state not in _TERMINAL and order.limit_price is not None
+                    ),
+                    last_close=last_regular_closes.get(entry.instrument),
+                )
+            )
+        return brackets
 
     # -- entries for D+1 ---------------------------------------------------------
 

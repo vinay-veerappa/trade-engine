@@ -20,3 +20,13 @@ class Strategy(Protocol):
     def generate_intents(self, signals: list[Signal], context: Any) -> list[OrderIntent]:
         """Generate order intents from a collection of signals and account/market context."""
         ...
+
+    # Optional, looked up with getattr by the EOD runner (not part of the protocol check):
+    #
+    #   def manage_positions(
+    #       self, brackets: list[OpenBracket], context: Any
+    #   ) -> Iterable[MoveStop | ClosePosition]
+    #
+    # Called once per account at the close with the brackets that still hold open
+    # quantity (``trade_engine.domain.exits``). Stops only tighten; a close exits the
+    # whole open quantity at the next open.

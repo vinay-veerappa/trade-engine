@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 
 from trade_engine.domain.instruments import Equity, Instrument, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
@@ -144,9 +144,14 @@ class OrderManager:
             oco_group=f"{prefix}:exits",
         )
         self._validate_quantity(intent.instrument, quantity)
-        target_quantities = self._split_quantity(
-            quantity, len(intent.profit_targets), intent.instrument
-        )
+        if intent.target_fractions is None:
+            target_quantities = self._split_quantity(
+                quantity, len(intent.profit_targets), intent.instrument
+            )
+        else:
+            target_quantities = self._fraction_quantities(
+                quantity, intent.target_fractions, intent.instrument
+            )
         targets = tuple(
             Order(
                 order_id=f"{prefix}:target:{index}",
@@ -392,6 +397,95 @@ class OrderManager:
         if order.parent_order_id is None:
             self._synchronize_bracket(order, command_id)
         return result
+
+    def move_stop(self, entry_order_id: str, stop_price: Decimal, *, command_id: str) -> Order:
+        """Tighten an open bracket's protective stop; loosening it refuses (I5)."""
+        stop, open_quantity = self._open_bracket_stop(entry_order_id)
+        current = stop.stop_price
+        if current is None:
+            raise OrderManagementError(f"Protective stop '{stop.order_id}' has no stop price")
+        if stop_price == current:
+            return stop
+        loosens = stop_price < current if stop.side is Side.SELL else stop_price > current
+        if loosens:
+            raise OrderManagementError(
+                f"Moving stop '{stop.order_id}' from {current} to {stop_price} would widen "
+                "the bracket's risk; stops only tighten"
+            )
+        return self.replace(
+            stop.order_id, OrderChanges(new_stop_price=stop_price), command_id=command_id
+        )
+
+    def close_bracket(self, entry_order_id: str, *, command_id: str, reason: str) -> Order:
+        """Exit an open bracket's whole open quantity with a DAY market order.
+
+        Entered after the close, it works the next session's open. The protective stop
+        stays live until the close order fills; the fill then cancels the remaining exits.
+        """
+        order_id = f"{entry_order_id}:close"
+        try:
+            existing = self.get_order(order_id)
+        except KeyError:
+            existing = None
+        if existing is not None and existing.command_id != command_id:
+            raise IdempotencyConflictError(
+                f"Bracket '{entry_order_id}' already has close order '{order_id}' from "
+                f"command '{existing.command_id}'"
+            )
+        if existing is not None and existing.state is not OrderState.NEW:
+            # Already sent (or resolved): a replayed command changes nothing (I3).
+            return existing
+        stop, open_quantity = self._open_bracket_stop(entry_order_id)
+        close = existing or Order(
+            order_id=order_id,
+            account_id=stop.account_id,
+            instrument=stop.instrument,
+            order_type=OrderType.MARKET,
+            side=stop.side,
+            quantity=open_quantity,
+            command_id=command_id,
+            created_at=self._utc_now(),
+            tif=TimeInForce.DAY,
+            parent_order_id=entry_order_id,
+            oco_group=stop.oco_group,
+        )
+        if existing is None:
+            self._append(
+                close.account_id,
+                EventKind.ORDERS_CREATED,
+                OrdersCreated(
+                    orders=(close,),
+                    fingerprint=self._fingerprint_order(close),
+                    reason=f"Bracket close: {reason}",
+                ),
+                command_id,
+            )
+        return self.submit(close)
+
+    def _open_bracket_stop(self, entry_order_id: str) -> tuple[Order, Decimal]:
+        entry = self.get_order(entry_order_id)
+        if entry.parent_order_id is not None:
+            raise OrderManagementError(f"Order '{entry_order_id}' is not a bracket entry")
+        state = self._account_state(entry.account_id)
+        children = [
+            order for order in state.orders.values() if order.parent_order_id == entry_order_id
+        ]
+        stop = next((order for order in children if order.order_type is OrderType.STOP), None)
+        if stop is None:
+            raise OrderManagementError(f"Order '{entry_order_id}' has no protective stop")
+        exited = sum(
+            (state.filled_quantity.get(order.order_id, Decimal("0")) for order in children),
+            Decimal("0"),
+        )
+        open_quantity = state.filled_quantity.get(entry_order_id, Decimal("0")) - exited
+        if open_quantity <= 0:
+            raise OrderManagementError(f"Bracket '{entry_order_id}' has no open quantity")
+        if stop.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
+            raise OrderManagementError(
+                f"Protective stop '{stop.order_id}' is {stop.state.value}, not working at "
+                "the venue; reconcile before managing the bracket"
+            )
+        return stop, open_quantity
 
     def replace(
         self, order_id: str, changes: OrderChanges, *, command_id: str
@@ -852,6 +946,8 @@ class OrderManager:
         ]
         stop = next((order for order in children if order.order_type is OrderType.STOP), None)
         targets = [order for order in children if order.order_type is OrderType.LIMIT]
+        # A strategy's close order (close_bracket) exits alongside the stop and targets.
+        closers = [order for order in children if order.order_type is OrderType.MARKET]
         if stop is None:
             return
         entry_terminal = context.order.state in (
@@ -868,7 +964,10 @@ class OrderManager:
 
         stop_filled = state.filled_quantity.get(stop.order_id, Decimal("0"))
         target_filled = sum(
-            (state.filled_quantity.get(target.order_id, Decimal("0")) for target in targets),
+            (
+                state.filled_quantity.get(order.order_id, Decimal("0"))
+                for order in (*targets, *closers)
+            ),
             Decimal("0"),
         )
         open_quantity = entry_filled - stop_filled - target_filled
@@ -887,9 +986,15 @@ class OrderManager:
                 target_weights = tuple(
                     self._planned_quantity(target.order_id) for target in targets
                 )
-                target_budgets = self._allocate_quantity(
-                    entry_filled, target_weights, entry.instrument
+                # Targets planned below the entry size leave a runner; it keeps its share
+                # of a partial entry fill instead of the targets absorbing all of it.
+                runner = self._planned_quantity(entry.order_id) - sum(
+                    target_weights, Decimal("0")
                 )
+                weights = (*target_weights, runner) if runner > 0 else target_weights
+                target_budgets = self._allocate_quantity(
+                    entry_filled, weights, entry.instrument
+                )[: len(targets)]
                 for target, budget in zip(targets, target_budgets, strict=True):
                     if target.state is OrderState.NEW:
                         if budget <= 0:
@@ -906,13 +1011,13 @@ class OrderManager:
                             )
         else:
             self._cancel_exits(
-                [stop, *targets],
+                [stop, *targets, *closers],
                 f"{cause_id}:{entry.order_id}:flat",
             )
 
         if stop_filled > 0:
             self._cancel_targets(
-                targets,
+                [*targets, *closers],
                 f"{cause_id}:{stop.order_id}:stop-fill",
             )
 
@@ -1296,6 +1401,8 @@ class OrderManager:
             # Added only when set, so brackets persisted before stop entries keep their
             # fingerprints and still replay idempotently (I3).
             payload["entry_type"] = intent.entry_type.value
+        if intent.target_fractions is not None:
+            payload["target_fractions"] = [str(value) for value in intent.target_fractions]
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -1322,6 +1429,36 @@ class OrderManager:
         if any(portion <= 0 for portion in portions):
             raise ValueError("quantity is too small to allocate a positive amount to each target")
         return portions
+
+    @classmethod
+    def _fraction_quantities(
+        cls, quantity: Decimal, fractions: tuple[Decimal, ...], instrument: Instrument
+    ) -> tuple[Decimal, ...]:
+        """Size each target to its share of the position; any remainder is the runner.
+
+        Equities round by largest remainder over the targets plus the runner, so the
+        shares always add up to the entry and no target silently rounds to zero.
+        """
+        cls._validate_quantity(instrument, quantity)
+        runner = Decimal("1") - sum(fractions, Decimal("0"))
+        weights = (*fractions, runner) if runner > 0 else fractions
+        if isinstance(instrument, Equity):
+            exact = [quantity * weight for weight in weights]
+            portions = [value.to_integral_value(rounding=ROUND_FLOOR) for value in exact]
+            remaining = int(quantity - sum(portions, Decimal("0")))
+            by_remainder = sorted(
+                range(len(weights)), key=lambda index: (-(exact[index] - portions[index]), index)
+            )
+            for index in by_remainder[:remaining]:
+                portions[index] += 1
+        else:
+            portions = [quantity * weight for weight in weights]
+        targets = tuple(portions[: len(fractions)])
+        if any(portion <= 0 for portion in targets):
+            raise ValueError(
+                f"quantity {quantity} is too small to give every target its fraction"
+            )
+        return targets
 
     @staticmethod
     def _allocate_quantity(
