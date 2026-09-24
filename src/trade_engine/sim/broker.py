@@ -112,12 +112,14 @@ class SimBroker(BrokerAdapter):
                 return self._ack(order.venue_order_id, "ACCEPTED")
             return self._ack(order.venue_order_id, "REJECTED", "Order is already cancelled")
         now = self._now()
-        self._orders[order.venue_order_id] = _WorkingOrder(
+        working = _WorkingOrder(
             order=order,
             state=OrderState.ACCEPTED,
             filled_quantity=ZERO,
             updated_at=now,
         )
+        self._orders[order.venue_order_id] = working
+        self._fill_stop_inside_entry_bar(order.venue_order_id, working)
         return self._ack(order.venue_order_id, "ACCEPTED")
 
     def cancel(self, venue_order_id: str) -> VenueAck:
@@ -333,17 +335,55 @@ class SimBroker(BrokerAdapter):
             raise SimBrokerError(
                 f"Unsupported accepted order type {order.order_type.value}"
             )
-        slipped = base * (
-            Decimal("1")
-            + self._slippage_bps / BPS
-            if order.side is Side.BUY
-            else Decimal("1") - self._slippage_bps / BPS
-        )
+        slipped = self._slipped(base, order.side)
         if order.order_type is OrderType.LIMIT and order.limit_price is not None:
             if order.side is Side.BUY:
                 return min(slipped, order.limit_price)
             return max(slipped, order.limit_price)
         return slipped
+
+    def _slipped(self, base: Decimal, side: Side) -> Decimal:
+        return base * (
+            Decimal("1") + self._slippage_bps / BPS
+            if side is Side.BUY
+            else Decimal("1") - self._slippage_bps / BPS
+        )
+
+    def _fill_stop_inside_entry_bar(self, venue_order_id: str, working: _WorkingOrder) -> None:
+        """Fill a protective stop against the bar that filled its entry, when touched.
+
+        The OMS submits children only after it sees the entry fill, so they arrive after that
+        bar has been processed. A one-minute bar does not reveal whether its low (for a long)
+        came after the entry, so a touched stop is assumed hit: the same pessimism as
+        stop-before-target. Targets are not filled this way; the bar may have reached them
+        before the entry.
+        """
+        order = working.order
+        if order.parent_order_id is None or order.order_type is not OrderType.STOP:
+            return
+        entry_bar = self._last_bars.get(order.instrument)
+        if entry_bar is None or not self._is_regular_session_bar(entry_bar):
+            return
+        entry_fills = [
+            fill
+            for fill in self._fills
+            if fill.venue_order_id == order.parent_order_id
+            and fill.filled_at == entry_bar.timestamp
+        ]
+        stop_price = order.stop_price
+        if not entry_fills or stop_price is None:
+            return
+        entry_price = entry_fills[-1].price
+        if order.side is Side.SELL:
+            if entry_bar.low > stop_price:
+                return
+            # An entry already below the stop exits at the entry price, not the stop.
+            base = min(stop_price, entry_price)
+        else:
+            if entry_bar.high < stop_price:
+                return
+            base = max(stop_price, entry_price)
+        self._fill(venue_order_id, working, self._slipped(base, order.side), entry_bar.timestamp)
 
     def _fill(
         self,
