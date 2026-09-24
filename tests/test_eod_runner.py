@@ -1248,6 +1248,38 @@ def test_d_plus_one_entry_from_a_replayed_account_works_the_next_session(tmp_pat
     ledger.close()
 
 
+@pytest.mark.parametrize("fresh_process", [False, True], ids=["same-broker", "restored"])
+def test_unfilled_d_plus_one_entry_is_expired_at_the_close(
+    tmp_path: Path, fresh_process: bool
+) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    bracket = _seed_bracket(ledger, broker, clock, command_id="e7-unfilled")
+    if fresh_process:
+        broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    # Every bar trades above the 100 buy limit, so the DAY entry never fills.
+    market_data = FakeMarketData({minute: ("102", "103", "101", "102") for minute in range(390)})
+
+    EodRunner(
+        ledger, clock, CALENDAR, market_data,
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+
+    state = ledger.state(ACCOUNT)
+    assert state.orders[bracket.entry.order_id].state is OrderState.EXPIRED
+    assert {state.orders[order.order_id].state for order in (bracket.stop, *bracket.targets)} == {
+        OrderState.CANCELLED
+    }
+    expired = ledger.event_by_command(
+        f"{bracket.entry.command_id}:reconcile:{SESSION_CLOSE.isoformat()}:EXPIRED"
+    )
+    assert expired is not None and expired.kind is EventKind.ORDER_EXPIRED
+    ledger.close()
+
+
 def test_replay_refuses_a_clock_already_past_the_open(tmp_path: Path) -> None:
     clock = SettableClock(PREV_EOD)
     ledger = Ledger(tmp_path / "eod-ledger.db")
