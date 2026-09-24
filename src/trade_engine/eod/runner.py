@@ -16,7 +16,8 @@ The 17:45 ET job per account and session, in order:
    MTM: one Mark per open position at the last regular bar's close; a missing
    regular bar refuses (I5).
    Exits: a strategy with ``manage_positions`` sees its open brackets and may tighten
-   stops or close positions at the next open (``domain.exits``); the OMS applies them.
+   stops, close positions or reduce them at the next open (``domain.exits``); the OMS
+   applies them.
 4. Marker: one ``EodRun`` event per account, claimed by
    ``eod:<job>:<account>:<session>``. A re-run replays deterministically and every
    command id it derives is already claimed, so the second run appends nothing.
@@ -41,7 +42,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from trade_engine.calendar.sessions import ExchangeCalendar
-from trade_engine.domain.exits import ClosePosition, MoveStop, OpenBracket
+from trade_engine.domain.exits import ClosePosition, MoveStop, OpenBracket, ReducePosition
 from trade_engine.domain.instruments import Equity, Instrument
 from trade_engine.domain.orders import OrderState, OrderType
 from trade_engine.domain.portfolio import Fill
@@ -763,10 +764,19 @@ class EodRunner:
                 )
                 if order.state not in _TERMINAL:
                     manager.reconcile_order(order.order_id)
+            elif isinstance(action, ReducePosition):
+                order = manager.reduce_bracket(
+                    action.entry_order_id,
+                    action.fraction,
+                    command_id=action.command_id,
+                    reason=action.reason,
+                )
+                if order.state not in _TERMINAL:
+                    manager.reconcile_order(order.order_id)
             else:
                 raise EodRunnerError(
                     f"Strategy for '{account_id}' returned {type(action).__name__}; exit "
-                    "actions are MoveStop or ClosePosition"
+                    "actions are MoveStop, ClosePosition or ReducePosition"
                 )
             applied += 1
         return applied

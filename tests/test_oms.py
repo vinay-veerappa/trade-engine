@@ -1494,3 +1494,251 @@ def test_replaying_a_filled_close_returns_it(manager_factory):
     replay = manager.close_bracket(bracket.entry.order_id, command_id="close", reason="day 5")
     assert replay.state is OrderState.FILLED
     assert len(broker.submitted) == sent
+
+
+# -- strategy exits: reduce_bracket takes a partial at the next open --------------------
+
+
+def test_reduce_position_validates_its_fields():
+    from trade_engine.domain.exits import ReducePosition
+
+    for fraction in (Decimal("0.001"), Decimal("0.5"), Decimal("0.999")):
+        assert ReducePosition("e", fraction, "r", "c").fraction == fraction
+    for fraction in (
+        Decimal("0"),
+        Decimal("1"),
+        Decimal("-0.5"),
+        Decimal("1.5"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        0.5,
+    ):
+        with pytest.raises(ValueError, match="fraction"):
+            ReducePosition("e", fraction, "r", "c")
+    for blank in ("entry_order_id", "reason", "command_id"):
+        fields = {"entry_order_id": "e", "fraction": Decimal("0.5"), "reason": "r", "command_id": "c"}
+        fields[blank] = ""
+        with pytest.raises(ValueError, match=blank):
+            ReducePosition(**fields)
+
+
+def test_reduce_bracket_sells_the_floor_of_the_fraction_and_cancels_targets(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager)
+
+    reduce = manager.reduce_bracket(
+        bracket.entry.order_id, Decimal("1") / 3, command_id="day-5-third", reason="a third at day 5"
+    )
+    assert reduce.order_id == "managed:entry:reduce:1"
+    assert (reduce.order_type, reduce.tif, reduce.quantity, reduce.side) == (
+        OrderType.MARKET,
+        TimeInForce.DAY,
+        Decimal("3"),
+        Side.SELL,
+    )
+    assert reduce.parent_order_id == bracket.entry.order_id
+    assert reduce.oco_group == bracket.stop.oco_group
+    assert reduce.state is OrderState.ACCEPTED
+    assert broker.submitted[-1].venue_order_id == reduce.order_id
+    # The reduce replaces the resting targets; the stop keeps protecting all ten.
+    assert set(broker.cancelled) == {target.order_id for target in bracket.targets}
+    for target in bracket.targets:
+        assert manager.get_order(target.order_id).state is OrderState.CANCELLED
+    stop = manager.get_order(bracket.stop.order_id)
+    assert (stop.state, stop.quantity) == (OrderState.ACCEPTED, Decimal("10"))
+
+
+def test_reduce_bracket_sizes_from_the_open_quantity_after_a_target_fill(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    manager.record_fill(make_fill(bracket.targets[0], "t1", "5", "105"))
+    reduce = manager.reduce_bracket(
+        bracket.entry.order_id, Decimal("0.5"), command_id="half", reason="half"
+    )
+    assert reduce.quantity == Decimal("2")  # floor(5 x 0.5)
+    assert manager.get_order(bracket.targets[0].order_id).state is OrderState.FILLED
+    assert manager.get_order(bracket.targets[1].order_id).state is OrderState.CANCELLED
+
+
+def test_reduce_bracket_replays_by_command_id_and_refuses_a_different_payload(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    entry_id = bracket.entry.order_id
+    reduce = manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="day 3")
+    sent, cancelled = len(broker.submitted), len(broker.cancelled)
+
+    assert manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="day 3") == reduce
+    assert (len(broker.submitted), len(broker.cancelled)) == (sent, cancelled)
+    with pytest.raises(IdempotencyConflictError):
+        manager.reduce_bracket(entry_id, Decimal("0.25"), command_id="half", reason="day 3")
+    with pytest.raises(IdempotencyConflictError):
+        manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="other")
+    with pytest.raises(IdempotencyConflictError):
+        # A command id already claimed by a fill, not by a reduce.
+        manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="fill:managed-fill", reason="r")
+    assert [order.order_id for order in manager._bracket_children(entry_id) if "reduce" in order.order_id] == [
+        reduce.order_id
+    ]
+
+
+def test_reduce_replay_resumes_a_reduce_persisted_before_a_crash(manager_factory, monkeypatch):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    entry_id = bracket.entry.order_id
+
+    def crash(reduce, command_id):
+        raise RuntimeError("process died after persisting the reduce")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(manager, "_send_reduce", crash)
+        with pytest.raises(RuntimeError):
+            manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="day 3")
+    assert manager.get_order(f"{entry_id}:reduce:1").state is OrderState.NEW
+    assert broker.cancelled == []
+
+    reduce = manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="day 3")
+    assert (reduce.order_id, reduce.state) == (f"{entry_id}:reduce:1", OrderState.ACCEPTED)
+    assert set(broker.cancelled) == {target.order_id for target in bracket.targets}
+
+
+def test_reduce_replay_from_another_account_is_a_conflict(manager_factory):
+    from trade_engine.ledger import OrdersCreated
+
+    manager, ledger, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    entry_id = bracket.entry.order_id
+    foreign = replace(
+        bracket.entry, order_id="foreign:order", account_id="account-2", command_id="shared"
+    )
+    ledger.append(
+        Event(
+            account="account-2",
+            kind=EventKind.ORDERS_CREATED,
+            payload=OrdersCreated(
+                orders=(foreign,),
+                fingerprint=OrderManager._reduce_fingerprint(entry_id, Decimal("0.5"), "r"),
+                reason="Bracket reduce: r",
+            ),
+            ts_utc=NOW,
+            command_id="shared",
+        )
+    )
+    with pytest.raises(IdempotencyConflictError):
+        manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="shared", reason="r")
+
+
+def test_reduce_bracket_refuses_a_fraction_it_cannot_size(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    entry_id = bracket.entry.order_id
+    sent = len(broker.submitted)
+    with pytest.raises(OrderManagementError, match="rounds down to nothing"):
+        manager.reduce_bracket(entry_id, Decimal("0.05"), command_id="tiny", reason="r")
+    for fraction in (Decimal("0"), Decimal("1"), Decimal("1.5"), Decimal("NaN")):
+        with pytest.raises(ValueError, match="fraction"):
+            manager.reduce_bracket(entry_id, fraction, command_id=f"bad-{fraction}", reason="r")
+    assert len(broker.submitted) == sent
+    assert manager.get_order(bracket.targets[0].order_id).state is OrderState.ACCEPTED
+    # One share out of ten is the smallest reduce that sizes.
+    assert manager.reduce_bracket(
+        entry_id, Decimal("0.1"), command_id="tenth", reason="r"
+    ).quantity == Decimal("1")
+
+
+def test_reduce_bracket_refuses_without_open_quantity_or_an_entry(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = manager.create_bracket(make_intent(command_id="unfilled"), Decimal("10"))
+    manager.submit(bracket.entry)
+    with pytest.raises(OrderManagementError, match="no open quantity"):
+        manager.reduce_bracket(bracket.entry.order_id, Decimal("0.5"), command_id="early", reason="r")
+    with pytest.raises(OrderManagementError, match="not a bracket entry"):
+        manager.reduce_bracket(bracket.stop.order_id, Decimal("0.5"), command_id="child", reason="r")
+
+
+def test_reduce_bracket_refuses_while_a_close_is_working(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    entry_id = bracket.entry.order_id
+    manager.close_bracket(entry_id, command_id="close", reason="time stop")
+    sent = len(broker.submitted)
+    with pytest.raises(OrderManagementError, match="close order working"):
+        manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="r")
+    assert len(broker.submitted) == sent
+
+
+def test_reduce_is_allowed_once_a_close_was_cancelled(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    entry_id = bracket.entry.order_id
+    close = manager.close_bracket(entry_id, command_id="close", reason="time stop")
+    manager.record_fill(make_fill(bracket.stop, "stopped-part", "4", "95"))
+    assert manager.get_order(close.order_id).state is OrderState.CANCELLED
+    reduce = manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="r")
+    assert reduce.quantity == Decimal("3")  # floor(6 x 0.5)
+
+
+def test_a_second_reduce_waits_for_the_first_and_is_numbered(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    entry_id = bracket.entry.order_id
+    first = manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="day 3")
+    with pytest.raises(OrderManagementError, match="already has a reduce order working"):
+        manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="again", reason="day 4")
+    manager.record_fill(make_fill(first, "half-fill", "5", "104"))
+    second = manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="again", reason="day 4")
+    assert (second.order_id, second.quantity) == ("managed:entry:reduce:2", Decimal("2"))
+
+
+def test_close_bracket_refuses_while_a_reduce_is_working(manager_factory):
+    manager, ledger, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    entry_id = bracket.entry.order_id
+    reduce = manager.reduce_bracket(entry_id, Decimal("0.5"), command_id="half", reason="day 3")
+    with pytest.raises(OrderManagementError, match="reduce order working"):
+        manager.close_bracket(entry_id, command_id="close", reason="time stop")
+    manager.record_fill(make_fill(reduce, "half-fill", "5", "104"))
+
+    close = manager.close_bracket(entry_id, command_id="close", reason="time stop")
+    assert close.quantity == Decimal("5")
+    manager.record_fill(make_fill(close, "close-fill", "5", "103"))
+    assert ledger.state("account-1").positions[Equity("AAPL")].quantity == Decimal("0")
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.CANCELLED
+
+
+def test_a_filled_reduce_shrinks_the_stop_and_leaves_it_working(manager_factory):
+    manager, ledger, broker = manager_factory()
+    bracket = _open_bracket(manager)
+    reduce = manager.reduce_bracket(
+        bracket.entry.order_id, Decimal("0.5"), command_id="half", reason="day 3"
+    )
+    manager.record_fill(make_fill(reduce, "half-fill", "5", "104"))
+
+    assert manager.get_order(reduce.order_id).state is OrderState.FILLED
+    stop = manager.get_order(bracket.stop.order_id)
+    assert (stop.state, stop.quantity) == (OrderState.ACCEPTED, Decimal("5"))
+    assert broker.replaced[-1] == (bracket.stop.order_id, OrderChanges(new_quantity=Decimal("5")))
+    assert bracket.stop.order_id not in broker.cancelled
+    assert ledger.state("account-1").positions[Equity("AAPL")].quantity == Decimal("5")
+
+
+def test_stop_fill_cancels_a_pending_reduce(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    reduce = manager.reduce_bracket(
+        bracket.entry.order_id, Decimal("0.5"), command_id="half", reason="day 3"
+    )
+    manager.record_fill(make_fill(bracket.stop, "stopped", "10", "95"))
+    assert manager.get_order(reduce.order_id).state is OrderState.CANCELLED
+
+
+def test_partial_stop_fill_cancels_a_pending_reduce(manager_factory):
+    manager, _, _ = manager_factory()
+    bracket = _open_bracket(manager)
+    reduce = manager.reduce_bracket(
+        bracket.entry.order_id, Decimal("0.5"), command_id="half", reason="day 3"
+    )
+    # 6 remain after the stop's partial; the reduce for 5 would no longer be what was
+    # asked for, so it is cancelled rather than resized. The stop keeps working the rest.
+    manager.record_fill(make_fill(bracket.stop, "stopped-part", "4", "95"))
+    assert manager.get_order(reduce.order_id).state is OrderState.CANCELLED
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.PARTIALLY_FILLED
