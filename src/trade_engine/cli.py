@@ -18,6 +18,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show version and resolved package path",
     )
+    subparsers = parser.add_subparsers(dest="command")
+    eod_parser = subparsers.add_parser(
+        "eod", help="Run the end-of-day job for one session (E7, Architecture §4.9)"
+    )
+    eod_parser.add_argument("--session", required=True, help="Session date YYYY-MM-DD")
+    eod_parser.add_argument("--ledger", required=True, help="Path to the ledger database")
+    eod_parser.add_argument(
+        "--market-data",
+        help="Name of a trade_engine.marketdata entry-point plugin to source bars from",
+    )
+    eod_parser.add_argument(
+        "--accounts",
+        default="",
+        help="Comma-separated account ids to run (default: every account in the ledger)",
+    )
+    eod_parser.add_argument(
+        "--slippage-bps",
+        default="0",
+        help="SimBroker slippage in basis points (default 0)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -25,6 +45,11 @@ def main(argv: list[str] | None = None) -> int:
         resolved_path = Path(trade_engine.__file__).resolve().parent
         print(f"trade-engine {trade_engine.__version__} (from {resolved_path})")
         return 0
+
+    if args.command == "eod":
+        from trade_engine.eod.cli import run_eod
+
+        return run_eod(args)
 
     parser.print_help()
     return 0

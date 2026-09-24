@@ -7,7 +7,7 @@ which payload type each kind must carry. Nothing here performs I/O.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -49,6 +49,7 @@ class EventKind(StrEnum):
     CASH_FLOW = "CashFlow"
     MARK = "Mark"
     VENUE_RECONCILE = "VenueReconcile"
+    EOD_RUN = "EodRun"
 
 
 class EventPayloadError(ValueError):
@@ -253,6 +254,31 @@ class LifecycleNotice:
         _require_utc(self.as_of, "LifecycleNotice.as_of")
 
 
+@dataclass(frozen=True)
+class EodRun:
+    """A completed EOD job run for one account and session (Architecture §4.9, I3).
+
+    The marker is provenance for the scheduler, not folded state: a re-run is a no-op
+    because its command id (`eod:<job>:<account>:<session>`) is already claimed, and
+    "is session S complete?" is answered by reading the ledger, never by guessing.
+    """
+
+    session: date
+    job: str
+    account_id: str
+    bars_processed: int
+    at_close: datetime
+
+    def __post_init__(self) -> None:
+        if not self.job:
+            raise EventPayloadError("EodRun.job must be non-empty")
+        if not self.account_id:
+            raise EventPayloadError("EodRun.account_id must be non-empty")
+        if self.bars_processed < 0:
+            raise EventPayloadError("EodRun.bars_processed must be non-negative")
+        _require_utc(self.at_close, "EodRun.at_close")
+
+
 # Each kind must carry exactly this payload type; anything else is refused (I5).
 PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.SIGNAL_SEEN: Signal,
@@ -276,6 +302,7 @@ PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.CASH_FLOW: CashFlow,
     EventKind.MARK: Mark,
     EventKind.VENUE_RECONCILE: VenueReconcile,
+    EventKind.EOD_RUN: EodRun,
 }
 
 
