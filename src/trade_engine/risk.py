@@ -447,7 +447,7 @@ class RiskEngine:
         self._set_kill_switch(command_id, False, reason)
 
     def _control_enabled(self, account_id: str, control_id: str) -> bool:
-        return self.ledger.snapshot(account_id).risk_controls.get(control_id, False)
+        return self.ledger.state(account_id).risk_controls.get(control_id, False)
 
     def _now(self) -> datetime:
         now = self.clock.now_utc()
@@ -458,7 +458,7 @@ class RiskEngine:
     def _update_drawdown_controls(
         self, account_id: str, drawdown: Decimal | None, intent_command_id: str
     ) -> tuple[bool, bool]:
-        state = self.ledger.snapshot(account_id)
+        state = self.ledger.state(account_id)
         brake_active = state.risk_controls.get("drawdown_brake", False)
         suspension_active = state.risk_controls.get("drawdown_suspension", False)
         desired_brake = brake_active
