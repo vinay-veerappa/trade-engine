@@ -43,6 +43,7 @@ from trade_engine.ledger import (
     register_handler,
 )
 from trade_engine.ledger.codec import decode_event, encode_event
+from trade_engine.ledger.state import AccountState, fold_account
 
 TS = datetime(2026, 9, 23, 21, 0, 0, tzinfo=timezone.utc)
 TS2 = datetime(2026, 9, 24, 21, 0, 0, tzinfo=timezone.utc)
@@ -1279,3 +1280,42 @@ def test_fold_orders_by_seq_not_input_order() -> None:
         Event(account="ACC", kind=EventKind.FILL, payload=a_fill("f1", "o1"), ts_utc=TS, seq=2),
     ]
     assert fold(list(reversed(events))) == fold(events)
+
+
+# --------------------------------------------------------------------------- state cache
+
+
+def _cash(ledger: Ledger, amount: str, command: str) -> None:
+    ledger.append(
+        Event(
+            account="ACC",
+            kind=EventKind.CASH_FLOW,
+            payload=CashFlow(amount=Decimal(amount), kind="deposit", as_of=TS),
+            ts_utc=TS,
+            command_id=command,
+        )
+    )
+
+
+def test_state_is_the_fold_of_the_log_after_every_append(ledger: Ledger) -> None:
+    for index, amount in enumerate(("100", "-30", "5")):
+        _cash(ledger, amount, f"c{index}")
+        assert ledger.state("ACC") == fold_account(ledger.events(account="ACC"), "ACC")
+    assert ledger.state("ACC").cash == Decimal("75")
+    ledger.verify_snapshot("ACC")
+
+
+def test_state_does_not_reread_the_log_once_folded(ledger: Ledger, monkeypatch) -> None:
+    _cash(ledger, "100", "c0")
+    ledger.state("ACC")
+    monkeypatch.setattr(ledger, "events", lambda **kwargs: pytest.fail("state() re-read the log"))
+    _cash(ledger, "1", "c1")  # the append folds itself into the cache
+    assert ledger.state("ACC").cash == Decimal("101")
+
+
+def test_state_after_reopen_is_folded_from_the_log(ledger_path: Path) -> None:
+    with Ledger(ledger_path) as first:
+        _cash(first, "100", "c0")
+    with Ledger(ledger_path) as second:
+        assert second.state("ACC").cash == Decimal("100")
+        assert second.state("NOBODY") == AccountState(account_id="NOBODY")
