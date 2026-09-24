@@ -106,6 +106,20 @@ def place_order(
     )
 
 
+def feed_session(
+    broker: SimBroker,
+    clock: ReplayClock,
+    open_at: datetime,
+    *,
+    minutes: int = 390,
+) -> None:
+    """Feed ``minutes`` flat one-minute bars from ``open_at`` (390 = a full session)."""
+    for minute in range(minutes):
+        timestamp = open_at + timedelta(minutes=minute)
+        clock.set(timestamp)
+        broker.process_bar(bar(timestamp))
+
+
 def test_gap_through_stop_fills_at_open_with_configured_slippage() -> None:
     broker, clock = broker_fixture(slippage_bps=Decimal("10"))
     place_order(
@@ -594,9 +608,7 @@ def test_day_order_expires_before_it_can_fill_next_session() -> None:
         order_type=OrderType.LIMIT,
         limit_price=Decimal("95"),
     )
-    broker.process_bar(
-        bar(START + timedelta(minutes=1), open_="100", high="102", low="98", close="101")
-    )
+    feed_session(broker, clock, START + timedelta(minutes=1))
 
     next_session_open = bar(
         datetime(2026, 9, 24, 13, 30, tzinfo=UTC),
@@ -623,8 +635,8 @@ def test_first_bar_must_be_the_exchange_session_open() -> None:
 
 
 def test_missing_open_after_a_prior_session_is_refused() -> None:
-    broker, _ = broker_fixture()
-    broker.process_bar(bar(datetime(2026, 9, 23, 13, 30, tzinfo=UTC)))
+    broker, clock = broker_fixture()
+    feed_session(broker, clock, datetime(2026, 9, 23, 13, 30, tzinfo=UTC))
 
     with pytest.raises(MissingBarError, match="session opening"):
         broker.process_bar(
@@ -633,8 +645,8 @@ def test_missing_open_after_a_prior_session_is_refused() -> None:
 
 
 def test_missing_entire_exchange_session_is_refused() -> None:
-    broker, _ = broker_fixture()
-    broker.process_bar(bar(datetime(2026, 9, 23, 13, 30, tzinfo=UTC)))
+    broker, clock = broker_fixture()
+    feed_session(broker, clock, datetime(2026, 9, 23, 13, 30, tzinfo=UTC))
 
     with pytest.raises(MissingBarError, match="Missing session bars"):
         broker.process_bar(
@@ -643,12 +655,119 @@ def test_missing_entire_exchange_session_is_refused() -> None:
 
 
 def test_valid_open_bars_on_consecutive_sessions_are_accepted() -> None:
-    broker, _ = broker_fixture()
-    first = bar(datetime(2026, 9, 23, 13, 30, tzinfo=UTC))
+    broker, clock = broker_fixture()
+    feed_session(broker, clock, datetime(2026, 9, 23, 13, 30, tzinfo=UTC))
     following = bar(datetime(2026, 9, 24, 13, 30, tzinfo=UTC))
 
-    assert broker.process_bar(first) == ()
     assert broker.process_bar(following) == ()
+
+
+def test_missing_closing_bars_are_refused_before_the_next_session() -> None:
+    broker, clock = broker_fixture()
+    # 09:30-15:30 ET only: the last 29 minutes of 2026-09-23 never arrive.
+    feed_session(broker, clock, datetime(2026, 9, 23, 13, 30, tzinfo=UTC), minutes=361)
+
+    with pytest.raises(MissingBarError, match="Missing closing one-minute bars"):
+        broker.process_bar(bar(datetime(2026, 9, 24, 13, 30, tzinfo=UTC)))
+
+
+def test_early_close_session_ends_at_the_early_close() -> None:
+    broker, clock = broker_fixture()
+    # 2026-11-27 closes at 13:00 ET: 210 bars from 09:30 ET is the full session.
+    feed_session(broker, clock, datetime(2026, 11, 27, 14, 30, tzinfo=UTC), minutes=210)
+
+    assert broker.process_bar(bar(datetime(2026, 11, 30, 14, 30, tzinfo=UTC))) == ()
+
+
+def test_after_hours_bar_does_not_trigger_a_resting_stop() -> None:
+    broker, clock = broker_fixture()
+    place_order(
+        broker,
+        clock,
+        "gtc-stop",
+        side=Side.SELL,
+        order_type=OrderType.STOP,
+        stop_price=Decimal("95"),
+        tif=TimeInForce.GTC,
+    )
+    feed_session(broker, clock, START + timedelta(minutes=1))
+
+    after_close = datetime(2026, 9, 23, 20, 0, tzinfo=UTC)
+    clock.set(after_close)
+    assert broker.process_bar(
+        bar(after_close, open_="94", high="95", low="93", close="94")
+    ) == ()
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+    clock.set(datetime(2026, 9, 24, 13, 30, tzinfo=UTC))
+    fills = broker.process_bar(
+        bar(datetime(2026, 9, 24, 13, 30, tzinfo=UTC), open_="94", high="95", low="93", close="94")
+    )
+    assert [(fill.venue_order_id, fill.price) for fill in fills] == [("gtc-stop", Decimal("94"))]
+
+
+def test_day_order_entered_after_the_close_works_the_next_session() -> None:
+    clock = ReplayClock(datetime(2026, 9, 23, 21, 45, tzinfo=UTC))  # 17:45 ET EOD job
+    broker, _ = broker_fixture(clock=clock)
+    place_order(
+        broker,
+        clock,
+        "next-day-entry",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("95"),
+    )
+
+    next_open = datetime(2026, 9, 24, 13, 30, tzinfo=UTC)
+    feed_session(broker, clock, next_open, minutes=2)
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+    touch = next_open + timedelta(minutes=2)
+    clock.set(touch)
+    fills = broker.process_bar(bar(touch, open_="96", high="97", low="94", close="95"))
+
+    assert [(fill.venue_order_id, fill.price) for fill in fills] == [
+        ("next-day-entry", Decimal("95"))
+    ]
+
+
+def test_day_order_entered_after_the_close_expires_after_the_next_session() -> None:
+    clock = ReplayClock(datetime(2026, 9, 23, 21, 45, tzinfo=UTC))
+    broker, _ = broker_fixture(clock=clock)
+    place_order(
+        broker,
+        clock,
+        "next-day-entry",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("95"),
+    )
+    feed_session(broker, clock, datetime(2026, 9, 24, 13, 30, tzinfo=UTC))
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+    later = datetime(2026, 9, 25, 13, 30, tzinfo=UTC)
+    clock.set(later)
+    assert broker.process_bar(bar(later, open_="94", high="96", low="93", close="95")) == ()
+    assert broker.orders(START)[0].state is OrderState.EXPIRED
+
+
+def test_opening_order_expires_when_its_session_open_was_never_simulated() -> None:
+    clock = ReplayClock(datetime(2026, 9, 22, 20, 30, tzinfo=UTC))
+    broker, _ = broker_fixture(clock=clock)
+    place_order(
+        broker,
+        clock,
+        "stale-opening",
+        side=Side.SELL,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.OPG,
+    )
+
+    # The AAPL stream starts on 09-24, after the 09-23 open this order was for.
+    later_open = datetime(2026, 9, 24, 13, 30, tzinfo=UTC)
+    clock.set(later_open)
+    assert broker.process_bar(bar(later_open)) == ()
+    assert broker.orders(START)[0].state is OrderState.EXPIRED
 
 
 def test_missing_bar_is_refused_and_never_filled_from_last_price() -> None:

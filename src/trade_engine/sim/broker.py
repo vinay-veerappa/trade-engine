@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -240,6 +240,17 @@ class SimBroker(BrokerAdapter):
             return ()
         self._check_bar_sequence(bar)
 
+        for working in self._orders.values():
+            if (
+                working.order.instrument == bar.instrument
+                and working.state in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED)
+            ):
+                self._expire_order(working, bar)
+        if not self._is_regular_session_bar(bar):
+            # Extended-hours bars keep the sequence contiguous but never trigger fills.
+            self._last_bars[bar.instrument] = bar
+            return ()
+
         active = [
             (venue_id, working)
             for venue_id, working in self._orders.items()
@@ -249,8 +260,6 @@ class SimBroker(BrokerAdapter):
         ]
         candidates: list[tuple[str, _WorkingOrder, Decimal]] = []
         for venue_id, working in active:
-            if self._expire_day_order(working, bar):
-                continue
             price = self._execution_price(working.order, bar)
             if price is not None:
                 candidates.append((venue_id, working, price))
@@ -404,23 +413,30 @@ class SimBroker(BrokerAdapter):
             fill.filled_at,
         )
 
-    def _expire_day_order(self, working: _WorkingOrder, bar: Bar) -> bool:
+    def _expire_order(self, working: _WorkingOrder, bar: Bar) -> None:
         order = working.order
-        if order.tif is not TimeInForce.DAY or bar.timestamp <= order.submitted_at:
-            return False
-        submitted_date = order.submitted_at.astimezone(NEW_YORK).date()
-        bar_date = bar.timestamp.astimezone(NEW_YORK).date()
-        if bar_date > submitted_date:
-            expired = True
-        elif self._calendar.is_session(submitted_date):
-            expired = bar.timestamp >= self._calendar.session_close(submitted_date)
+        if bar.timestamp <= order.submitted_at:
+            return
+        if order.tif is TimeInForce.DAY:
+            # An order entered after the close (the 17:45 EOD job) works the next session.
+            expired = bar.timestamp >= self._calendar.session_close(
+                self._day_session(order.submitted_at)
+            )
+        elif order.tif is TimeInForce.OPG:
+            expired = bar.timestamp > self._opg_session_open(order.submitted_at)
         else:
             expired = False
         if expired:
             working.state = OrderState.EXPIRED
             working.updated_at = bar.timestamp
-            return True
-        return False
+
+    def _day_session(self, submitted_at: datetime) -> date:
+        submitted_date = submitted_at.astimezone(NEW_YORK).date()
+        if self._calendar.is_session(submitted_date):
+            if submitted_at < self._calendar.session_close(submitted_date):
+                return submitted_date
+            return self._calendar.next_session(submitted_date)
+        return self._calendar.roll_to_session(submitted_date, "next")
 
     def _opg_session_open(self, submitted_at: datetime) -> datetime:
         submitted_date = submitted_at.astimezone(NEW_YORK).date()
@@ -432,6 +448,14 @@ class SimBroker(BrokerAdapter):
         else:
             session_date = self._calendar.roll_to_session(submitted_date, "next")
         return self._calendar.session_open(session_date)
+
+    def _is_regular_session_bar(self, bar: Bar) -> bool:
+        bar_date = bar.timestamp.astimezone(NEW_YORK).date()
+        return (
+            self._calendar.session_open(bar_date)
+            <= bar.timestamp
+            < self._calendar.session_close(bar_date)
+        )
 
     @staticmethod
     def _oco_priority(
@@ -476,6 +500,13 @@ class SimBroker(BrokerAdapter):
                     f"{previous.timestamp.isoformat()} and {bar.timestamp.isoformat()}"
                 )
             return
+        last_regular_bar = self._calendar.session_close(previous_date) - timedelta(minutes=1)
+        if previous.timestamp < last_regular_bar:
+            raise MissingBarError(
+                f"Missing closing one-minute bars for {bar.instrument.symbol}: session "
+                f"{previous_date} ended at {previous.timestamp.isoformat()}, expected "
+                f"{last_regular_bar.isoformat()}"
+            )
         next_session = self._calendar.next_session(previous_date)
         if bar_date != next_session:
             raise MissingBarError(
