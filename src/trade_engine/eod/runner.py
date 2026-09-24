@@ -4,13 +4,16 @@ The 17:45 ET job per account and session, in order:
 
 1. Gate: a session whose previous session has no completed run for the account
    refuses (bootstrap: an account's first run has no previous marker to demand).
-2. Replay: one-minute bars for every instrument the account orders or holds, fed to
-   the venue one bar at a time. After **every** bar the runner reconciles every order
+2. Replay: one-minute bars for every instrument an account orders or holds, merged
+   into one timeline across accounts and instruments so a single clock walks the
+   session minute by minute. After **every** bar the runner reconciles every order
    the venue touched that bar — fills recorded, states read back, brackets
    synchronized. SimBroker rejects a protective stop submitted after later bars were
    simulated, and the OMS raises; the runner never batches reconciliation to the end
    of the session, because the bars in between are gone.
-3. MTM: one Mark per open position at the last regular bar's close; a missing
+3. Close: the clock moves to the session close, so marks are dated at the close and a
+   D+1 DAY entry belongs to the next session instead of expiring at its open.
+   MTM: one Mark per open position at the last regular bar's close; a missing
    regular bar refuses (I5).
 4. Marker: one ``EodRun`` event per account, claimed by
    ``eod:<job>:<account>:<session>``. A re-run replays deterministically and every
@@ -28,7 +31,7 @@ comes from an injected provider (I5: no default source).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -155,6 +158,15 @@ class EodRunResult:
     accounts: tuple[AccountRunResult, ...]
 
 
+@dataclass
+class _Tally:
+    """Per-account counters and closes gathered while the session replays."""
+
+    bars_processed: int = 0
+    fills_recorded: int = 0
+    last_regular_closes: dict[Instrument, Decimal] = field(default_factory=dict)
+
+
 class EodRunner:
     """Run the EOD job for one session across the configured accounts."""
 
@@ -185,9 +197,29 @@ class EodRunner:
             )
         self._require_previous_session_complete(session)
 
+        pending = [
+            account_id
+            for account_id in sorted(self._config.brokers)
+            # A completed account is never re-driven through the venue: idempotency is
+            # the contract, and everything this run could derive is already recorded.
+            if self._ledger.event_by_command(self._run_command(account_id, session)) is None
+        ]
+        replays = {account_id: self._prepare_account(account_id) for account_id in pending}
+        tallies = {account_id: _Tally() for account_id in pending}
+        self._replay_session(session, replays, tallies)
+
+        # The session is over before anything is marked or entered: a DAY entry for D+1
+        # submitted while the clock still read 15:59 would belong to *this* session and
+        # expire at the next open without ever working.
+        self._advance_clock(self._calendar.session_close(session))
         results: list[AccountRunResult] = []
         for account_id in sorted(self._config.brokers):
-            results.append(self._run_account(account_id, session))
+            if account_id not in replays:
+                results.append(AccountRunResult(account_id=account_id))
+                continue
+            results.append(
+                self._finish_account(account_id, session, replays[account_id], tallies[account_id])
+            )
         self._drain_outbox()
         return EodRunResult(session=session, accounts=tuple(results))
 
@@ -219,55 +251,81 @@ class EodRunner:
 
     # -- per-account run ---------------------------------------------------------
 
-    def _run_account(self, account_id: str, session: date) -> AccountRunResult:
-        if self._ledger.event_by_command(self._run_command(account_id, session)) is not None:
-            # This session already completed for this account; re-driving the venue
-            # is not the contract — idempotency is. Everything this run could derive
-            # is already in the ledger and every command below replays as a no-op.
-            return AccountRunResult(account_id=account_id)
-
+    def _prepare_account(self, account_id: str) -> tuple[Instrument, ...]:
         broker = self._config.brokers[account_id]
         broker.connect()
         state = self._ledger.state(account_id)
         instruments = self._replay_instruments(state)
         self._rehydrate_venue(account_id, broker, state)
+        return instruments
 
-        bars_processed = 0
-        fills_recorded = 0
-        last_regular_closes: dict[Instrument, Decimal] = {}
+    def _replay_session(
+        self,
+        session: date,
+        replays: Mapping[str, tuple[Instrument, ...]],
+        tallies: Mapping[str, "_Tally"],
+    ) -> None:
+        """Feed every account's bars on one timeline, minute by minute.
+
+        One clock serves every account, and the ledger records events in the order they
+        happened: instrument by instrument, a 09:31 fill in the second symbol would land
+        after a 15:00 exit in the first, stamped 15:59 (I7). Each bar goes to every
+        account holding its instrument, and each account reconciles immediately.
+        """
+        holders: dict[Instrument, list[str]] = {}
+        for account_id, instruments in replays.items():
+            for instrument in instruments:
+                holders.setdefault(instrument, []).append(account_id)
+        if not holders:
+            return
         session_open = self._calendar.session_open(session)
         session_close = self._calendar.session_close(session)
-        if instruments and self._clock.now_utc() > session_open:
+        if self._clock.now_utc() > session_open:
             raise EodRunnerError(
-                f"Cannot replay {session.isoformat()} for '{account_id}': the injected "
-                f"clock reads {self._clock.now_utc().isoformat()}, past the session "
-                f"open {session_open.isoformat()}. Replay needs a clock it can advance "
-                f"bar by bar (I7); inject a replay clock positioned at or before the "
-                f"session open"
+                f"Cannot replay {session.isoformat()}: the injected clock reads "
+                f"{self._clock.now_utc().isoformat()}, past the session open "
+                f"{session_open.isoformat()}. Replay needs a clock it can advance bar by "
+                f"bar (I7); inject a replay clock positioned at or before the session open"
             )
-        for instrument in instruments:
-            manager = self._manager_for(account_id, broker)
-            replay = self._load_bars(instrument, session_open, session_close)
-            for bar, is_regular in replay:
-                self._advance_clock(bar.timestamp)
+        timeline = []
+        for instrument in sorted(holders, key=lambda value: value.symbol):
+            for bar, is_regular in self._load_bars(instrument, session_open, session_close):
+                timeline.append((bar.timestamp, instrument.symbol, bar, is_regular))
+        timeline.sort(key=lambda item: (item[0], item[1]))
+        for timestamp, _, bar, is_regular in timeline:
+            self._advance_clock(timestamp)
+            for account_id in sorted(holders[bar.instrument]):
+                broker = self._config.brokers[account_id]
+                tally = tallies[account_id]
                 broker.process_bar(bar)
                 if is_regular:
-                    last_regular_closes[instrument] = bar.close
-                fills_recorded += self._reconcile_after_bar(
-                    account_id, broker, manager, bar.timestamp
+                    tally.last_regular_closes[bar.instrument] = bar.close
+                tally.fills_recorded += self._reconcile_after_bar(
+                    account_id, broker, self._manager_for(account_id, broker), timestamp
                 )
-                bars_processed += 1
+                tally.bars_processed += 1
+
+    def _finish_account(
+        self,
+        account_id: str,
+        session: date,
+        instruments: tuple[Instrument, ...],
+        tally: "_Tally",
+    ) -> AccountRunResult:
+        broker = self._config.brokers[account_id]
+        if instruments:
             # A closing sweep with no bar: confirms every terminal state the venue
             # reached during the session (DAY expiry at the close, cancelled exits).
-            fills_recorded += self._reconcile_after_bar(account_id, broker, manager, None)
-
-        self._mark_positions(account_id, last_regular_closes, session)
+            tally.fills_recorded += self._reconcile_after_bar(
+                account_id, broker, self._manager_for(account_id, broker), None
+            )
+        self._mark_positions(account_id, tally.last_regular_closes, session)
         orders_submitted = self._submit_new_orders(account_id, session)
-        self._append_run_marker(account_id, session, bars_processed)
+        self._append_run_marker(account_id, session, tally.bars_processed)
         return AccountRunResult(
             account_id=account_id,
-            bars_processed=bars_processed,
-            fills_recorded=fills_recorded,
+            bars_processed=tally.bars_processed,
+            fills_recorded=tally.fills_recorded,
             marks_appended=self._marks_appended(account_id, session),
             orders_submitted=orders_submitted,
         )
