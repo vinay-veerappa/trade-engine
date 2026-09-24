@@ -15,7 +15,7 @@ from typing import Any
 from trade_engine.domain.instruments import Instrument
 from trade_engine.domain.orders import Order
 from trade_engine.domain.portfolio import Fill
-from trade_engine.domain.risk import RiskVerdict
+from trade_engine.domain.risk import RiskControlChange, RiskVerdict
 from trade_engine.domain.signals import Signal
 from trade_engine.interfaces.market_data import CorporateAction
 
@@ -31,6 +31,7 @@ class EventKind(StrEnum):
     SIGNAL_SEEN = "SignalSeen"
     RISK_VERDICT = "RiskVerdict"
     ORDERS_CREATED = "OrdersCreated"
+    RISK_CONTROL = "RiskControl"
     ORDER_SUBMITTED = "OrderSubmitted"
     ORDER_UPDATED = "OrderUpdated"
     ORDER_PENDING = "OrderPending"
@@ -257,6 +258,7 @@ PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.SIGNAL_SEEN: Signal,
     EventKind.RISK_VERDICT: RiskVerdict,
     EventKind.ORDERS_CREATED: OrdersCreated,
+    EventKind.RISK_CONTROL: RiskControlChange,
     EventKind.ORDER_SUBMITTED: Order,
     EventKind.ORDER_UPDATED: OrderUpdated,
     EventKind.ORDER_PENDING: OrderStateChange,

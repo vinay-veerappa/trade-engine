@@ -20,6 +20,32 @@ This engine is designed around strict invariants (I1–I13):
 12. **I12: A sink confirms delivery, not a 200.** Outbox drains in order and stops at the first failure until confirmed.
 13. **I13: Strategies know nothing about brokers; adapters know nothing about strategies.** Clean separation of concerns.
 
+## Risk Evaluation
+
+`trade_engine.risk.RiskEngine` evaluates equity intents against explicit
+`AccountRiskRules`, market/account measurements in `RiskContext`, and `VenueRiskRails`.
+Missing measurements (including regime, price, earnings distance, and daily P&L) fail
+their rule instead of being inferred. `RiskVerdict` includes every rule result and the
+approved whole-share quantity when accepted.
+
+Account rule fields ending in `_frac` store Decimal fractions (for example,
+`Decimal("0.0075")` is 0.75%). `AccountRiskRules.from_mapping` is the config boundary:
+percentage-valued keys use explicit strings such as `risk_per_trade: "0.75%"`;
+bare numeric percentages and unknown keys are rejected. Rule-specific sanity caps reject
+slipped decimal points (including per-trade risk above 5%). Measured drawdown is a
+non-negative fraction; signed session P&L remains a separate measurement. The intent's
+`quantity_rule` is honored (`risk_0.75pct` or `fixed_10`), but account risk limits remain
+authoritative.
+
+Paper/live `VenueRiskRails` require an allowlist, quantity and daily-order caps, daily
+loss limit, trading hours, duplicate protection, and a persistent kill switch. Risk
+control changes are append-only ledger events; provide unique command IDs to
+`engage_kill_switch` and `release_kill_switch`. `RiskEngine.evaluate` can append
+drawdown-brake and suspension transitions to the ledger; it is not a pure read. A
+drawdown suspension remains latched until the configured recovery threshold is reached.
+Trading hours are intersected with the configured exchange calendar, including holidays
+and early closes.
+
 ## Development
 
 Requires Python >= 3.13.

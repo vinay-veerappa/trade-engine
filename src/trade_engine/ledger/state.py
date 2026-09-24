@@ -37,6 +37,7 @@ from trade_engine.ledger.events import (
     OrderUpdated,
     OrderStateChange,
     OrdersCreated,
+    RiskControlChange,
     UnhandledEventError,
     VenueReconcile,
 )
@@ -76,6 +77,7 @@ class AccountState:
     refusals: int = 0
     last_reconcile: VenueReconcile | None = None
     venue_halted: bool = False
+    risk_controls: Mapping[str, bool] = field(default_factory=lambda: MappingProxyType({}))
     last_seq: int = 0
 
 
@@ -251,6 +253,7 @@ def _replace(state: AccountState, **changes: Any) -> AccountState:
         "refusals": state.refusals,
         "last_reconcile": state.last_reconcile,
         "venue_halted": state.venue_halted,
+        "risk_controls": state.risk_controls,
         "last_seq": state.last_seq,
     }
     data.update(changes)
@@ -506,11 +509,19 @@ def _on_risk_verdict(state: AccountState, event: Event) -> AccountState:
     )
 
 
+def _on_risk_control(state: AccountState, event: Event) -> AccountState:
+    control: RiskControlChange = event.payload
+    controls = dict(state.risk_controls)
+    controls[control.control_id] = control.enabled
+    return _replace(state, risk_controls=MappingProxyType(controls))
+
+
 # Event kinds E1 knows how to fold. Everything else refuses (see FOLD_OWNERS).
 HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.SIGNAL_SEEN: _on_signal_seen,
     EventKind.RISK_VERDICT: _on_risk_verdict,
     EventKind.ORDERS_CREATED: _on_orders_created,
+    EventKind.RISK_CONTROL: _on_risk_control,
     EventKind.ORDER_SUBMITTED: _on_order_submitted,
     EventKind.ORDER_UPDATED: _on_order_updated,
     EventKind.ORDER_PENDING: _order_state_handler(OrderState.PENDING_UNKNOWN),

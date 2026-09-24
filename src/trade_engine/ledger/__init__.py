@@ -21,6 +21,7 @@ from trade_engine.ledger.events import (
     OrderUpdated,
     OrderStateChange,
     OrdersCreated,
+    RiskControlChange,
     UnhandledEventError,
     VenueReconcile,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "OutboxItem",
     "OutboxStatus",
     "OrdersCreated",
+    "RiskControlChange",
     "PayloadCodecError",
     "SCHEMA_VERSION",
     "SingleInstanceLock",
