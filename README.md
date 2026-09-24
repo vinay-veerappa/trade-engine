@@ -90,6 +90,14 @@ targets filled and still open, and the session's last close. It returns exit act
 - `ClosePosition(entry_order_id, reason, command_id)` sends a DAY market order for the whole
   open quantity, which fills at the next session's open. The stop keeps protecting until it
   fills; its fill cancels the remaining stop and targets, and a stop fill first cancels it.
+- `ReducePosition(entry_order_id, fraction, reason, command_id)` sends a DAY market order for
+  `floor(open quantity × fraction)`, `0 < fraction < 1`, which fills at the next session's
+  open: "a third after 5 days", "half at the day-3 close". It replaces the resting profit
+  targets, which it cancels (the partial is taken at the target or after N days, whichever
+  comes first). Once it fills, the protective stop shrinks to the remaining quantity and keeps
+  working. A fraction that rounds down to nothing refuses, as does a reduce while a close or
+  another reduce is still working (and a close while a reduce is working). Any stop fill,
+  full or partial, before the reduce fills cancels it.
 
 An action naming anything but an open bracket of the account refuses. Command ids make a
 replayed action a no-op (I3).

@@ -1656,3 +1656,78 @@ def test_a_bracket_stopped_out_during_the_session_is_not_offered(tmp_path: Path)
     runner.run(SESSION)
     assert strategy.seen == []
     ledger.close()
+
+
+def _events(ledger: Ledger) -> list[tuple]:
+    return [(e.seq, e.kind.value, e.command_id, e.ts_utc.isoformat()) for e in ledger.events()]
+
+
+def test_reduce_position_takes_half_at_the_next_open_and_the_stop_follows(tmp_path: Path) -> None:
+    from trade_engine.domain.exits import ReducePosition
+
+    rule = lambda brackets, context: [  # noqa: E731
+        ReducePosition(b.entry_order_id, Decimal("0.5"), "half at the day-0 close", f"half:{b.entry_order_id}")
+        for b in brackets
+        if b.open_quantity == b.entry_quantity
+    ]
+    ledger, clock, broker, strategy, runner = _run_with_exits(tmp_path, rule)
+    assert runner.run(SESSION).accounts[0].exit_actions == 1
+    state = ledger.state(ACCOUNT)
+    reduce = state.orders["held:entry:reduce:1"]
+    assert (reduce.order_type, reduce.tif, reduce.quantity, reduce.state) == (
+        OrderType.MARKET,
+        TimeInForce.DAY,
+        Decimal("1"),
+        OrderState.ACCEPTED,
+    )
+    assert state.orders["held:target:1"].state is OrderState.CANCELLED
+    assert state.orders["held:stop"].quantity == Decimal("2")
+    before = _events(ledger)
+    runner.run(SESSION)
+    assert _events(ledger) == before
+
+    clock.set(NEXT_OPEN - timedelta(minutes=1))
+    next_runner = EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}, strategies={ACCOUNT: strategy}),
+    )
+    assert next_runner.run(NEXT_SESSION).accounts[0].exit_actions == 0
+    state = ledger.state(ACCOUNT)
+    fill = next(fill for fill in state.fills if fill.order_id == "held:entry:reduce:1")
+    assert (fill.filled_at, fill.quantity, fill.price) == (NEXT_OPEN, Decimal("1"), Decimal("100"))
+    assert state.positions[INSTRUMENT].quantity == Decimal("1")
+    stop = state.orders["held:stop"]
+    assert (stop.state, stop.quantity) == (OrderState.ACCEPTED, Decimal("1"))
+    [(brackets, _)] = strategy.seen[-1:]
+    assert brackets[0].open_quantity == Decimal("1") and brackets[0].open_targets == ()
+
+    before = _events(ledger)
+    next_runner.run(NEXT_SESSION)
+    assert _events(ledger) == before
+    ledger.close()
+
+
+def test_reduce_position_that_cannot_size_fails_the_run(tmp_path: Path) -> None:
+    from trade_engine.domain.exits import ReducePosition
+    from trade_engine.oms.manager import OrderManagementError
+
+    rule = lambda brackets, context: [  # noqa: E731
+        ReducePosition(b.entry_order_id, Decimal("0.25"), "a quarter", "quarter") for b in brackets
+    ]
+    ledger, _, _, _, runner = _run_with_exits(tmp_path, rule)
+    with pytest.raises(OrderManagementError, match="rounds down to nothing"):
+        runner.run(SESSION)
+    assert "held:entry:reduce:1" not in ledger.state(ACCOUNT).orders
+    ledger.close()
+
+
+def test_reduce_naming_an_unknown_bracket_refuses(tmp_path: Path) -> None:
+    from trade_engine.domain.exits import ReducePosition
+
+    rule = lambda brackets, context: [  # noqa: E731
+        ReducePosition("nope:entry", Decimal("0.5"), "bad", "bad")
+    ]
+    ledger, _, _, _, runner = _run_with_exits(tmp_path, rule)
+    with pytest.raises(EodRunnerError, match="not an open bracket"):
+        runner.run(SESSION)
+    ledger.close()

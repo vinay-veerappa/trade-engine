@@ -64,6 +64,11 @@ class OrderReconciliationError(OrderManagementError):
     """Venue read-back could not establish an order's state."""
 
 
+_TERMINAL = frozenset(
+    {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED}
+)
+
+
 @dataclass(frozen=True)
 class _OrderContext:
     order: Order
@@ -436,6 +441,15 @@ class OrderManager:
             # Already sent (or resolved): a replayed command changes nothing (I3).
             return existing
         stop, open_quantity = self._open_bracket_stop(entry_order_id)
+        if existing is None and any(
+            self._is_reduce(order, entry_order_id) and order.state not in _TERMINAL
+            for order in self._bracket_children(entry_order_id)
+        ):
+            # Both would be sized from the same open quantity and could oversell it.
+            raise OrderManagementError(
+                f"Bracket '{entry_order_id}' has a reduce order working; it must resolve "
+                "before the bracket can be closed"
+            )
         close = existing or Order(
             order_id=order_id,
             account_id=stop.account_id,
@@ -461,6 +475,100 @@ class OrderManager:
                 command_id,
             )
         return self.submit(close)
+
+    def reduce_bracket(
+        self, entry_order_id: str, fraction: Decimal, *, command_id: str, reason: str
+    ) -> Order:
+        """Exit ``fraction`` of an open bracket, rounded down, with a DAY market order.
+
+        The reduce replaces the resting profit targets and cancels them: the partial is
+        taken at the target or after N days, whichever comes first. The protective stop
+        stays live; once the reduce fills, it shrinks to the remaining open quantity.
+        """
+        if not fraction.is_finite() or not Decimal("0") < fraction < Decimal("1"):
+            raise ValueError(f"fraction must be between 0 and 1 exclusive, got {fraction}")
+        entry = self.get_order(entry_order_id)
+        fingerprint = self._reduce_fingerprint(entry_order_id, fraction, reason)
+        existing = self._ledger.event_by_command(command_id)
+        if existing is not None:
+            if (
+                existing.kind is not EventKind.ORDERS_CREATED
+                or existing.account != entry.account_id
+                or existing.payload.fingerprint != fingerprint
+            ):
+                raise IdempotencyConflictError(
+                    f"command_id '{command_id}' was already used for a different OMS command"
+                )
+            # Resumes a reduce persisted before a crash; once sent (or resolved), cancelling
+            # the targets and submitting are both no-ops, so a replay changes nothing (I3).
+            return self._send_reduce(
+                self.get_order(existing.payload.orders[0].order_id), command_id
+            )
+        stop, open_quantity = self._open_bracket_stop(entry_order_id)
+        children = self._bracket_children(entry_order_id)
+        if any(
+            order.order_id == f"{entry_order_id}:close" and order.state not in _TERMINAL
+            for order in children
+        ):
+            raise OrderManagementError(
+                f"Bracket '{entry_order_id}' has a close order working; nothing is left to reduce"
+            )
+        reduces = [order for order in children if self._is_reduce(order, entry_order_id)]
+        if any(order.state not in _TERMINAL for order in reduces):
+            # Two reduces sized from the same open quantity could oversell it.
+            raise OrderManagementError(
+                f"Bracket '{entry_order_id}' already has a reduce order working"
+            )
+        quantity = (open_quantity * fraction).to_integral_value(rounding=ROUND_FLOOR)
+        if quantity < 1:
+            raise OrderManagementError(
+                f"Reducing bracket '{entry_order_id}' by {fraction} of {open_quantity} rounds "
+                "down to nothing; refusing to guess a size"
+            )
+        reduce = Order(
+            order_id=f"{entry_order_id}:reduce:{len(reduces) + 1}",
+            account_id=stop.account_id,
+            instrument=stop.instrument,
+            order_type=OrderType.MARKET,
+            side=stop.side,
+            quantity=quantity,
+            command_id=command_id,
+            created_at=self._utc_now(),
+            tif=TimeInForce.DAY,
+            parent_order_id=entry_order_id,
+            oco_group=stop.oco_group,
+        )
+        self._append(
+            reduce.account_id,
+            EventKind.ORDERS_CREATED,
+            OrdersCreated(
+                orders=(reduce,),
+                fingerprint=fingerprint,
+                reason=f"Bracket reduce: {reason}",
+            ),
+            command_id,
+        )
+        return self._send_reduce(reduce, command_id)
+
+    def _send_reduce(self, reduce: Order, command_id: str) -> Order:
+        # Cancelled before the reduce goes out, so the targets cannot also fill against it.
+        targets = [
+            order
+            for order in self._bracket_children(reduce.parent_order_id)
+            if order.order_type is OrderType.LIMIT
+        ]
+        self._cancel_exits(targets, f"{command_id}:replaces-targets")
+        return self.submit(reduce)
+
+    def _bracket_children(self, entry_order_id: str) -> list[Order]:
+        state = self._account_state(self.get_order(entry_order_id).account_id)
+        return [
+            order for order in state.orders.values() if order.parent_order_id == entry_order_id
+        ]
+
+    @staticmethod
+    def _is_reduce(order: Order, entry_order_id: str) -> bool:
+        return order.order_id.startswith(f"{entry_order_id}:reduce:")
 
     def _open_bracket_stop(self, entry_order_id: str) -> tuple[Order, Decimal]:
         entry = self.get_order(entry_order_id)
@@ -946,7 +1054,9 @@ class OrderManager:
         ]
         stop = next((order for order in children if order.order_type is OrderType.STOP), None)
         targets = [order for order in children if order.order_type is OrderType.LIMIT]
-        # A strategy's close order (close_bracket) exits alongside the stop and targets.
+        # A strategy's close (close_bracket) or reduce (reduce_bracket) order exits
+        # alongside the stop and targets. A filled reduce leaves open quantity, so it only
+        # shrinks the stop below; a stop fill cancels a reduce still working.
         closers = [order for order in children if order.order_type is OrderType.MARKET]
         if stop is None:
             return
@@ -1403,6 +1513,18 @@ class OrderManager:
             payload["entry_type"] = intent.entry_type.value
         if intent.target_fractions is not None:
             payload["target_fractions"] = [str(value) for value in intent.target_fractions]
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _reduce_fingerprint(entry_order_id: str, fraction: Decimal, reason: str) -> str:
+        # The command, not the order: its size depends on the open quantity at the time.
+        payload = {
+            "action": "reduce",
+            "entry_order_id": entry_order_id,
+            "fraction": str(fraction),
+            "reason": reason,
+        }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
