@@ -810,3 +810,14 @@ def test_notional_rule_with_unknown_equity_refuses(tmp_path: Path) -> None:
 
     assert not verdict.accepted
     assert not _rule(verdict, "risk_per_trade").passed
+
+
+def test_evaluate_reads_the_ledgers_cached_state_not_a_refold(tmp_path: Path, monkeypatch) -> None:
+    # The EOD runner evaluates every intent of a pass; a refold per evaluation made a
+    # backfill session spend most of its time decoding the same events again.
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        evaluate(ledger)
+        monkeypatch.setattr(ledger, "snapshot", lambda *a, **k: pytest.fail("refolded the log"))
+        monkeypatch.setattr(ledger, "events", lambda *a, **k: pytest.fail("re-read the log"))
+        verdict = evaluate(ledger)
+    assert verdict.accepted
