@@ -13,6 +13,7 @@ from trade_engine.interfaces.broker import (
     Capabilities,
     OrderChanges,
     VenueAck,
+    VenueFill,
     VenueOrder,
     VenueOrderState,
 )
@@ -696,6 +697,68 @@ def test_reconcile_does_not_accept_pending_replace_with_old_terms(manager_factor
     assert pending.state is OrderState.PENDING_UNKNOWN
     assert manager.get_order(order.order_id).state is OrderState.PENDING_UNKNOWN
     assert manager.get_order(order.order_id).limit_price == Decimal("100")
+
+
+@pytest.mark.parametrize(
+    "venue_state",
+    [
+        OrderState.CANCELLED,
+        OrderState.REJECTED,
+        OrderState.EXPIRED,
+        OrderState.FILLED,
+    ],
+)
+def test_reconcile_resolves_terminal_state_after_pending_replace(
+    manager_factory, venue_state
+):
+    manager, _, broker = manager_factory()
+    order = Order(
+        order_id=f"pending-replace-terminal-{venue_state.value.lower()}",
+        account_id="account-1",
+        instrument=Equity("AAPL"),
+        order_type=OrderType.LIMIT,
+        side=Side.BUY,
+        quantity=Decimal("2"),
+        command_id=f"pending-replace-terminal-{venue_state.value.lower()}-command",
+        created_at=NOW,
+        limit_price=Decimal("100"),
+    )
+    manager.submit(order)
+    broker.replace_status = "PENDING"
+    manager.replace(
+        order.order_id,
+        OrderChanges(new_limit_price=Decimal("101")),
+        command_id=f"pending-limit-update-{venue_state.value.lower()}",
+    )
+    broker.order_readback = [
+        VenueOrderState(
+            venue_order_id=order.order_id,
+            state=venue_state,
+            filled_quantity=(
+                Decimal("2") if venue_state is OrderState.FILLED else Decimal("0")
+            ),
+            remaining_quantity=(
+                Decimal("0") if venue_state is OrderState.FILLED else Decimal("2")
+            ),
+            updated_at=NOW,
+        )
+    ]
+    if venue_state is OrderState.FILLED:
+        broker.fill_readback = [
+            VenueFill(
+                venue_fill_id="pending-replace-terminal-fill",
+                venue_order_id=order.order_id,
+                instrument=order.instrument,
+                quantity=Decimal("2"),
+                price=Decimal("100"),
+                filled_at=NOW,
+                side=order.side,
+            )
+        ]
+
+    reconciled = manager.reconcile_order(order.order_id)
+
+    assert reconciled.state is venue_state
 
 
 @pytest.mark.parametrize("venue_state", [OrderState.SUBMITTED, OrderState.EXPIRED])

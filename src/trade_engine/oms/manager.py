@@ -563,10 +563,6 @@ class OrderManager:
         """Read back an ambiguous venue order; never resend it."""
         context = self._context(order_id)
         order = context.order
-        if order.state is OrderState.PENDING_UNKNOWN and self._has_unresolved_replace(order_id):
-            raise OrderReconciliationError(
-                f"Pending replace terms for '{order_id}' cannot be resolved from status-only venue read-back"
-            )
         states = self._broker.orders(order.created_at)
         venue_id = context.venue_order_id or order_id
         found = next(
@@ -580,6 +576,14 @@ class OrderManager:
         if found is None:
             raise OrderReconciliationError(
                 f"Venue has no read-back for order '{order_id}'; it remains {order.state.value}"
+            )
+        if (
+            order.state is OrderState.PENDING_UNKNOWN
+            and self._has_unresolved_replace(order_id)
+            and found.state is OrderState.ACCEPTED
+        ):
+            raise OrderReconciliationError(
+                f"Pending replace terms for '{order_id}' cannot be resolved from status-only venue read-back"
             )
         if found.state is OrderState.FILLED or found.state is OrderState.PARTIALLY_FILLED:
             fills = self._broker.fills(order.created_at)
