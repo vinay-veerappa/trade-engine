@@ -18,6 +18,7 @@ from trade_engine.ledger.events import (
     LifecycleNotice,
     Mark,
     OrderStateChange,
+    RiskControlChange,
     UnhandledEventError,
     VenueReconcile,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "OrderStateChange",
     "OutboxItem",
     "OutboxStatus",
+    "RiskControlChange",
     "PayloadCodecError",
     "SCHEMA_VERSION",
     "SingleInstanceLock",

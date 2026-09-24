@@ -28,7 +28,7 @@ from trade_engine.domain.instruments import (
 )
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill, Lot
-from trade_engine.domain.risk import RiskRuleResult, RiskVerdict
+from trade_engine.domain.risk import RiskControlChange, RiskRuleResult, RiskVerdict
 from trade_engine.domain.signals import Signal
 from trade_engine.interfaces.market_data import CorporateAction
 
@@ -66,6 +66,7 @@ _TAG_TO_TYPE: dict[str, type] = {
     "Lot": Lot,
     "Signal": Signal,
     "RiskVerdict": RiskVerdict,
+    "RiskControlChange": RiskControlChange,
     "RiskRuleResult": RiskRuleResult,
     "Order": Order,
     "OrderStateChange": OrderStateChange,

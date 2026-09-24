@@ -17,7 +17,7 @@ import pytest
 from trade_engine.domain.instruments import Equity, OptionContract, OptionRight, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill, Lot, Position
-from trade_engine.domain.risk import RiskRuleResult, RiskVerdict
+from trade_engine.domain.risk import RiskControlChange, RiskRuleResult, RiskVerdict
 from trade_engine.domain.signals import Signal
 from trade_engine.interfaces.market_data import CorporateAction
 from trade_engine.ledger import (
@@ -138,6 +138,7 @@ def ledger(ledger_path: Path):
                 RiskRuleResult("max_position", True, Decimal("8000"), Decimal("10000"), "ok"),
             ),
         ),
+        RiskControlChange("kill_switch", True, "operator halt", TS),
         OrderStateChange(order_id="o1", reason="venue ack"),
         CashFlow(amount=Decimal("-12.34"), kind="fee", as_of=TS),
         Mark(instrument=AAPL, price=Decimal("150.25"), as_of=TS),
