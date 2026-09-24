@@ -1469,3 +1469,158 @@ def test_partial_target_in_replay_leaves_the_runner_protected(tmp_path: Path) ->
     assert (stop.state, stop.quantity) == (OrderState.ACCEPTED, Decimal("2"))
     assert ledger.event_by_command(f"eod:mark:{ACCOUNT}:{SESSION.isoformat()}:AAPL") is not None
     ledger.close()
+
+
+# -- strategy exits at the close ------------------------------------------------------
+
+
+class ExitStrategy:
+    """Strategy stand-in whose exit rule is a function of the open brackets."""
+
+    name = "exits"
+
+    def __init__(self, rule) -> None:
+        self._rule = rule
+        self.seen: list = []
+
+    def generate_intents(self, signals, context) -> list[OrderIntent]:
+        return []
+
+    def manage_positions(self, brackets, context):
+        self.seen.append((list(brackets), dict(context)))
+        return self._rule(brackets, context)
+
+
+def _run_with_exits(tmp_path: Path, rule, script=None):
+    from trade_engine.domain.exits import ClosePosition, MoveStop  # noqa: F401
+
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    _seed_bracket(ledger, broker, clock, command_id="held", entry_prefilled=True)
+    strategy = ExitStrategy(rule)
+    runner = EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(script),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}, strategies={ACCOUNT: strategy}),
+    )
+    return ledger, clock, broker, strategy, runner
+
+
+def test_strategy_sees_its_open_brackets_at_the_close(tmp_path: Path) -> None:
+    ledger, _, _, strategy, runner = _run_with_exits(
+        tmp_path, lambda brackets, context: [], script={389: ("100", "101", "99", "100.5")}
+    )
+    result = runner.run(SESSION)
+
+    [(brackets, context)] = strategy.seen
+    assert context == {"session": SESSION, "account_id": ACCOUNT}
+    [bracket] = brackets
+    assert bracket.entry_order_id == "held:entry"
+    assert (bracket.entry_quantity, bracket.open_quantity) == (Decimal("2"), Decimal("2"))
+    assert bracket.average_entry_price == Decimal("100")
+    assert bracket.entry_session == SESSION and bracket.sessions_held == 0
+    assert bracket.stop_price == Decimal("95")
+    assert bracket.open_targets == ((Decimal("110"), Decimal("2")),)
+    assert bracket.last_close == Decimal("100.5")
+    assert result.accounts[0].exit_actions == 0
+    ledger.close()
+
+
+def test_move_stop_to_breakeven_is_applied_and_protects_the_next_session(tmp_path: Path) -> None:
+    from trade_engine.domain.exits import MoveStop
+
+    rule = lambda brackets, context: [  # noqa: E731
+        MoveStop(b.entry_order_id, b.average_entry_price, "breakeven", f"be:{b.entry_order_id}")
+        for b in brackets
+    ]
+    ledger, clock, broker, _, runner = _run_with_exits(tmp_path, rule)
+    assert runner.run(SESSION).accounts[0].exit_actions == 1
+    assert ledger.state(ACCOUNT).orders["held:stop"].stop_price == Decimal("100")
+
+    clock.set(NEXT_OPEN - timedelta(minutes=1))
+    EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(NEXT_SESSION)
+    state = ledger.state(ACCOUNT)
+    assert state.orders["held:stop"].state is OrderState.FILLED
+    assert state.realized_pnl == Decimal("0")
+    ledger.close()
+
+
+def test_close_position_exits_at_the_next_open(tmp_path: Path) -> None:
+    from trade_engine.domain.exits import ClosePosition
+
+    rule = lambda brackets, context: [  # noqa: E731
+        ClosePosition(b.entry_order_id, "time stop", f"close:{b.entry_order_id}") for b in brackets
+    ]
+    ledger, clock, broker, _, runner = _run_with_exits(tmp_path, rule)
+    runner.run(SESSION)
+    close = ledger.state(ACCOUNT).orders["held:entry:close"]
+    assert (close.order_type, close.state) == (OrderType.MARKET, OrderState.ACCEPTED)
+
+    clock.set(NEXT_OPEN - timedelta(minutes=1))
+    EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(NEXT_SESSION)
+    state = ledger.state(ACCOUNT)
+    fill = next(fill for fill in state.fills if fill.order_id == "held:entry:close")
+    assert fill.filled_at == NEXT_OPEN
+    assert state.positions[INSTRUMENT].quantity == Decimal("0")
+    assert state.orders["held:stop"].state is OrderState.CANCELLED
+    ledger.close()
+
+
+def test_exit_naming_an_unknown_bracket_refuses(tmp_path: Path) -> None:
+    from trade_engine.domain.exits import ClosePosition
+
+    rule = lambda brackets, context: [ClosePosition("nope:entry", "bad", "bad")]  # noqa: E731
+    ledger, _, _, _, runner = _run_with_exits(tmp_path, rule)
+    with pytest.raises(EodRunnerError, match="not an open bracket"):
+        runner.run(SESSION)
+    ledger.close()
+
+
+def test_exit_that_loosens_the_stop_refuses(tmp_path: Path) -> None:
+    from trade_engine.domain.exits import MoveStop
+    from trade_engine.oms.manager import OrderManagementError
+
+    rule = lambda brackets, context: [  # noqa: E731
+        MoveStop(b.entry_order_id, Decimal("90"), "wider", "wider") for b in brackets
+    ]
+    ledger, _, _, _, runner = _run_with_exits(tmp_path, rule)
+    with pytest.raises(OrderManagementError, match="only tighten"):
+        runner.run(SESSION)
+    assert ledger.state(ACCOUNT).orders["held:stop"].stop_price == Decimal("95")
+    ledger.close()
+
+
+def test_strategy_without_manage_positions_is_left_alone(tmp_path: Path) -> None:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    _seed_bracket(ledger, broker, clock, command_id="held", entry_prefilled=True)
+    result = EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(),
+        EodRunnerConfig(
+            job_name="eod", brokers={ACCOUNT: broker},
+            strategies={ACCOUNT: DeterministicStrategy(INSTRUMENT)},
+        ),
+    ).run(SESSION)
+    assert result.accounts[0].exit_actions == 0
+    assert ledger.state(ACCOUNT).orders["held:stop"].stop_price == Decimal("95")
+    ledger.close()
+
+
+def test_a_bracket_stopped_out_during_the_session_is_not_offered(tmp_path: Path) -> None:
+    ledger, _, _, strategy, runner = _run_with_exits(
+        tmp_path, lambda brackets, context: [], script={1: ("96", "97", "94", "95")}
+    )
+    runner.run(SESSION)
+    assert strategy.seen == []
+    ledger.close()

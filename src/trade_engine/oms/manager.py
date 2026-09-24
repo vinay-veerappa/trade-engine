@@ -398,6 +398,95 @@ class OrderManager:
             self._synchronize_bracket(order, command_id)
         return result
 
+    def move_stop(self, entry_order_id: str, stop_price: Decimal, *, command_id: str) -> Order:
+        """Tighten an open bracket's protective stop; loosening it refuses (I5)."""
+        stop, open_quantity = self._open_bracket_stop(entry_order_id)
+        current = stop.stop_price
+        if current is None:
+            raise OrderManagementError(f"Protective stop '{stop.order_id}' has no stop price")
+        if stop_price == current:
+            return stop
+        loosens = stop_price < current if stop.side is Side.SELL else stop_price > current
+        if loosens:
+            raise OrderManagementError(
+                f"Moving stop '{stop.order_id}' from {current} to {stop_price} would widen "
+                "the bracket's risk; stops only tighten"
+            )
+        return self.replace(
+            stop.order_id, OrderChanges(new_stop_price=stop_price), command_id=command_id
+        )
+
+    def close_bracket(self, entry_order_id: str, *, command_id: str, reason: str) -> Order:
+        """Exit an open bracket's whole open quantity with a DAY market order.
+
+        Entered after the close, it works the next session's open. The protective stop
+        stays live until the close order fills; the fill then cancels the remaining exits.
+        """
+        order_id = f"{entry_order_id}:close"
+        try:
+            existing = self.get_order(order_id)
+        except KeyError:
+            existing = None
+        if existing is not None and existing.command_id != command_id:
+            raise IdempotencyConflictError(
+                f"Bracket '{entry_order_id}' already has close order '{order_id}' from "
+                f"command '{existing.command_id}'"
+            )
+        if existing is not None and existing.state is not OrderState.NEW:
+            # Already sent (or resolved): a replayed command changes nothing (I3).
+            return existing
+        stop, open_quantity = self._open_bracket_stop(entry_order_id)
+        close = existing or Order(
+            order_id=order_id,
+            account_id=stop.account_id,
+            instrument=stop.instrument,
+            order_type=OrderType.MARKET,
+            side=stop.side,
+            quantity=open_quantity,
+            command_id=command_id,
+            created_at=self._utc_now(),
+            tif=TimeInForce.DAY,
+            parent_order_id=entry_order_id,
+            oco_group=stop.oco_group,
+        )
+        if existing is None:
+            self._append(
+                close.account_id,
+                EventKind.ORDERS_CREATED,
+                OrdersCreated(
+                    orders=(close,),
+                    fingerprint=self._fingerprint_order(close),
+                    reason=f"Bracket close: {reason}",
+                ),
+                command_id,
+            )
+        return self.submit(close)
+
+    def _open_bracket_stop(self, entry_order_id: str) -> tuple[Order, Decimal]:
+        entry = self.get_order(entry_order_id)
+        if entry.parent_order_id is not None:
+            raise OrderManagementError(f"Order '{entry_order_id}' is not a bracket entry")
+        state = self._account_state(entry.account_id)
+        children = [
+            order for order in state.orders.values() if order.parent_order_id == entry_order_id
+        ]
+        stop = next((order for order in children if order.order_type is OrderType.STOP), None)
+        if stop is None:
+            raise OrderManagementError(f"Order '{entry_order_id}' has no protective stop")
+        exited = sum(
+            (state.filled_quantity.get(order.order_id, Decimal("0")) for order in children),
+            Decimal("0"),
+        )
+        open_quantity = state.filled_quantity.get(entry_order_id, Decimal("0")) - exited
+        if open_quantity <= 0:
+            raise OrderManagementError(f"Bracket '{entry_order_id}' has no open quantity")
+        if stop.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
+            raise OrderManagementError(
+                f"Protective stop '{stop.order_id}' is {stop.state.value}, not working at "
+                "the venue; reconcile before managing the bracket"
+            )
+        return stop, open_quantity
+
     def replace(
         self, order_id: str, changes: OrderChanges, *, command_id: str
     ) -> Order:
@@ -857,6 +946,8 @@ class OrderManager:
         ]
         stop = next((order for order in children if order.order_type is OrderType.STOP), None)
         targets = [order for order in children if order.order_type is OrderType.LIMIT]
+        # A strategy's close order (close_bracket) exits alongside the stop and targets.
+        closers = [order for order in children if order.order_type is OrderType.MARKET]
         if stop is None:
             return
         entry_terminal = context.order.state in (
@@ -873,7 +964,10 @@ class OrderManager:
 
         stop_filled = state.filled_quantity.get(stop.order_id, Decimal("0"))
         target_filled = sum(
-            (state.filled_quantity.get(target.order_id, Decimal("0")) for target in targets),
+            (
+                state.filled_quantity.get(order.order_id, Decimal("0"))
+                for order in (*targets, *closers)
+            ),
             Decimal("0"),
         )
         open_quantity = entry_filled - stop_filled - target_filled
@@ -917,13 +1011,13 @@ class OrderManager:
                             )
         else:
             self._cancel_exits(
-                [stop, *targets],
+                [stop, *targets, *closers],
                 f"{cause_id}:{entry.order_id}:flat",
             )
 
         if stop_filled > 0:
             self._cancel_targets(
-                targets,
+                [*targets, *closers],
                 f"{cause_id}:{stop.order_id}:stop-fill",
             )
 

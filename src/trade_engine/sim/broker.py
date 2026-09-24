@@ -445,7 +445,9 @@ class SimBroker(BrokerAdapter):
         would silently skip any stop or target they reached (I5). The caller must
         reconcile after every bar.
         """
-        if order.parent_order_id is None:
+        if order.parent_order_id is None or order.order_type is OrderType.MARKET:
+            # A market close is a new decision, not a stop or target that should already
+            # have been working; there is no trigger in the skipped bars for it to miss.
             return None
         entry_fills = [
             fill.filled_at for fill in self._fills if fill.venue_order_id == order.parent_order_id
