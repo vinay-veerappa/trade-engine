@@ -31,8 +31,8 @@ from trade_engine.ledger import (
     LedgerFillMismatchError,
     LedgerFoldError,
     LedgerLockError,
-    LifecycleNotice,
     Mark,
+    OptionLifecycle,
     OrderStateChange,
     PayloadCodecError,
     UnhandledEventError,
@@ -145,7 +145,16 @@ def ledger(ledger_path: Path):
         Mark(instrument=AAPL, price=Decimal("150.25"), as_of=TS),
         VenueReconcile(venue="sim", as_of=TS, reconciled=True),
         VenueReconcile(venue="sim", as_of=TS, reconciled=False, drift=("AAPL",)),
-        LifecycleNotice(instrument=SPXW, quantity_delta=Decimal("2"), cash_delta=Decimal("-500"), as_of=TS),
+        OptionLifecycle(
+            account_id="ACC",
+            contract=SPXW,
+            quantity=Decimal("2"),
+            held=Side.SELL,
+            underlying_price=Decimal("6012.5"),
+            price_source="test",
+            as_of=TS,
+            reason="assigned at expiry",
+        ),
         CorporateAction(
             symbol="AAPL",
             action_type="dividend",
@@ -690,18 +699,14 @@ def test_clear_reconcile_leaves_venue_running() -> None:
     assert state.venue_halted is False
 
 
-@pytest.mark.parametrize(
-    "kind,payload",
-    [
-        (EventKind.EXPIRY, LifecycleNotice(instrument=SPXW, quantity_delta=Decimal("-2"), cash_delta=Decimal("0"), as_of=TS)),
-        (EventKind.ASSIGNMENT, LifecycleNotice(instrument=SPXW, quantity_delta=Decimal("100"), cash_delta=Decimal("-600000"), as_of=TS)),
-        (EventKind.EXERCISE, LifecycleNotice(instrument=SPXW, quantity_delta=Decimal("-100"), cash_delta=Decimal("600000"), as_of=TS)),
-    ],
-)
-def test_lifecycle_kinds_refuse_until_o2_registers_handlers(kind: EventKind, payload: LifecycleNotice) -> None:
-    """E1 must not invent assignment/expiry semantics that O2 owns (I5)."""
-    with pytest.raises(UnhandledEventError, match="owned by O2"):
-        fold([Event(account="ACC", kind=kind, payload=payload, ts_utc=TS, seq=1)])
+def test_a_corporate_action_refuses_to_fold_until_someone_models_it() -> None:
+    """Nobody owns what a dividend or split does to a holding yet; the fold refuses (I5).
+    Expiry, exercise and assignment fold since O2 (tests/test_option_lifecycle.py)."""
+    action = CorporateAction(
+        symbol="AAPL", action_type="split", effective_date=date(2026, 10, 1), as_of=TS, details={"ratio": "4:1"}
+    )
+    with pytest.raises(UnhandledEventError, match="not modelled"):
+        fold([Event(account="ACC", kind=EventKind.CORPORATE_ACTION, payload=action, ts_utc=TS, seq=1)])
 
 
 def test_fold_is_per_account_isolated() -> None:

@@ -4,20 +4,29 @@
 replays the log and arrives at the same state, which is the point of I2. A snapshot cache
 is only ever an optimisation — correctness is defined by `fold()`.
 
-Kinds whose semantics belong to a later work package (option expiry, assignment,
-exercise, corporate actions) are refused rather than guessed (I5). O2 registers real
-handlers; until then a ledger containing one of those events cannot be folded, loudly.
+Option expiry, exercise and assignment fold here from ``OptionLifecycle`` events (O2,
+``domain.option_lifecycle``). Kinds no work package owns yet (corporate actions) are
+refused rather than guessed (I5): a ledger containing one cannot be folded, loudly.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
-from trade_engine.domain.instruments import Instrument, Side
+from trade_engine.domain.instruments import Instrument, Side, UnresolvableInstrumentError
+from trade_engine.domain.option_lifecycle import (
+    EXERCISE_THRESHOLD,
+    can_exercise_early,
+    deliverable,
+    delivery,
+    intrinsic,
+    is_cash_settled,
+)
 from trade_engine.domain.orders import (
     IllegalOrderStateTransitionError,
     Order,
@@ -32,8 +41,8 @@ from trade_engine.ledger.events import (
     EmulatedOrderState,
     Event,
     EventKind,
-    LifecycleNotice,
     Mark,
+    OptionLifecycle,
     OrderUpdated,
     OrderStateChange,
     OrdersCreated,
@@ -156,7 +165,34 @@ def apply_fill(
     multiplier: int,
 ) -> Position:
     """Return a new Position after applying one fill (FIFO lots, realized P&L on close)."""
-    signed_delta = fill.quantity if fill.side == Side.BUY else -fill.quantity
+    return _apply_trade(
+        account_id,
+        position,
+        fill.instrument,
+        fill.side,
+        fill.quantity,
+        fill.price,
+        fill.filled_at,
+        fill.fill_id,
+        multiplier,
+    )
+
+
+def _apply_trade(
+    account_id: str,
+    position: Position | None,
+    instrument: Instrument,
+    side: Side,
+    quantity: Decimal,
+    price: Decimal,
+    at: datetime,
+    lot_id: str,
+    multiplier: int,
+) -> Position:
+    """One trade into a position: a fill, or the share delivery of an exercise or
+    assignment. New quantity opens a lot named ``lot_id``; opposite quantity closes the
+    oldest lots first."""
+    signed_delta = quantity if side == Side.BUY else -quantity
 
     if position is None or position.quantity == ZERO:
         # A flat position keeps its realised history: P&L already booked must survive
@@ -164,17 +200,17 @@ def apply_fill(
         # strategy that closes and re-opens looks less profitable than it is.
         carried_realized = position.realized_pnl if position is not None else ZERO
         lot = Lot(
-            lot_id=fill.fill_id,
-            quantity=fill.quantity,
-            cost_basis=fill.price,
-            acquired_at=fill.filled_at,
-            side=fill.side,
+            lot_id=lot_id,
+            quantity=quantity,
+            cost_basis=price,
+            acquired_at=at,
+            side=side,
         )
         return Position(
             account_id=account_id,
-            instrument=fill.instrument,
+            instrument=instrument,
             quantity=signed_delta,
-            avg_cost=fill.price,
+            avg_cost=price,
             realized_pnl=carried_realized,
             open_lots=(lot,),
         )
@@ -188,32 +224,32 @@ def apply_fill(
     if increasing:
         new_qty = old_qty + signed_delta
         new_lot = Lot(
-            lot_id=fill.fill_id,
-            quantity=fill.quantity,
-            cost_basis=fill.price,
-            acquired_at=fill.filled_at,
-            side=fill.side,
+            lot_id=lot_id,
+            quantity=quantity,
+            cost_basis=price,
+            acquired_at=at,
+            side=side,
         )
-        weighted = avg * abs(old_qty) + fill.price * fill.quantity
+        weighted = avg * abs(old_qty) + price * quantity
         new_avg = weighted / abs(new_qty)
         lots = [*old_lots, new_lot]
     else:
         closing = min(abs(signed_delta), abs(old_qty))
-        lots, close_pnl = _consume_lots(old_lots, closing, fill.price, multiplier)
+        lots, close_pnl = _consume_lots(old_lots, closing, price, multiplier)
         realized += close_pnl
         new_qty = old_qty + signed_delta
 
         if abs(signed_delta) > abs(old_qty):
             flip_qty = abs(signed_delta) - abs(old_qty)
             new_lot = Lot(
-                lot_id=fill.fill_id,
+                lot_id=lot_id,
                 quantity=flip_qty,
-                cost_basis=fill.price,
-                acquired_at=fill.filled_at,
-                side=fill.side,
+                cost_basis=price,
+                acquired_at=at,
+                side=side,
             )
             lots = [new_lot]
-            new_avg = fill.price
+            new_avg = price
         elif new_qty == ZERO:
             new_avg = ZERO
         else:
@@ -223,7 +259,7 @@ def apply_fill(
 
     return Position(
         account_id=account_id,
-        instrument=fill.instrument,
+        instrument=instrument,
         quantity=new_qty,
         avg_cost=new_avg,
         realized_pnl=realized,
@@ -356,6 +392,153 @@ def _on_fill(state: AccountState, event: Event) -> AccountState:
         fills=state.fills + (fill,),
         fill_ids=state.fill_ids | {fill.fill_id},
     )
+
+
+def _take_lots(lots: tuple[Lot, ...], quantity: Decimal) -> tuple[list[Lot], list[Lot]]:
+    """Split ``quantity`` off the front of the lots (FIFO): (kept, taken)."""
+    remaining = quantity
+    kept: list[Lot] = []
+    taken: list[Lot] = []
+    for lot in lots:
+        if remaining <= ZERO:
+            kept.append(lot)
+            continue
+        part = min(lot.quantity, remaining)
+        taken.append(replace(lot, quantity=part))
+        if part < lot.quantity:
+            kept.append(replace(lot, quantity=lot.quantity - part))
+        remaining -= part
+    if remaining != ZERO:
+        raise LedgerFoldError(f"Open lots ran short by {remaining}; ledger is inconsistent (I2)")
+    return kept, taken
+
+
+def _remaining(position: Position, lots: list[Lot], realized: Decimal) -> Position:
+    """The position left holding ``lots`` (flat when none), its realised P&L updated."""
+    quantity = sum((lot.quantity if lot.side is Side.BUY else -lot.quantity for lot in lots), ZERO)
+    avg = (
+        sum((lot.cost_basis * lot.quantity for lot in lots), ZERO) / abs(quantity)
+        if quantity != ZERO
+        else ZERO
+    )
+    return replace(
+        position, quantity=quantity, avg_cost=avg, realized_pnl=realized, open_lots=tuple(lots)
+    )
+
+
+def _lifecycle_handler(kind: EventKind) -> Callable[[AccountState, Event], AccountState]:
+    """Fold an expiry, exercise or assignment (``domain.option_lifecycle``; I9).
+
+    The event names the contract, the contracts settled and the price decided on; the
+    effect comes from the position's own lots, so it cannot disagree with the book. An
+    event that contradicts the book or the rules refuses (I5): no position or the wrong
+    side, more contracts than are held, an in-the-money contract expiring worthless, an
+    out-of-the-money one exercised or assigned, a European contract assigned early.
+    """
+
+    def handler(state: AccountState, event: Event) -> AccountState:
+        notice: OptionLifecycle = event.payload
+        contract = notice.contract
+        label = f"{kind.value} of {contract.occ.strip()} in '{state.account_id}'"
+        position = state.positions.get(contract)
+        if position is None or position.quantity == ZERO:
+            raise LedgerFoldError(f"{label}: no open position to settle (I5)")
+        held = Side.BUY if position.quantity > ZERO else Side.SELL
+        if held is not notice.held:
+            raise LedgerFoldError(
+                f"{label}: the event says the contracts are held {notice.held.value} but the "
+                f"book holds them {held.value} (I5)"
+            )
+        if notice.quantity > abs(position.quantity):
+            raise LedgerFoldError(
+                f"{label}: {notice.quantity} contracts settled but {abs(position.quantity)} "
+                f"are held (I5)"
+            )
+        try:
+            value = intrinsic(contract, notice.underlying_price)
+            cash_settled = is_cash_settled(contract)
+            american = can_exercise_early(contract)
+        except (ValueError, UnresolvableInstrumentError) as err:
+            raise LedgerFoldError(f"{label}: {err}") from err
+
+        if kind is EventKind.EXPIRY:
+            if notice.early:
+                raise LedgerFoldError(f"{label}: a contract expires only at its expiry (I9)")
+            if value >= EXERCISE_THRESHOLD:
+                raise LedgerFoldError(
+                    f"{label}: {value} in the money at {notice.underlying_price}; it is "
+                    f"exercised or assigned, not expired worthless (I9)"
+                )
+        else:
+            wanted = Side.BUY if kind is EventKind.EXERCISE else Side.SELL
+            if held is not wanted:
+                raise LedgerFoldError(
+                    f"{label}: {kind.value} applies to "
+                    f"{'long' if wanted is Side.BUY else 'short'} contracts; these are held "
+                    f"{held.value} (I5)"
+                )
+            if value < EXERCISE_THRESHOLD:
+                raise LedgerFoldError(
+                    f"{label}: not in the money at {notice.underlying_price}; nobody "
+                    f"exercises it (I9)"
+                )
+            if notice.early and not american:
+                raise LedgerFoldError(f"{label}: a European contract cannot be assigned early (I5)")
+
+        multiplier = _multiplier(contract)
+        positions = dict(state.positions)
+        cash = state.cash
+        realized = ZERO
+        if kind is EventKind.EXPIRY or cash_settled:
+            # Worthless at zero; cash-settled at its intrinsic value, paid in cash.
+            exit_price = ZERO if kind is EventKind.EXPIRY else value
+            kept, closed_pnl = _consume_lots(
+                list(position.open_lots), notice.quantity, exit_price, multiplier
+            )
+            realized += closed_pnl
+            positions[contract] = _remaining(position, kept, position.realized_pnl + closed_pnl)
+            amount = exit_price * notice.quantity * multiplier
+            cash += amount if held is Side.BUY else -amount
+        else:
+            # Physical: each lot's premium goes into the price of the shares it delivers,
+            # and the option leg closes with no P&L of its own (domain.option_lifecycle).
+            kept, taken = _take_lots(position.open_lots, notice.quantity)
+            positions[contract] = _remaining(position, kept, position.realized_pnl)
+            try:
+                shares_instrument = deliverable(contract)
+            except ValueError as err:
+                raise LedgerFoldError(f"{label}: {err}") from err
+            for lot in taken:
+                try:
+                    side, price = delivery(contract, held, lot.cost_basis)
+                except ValueError as err:
+                    raise LedgerFoldError(f"{label}: {err}") from err
+                shares = lot.quantity * multiplier
+                shares_position = positions.get(shares_instrument)
+                prior = shares_position.realized_pnl if shares_position is not None else ZERO
+                updated = _apply_trade(
+                    state.account_id,
+                    shares_position,
+                    shares_instrument,
+                    side,
+                    shares,
+                    price,
+                    notice.as_of,
+                    f"{kind.value}:{notice.as_of.isoformat()}:{lot.lot_id}",
+                    _multiplier(shares_instrument),
+                )
+                positions[shares_instrument] = updated
+                realized += updated.realized_pnl - prior
+                paid = contract.strike * shares
+                cash += -paid if side is Side.BUY else paid
+        return _replace(
+            state,
+            cash=cash,
+            positions=MappingProxyType(positions),
+            realized_pnl=state.realized_pnl + realized,
+        )
+
+    return handler
 
 
 def _on_order_submitted(state: AccountState, event: Event) -> AccountState:
@@ -543,6 +726,9 @@ HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.MARK: _on_mark,
     EventKind.VENUE_RECONCILE: _on_venue_reconcile,
     EventKind.EOD_RUN: _on_eod_run,
+    EventKind.EXPIRY: _lifecycle_handler(EventKind.EXPIRY),
+    EventKind.EXERCISE: _lifecycle_handler(EventKind.EXERCISE),
+    EventKind.ASSIGNMENT: _lifecycle_handler(EventKind.ASSIGNMENT),
 }
 
 

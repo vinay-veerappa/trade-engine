@@ -181,6 +181,48 @@ contract already settled, raises `GreeksUnavailable`. American options are price
 European. `OptionQuote.greeks` holds a vendor's published greeks when a quote carries
 them (`source="vendor"`), and `model_greeks` returns `source="model"`.
 
+## Options Lifecycle
+
+`lifecycle.LifecyclePass(ledger, clock, calendar, settlements, dividends=, quotes=)`
+settles a session's option positions after its close (I9). `run(session)` appends one
+`OptionLifecycle` event per position settled, filed as `Expiry`, `Exercise` (a long
+position) or `Assignment` (a short one), with command id
+`lifecycle:<account>:<occ>:<session>`, so a re-run appends nothing.
+
+- **At expiry** a contract settles on its official price: the close for PM-settled
+  roots, the opening settlement for `SPX` monthlies. At least $0.01 in the money it is
+  exercised or assigned (the OCC's exercise by exception); otherwise it expires
+  worthless.
+- **Physical delivery** moves shares at the strike, and each lot's premium goes into the
+  shares' price. An assigned put buys at strike − credit, an assigned call sells at
+  strike + credit, an exercised call buys at strike + debit, and an exercised put sells
+  at strike − debit. The option leg closes with no P&L of its own. So a cash-secured put
+  assigned in the money holds shares at a cost basis of strike − credit, and a put spread
+  through both strikes realises exactly its maximum loss.
+- **Cash settlement** (`SPX`, `SPXW`) closes the option at its intrinsic value and moves
+  that cash.
+- **Early assignment before an ex-dividend date.** A short American call in the money at
+  the close, whose shares go ex next session, is assigned when the dividend is larger
+  than the call's bid minus its intrinsic value (what the holder would give up by
+  exercising rather than selling).
+
+The official close is an input (`Settlements`; `FixedSettlements` ships). The close of
+the 15:59 one-minute bar is not the official close, and `SPX`'s opening settlement isn't
+its first print. So are dividends (`FixedDividends`, or `CorporateActionDividends` over
+a provider) and option quotes (`SnapshotQuotes` over the chain snapshot store). The pass
+refuses, and writes nothing for any account, in these cases:
+- the clock is before the close;
+- a price, dividend or quote it needs is unknown, or is stamped after the clock;
+- a settlement price is stamped before its settlement instant;
+- an option expired in an earlier session and was never settled;
+- a short American call faces a decision with no dividend source.
+
+The fold (`ledger.state`) refuses a lifecycle event that contradicts the book or the
+rules: no open position, the wrong side, more contracts than are held, an in-the-money
+contract expiring worthless, an out-of-the-money one exercised or assigned, or a
+European contract assigned early. Assignment fees are zero. Pin risk and partial
+assignment are not modelled.
+
 ## Development
 
 Requires Python >= 3.13.

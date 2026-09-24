@@ -26,10 +26,11 @@ The 17:45 ET job per account and session, in order:
    session.
 6. Outbox: every configured destination drains in order (I12).
 
-The runner owns orchestration only. Expiry/assignment semantics stay with O2 (options
-are refused here), EOD exit rules belong to strategy plugins (I13) and reach the venue only through the
-OMS, and market data
-comes from an injected provider (I5: no default source).
+The runner owns orchestration only. Option positions and orders are refused here: an
+option is marked from a chain snapshot and settled by ``lifecycle.LifecyclePass``
+(O2), and wiring both into this pass is O4's. EOD exit rules belong to strategy plugins
+(I13) and reach the venue only through the OMS, and market data comes from an injected
+provider (I5: no default source).
 """
 
 from __future__ import annotations
@@ -505,8 +506,8 @@ class EodRunner:
         for instrument in ordered:
             if not isinstance(instrument, Equity):
                 raise EodRunnerError(
-                    f"Equity EOD replay cannot value {instrument.symbol}; options "
-                    f"lifecycle is O2's (I5)"
+                    f"Equity EOD replay cannot value {instrument.symbol}; option marks "
+                    f"and the lifecycle pass are wired into the EOD run by O4 (I5)"
                 )
         return ordered
 
