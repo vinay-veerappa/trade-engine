@@ -301,8 +301,13 @@ class Ledger:
         return fold(self.events())
 
     def state(self, account: str) -> AccountState:
-        """Folded state of one account, from that account's events only (I8)."""
-        return fold_account(self.events(account=account), account)
+        """Folded state of one account, from that account's events only (I8).
+
+        Served from the committed-state cache: this instance is the only writer (I4)
+        and every append folds its events into the cache, so the cache is the fold
+        of the log (I2) without re-reading it. ``verify_snapshot`` proves the two agree.
+        """
+        return self._committed_state(account)
 
     def snapshot(self, account: str, *, at_seq: int | None = None) -> AccountState:
         """Folded state for one account, with `last_seq` pinned to the snapshot point."""
