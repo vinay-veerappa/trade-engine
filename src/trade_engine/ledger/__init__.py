@@ -10,6 +10,7 @@ from trade_engine.ledger.codec import (
 from trade_engine.ledger.events import (
     CASH_FLOW_KINDS,
     EmulatedOrderState,
+    EodRun,
     FOLD_OWNERS,
     SCHEMA_VERSION,
     CashFlow,
@@ -71,6 +72,7 @@ __all__ = [
     "UnhandledEventError",
     "EmulatedOrderState",
     "VenueReconcile",
+    "EodRun",
     "apply_fill",
     "decode_event",
     "decode_payload",

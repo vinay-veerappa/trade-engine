@@ -516,6 +516,13 @@ def _on_risk_control(state: AccountState, event: Event) -> AccountState:
     return _replace(state, risk_controls=MappingProxyType(controls))
 
 
+def _on_eod_run(state: AccountState, event: Event) -> AccountState:
+    # Scheduler provenance only: "was this session run?" is answered by reading the
+    # ledger, so the fold has nothing to add. Returning state unchanged keeps the event
+    # foldable without inventing state for it (I2, I5).
+    return state
+
+
 # Event kinds E1 knows how to fold. Everything else refuses (see FOLD_OWNERS).
 HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.SIGNAL_SEEN: _on_signal_seen,
@@ -535,6 +542,7 @@ HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.CASH_FLOW: _on_cash_flow,
     EventKind.MARK: _on_mark,
     EventKind.VENUE_RECONCILE: _on_venue_reconcile,
+    EventKind.EOD_RUN: _on_eod_run,
 }
 
 
