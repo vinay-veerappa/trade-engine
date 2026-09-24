@@ -73,6 +73,23 @@ rest. Whole shares round by largest remainder over the targets and the runner; a
 too small to give every target at least one share is refused. A partial entry fill keeps
 the same proportions, so the runner is never absorbed into the targets.
 
+## Strategy Exits at the Close
+
+A strategy may define `manage_positions(brackets, context)`. The EOD runner calls it once
+per account after marks and before D+1 entries, passing an `OpenBracket` for every bracket
+that still holds open quantity: average entry, entry session, `sessions_held`, current stop,
+targets filled and still open, and the session's last close. It returns exit actions from
+`trade_engine.domain.exits`, which the OMS applies:
+
+- `MoveStop(entry_order_id, stop_price, reason, command_id)` replaces the protective stop.
+  Stops only tighten; one that would widen the bracket's risk refuses and fails the run.
+- `ClosePosition(entry_order_id, reason, command_id)` sends a DAY market order for the whole
+  open quantity, which fills at the next session's open. The stop keeps protecting until it
+  fills; its fill cancels the remaining stop and targets, and a stop fill first cancels it.
+
+An action naming anything but an open bracket of the account refuses. Command ids make a
+replayed action a no-op (I3).
+
 ## Equity Simulation
 
 `trade_engine.sim.SimBroker` is a single-account paper venue driven only by explicit
