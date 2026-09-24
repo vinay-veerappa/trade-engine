@@ -185,6 +185,7 @@ class SimBroker(BrokerAdapter):
 
     def submit(self, order: VenueOrder) -> VenueAck:
         self._require_connected()
+        self._expire_due()
         self._validate_venue_order(order)
         existing = self._orders.get(order.venue_order_id)
         if existing is not None:
@@ -212,6 +213,7 @@ class SimBroker(BrokerAdapter):
         return self._ack(order.venue_order_id, "ACCEPTED")
 
     def cancel(self, venue_order_id: str) -> VenueAck:
+        self._expire_due()
         working = self._require_order(venue_order_id)
         if working.state is OrderState.CANCELLED:
             return self._ack(venue_order_id, "ACCEPTED")
@@ -222,6 +224,7 @@ class SimBroker(BrokerAdapter):
         return self._ack(venue_order_id, "ACCEPTED")
 
     def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
+        self._expire_due()
         working = self._require_order(venue_order_id)
         if working.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
             return self._ack(
@@ -281,6 +284,7 @@ class SimBroker(BrokerAdapter):
 
     def orders(self, since: datetime) -> list[VenueOrderState]:
         self._validate_timestamp(since, "since")
+        self._expire_due()
         return [
             VenueOrderState(
                 venue_order_id=venue_order_id,
@@ -295,9 +299,11 @@ class SimBroker(BrokerAdapter):
 
     def fills(self, since: datetime) -> list[VenueFill]:
         self._validate_timestamp(since, "since")
+        self._expire_due()
         return [fill for fill in self._fills if fill.filled_at >= since]
 
     def positions(self) -> list[VenuePosition]:
+        self._expire_due()
         return [
             VenuePosition(
                 instrument=instrument,
@@ -579,21 +585,59 @@ class SimBroker(BrokerAdapter):
         )
 
     def _expire_order(self, working: _WorkingOrder, bar: Bar) -> None:
-        order = working.order
-        if bar.timestamp <= order.submitted_at:
-            return
-        if order.tif is TimeInForce.DAY:
-            # An order entered after the close (the 17:45 EOD job) works the next session.
-            expired = bar.timestamp >= self._calendar.session_close(
-                self._day_session(order.submitted_at)
-            )
-        elif order.tif is TimeInForce.OPG:
-            expired = bar.timestamp > self._opg_session_open(order.submitted_at)
-        else:
-            expired = False
-        if expired:
+        if self._has_expired(working.order, bar.timestamp):
             working.state = OrderState.EXPIRED
             working.updated_at = bar.timestamp
+
+    def _expire_due(self) -> None:
+        """Expire working DAY/OPG orders whose time in force has ended by the clock.
+
+        A venue expires a DAY order at the close whether or not another bar arrives, and
+        the EOD runner's closing sweep feeds none. The order is stamped with the instant
+        it expired (the session close, or the OPG open), not the time it was observed.
+
+        Only bars prove an order did not fill: one whose instrument was not simulated
+        through its last chance (the session's final regular bar, or the opening bar)
+        stays working rather than being declared unfilled (I5).
+        """
+        now = self._now()
+        for working in self._orders.values():
+            if working.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
+                continue
+            if not self._has_expired(working.order, now):
+                continue
+            instant = self._expiry_instant(working.order)
+            if instant is None:
+                raise SimBrokerError("Expired order has no expiry instant")
+            last_chance = (
+                instant
+                if working.order.tif is TimeInForce.OPG
+                else instant - timedelta(minutes=1)
+            )
+            latest_bar = self._last_bars.get(working.order.instrument)
+            if latest_bar is None or latest_bar.timestamp < last_chance:
+                continue
+            working.state = OrderState.EXPIRED
+            working.updated_at = instant
+
+    def _has_expired(self, order: VenueOrder, at: datetime) -> bool:
+        if at <= order.submitted_at:
+            return False
+        instant = self._expiry_instant(order)
+        if instant is None:
+            return False
+        if order.tif is TimeInForce.OPG:
+            # The opening auction is the order's only chance; it lapses once it has passed.
+            return at > instant
+        return at >= instant
+
+    def _expiry_instant(self, order: VenueOrder) -> datetime | None:
+        if order.tif is TimeInForce.DAY:
+            # An order entered after the close (the 17:45 EOD job) works the next session.
+            return self._calendar.session_close(self._day_session(order.submitted_at))
+        if order.tif is TimeInForce.OPG:
+            return self._opg_session_open(order.submitted_at)
+        return None
 
     def _day_session(self, submitted_at: datetime) -> date:
         submitted_date = submitted_at.astimezone(NEW_YORK).date()

@@ -755,6 +755,115 @@ def test_day_order_entered_after_the_close_expires_after_the_next_session() -> N
     assert broker.orders(START)[0].state is OrderState.EXPIRED
 
 
+SESSION_CLOSE = datetime(2026, 9, 23, 20, 0, tzinfo=UTC)
+
+
+def _unfilled_day_limit_through_the_session(tif: TimeInForce = TimeInForce.DAY):
+    broker, clock = broker_fixture()
+    place_order(
+        broker,
+        clock,
+        "unfilled-day",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("95"),
+        tif=tif,
+    )
+    feed_session(broker, clock, START + timedelta(minutes=1))
+    return broker, clock
+
+
+def test_day_order_expires_at_the_close_by_the_clock_without_a_bar() -> None:
+    broker, clock = _unfilled_day_limit_through_the_session()
+
+    clock.set(SESSION_CLOSE)  # the EOD closing sweep: no bar at or after the close
+
+    [state] = broker.orders(START)
+    assert state.state is OrderState.EXPIRED
+    assert state.updated_at == SESSION_CLOSE
+
+
+def test_day_order_expiry_is_stamped_at_the_close_when_observed_later() -> None:
+    broker, clock = _unfilled_day_limit_through_the_session()
+
+    clock.set(datetime(2026, 9, 23, 21, 45, tzinfo=UTC))
+
+    [state] = broker.orders(START)
+    assert state.state is OrderState.EXPIRED
+    assert state.updated_at == SESSION_CLOSE
+
+
+def test_day_order_is_still_working_one_minute_before_the_close() -> None:
+    broker, clock = _unfilled_day_limit_through_the_session()
+
+    assert clock.now_utc() == SESSION_CLOSE - timedelta(minutes=1)
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+
+def test_day_order_is_not_expired_by_the_clock_for_bars_never_simulated() -> None:
+    broker, clock = broker_fixture()
+    place_order(
+        broker,
+        clock,
+        "unsimulated-day",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("95"),
+    )
+    feed_session(broker, clock, START + timedelta(minutes=1), minutes=389)
+
+    # The 15:59 bar was never fed, so nothing proves the order went unfilled (I5).
+    clock.set(SESSION_CLOSE)
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+
+def test_day_order_entered_after_the_close_survives_until_the_next_close() -> None:
+    broker, clock = broker_fixture()
+    feed_session(broker, clock, START + timedelta(minutes=1))
+    clock.set(datetime(2026, 9, 23, 21, 45, tzinfo=UTC))  # 17:45 ET EOD job
+    place_order(
+        broker,
+        clock,
+        "next-day-entry",
+        side=Side.BUY,
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("95"),
+    )
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+    next_open = datetime(2026, 9, 24, 13, 30, tzinfo=UTC)
+    feed_session(broker, clock, next_open)
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+    next_close = next_open + timedelta(minutes=390)
+    clock.set(next_close)
+    [state] = broker.orders(START)
+    assert state.state is OrderState.EXPIRED
+    assert state.updated_at == next_close
+
+
+def test_gtc_order_is_not_expired_by_the_clock() -> None:
+    broker, clock = _unfilled_day_limit_through_the_session(TimeInForce.GTC)
+
+    clock.set(SESSION_CLOSE)
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+    clock.set(datetime(2026, 9, 24, 21, 45, tzinfo=UTC))
+    assert broker.orders(START)[0].state is OrderState.ACCEPTED
+
+
+def test_cancel_after_the_close_sees_the_order_expired() -> None:
+    broker, clock = _unfilled_day_limit_through_the_session()
+
+    clock.set(SESSION_CLOSE)
+    ack = broker.cancel("unfilled-day")
+
+    assert ack.status == "REJECTED"
+    assert ack.message == "Order is EXPIRED"
+    [state] = broker.orders(START)
+    assert state.state is OrderState.EXPIRED
+    assert state.updated_at == SESSION_CLOSE
+
+
 def test_opening_order_expires_when_its_session_open_was_never_simulated() -> None:
     clock = ReplayClock(datetime(2026, 9, 22, 20, 30, tzinfo=UTC))
     broker, _ = broker_fixture(clock=clock)
