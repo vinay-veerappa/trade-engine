@@ -9,6 +9,10 @@ from decimal import Decimal
 from types import MappingProxyType
 
 from trade_engine.domain.instruments import Instrument, Side
+from trade_engine.domain.orders import TimeInForce
+
+# Bracket orders rest until filled or cancelled; OPG/MOC/GTD need terms an intent does not carry.
+BRACKET_TIFS = frozenset({TimeInForce.DAY, TimeInForce.GTC})
 
 
 @dataclass(frozen=True)
@@ -73,10 +77,21 @@ class OrderIntent:
     profit_targets: tuple[Decimal, ...]
     reason: str
     command_id: str  # Idempotency key (I3)
+    # The entry works one session; protective exits stay live until the position closes,
+    # so a multi-day (equity or options) swing trade keeps its stop overnight.
+    entry_tif: TimeInForce = TimeInForce.DAY
+    exit_tif: TimeInForce = TimeInForce.GTC
 
     def __post_init__(self) -> None:
         if not self.intent_id:
             raise ValueError("intent_id must be non-empty")
+        for name in ("entry_tif", "exit_tif"):
+            tif = getattr(self, name)
+            if tif not in BRACKET_TIFS:
+                raise ValueError(
+                    f"{name} must be one of "
+                    f"{sorted(value.value for value in BRACKET_TIFS)}, got {tif!r}"
+                )
         if not self.account_id:
             raise ValueError("account_id must be non-empty")
         if not self.command_id:

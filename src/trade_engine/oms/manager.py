@@ -84,6 +84,16 @@ class OrderManager:
         """Persist a deterministic bracket; conflicting command replays are refused."""
         if not quantity.is_finite() or quantity <= 0:
             raise ValueError("quantity must be finite and positive")
+        unsupported = sorted(
+            {intent.entry_tif, intent.exit_tif} - self._broker.capabilities.supported_tifs
+        )
+        if unsupported:
+            # Refuse before the entry can fill; a GTC stop refused later leaves an open
+            # position unprotected.
+            raise UnsupportedOrderCapabilityError(
+                "Venue does not support bracket time in force "
+                f"{', '.join(tif.value for tif in unsupported)}"
+            )
         fingerprint = self._bracket_fingerprint(intent, quantity)
         existing = self._ledger.event_by_command(intent.command_id)
         if existing is not None:
@@ -109,6 +119,7 @@ class OrderManager:
             command_id=f"{prefix}:entry",
             created_at=now,
             limit_price=intent.entry_price,
+            tif=intent.entry_tif,
         )
         exit_side = Side.SELL if intent.side is Side.BUY else Side.BUY
         stop = Order(
@@ -121,6 +132,7 @@ class OrderManager:
             command_id=f"{prefix}:stop",
             created_at=now,
             stop_price=intent.stop_loss,
+            tif=intent.exit_tif,
             parent_order_id=entry.order_id,
             oco_group=f"{prefix}:exits",
         )
@@ -139,6 +151,7 @@ class OrderManager:
                 command_id=f"{prefix}:target:{index}",
                 created_at=now,
                 limit_price=price,
+                tif=intent.exit_tif,
                 parent_order_id=entry.order_id,
                 oco_group=f"{prefix}:exits",
             )
@@ -1269,6 +1282,8 @@ class OrderManager:
             "profit_targets": [str(value) for value in intent.profit_targets],
             "reason": intent.reason,
             "command_id": intent.command_id,
+            "entry_tif": intent.entry_tif.value,
+            "exit_tif": intent.exit_tif.value,
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()

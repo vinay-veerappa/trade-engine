@@ -46,6 +46,14 @@ drawdown suspension remains latched until the configured recovery threshold is r
 Trading hours are intersected with the configured exchange calendar, including holidays
 and early closes.
 
+## Order Time in Force
+
+`OrderIntent.entry_tif` defaults to `DAY` and `exit_tif` to `GTC`, so the protective stop and
+targets of a multi-day swing trade (equity or option) stay live after the close. Set
+`entry_tif=TimeInForce.GTC` for an entry that should rest until filled or cancelled. Brackets
+accept only `DAY` and `GTC`; `OrderManager.create_bracket` refuses the whole bracket before
+the entry is placed when the venue does not support either value.
+
 ## Equity Simulation
 
 `trade_engine.sim.SimBroker` is a single-account paper venue driven only by explicit

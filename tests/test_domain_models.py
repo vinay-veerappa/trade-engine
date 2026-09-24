@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 from trade_engine.domain.instruments import Equity, Side
+from trade_engine.domain.orders import TimeInForce
 from trade_engine.domain.portfolio import AccountConfig, Fill, Lot, Position
 from trade_engine.domain.risk import RiskRuleResult, RiskVerdict
 from trade_engine.domain.signals import OrderIntent, Signal
@@ -373,3 +374,42 @@ def test_market_data_structures_validation() -> None:
     )
     with pytest.raises(TypeError):
         ca.details["amount"] = "0.30"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("tif", [TimeInForce.OPG, TimeInForce.MOC, TimeInForce.GTD])
+@pytest.mark.parametrize("field_name", ["entry_tif", "exit_tif"])
+def test_order_intent_refuses_time_in_force_a_bracket_cannot_honour(
+    field_name: str, tif: TimeInForce
+) -> None:
+    with pytest.raises(ValueError, match=field_name):
+        OrderIntent(
+            intent_id="i",
+            account_id="a",
+            instrument=Equity("AAPL"),
+            side=Side.BUY,
+            quantity_rule="fixed_1",
+            entry_price=Decimal("100"),
+            stop_loss=Decimal("95"),
+            profit_targets=(),
+            reason="r",
+            command_id="c",
+            **{field_name: tif},
+        )
+
+
+def test_order_intent_defaults_to_day_entry_and_gtc_exits() -> None:
+    intent = OrderIntent(
+        intent_id="i",
+        account_id="a",
+        instrument=Equity("AAPL"),
+        side=Side.BUY,
+        quantity_rule="fixed_1",
+        entry_price=Decimal("100"),
+        stop_loss=Decimal("95"),
+        profit_targets=(),
+        reason="r",
+        command_id="c",
+    )
+
+    assert intent.entry_tif is TimeInForce.DAY
+    assert intent.exit_tif is TimeInForce.GTC

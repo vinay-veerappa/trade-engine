@@ -825,3 +825,45 @@ def test_opening_order_refuses_a_missing_opening_bar() -> None:
         broker.process_bar(late_open_bar)
     assert broker.orders(START)[0].state is OrderState.ACCEPTED
     assert broker.fills(START) == []
+
+
+def test_gtc_bracket_stop_survives_the_close_and_fires_next_session(tmp_path: Path) -> None:
+    clock = ReplayClock()
+    broker, _ = broker_fixture(clock=clock)
+    intent = OrderIntent(
+        intent_id="overnight-swing",
+        account_id=ACCOUNT,
+        instrument=INSTRUMENT,
+        side=Side.BUY,
+        quantity_rule="fixed_4",
+        entry_price=Decimal("100"),
+        stop_loss=Decimal("95"),
+        profit_targets=(Decimal("120"),),
+        reason="Known-answer overnight stop",
+        command_id="overnight-swing-command",
+    )
+
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        manager = OrderManager(broker, clock, ledger)
+        bracket = manager.create_bracket(intent, Decimal("4"))
+        manager.submit(bracket.entry)
+
+        open_at = START + timedelta(minutes=1)
+        clock.set(open_at)
+        broker.process_bar(bar(open_at))
+        manager.reconcile_order(bracket.entry.order_id)
+        feed_session(broker, clock, open_at + timedelta(minutes=1), minutes=389)
+
+        next_open = datetime(2026, 9, 24, 13, 30, tzinfo=UTC)
+        clock.set(next_open)
+        fills = broker.process_bar(
+            bar(next_open, open_="93", high="94", low="92", close="93")
+        )
+
+        assert [(fill.venue_order_id, fill.price) for fill in fills] == [
+            (bracket.stop.order_id, Decimal("93"))
+        ]
+        manager.reconcile_order(bracket.stop.order_id)
+        assert manager.get_order(bracket.stop.order_id).state is OrderState.FILLED
+
+    assert broker.positions() == []

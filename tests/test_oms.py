@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
 
-from trade_engine.domain.instruments import Equity, Side
+from trade_engine.domain.instruments import Equity, OptionContract, OptionRight, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.signals import OrderIntent
@@ -57,7 +58,9 @@ class FakeBroker:
             supported_order_types=order_types
             if order_types is not None
             else frozenset({OrderType.MARKET, OrderType.LIMIT, OrderType.STOP}),
-            supported_tifs=tifs if tifs is not None else frozenset({TimeInForce.DAY}),
+            supported_tifs=tifs
+            if tifs is not None
+            else frozenset({TimeInForce.DAY, TimeInForce.GTC}),
             supports_multi_leg=False,
             supports_native_stops=native_stops,
             supports_streaming=True,
@@ -1137,3 +1140,65 @@ def replace_order_tif(order: Order, tif: TimeInForce, order_id: str) -> Order:
         trail_amount=order.trail_amount,
         tif=tif,
     )
+
+
+def test_bracket_defaults_to_day_entry_and_gtc_protective_exits(manager_factory):
+    manager, _, broker = manager_factory()
+    bracket = manager.create_bracket(make_intent(), Decimal("10"))
+    manager.submit(bracket.entry)
+    manager.record_fill(make_fill(bracket.entry, "tif-entry-fill", "10", "100"))
+
+    assert [(order.venue_order_id, order.tif) for order in broker.submitted] == [
+        (bracket.entry.order_id, TimeInForce.DAY),
+        (bracket.stop.order_id, TimeInForce.GTC),
+        (bracket.targets[0].order_id, TimeInForce.GTC),
+        (bracket.targets[1].order_id, TimeInForce.GTC),
+    ]
+
+
+def test_option_swing_bracket_can_rest_its_entry_gtc(manager_factory):
+    manager, _, broker = manager_factory()
+    contract = OptionContract("AAPL", date(2026, 11, 20), Decimal("200"), OptionRight.CALL)
+    intent = OrderIntent(
+        intent_id="option-swing",
+        account_id="account-1",
+        instrument=contract,
+        side=Side.BUY,
+        quantity_rule="fixed_2",
+        entry_price=Decimal("4.50"),
+        stop_loss=Decimal("2.25"),
+        profit_targets=(Decimal("9.00"),),
+        reason="options swing",
+        command_id="option-swing-command",
+        entry_tif=TimeInForce.GTC,
+    )
+    bracket = manager.create_bracket(intent, Decimal("2"))
+
+    assert {order.tif for order in (bracket.entry, bracket.stop, *bracket.targets)} == {
+        TimeInForce.GTC
+    }
+    manager.submit(bracket.entry)
+    assert broker.submitted[0].tif is TimeInForce.GTC
+
+
+def test_bracket_is_refused_before_entry_when_venue_lacks_exit_tif(manager_factory):
+    broker = FakeBroker(tifs=frozenset({TimeInForce.DAY}))
+    manager, ledger, _ = manager_factory(broker)
+
+    with pytest.raises(UnsupportedOrderCapabilityError, match="GTC"):
+        manager.create_bracket(make_intent(), Decimal("10"))
+
+    assert ledger.event_by_command("command-1") is None
+    assert broker.submitted == []
+    day_only = replace(make_intent(command_id="day-exits"), exit_tif=TimeInForce.DAY)
+    assert manager.create_bracket(day_only, Decimal("10")).stop.tif is TimeInForce.DAY
+
+
+def test_bracket_replay_with_different_tif_is_an_idempotency_conflict(manager_factory):
+    manager, _, _ = manager_factory()
+    manager.create_bracket(make_intent(), Decimal("10"))
+
+    with pytest.raises(IdempotencyConflictError):
+        manager.create_bracket(
+            replace(make_intent(), exit_tif=TimeInForce.DAY), Decimal("10")
+        )
