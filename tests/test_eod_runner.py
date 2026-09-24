@@ -1359,3 +1359,77 @@ def test_fills_recorded_counts_a_stop_filled_inside_its_entry_bar(tmp_path: Path
     assert result.accounts[0].fills_recorded == 2
     assert ledger.state(ACCOUNT).positions[INSTRUMENT].quantity == Decimal("0")
     ledger.close()
+
+
+# -- stop entries: a breakout trigger fills only once price trades through it ---------
+
+
+def _seed_breakout(ledger, broker, clock, *, command_id: str, entry_type: OrderType):
+    intent = OrderIntent(
+        intent_id=f"intent-{command_id}",
+        account_id=ACCOUNT,
+        instrument=INSTRUMENT,
+        side=Side.BUY,
+        quantity_rule="fixed_2",
+        entry_price=Decimal("102"),
+        stop_loss=Decimal("97"),
+        profit_targets=(Decimal("112"),),
+        reason="breakout above 101.90",
+        command_id=command_id,
+        entry_type=entry_type,
+    )
+    manager = OrderManager(broker, clock, ledger)
+    bracket = manager.create_bracket(intent, Decimal("2"))
+    manager.submit(bracket.entry)
+    clock.set(SESSION_OPEN - timedelta(minutes=1))
+    return bracket
+
+
+def _run_breakout(tmp_path: Path, entry_type: OrderType, script: dict) -> Ledger:
+    clock = SettableClock(PREV_EOD)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    _seed_breakout(ledger, broker, clock, command_id="brk", entry_type=entry_type)
+    EodRunner(
+        ledger, clock, CALENDAR, FakeMarketData(script),
+        EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}),
+    ).run(SESSION)
+    return ledger
+
+
+def test_untriggered_stop_entry_never_fills(tmp_path: Path) -> None:
+    # Every bar tops out at 101: the breakout at 102 never happens.
+    ledger = _run_breakout(tmp_path, OrderType.STOP, {})
+    state = ledger.state(ACCOUNT)
+    assert not [fill for fill in state.fills if fill.order_id == "brk:entry"]
+    assert all(position.quantity == 0 for position in state.positions.values())
+    ledger.close()
+
+
+def test_limit_entry_above_the_market_fills_at_the_open_without_a_breakout(tmp_path: Path) -> None:
+    # The pre-fix behaviour, kept as the contrast: a buy LIMIT at 102 is marketable at 100.
+    ledger = _run_breakout(tmp_path, OrderType.LIMIT, {})
+    fill = next(fill for fill in ledger.state(ACCOUNT).fills if fill.order_id == "brk:entry")
+    assert fill.price == Decimal("100")
+    assert fill.filled_at == SESSION_OPEN
+    ledger.close()
+
+
+def test_stop_entry_fills_at_the_trigger_when_price_trades_through(tmp_path: Path) -> None:
+    ledger = _run_breakout(tmp_path, OrderType.STOP, {30: ("101", "103", "100.5", "102.5")})
+    state = ledger.state(ACCOUNT)
+    fill = next(fill for fill in state.fills if fill.order_id == "brk:entry")
+    assert fill.price == Decimal("102")
+    assert fill.filled_at == SESSION_OPEN + timedelta(minutes=30)
+    assert state.orders["brk:stop"].state is OrderState.ACCEPTED
+    assert state.positions[INSTRUMENT].quantity == Decimal("2")
+    ledger.close()
+
+
+def test_stop_entry_gapping_over_the_trigger_fills_at_the_open(tmp_path: Path) -> None:
+    ledger = _run_breakout(tmp_path, OrderType.STOP, {0: ("104", "105", "103.5", "104.5")})
+    fill = next(fill for fill in ledger.state(ACCOUNT).fills if fill.order_id == "brk:entry")
+    assert fill.price == Decimal("104")
+    ledger.close()

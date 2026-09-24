@@ -94,6 +94,12 @@ class OrderManager:
                 "Venue does not support bracket time in force "
                 f"{', '.join(tif.value for tif in unsupported)}"
             )
+        if intent.entry_type is OrderType.STOP and not self._supports_native_type(OrderType.STOP):
+            # An emulated entry triggers only on prices someone feeds it; nothing watches
+            # an EOD entry overnight, so the breakout would silently never trade.
+            raise UnsupportedOrderCapabilityError(
+                "Venue has no native STOP orders; a stop entry cannot be worked"
+            )
         fingerprint = self._bracket_fingerprint(intent, quantity)
         existing = self._ledger.event_by_command(intent.command_id)
         if existing is not None:
@@ -113,12 +119,13 @@ class OrderManager:
             order_id=f"{prefix}:entry",
             account_id=intent.account_id,
             instrument=intent.instrument,
-            order_type=OrderType.LIMIT,
+            order_type=intent.entry_type,
             side=intent.side,
             quantity=quantity,
             command_id=f"{prefix}:entry",
             created_at=now,
-            limit_price=intent.entry_price,
+            limit_price=intent.entry_price if intent.entry_type is OrderType.LIMIT else None,
+            stop_price=intent.entry_price if intent.entry_type is OrderType.STOP else None,
             tif=intent.entry_tif,
         )
         exit_side = Side.SELL if intent.side is Side.BUY else Side.BUY
@@ -1285,6 +1292,10 @@ class OrderManager:
             "entry_tif": intent.entry_tif.value,
             "exit_tif": intent.exit_tif.value,
         }
+        if intent.entry_type is not OrderType.LIMIT:
+            # Added only when set, so brackets persisted before stop entries keep their
+            # fingerprints and still replay idempotently (I3).
+            payload["entry_type"] = intent.entry_type.value
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -1348,7 +1359,12 @@ class OrderManager:
     def _bracket_from_orders(self, orders: tuple[Order, ...]) -> Bracket:
         by_id = {order.order_id: self._stored_order(order) for order in orders}
         entry = next(order for order in by_id.values() if order.parent_order_id is None)
-        stop = next(order for order in by_id.values() if order.order_type is OrderType.STOP)
+        # The protective stop is the entry's STOP child; a stop entry is STOP too.
+        stop = next(
+            order
+            for order in by_id.values()
+            if order.parent_order_id == entry.order_id and order.order_type is OrderType.STOP
+        )
         targets = tuple(
             sorted(
                 (

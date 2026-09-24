@@ -1202,3 +1202,86 @@ def test_bracket_replay_with_different_tif_is_an_idempotency_conflict(manager_fa
         manager.create_bracket(
             replace(make_intent(), exit_tif=TimeInForce.DAY), Decimal("10")
         )
+
+
+# -- stop entries (breakout triggers) -------------------------------------------------
+
+
+def test_intent_entry_type_defaults_to_limit_and_refuses_other_types():
+    assert make_intent().entry_type is OrderType.LIMIT
+    assert replace(make_intent(), entry_type=OrderType.STOP).entry_type is OrderType.STOP
+    for refused in (OrderType.MARKET, OrderType.STOP_LIMIT, OrderType.TRAIL):
+        with pytest.raises(ValueError, match="entry_type"):
+            replace(make_intent(), entry_type=refused)
+
+
+def test_stop_entry_bracket_rests_a_stop_at_the_trigger(manager_factory):
+    manager, _, broker = manager_factory()
+    intent = replace(make_intent(command_id="breakout"), entry_type=OrderType.STOP)
+    bracket = manager.create_bracket(intent, Decimal("10"))
+
+    assert bracket.entry.order_type is OrderType.STOP
+    assert bracket.entry.stop_price == Decimal("100")
+    assert bracket.entry.limit_price is None
+    # The protective stop is the entry's child, never the (also STOP) entry itself.
+    assert bracket.stop.order_id == "breakout:stop"
+    assert bracket.stop.stop_price == Decimal("95")
+    manager.submit(bracket.entry)
+    assert broker.submitted[0].order_type is OrderType.STOP
+    assert broker.submitted[0].stop_price == Decimal("100")
+    manager.record_fill(make_fill(bracket.entry, "breakout-fill", "10", "100.20"))
+    assert [order.venue_order_id for order in broker.submitted[1:]] == [
+        "breakout:stop",
+        "breakout:target:1",
+        "breakout:target:2",
+    ]
+    assert manager.create_bracket(intent, Decimal("10")) == manager.create_bracket(
+        intent, Decimal("10")
+    )
+
+
+def test_limit_bracket_fingerprint_is_unchanged_by_the_entry_type_field():
+    import hashlib
+    import json
+
+    intent = make_intent()
+    legacy = {
+        "intent_id": intent.intent_id,
+        "account_id": intent.account_id,
+        "instrument": encode_payload(intent.instrument),
+        "side": intent.side.value,
+        "quantity_rule": intent.quantity_rule,
+        "quantity": "10",
+        "entry_price": str(intent.entry_price),
+        "stop_loss": str(intent.stop_loss),
+        "profit_targets": [str(value) for value in intent.profit_targets],
+        "reason": intent.reason,
+        "command_id": intent.command_id,
+        "entry_tif": intent.entry_tif.value,
+        "exit_tif": intent.exit_tif.value,
+    }
+    raw = json.dumps(legacy, sort_keys=True, separators=(",", ":"))
+    assert OrderManager._bracket_fingerprint(intent, Decimal("10")) == hashlib.sha256(
+        raw.encode("utf-8")
+    ).hexdigest()
+
+
+def test_bracket_replay_with_a_different_entry_type_is_an_idempotency_conflict(manager_factory):
+    manager, _, _ = manager_factory()
+    manager.create_bracket(make_intent(), Decimal("10"))
+
+    with pytest.raises(IdempotencyConflictError):
+        manager.create_bracket(replace(make_intent(), entry_type=OrderType.STOP), Decimal("10"))
+
+
+def test_stop_entry_is_refused_before_persisting_without_native_stops(manager_factory):
+    manager, ledger, broker = manager_factory(FakeBroker(native_stops=False))
+    intent = replace(make_intent(command_id="emulated-entry"), entry_type=OrderType.STOP)
+
+    with pytest.raises(UnsupportedOrderCapabilityError, match="stop entry"):
+        manager.create_bracket(intent, Decimal("10"))
+
+    assert ledger.event_by_command("emulated-entry") is None
+    assert broker.submitted == []
+    # A limit entry at the same venue still works; its protective stop is emulated.
+    assert manager.create_bracket(make_intent(command_id="limit-ok"), Decimal("10"))
