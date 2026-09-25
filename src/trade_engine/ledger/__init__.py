@@ -37,6 +37,7 @@ from trade_engine.ledger.state import (
     apply_fill,
     fold,
     fold_account,
+    halted_venues,
     register_handler,
 )
 from trade_engine.ledger.outbox import DrainResult, OutboxItem, OutboxStatus
@@ -80,6 +81,7 @@ __all__ = [
     "encode_payload",
     "fold",
     "fold_account",
+    "halted_venues",
     "fold_events",
     "register_handler",
 ]

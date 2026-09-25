@@ -13,6 +13,11 @@ from trade_engine.domain.instruments import Instrument, Side
 from trade_engine.domain.orders import OrderState, OrderType, TimeInForce, validate_order_prices
 
 
+class UnsupportedCapability(Exception):
+    """The venue cannot express this order (an order type, TIF, instrument or leg count
+    its adapter does not declare). Refuse with the reason; never approximate (I5, §4.5)."""
+
+
 @dataclass(frozen=True)
 class Capabilities:
     """Venue capabilities declared by the broker adapter."""
