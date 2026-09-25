@@ -223,6 +223,51 @@ contract expiring worthless, an out-of-the-money one exercised or assigned, or a
 European contract assigned early. Assignment fees are zero. Pin risk and partial
 assignment are not modelled.
 
+## Option Margin
+
+`metrics.account_margin(state, overrides=, underlying_prices=)` margins options as
+strategies. Each underlying's options, together with whole lots of its shares, are
+grouped into strategies. Each strategy is then margined as a unit
+(`metrics.option_margin`). The matching and the formulas are ported from LEAN's
+`OptionStrategyPositionGroupBuyingPowerModel` and `OptionMarginModel`. Any shares no
+strategy uses are margined as plain stock.
+
+| Strategy | Maintenance (initial where it differs) |
+|---|---|
+| Naked put / call | premium + max(10% of strike (put) or underlying (call), 20% of underlying − OTM); 15% for an index |
+| Vertical, diagonal | width when the long is further out of the money, else 0; initial adds a net debit |
+| Covered call | max(ITM + stock margin at min(price, strike), stock margin); initial 0.8 × call value + stock initial |
+| Protective put / call | min(10% of strike + OTM, stock maintenance); initial is the stock's |
+| Covered put | stock initial + ITM |
+| Collar | min(10% of put strike + put OTM, 25% of call strike); initial stock initial + call ITM |
+| Calendar | 0 (long); the short leg's naked margin (short) |
+| Long option | 0; initial is its premium |
+
+Each strategy also records `cash_secured`, the cash an account without margin must hold
+for it. That's the strike for a naked put and the width for a credit spread. Where cash
+can't secure it at all, as with a naked call, it's `None`. It also records
+`net_of_credit`: the maintenance requirement less the credit taken in when the position
+was opened (from each leg's entry price). That's the buying power a broker shows the
+position using, the rules doc's "width × 100 − credit" for a credit spread.
+
+Where this differs from LEAN:
+- **Diagonals.** LEAN has none. Its calendars need equal strikes, so a poor man's covered
+  call would split into a naked call plus a long call. Here `Call/Put Diagonal Spread`
+  covers a short with a long of the same right, a different strike and a later expiry.
+  A long that expires before its short covers nothing.
+- **Best grouping.** LEAN keeps its first greedy grouping, which can pair the wrong
+  legs. Two bull put spreads, 95/90 and 85/80, come out as a 90/85 bear put spread plus
+  a 95/80 bull put spread: 1,500 instead of 1,000. So every grouping is also searched.
+  The one leaving the fewest naked shorts wins (LEAN's own objective), then the one with
+  the least margin. So short shares and a short put stay a covered put, even though a
+  naked put beside the shares would cost less. On a tie, or when the book is too large
+  to search, LEAN's grouping stands.
+- **Marks.** LEAN's maintenance for a naked option uses the premium it was sold for.
+  Here it uses the current mark.
+
+Missing inputs refuse: an option or underlying without a price, a fractional contract,
+mixed contract multipliers on one underlying, or a `Combo` held as a single position.
+
 ## Development
 
 Requires Python >= 3.13.
