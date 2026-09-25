@@ -99,6 +99,9 @@ class AccountState:
     refusals: int = 0
     last_reconcile: VenueReconcile | None = None
     venue_halted: bool = False
+    # Venues (by venue key, e.g. a paperMoney account) a drifting reconcile has halted.
+    # Sticky: a later clean reconcile never clears it (§4.5).
+    halted_venues: frozenset[str] = frozenset()
     risk_controls: Mapping[str, bool] = field(default_factory=lambda: MappingProxyType({}))
     last_seq: int = 0
 
@@ -335,6 +338,7 @@ def _replace(state: AccountState, **changes: Any) -> AccountState:
         "refusals": state.refusals,
         "last_reconcile": state.last_reconcile,
         "venue_halted": state.venue_halted,
+        "halted_venues": state.halted_venues,
         "risk_controls": state.risk_controls,
         "last_seq": state.last_seq,
     }
@@ -741,6 +745,11 @@ def _on_venue_reconcile(state: AccountState, event: Event) -> AccountState:
         state,
         last_reconcile=notice,
         venue_halted=state.venue_halted or not notice.reconciled,
+        halted_venues=(
+            state.halted_venues
+            if notice.reconciled
+            else state.halted_venues | frozenset({notice.venue})
+        ),
     )
 
 
@@ -825,6 +834,15 @@ def apply_event(state: AccountState, event: Event) -> AccountState:
     return _replace(
         new_state, last_seq=event.seq if event.seq is not None else new_state.last_seq
     )
+
+
+def halted_venues(states: Mapping[str, AccountState]) -> frozenset[str]:
+    """Every venue any account's reconcile has halted: the halt is per venue, not per
+    ledger account, so a drift recorded under one account halts the venue for all (§4.5)."""
+    halted: frozenset[str] = frozenset()
+    for state in states.values():
+        halted |= state.halted_venues
+    return halted
 
 
 def fold(events: Iterable[Event]) -> dict[str, AccountState]:
