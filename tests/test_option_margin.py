@@ -36,9 +36,11 @@ def opt(right: str, strike: str, expiry: date = NEAR, root: str = "AAPL", multip
     return OptionContract(root, expiry, D(strike), OptionRight(right), multiplier)
 
 
-def state(holdings: dict, marks: dict, cash: str = "0") -> AccountState:
+def state(holdings: dict, marks: dict, cash: str = "0", entries: dict | None = None) -> AccountState:
+    """``entries`` are the per-share prices positions were opened at (default 1)."""
+    entries = entries or {}
     positions = {
-        instrument: Position("ACC", instrument, D(str(quantity)), D("1"))
+        instrument: Position("ACC", instrument, D(str(quantity)), D(entries.get(instrument, "1")))
         for instrument, quantity in holdings.items()
     }
     return AccountState(
@@ -233,18 +235,13 @@ def test_a_collar_needs_the_put_below_the_call() -> None:
 
 
 def test_a_covered_put_is_the_short_shares_initial_plus_the_puts_intrinsic() -> None:
-    """Short 100 shares, short 105P at 6: 5,000 + 500. LEAN charges the shares' initial
-    margin even for maintenance, so the account keeps the cheaper split instead: a naked
-    put (max(10.5, 20) + 6 = 2,600) and the short shares as stock (2,500)."""
+    """Short 100 shares, short 105P at 6: 5,000 + 500."""
     put = opt("P", "105")
     (matched,), _ = match_strategies({put: -1}, -1)
     covered = strategy_margin(matched, "AAPL", D("100"), {put: D("6")}, D("0.5"), D("0.25"))
     assert covered.name == "Covered Put"
     assert covered.initial == covered.maintenance == D("5500.00")
     assert covered.cash_secured is None
-    margin = account_margin(state({AAPL: -100, put: -1}, {AAPL: "100", put: "6"}))
-    assert [s.name for s in margin.strategies] == ["Naked Put"]
-    assert margin.margin_maintenance == D("5100.00")
 
 
 def test_a_protective_call_on_short_shares() -> None:
@@ -543,3 +540,47 @@ def test_an_equal_cost_grouping_does_not_replace_leans() -> None:
     margin = account_margin(state(book, {c: "1" for c in book} | {AAPL: "100"}))
     assert [s.name for s in margin.strategies] == ["Bear Call Spread", "Naked Call"]
     assert margin.margin_maintenance == D("2100")
+
+
+def test_a_covered_put_is_not_split_into_a_cheaper_naked_put() -> None:
+    """A naked put (max(10.5, 20) + 6 = 2,600) beside the short shares as stock (2,500)
+    costs 5,100, less than the covered put's 5,500. Fewer naked shorts wins first."""
+    put = opt("P", "105")
+    margin = account_margin(state({AAPL: -100, put: -1}, {AAPL: "100", put: "6"}))
+    assert [s.name for s in margin.strategies] == ["Covered Put"]
+    assert margin.positions == ()
+
+
+def test_the_net_figure_is_a_credit_spreads_width_less_its_credit() -> None:
+    """Three 95/90 put spreads opened at 2.00 and 0.80: 1,500 - 360 = 1,140, the rules
+    doc's width x 100 - credit (380 each)."""
+    short, long = opt("P", "95"), opt("P", "90")
+    spread = only(account_margin(state(
+        {short: -3, long: 3}, {short: "2.50", long: "1.00", AAPL: "100"},
+        entries={short: "2.00", long: "0.80"},
+    )))
+    assert spread.maintenance == D("1500")
+    assert spread.net_of_credit == D("1140.00")
+
+
+def test_the_net_figure_of_a_naked_put_takes_off_its_credit() -> None:
+    """Sold at 2.00, now 2.00: 1,700 - 200."""
+    put = opt("P", "95")
+    naked = only(account_margin(state({put: -1}, {put: "2.00", AAPL: "100"}, entries={put: "2.00"})))
+    assert naked.net_of_credit == D("1500.00")
+
+
+def test_a_debit_strategy_took_no_credit() -> None:
+    leaps, short = opt("C", "80", FAR), opt("C", "110")
+    diagonal = only(account_margin(state(
+        {leaps: 1, short: -1}, {leaps: "25", short: "1", AAPL: "100"}, entries={leaps: "24", short: "1.5"},
+    )))
+    assert diagonal.net_of_credit == diagonal.maintenance == D("0")
+
+
+def test_the_net_figure_needs_every_legs_entry_price() -> None:
+    put = opt("P", "95")
+    (matched,), _ = match_strategies({put: -1})
+    fractions = (D("0.5"), D("0.25"))
+    assert strategy_margin(matched, "AAPL", D("100"), {put: D("2")}, *fractions).net_of_credit is None
+    assert strategy_margin(matched, "AAPL", D("100"), {put: D("2")}, *fractions, {}).net_of_credit is None

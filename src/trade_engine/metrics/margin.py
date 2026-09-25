@@ -172,6 +172,7 @@ def account_margin(
             state.marks,
             override.initial if override else INITIAL_FRACTION,
             override.maintenance if override else MAINTENANCE_FRACTION,
+            {contract: state.positions[contract].avg_cost for contract in book},
         )
         for figures in matched:
             margin_initial += figures.initial

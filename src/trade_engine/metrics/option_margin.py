@@ -20,9 +20,9 @@ verticals), which never charges less than LEAN would.
 
 Three things here are not LEAN's:
 
-- **Cheapest grouping.** LEAN keeps the first grouping its greedy pass finds, which can
-  pair the wrong legs (see ``margin_book``). The grouping with the least margin is kept
-  instead, and LEAN's stands on a tie, so this never charges more than LEAN.
+- **Best grouping.** LEAN keeps the first grouping its greedy pass finds, which can
+  pair the wrong legs (see ``margin_book``). Every grouping is searched instead: fewest
+  naked shorts first, then least margin, with LEAN's standing on a tie.
 
 - **Diagonals.** LEAN has no diagonal: its calendars need equal strikes, so a poor man's
   covered call (long LEAPS call, short near call at a higher strike) comes apart into a
@@ -282,13 +282,18 @@ def _long(contract: OptionContract, quantity: int) -> MatchedStrategy:
 # number of distinct books it visits. A book too large to search keeps LEAN's grouping.
 SEARCH_LIMIT = 20_000
 
-Cost = tuple[Decimal, Decimal]  # (maintenance, initial), compared in that order
+# (naked short contracts, maintenance, initial), compared in that order
+Cost = tuple[Decimal, Decimal, Decimal]
 Items = tuple[tuple[OptionContract, int], ...]
 Grouping = tuple[Cost, tuple[MatchedStrategy, ...], int]
 
 
 class _TooLarge(Exception):
     pass
+
+
+def _add(a: Cost, b: Cost) -> Cost:
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
 
 def _items(book: Mapping[OptionContract, int]) -> Items:
@@ -334,8 +339,7 @@ def _cheapest(
                 rest = best(_items(remaining), lots - match.underlying_lots)
                 if rest is None:
                     continue
-                own = strategy_cost(match)
-                cost = (own[0] + rest[0][0], own[1] + rest[0][1])
+                cost = _add(strategy_cost(match), rest[0])
                 if found is None or cost < found[0]:
                     found = (cost, (match, *rest[1]), rest[2])
         memo[key] = found
@@ -358,6 +362,11 @@ class StrategyMargin:
     the strike for a naked put, the width for a credit spread, nothing when shares or a
     long option cover the short. It is None where cash cannot secure the position at all
     (a naked call, anything short the shares).
+
+    ``net_of_credit`` is the maintenance requirement less the credit taken in when the
+    position was opened, what a broker shows as the buying power it uses (rules doc
+    §6.1: a credit spread is width x 100 - credit). A debit strategy took no credit, so
+    it equals the maintenance. It is None when an entry price is not known.
     """
 
     name: str
@@ -368,6 +377,7 @@ class StrategyMargin:
     initial: Decimal
     maintenance: Decimal
     cash_secured: Decimal | None
+    net_of_credit: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -487,9 +497,11 @@ def strategy_margin(
     marks: Mapping[OptionContract, Decimal],
     initial_fraction: Decimal,
     maintenance_fraction: Decimal,
+    entry_prices: Mapping[OptionContract, Decimal] | None = None,
 ) -> StrategyMargin:
     """Margin one matched strategy. Initial margin also carries the net premium when the
-    strategy was bought for a debit (``OptionInitialMargin``); a credit adds nothing."""
+    strategy was bought for a debit (``OptionInitialMargin``); a credit adds nothing.
+    ``entry_prices`` (per share, what each leg was opened at) gives ``net_of_credit``."""
     if underlying_price <= ZERO:
         raise OptionMarginError(f"No price for {underlying} (I5)")
     for contract, _ in strategy.legs:
@@ -503,6 +515,10 @@ def strategy_margin(
     prices = _Prices(underlying_price, marks, initial_fraction, maintenance_fraction)
     initial, maintenance, cash = _strategy_margin(strategy, prices, multiplier)
     premium = sum((_value(c, q, prices) for c, q in strategy.legs), ZERO)
+    net = None
+    if entry_prices is not None and all(c in entry_prices for c, _ in strategy.legs):
+        opened = sum((entry_prices[c] * c.multiplier * q for c, q in strategy.legs), ZERO)
+        net = maintenance - max(-opened, ZERO)
     return StrategyMargin(
         name=strategy.name,
         underlying=underlying,
@@ -512,6 +528,7 @@ def strategy_margin(
         initial=initial + max(premium, ZERO),
         maintenance=maintenance,
         cash_secured=cash,
+        net_of_credit=net,
     )
 
 
@@ -523,6 +540,7 @@ def margin_book(
     marks: Mapping[OptionContract, Decimal],
     initial_fraction: Decimal,
     maintenance_fraction: Decimal,
+    entry_prices: Mapping[OptionContract, Decimal] | None = None,
     definitions: Sequence[StrategyDefinition] = DEFINITIONS,
 ) -> tuple[tuple[StrategyMargin, ...], Decimal]:
     """Margin one underlying's options (signed contracts) with the account's signed
@@ -530,10 +548,12 @@ def margin_book(
 
     LEAN takes its greedy grouping as found, and that grouping can be dear: two bull put
     spreads, 95/90 and 85/80, come out as a 90/85 bear put spread and a 95/80 bull put
-    spread, 1,500 against 1,000. So every grouping is also searched, and the one with the
-    least maintenance (then initial) margin, counting the lots left over as plain stock,
-    is kept. LEAN's grouping wins ties and stands when the book is too large to search,
-    so the answer never exceeds LEAN's. Returns the strategies and the shares none used.
+    spread, 1,500 against 1,000. So every grouping is also searched. The one leaving the
+    fewest naked short contracts is kept (LEAN's own objective), then the one with the
+    least maintenance and initial margin, counting the lots left over as plain stock. So
+    short shares and a short put stay a covered put even though a naked put beside the
+    shares costs less. LEAN's grouping wins ties and stands when the book is too large to
+    search. Returns the strategies and the shares none used.
     """
     multipliers = {contract.multiplier for contract in book}
     if len(multipliers) != 1:
@@ -545,23 +565,23 @@ def margin_book(
     def figures(strategy: MatchedStrategy) -> StrategyMargin:
         if strategy not in priced:
             priced[strategy] = strategy_margin(
-                strategy, underlying, underlying_price, marks, initial_fraction, maintenance_fraction
+                strategy, underlying, underlying_price, marks, initial_fraction, maintenance_fraction, entry_prices
             )
         return priced[strategy]
 
     def strategy_cost(strategy: MatchedStrategy) -> Cost:
         margin = figures(strategy)
-        return margin.maintenance, margin.initial
+        naked = Decimal(strategy.quantity) if strategy.name in (NAKED_CALL, NAKED_PUT) else ZERO
+        return naked, margin.maintenance, margin.initial
 
     def lots_cost(left: int) -> Cost:
         value = abs(left) * multiplier * underlying_price
-        return maintenance_fraction * value, initial_fraction * value
+        return ZERO, maintenance_fraction * value, initial_fraction * value
 
     greedy, left = match_strategies(book, lots, definitions)
     cost = lots_cost(left)
     for strategy in greedy:
-        own = strategy_cost(strategy)
-        cost = (cost[0] + own[0], cost[1] + own[1])
+        cost = _add(cost, strategy_cost(strategy))
     chosen, chosen_left = greedy, left
     searched = _cheapest(book, lots, definitions, strategy_cost, lots_cost)
     if searched is not None and searched[0] < cost:
