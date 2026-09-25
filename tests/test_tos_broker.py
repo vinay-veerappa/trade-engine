@@ -25,7 +25,12 @@ from trade_engine.interfaces.broker import (
 from trade_engine.ledger.events import Event, EventKind, VenueReconcile
 from trade_engine.ledger.state import fold, halted_venues
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker, TosPaperBrokerError
-from trade_engine.tos_paper.transport import TosOrderTransport, TransportRefused, TransportReplay
+from trade_engine.tos_paper.transport import (
+    OrderCanceller,
+    TosOrderTransport,
+    TransportRefused,
+    TransportReplay,
+)
 
 T = datetime(2026, 9, 24, 20, 0, tzinfo=timezone.utc)
 PM_A = "D-00000001"
@@ -564,11 +569,174 @@ def test_positions_are_read_back_and_normalized() -> None:
         _broker().positions()
 
 
-def test_cancel_and_replace_refuse_until_proven() -> None:
-    broker, _ = _connected()
-    with pytest.raises(TosPaperBrokerError, match="row selection"):
-        broker.cancel("tos:x")
-    with pytest.raises(TosPaperBrokerError, match="not proven over JAB"):
+# -- cancel ----------------------------------------------------------------------------
+
+
+class CancelVenue(FakeVenue):
+    """A FakeVenue whose sends name their Order Book row, and which can cancel it."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.next_id = 5400000001
+        self.ids: dict[str, dict] = {}  # Order ID -> its working row
+        self.cancelled: list[str] = []
+        self.cancel_result: dict | None = None  # overrides the CANCELED answer
+        self.cancel_raises: Exception | None = None
+        self.name_rows = True  # False: return the raw result, naming no Order ID
+
+    def place_order(self, ticket, idempotency_key: str) -> dict:
+        rows = len(self.working)
+        out = super().place_order(ticket, idempotency_key)
+        if self.name_rows and out.get("status") == "SENT" and len(self.working) > rows:
+            oid = str(self.next_id)
+            self.next_id += 1
+            self.ids[oid] = self.working[-1]
+            out.update(order_id=oid, book_status="WORKING")
+        return out
+
+    def cancel_order(self, order_id: str) -> dict:
+        self.calls.append("cancel")
+        self.cancelled.append(order_id)
+        if self.cancel_raises is not None:
+            raise self.cancel_raises
+        if self.cancel_result is not None:
+            return dict(self.cancel_result)
+        self.ids[order_id]["status"] = "CANCELED"
+        return {"status": "CANCELED", "order_id": order_id, "book_status": "CANCELED"}
+
+
+def _sent_ticket(venue: FakeVenue | None = None, **kwargs) -> tuple[TosPaperBroker, FakeVenue, str]:
+    broker, venue = _connected(venue or CancelVenue(), **kwargs)
+    batch = broker.mirror_batch([_order("a", "OPT_CSP", Side.SELL)], holdings={})
+    report = broker.drain()
+    assert report.acks[0].status == "ACCEPTED" and report.reconcile.reconciled
+    return broker, venue, batch.venue_orders[0].venue_order_id
+
+
+def test_the_cancel_venue_is_a_canceller_and_the_plain_fake_is_not() -> None:
+    assert isinstance(CancelVenue(), OrderCanceller) and isinstance(CancelVenue(), TosOrderTransport)
+    assert not isinstance(FakeVenue(), OrderCanceller)
+
+
+def test_cancel_before_connect_refuses() -> None:
+    with pytest.raises(TosPaperBrokerError, match="prove the venue first"):
+        _broker(CancelVenue()).cancel("tos:x")
+
+
+def test_cancel_of_a_sent_ticket_cancels_its_order_book_row() -> None:
+    broker, venue, key = _sent_ticket()
+    ack = broker.cancel(key)
+    assert ack.status == "ACCEPTED" and ack.venue_order_id == key and "5400000001" in ack.message
+    assert venue.cancelled == ["5400000001"]
+    assert broker.reconcile_now().reconciled  # the ticket left the expected book with its row
+
+
+def test_a_second_cancel_is_idempotent_and_clicks_nothing() -> None:
+    broker, venue, key = _sent_ticket()
+    broker.cancel(key)
+    ack = broker.cancel(key)
+    assert ack.status == "ACCEPTED" and ack.message == "already cancelled"
+    assert venue.cancelled == ["5400000001"]
+    assert broker.reconcile_now().reconciled  # not subtracted twice
+
+
+def test_cancel_of_a_queued_ticket_drops_it_without_touching_the_venue() -> None:
+    broker, venue = _connected(CancelVenue())
+    batch = broker.mirror_batch([_order("a", "OPT_CSP", Side.SELL)], holdings={})
+    key = batch.venue_orders[0].venue_order_id
+    ack = broker.cancel(key)
+    assert ack.status == "ACCEPTED" and "before send" in ack.message
+    assert broker.queued == () and "cancel" not in venue.calls and not venue.placed
+    assert broker.reconcile_now().reconciled
+    assert broker.cancel(key).message == "already cancelled"
+
+
+def test_cancel_of_a_queued_ticket_keeps_the_others() -> None:
+    broker, venue = _connected(CancelVenue())
+    batch = broker.mirror_batch(
+        [_order("a", "OPT_CSP", Side.SELL), _order("b", "OPT_CSP", Side.SELL, instrument=P190)], holdings={}
+    )
+    first, second = (t.venue_order_id for t in batch.venue_orders)
+    broker.cancel(first)
+    assert [t.venue_order_id for t in broker.queued] == [second]
+    report = broker.drain()
+    assert [a.venue_order_id for a in report.acks] == [second] and report.reconcile.reconciled
+
+
+def test_a_cancelled_queued_ticket_is_not_queued_again() -> None:
+    broker, _ = _connected(CancelVenue())
+    order = _order("a", "OPT_CSP", Side.SELL)
+    broker.cancel(broker.mirror_batch([order], holdings={}).venue_orders[0].venue_order_id)
+    broker.mirror_batch([order], holdings={})
+    assert broker.queued == ()  # the key stays used (I3)
+
+
+def test_cancel_of_an_unknown_key_is_rejected_without_a_venue_call() -> None:
+    broker, venue, _ = _sent_ticket()
+    ack = broker.cancel("tos:never")
+    assert ack.status == "REJECTED" and "no venue Order ID" in ack.message
+    assert "cancel" not in venue.calls
+
+
+@pytest.mark.parametrize("result", [
+    {"status": "SENT"},
+    {"status": "SENT", "order_id": "5400000009", "book_status": "UNKNOWN"},
+    {"status": "SENT", "order_id": "not-digits", "book_status": "WORKING"},
+])
+def test_a_send_that_proved_no_order_id_cannot_be_cancelled(result) -> None:
+    venue = CancelVenue()
+    venue.name_rows = False
+    venue.result = result
+    broker, _, key = _sent_ticket(venue)
+    ack = broker.cancel(key)
+    assert ack.status == "REJECTED" and "refusing to guess" in ack.message
+    assert "cancel" not in venue.calls
+
+
+def test_a_transport_without_cancel_is_rejected() -> None:
+    venue = FakeVenue()
+    venue.result = {"status": "SENT", "order_id": "5400000001", "book_status": "WORKING"}
+    broker, _, key = _sent_ticket(venue)
+    ack = broker.cancel(key)
+    assert ack.status == "REJECTED" and "cannot cancel" in ack.message
+
+
+def test_an_unconfirmed_cancel_is_pending_and_may_be_retried() -> None:
+    broker, venue, key = _sent_ticket()
+    venue.cancel_result = {"status": "UNKNOWN", "order_id": "5400000001", "note": "row still WORKING"}
+    ack = broker.cancel(key)
+    assert ack.status == "PENDING" and "row still WORKING" in ack.message
+    assert broker.reconcile_now().reconciled  # still resting, still expected
+    venue.cancel_result = None
+    assert broker.cancel(key).status == "ACCEPTED"
+    assert venue.cancelled == ["5400000001", "5400000001"]
+
+
+@pytest.mark.parametrize("exc,status", [
+    (TransportRefused("order 5400000001 is FILLED, not WORKING"), "REJECTED"),
+    (TimeoutError("JAB hung"), "PENDING"),
+])
+def test_cancel_exceptions_are_mapped_never_raised(exc, status) -> None:
+    broker, venue, key = _sent_ticket()
+    venue.cancel_raises = exc
+    ack = broker.cancel(key)
+    assert ack.status == status
+    assert broker.reconcile_now().reconciled  # the expectation is untouched
+    venue.cancel_raises = None
+    assert broker.cancel(key).status == "ACCEPTED"  # still cancellable
+
+
+def test_cancel_still_works_on_a_halted_venue() -> None:
+    broker, venue, key = _sent_ticket()
+    venue.positions.append({"symbol": P190.to_occ(), "quantity": "1", "avg_price": "1.00"})
+    assert not broker.reconcile_now().reconciled and broker.halted
+    assert broker.cancel(key).status == "ACCEPTED"
+    assert venue.cancelled == ["5400000001"]
+
+
+def test_replace_still_refuses() -> None:
+    broker, _ = _connected(CancelVenue())
+    with pytest.raises(TosPaperBrokerError, match="not mapped over JAB"):
         broker.replace("tos:x", OrderChanges(new_limit_price=Decimal("3.00")))
 
 
