@@ -46,9 +46,10 @@ def allocate_venue_fill(
 
     The ticket's allocations are all on the fill's side (netting is same-side only), so
     each order gets its pro-rata share. ``already_filled`` carries what earlier partial
-    fills of this ticket gave each strategy order: shares are computed on the cumulative
-    total so a sequence of partials allocates exactly as one fill would. Fees split
-    pro-rata to the cent, remainder to the first-in order.
+    fills of this ticket gave each strategy order; the fill is split pro-rata over what
+    each order still lacks — the mirror fold's rule (``ledger.mirror.on_fill``), so the
+    venue fills allocated here match the mirror book exactly. Fees split pro-rata to the
+    cent, remainder to the first-in order.
     """
     if fill.venue_order_id != ticket.venue_order_id:
         raise SlippageError(f"fill {fill.venue_fill_id} is for {fill.venue_order_id}, not {ticket.venue_order_id}")
@@ -63,17 +64,16 @@ def allocate_venue_fill(
         raise SlippageError(
             f"fill {fill.venue_fill_id} takes the ticket to {total} of {ticket.quantity}; overfill (I5)"
         )
-    targets = pro_rata([a.quantity for a in ticket.allocations], ticket.quantity, total)
-    pieces: list[tuple[int, Decimal]] = []
-    for index, (allocation, target) in enumerate(zip(ticket.allocations, targets)):
-        piece = target - prior.get(allocation.strategy_order_id, ZERO)
-        if piece < 0:
+    known = {a.strategy_order_id: a.quantity for a in ticket.allocations}
+    for order_id, quantity in prior.items():
+        if order_id not in known or quantity < 0 or quantity > known[order_id]:
             raise SlippageError(
-                f"cumulative allocation for {allocation.strategy_order_id} is not monotone; "
-                "allocate this ticket's partials by hand (I5)"
+                f"already_filled gives {order_id} {quantity}, which ticket {ticket.venue_order_id} "
+                "cannot have allocated (I5)"
             )
-        if piece > 0:
-            pieces.append((index, piece))
+    lacking = [a.quantity - prior.get(a.strategy_order_id, ZERO) for a in ticket.allocations]
+    shares = pro_rata(lacking, ticket.quantity - done, fill.quantity)
+    pieces = [(index, piece) for index, piece in enumerate(shares) if piece > 0]
     fees = [(fill.fee * piece / fill.quantity).quantize(CENT, rounding=ROUND_FLOOR) for _, piece in pieces]
     if fees:
         fees[0] += fill.fee - sum(fees, ZERO)

@@ -9,11 +9,20 @@ ledger, a connected :class:`TosPaperBroker` and an injected clock (I7):
   window (the intraday service's per-tick view).
 - :func:`run_mirror` — collect fills → append ``MirrorFill``s (and Order Book closes) →
   reconcile against the fold → append ``VenueReconcile`` → if not halted,
-  ``mirror_batch`` (holdings = the fold's mirror book) → append ``MirrorRefused`` +
-  ``MirrorQueued`` (written **ahead** of any send) → drain → append ``MirrorAck``s and
-  the drain's ``VenueReconcile``. On a halted venue every pending order is refused at
-  the venue with the reason instead (I11); nothing is queued.
+  ``mirror_batch`` (holdings = ``MirrorState.exposure()``: the mirror book plus every
+  open ticket's unfilled remainder, per allocation account, so a new order never opposes
+  one still resting) → append ``MirrorRefused`` + ``MirrorQueued`` (written **ahead** of
+  any send) → drain → append ``MirrorAck``s and the drain's ``VenueReconcile``. On a
+  halted venue every pending order is refused at the venue with the reason instead
+  (I11); nothing is queued.
 - :func:`collect_only` — fills + reconcile, no sends: the after-close pass.
+- :func:`cancel_ticket` — cancel one resting ticket by its proven venue Order ID and
+  record it (``MirrorAck`` with ``book_status`` CANCELLED), so the cancel survives a
+  restart even after the CANCELED row leaves the Order Book.
+
+**Entries only.** Exits, closes and profit targets (orders with a parent order) are
+not mirrored yet: a position the sim closes stays open at the venue, and the reconcile
+keeps expecting it. Mirroring exits is a later step.
 
 Every append goes through ``Ledger.append``/``extend`` under a derived command id, so a
 re-run is idempotent (I3): a second run the same day queues nothing new, and a fill
@@ -28,8 +37,12 @@ expired unfilled is recorded (``MirrorAck`` EXPIRED) before its row leaves the O
 Book. A ticket whose row vanished unrecorded stays expected and the reconcile halts
 the venue — refused, not guessed (I5).
 
-A ticket queued but never acked (a crash between the write-ahead and the send) stays
-expected and is never re-sent: the reconcile decides, and halts if the venue lacks it.
+Every open ticket must carry a proven venue Order ID, or its fills can never be read
+back and its resting remainder would mask whatever the venue did with it. A send that
+proved no Order ID (a SENT result naming no row, a PENDING read-back) and a ticket
+queued but never acked (a crash between the write-ahead and the send, or between the
+drain and the ack append) therefore **halt the venue** with a ``VenueReconcile`` naming
+the ticket's contracts. Such a ticket is never re-sent (I3); an operator resolves it.
 """
 
 from __future__ import annotations
@@ -53,7 +66,8 @@ from trade_engine.ledger.events import (
     VenueReconcile,
     mirror_account,
 )
-from trade_engine.ledger.mirror import MirrorState, ticket_contracts
+from trade_engine.interfaces.broker import VenueAck
+from trade_engine.ledger.mirror import MirrorState, MirrorTicketState, ticket_contracts
 from trade_engine.ledger.state import LedgerFoldError, halted_venues, mirror_state
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker, VenueUnreadable
 
@@ -237,9 +251,70 @@ def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock) -> MirrorRunR
         return MirrorRunReport(venue=venue, reconcile=written_halt, halted=True)
     fills = tuple(p for p in written if isinstance(p, MirrorFill))
     closes = tuple(p for p in written if isinstance(p, MirrorAck))
+    _halt_unproven(ledger, broker, clock, "collect")
     broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
     check = _reconcile(ledger, broker, clock, broker.reconcile_now(), "collect")
     return MirrorRunReport(venue=venue, fills=fills, closes=closes, reconcile=check, halted=broker.halted)
+
+
+def _unproven(mirror: MirrorState) -> tuple[MirrorTicketState, ...]:
+    """Open tickets with no proven venue Order ID: their fills cannot be read back."""
+    return tuple(ticket for ticket in mirror.open_tickets if ticket.venue_order_id is None)
+
+
+def _halt_unproven(ledger: Ledger, broker: TosPaperBroker, clock: Clock, phase: str) -> VenueReconcile | None:
+    """Halt the venue when an open ticket has no proven Order ID (I5): never silent."""
+    unproven = _unproven(mirror_of(ledger, broker.venue))
+    if not unproven:
+        return None
+    names = sorted({c.symbol for t in unproven for c in ticket_contracts(t.queued, t.queued.quantity)})
+    halt = VenueReconcile(
+        venue=broker.venue,
+        as_of=clock.now_utc(),
+        reconciled=False,
+        drift=tuple(names),
+        note=(
+            "no proven venue Order ID for open ticket(s) "
+            + ", ".join(t.key for t in unproven)
+            + ": their fills cannot be read back; venue halted (I5)"
+        ),
+    )
+    return _reconcile(ledger, broker, clock, halt, f"unproven:{phase}")
+
+
+def cancel_ticket(ledger: Ledger, broker: TosPaperBroker, ticket_key: str, *, clock: Clock) -> VenueAck:
+    """Cancel one resting ticket at the venue and record it in the ledger (I2).
+
+    The broker is restored from the fold first, so the cancel works after a restart and
+    takes only the unfilled remainder out of the expectation. An ACCEPTED cancel is
+    appended as a ``MirrorAck`` (``book_status`` CANCELLED), which closes the ticket in the
+    fold for good; anything else is returned unrecorded (the ticket is still open).
+    """
+    venue = broker.venue
+    broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
+    order_id = broker.proven_order_id(ticket_key)
+    ack = broker.cancel(ticket_key)
+    if ack.status == "ACCEPTED" and order_id is not None:
+        _append(
+            ledger,
+            venue,
+            clock,
+            [
+                (
+                    MirrorAck(
+                        venue=venue,
+                        ticket_key=ticket_key,
+                        status="ACCEPTED",
+                        message=ack.message or "cancelled",
+                        at=ack.timestamp,
+                        venue_order_id=order_id,
+                        book_status=OrderState.CANCELLED,
+                    ),
+                    f"cancel:{ticket_key}",
+                )
+            ],
+        )
+    return ack
 
 
 def collect_only(ledger: Ledger, broker: TosPaperBroker, *, clock: Clock) -> MirrorRunReport:
@@ -273,7 +348,7 @@ def run_mirror(
         return collected
     now = clock.now_utc()
     # A halted broker refuses the whole batch here, each order with the reason (I11).
-    batch = broker.mirror_batch(todo, holdings=mirror.book)
+    batch = broker.mirror_batch(todo, holdings=mirror.exposure())
     accounts = {order.order_id: order.account_id for order in todo}
     queued_keys = {ticket.venue_order_id for ticket in broker.queued}
     items: list[tuple[object, str]] = [
@@ -337,6 +412,8 @@ def run_mirror(
             )
         )
     acked = _append(ledger, venue, clock, acks)
+    if _halt_unproven(ledger, broker, clock, "drain") is not None:
+        broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
     drained = None
     if report.reconcile is not None:
         drained = _reconcile(ledger, broker, clock, report.reconcile, "drain")
@@ -374,6 +451,7 @@ def _with(report: MirrorRunReport, **changes) -> MirrorRunReport:
 __all__ = [
     "MirrorRunReport",
     "MirrorSessionError",
+    "cancel_ticket",
     "collect_only",
     "mirror_of",
     "pending_orders",

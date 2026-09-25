@@ -165,11 +165,13 @@ class TosPaperBroker(BrokerAdapter):
         self._queue: list[VenueOrder] = []
         self._keys: set[str] = set()  # ticket keys queued or sent (I3)
         self._expected: dict[Instrument, Decimal] = {}
-        # Open tickets' live remainder restored from the ledger fold (``restore``).
-        self._restored_open: dict[Instrument, Decimal] = {}
-        # ticket key -> (ticket, venue Order ID) for sends whose Order Book row was matched,
-        # restored from the fold after a restart; with no proven id a cancel refuses.
-        self._sent: dict[str, tuple[VenueOrder, str]] = {}
+        # True once ``restore`` loaded the fold: ``_expected`` is then the fold's own
+        # expectation, kept in step by every queue and cancel, and ``holdings`` only screens.
+        self._restored = False
+        # ticket key -> (ticket, venue Order ID, units still resting) for sends whose Order
+        # Book row was matched, restored from the fold after a restart (the remainder then
+        # excludes recorded fills); with no proven id a cancel refuses.
+        self._sent: dict[str, tuple[VenueOrder, str, Decimal]] = {}
         self._proven: dict[str, tuple[str, OrderState]] = {}  # this drain's proven ids
         self._cancelled: set[str] = set()  # ticket keys a cancel proved (idempotent)
         self.capabilities = Capabilities(
@@ -261,9 +263,13 @@ class TosPaperBroker(BrokerAdapter):
     ) -> NettedBatch:
         """Net a batch and queue its tickets. Never calls the transport.
 
-        ``holdings`` is the sim-derived mirror book: signed contracts per mirrored
-        virtual account on this venue, keyed ``(account_id, instrument)``. The sim book
-        takes every order; refusals here are venue refusals the caller records (I11).
+        ``holdings`` is what each mirrored virtual account holds or has resting on this
+        venue, signed contracts keyed ``(account_id, instrument)`` — conflicts are screened
+        against it (``MirrorState.exposure()``: the mirror book plus every open ticket's
+        unfilled remainder, per allocation). Before ``restore`` it is also the expected
+        venue book; after ``restore`` the expectation is the fold's (``MirrorState.expected``),
+        so an open ticket is never counted twice. The sim book takes every order; refusals
+        here are venue refusals the caller records (I11).
         """
         self._require_connected("mirror_batch")
         orders = list(strategy_orders)
@@ -282,11 +288,14 @@ class TosPaperBroker(BrokerAdapter):
             at=self._clock.now_utc(),
             holdings=holdings,
         )
-        expected: dict[Instrument, Decimal] = dict(self._restored_open)  # open tickets from the fold
-        for (_account, instrument), quantity in holdings.items():
-            expected[instrument] = expected.get(instrument, ZERO) + quantity
-        for queued in self._queue:  # still unsent: part of what the venue should end up holding
-            _add(expected, queued, 1)
+        if self._restored:  # the fold's expectation, already including the queue
+            expected: dict[Instrument, Decimal] = dict(self._expected)
+        else:
+            expected = {}
+            for (_account, instrument), quantity in holdings.items():
+                expected[instrument] = expected.get(instrument, ZERO) + quantity
+            for queued in self._queue:  # still unsent: part of what the venue should end up holding
+                _add(expected, queued, 1)
         for ticket in batch.venue_orders:
             if ticket.venue_order_id in self._keys:
                 continue  # the same ticket was already queued or sent (I3)
@@ -315,15 +324,12 @@ class TosPaperBroker(BrokerAdapter):
             raise TosPaperBrokerError("restore over an undrained queue; drain (or cancel) it first")
         if self.venue in frozenset(halted_venues):
             self._halted = True
-        open_remainder: dict[Instrument, Decimal] = {}
-        sent: dict[str, tuple[VenueOrder, str]] = {}
-        for ticket in mirror.open_tickets:
-            for contract, quantity in fold_contracts(ticket.queued, ticket.remaining).items():
-                open_remainder[contract] = open_remainder.get(contract, ZERO) + quantity
-            if ticket.venue_order_id is not None:
-                sent[ticket.key] = (venue_order_of(ticket.queued), ticket.venue_order_id)
-        self._restored_open = open_remainder
-        self._sent = sent
+        self._sent = {
+            ticket.key: (venue_order_of(ticket.queued), ticket.venue_order_id, ticket.remaining)
+            for ticket in mirror.open_tickets
+            if ticket.venue_order_id is not None
+        }
+        self._restored = True
         self._keys |= set(mirror.tickets)
         self._cancelled |= {
             key for key, ticket in mirror.tickets.items() if ticket.book_status is OrderState.CANCELLED
@@ -526,7 +532,7 @@ class TosPaperBroker(BrokerAdapter):
             return norm.normalize_place_exception(exc, ticket.venue_order_id, self._clock.now_utc())
         order_id = norm.placed_order_id(raw)
         if order_id is not None:
-            self._sent[ticket.venue_order_id] = (ticket, order_id)
+            self._sent[ticket.venue_order_id] = (ticket, order_id, ticket.quantity)
             self._proven[ticket.venue_order_id] = (order_id, norm.book_state(raw.get("book_status")))
         return norm.normalize_place_result(raw, ticket.venue_order_id, self._clock.now_utc())
 
@@ -556,8 +562,10 @@ class TosPaperBroker(BrokerAdapter):
         A still-queued ticket is dropped from the queue (nothing reached the venue). A
         sent one is cancelled by the venue Order ID its send proved; with no proven id,
         or a transport without :class:`OrderCanceller`, the cancel is REJECTED (I5).
-        ACCEPTED only when the Order Book row reads CANCELED; then the ticket leaves the
-        mirror book's expectation (a partial fill before the cancel shows as drift).
+        ACCEPTED only when the Order Book row reads CANCELED; then the ticket's unfilled
+        remainder leaves the expectation — after ``restore`` that is the quantity less the
+        fills the fold recorded, so the expectation stays the fold's (a fill not yet
+        collected shows as drift). ``tos_paper.session.cancel_ticket`` records the cancel.
         """
         self._require_connected("cancel")
         now = self._clock.now_utc()
@@ -577,7 +585,7 @@ class TosPaperBroker(BrokerAdapter):
             )
         if not isinstance(self.transport, OrderCanceller):
             return VenueAck(venue_order_id, "REJECTED", now, "the transport cannot cancel; refusing")
-        ticket, order_id = sent
+        ticket, order_id, resting = sent
         try:
             raw = self.transport.cancel_order(order_id)
         except Exception as exc:  # noqa: BLE001 — mapped, never propagated
@@ -585,12 +593,17 @@ class TosPaperBroker(BrokerAdapter):
         ack = norm.normalize_cancel_result(raw, venue_order_id, self._clock.now_utc())
         if ack.status == "ACCEPTED":
             del self._sent[venue_order_id]
-            self._unexpect(ticket)
+            self._unexpect(ticket, resting)
             self._cancelled.add(venue_order_id)
         return ack
 
-    def _unexpect(self, ticket: VenueOrder) -> None:
-        _add(self._expected, ticket, -1)
+    def _unexpect(self, ticket: VenueOrder, units: Decimal | None = None) -> None:
+        _add(self._expected, ticket, -1, units)
+
+    def proven_order_id(self, ticket_key: str) -> str | None:
+        """The venue Order ID a send (or the restored fold) proved for a ticket, or None."""
+        sent = self._sent.get(ticket_key)
+        return None if sent is None else sent[1]
 
     def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
         raise TosPaperBrokerError(
@@ -621,8 +634,8 @@ class TosPaperBroker(BrokerAdapter):
 _CLOSED = frozenset({OrderState.CANCELLED, OrderState.EXPIRED, OrderState.REJECTED})
 
 
-def _add(expected: dict[Instrument, Decimal], ticket: VenueOrder, sign: int) -> None:
-    for contract, quantity in ticket_contracts(ticket).items():
+def _add(expected: dict[Instrument, Decimal], ticket: VenueOrder, sign: int, units: Decimal | None = None) -> None:
+    for contract, quantity in ticket_contracts(ticket, units).items():
         expected[contract] = expected.get(contract, ZERO) + sign * quantity
 
 

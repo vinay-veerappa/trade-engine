@@ -126,13 +126,12 @@ def confirm_ticket(
     return "PENDING", "not visible on the order book or in positions yet"
 
 
-def ticket_contracts(ticket: VenueOrder) -> dict[Instrument, Decimal]:
-    """Signed contracts a whole ticket puts on the venue, per contract (a vertical per leg)."""
+def ticket_contracts(ticket: VenueOrder, units: Decimal | None = None) -> dict[Instrument, Decimal]:
+    """Signed contracts ``units`` of a ticket (default: all of it) put on the venue, per contract."""
+    units = ticket.quantity if units is None else units
     if isinstance(ticket.instrument, Combo):
-        return {
-            leg.contract: _signed(leg.side, ticket.quantity * leg.ratio) for leg in ticket.instrument.legs
-        }
-    return {ticket.instrument: _signed(ticket.side, ticket.quantity)}
+        return {leg.contract: _signed(leg.side, units * leg.ratio) for leg in ticket.instrument.legs}
+    return {ticket.instrument: _signed(ticket.side, units)}
 
 
 def _confirm_combo(

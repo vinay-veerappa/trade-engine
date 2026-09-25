@@ -121,6 +121,21 @@ class MirrorState:
     def open_tickets(self) -> tuple[MirrorTicketState, ...]:
         return tuple(t for _, t in sorted(self.tickets.items()) if not t.terminal)
 
+    def exposure(self) -> dict[tuple[str, Instrument], Decimal]:
+        """Per (strategy account, contract): the book plus each open ticket's unfilled part.
+
+        What each virtual account holds or has resting at the venue — the conflict screen's
+        holdings, so a resting order is never opposed by another account's new one (§4.4).
+        """
+        exposure: dict[tuple[str, Instrument], Decimal] = dict(self.book)
+        for ticket in self.open_tickets:
+            for allocation in ticket.queued.allocations:
+                lacking = allocation.quantity - ticket.allocated.get(allocation.strategy_order_id, ZERO)
+                for contract, quantity in ticket_contracts(ticket.queued, lacking).items():
+                    key = (allocation.strategy_account, contract)
+                    exposure[key] = exposure.get(key, ZERO) + quantity
+        return {key: quantity for key, quantity in exposure.items() if quantity != 0}
+
     def expected(self) -> dict[Instrument, Decimal]:
         """Per contract: the book plus every open ticket's live remainder."""
         expected: dict[Instrument, Decimal] = {}

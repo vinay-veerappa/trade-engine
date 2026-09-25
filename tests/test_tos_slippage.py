@@ -183,7 +183,7 @@ def test_a_full_fill_allocates_each_order_its_quantity() -> None:
     assert fills[0].venue_order_id == "tos:t1" and fills[0].fill_id == "vf-1:csp"
 
 
-def test_partials_allocate_pro_rata_on_the_cumulative_total() -> None:
+def test_partials_allocate_the_increment_over_what_each_order_lacks() -> None:
     ticket = _ticket(("a", "1"), ("b", "1"), ("c", "1"))
     first = allocate_venue_fill(_vfill("1", fid="p1"), ticket)
     assert [(f.order_id, f.quantity) for f in first] == [("a", Decimal("1"))]
@@ -209,10 +209,22 @@ def test_allocation_refuses_an_overfill() -> None:
     allocate_venue_fill(_vfill("1"), _ticket(("a", "1"), ("b", "1")), already_filled={"a": Decimal("1")})
 
 
-def test_allocation_refuses_a_non_monotone_history() -> None:
-    with pytest.raises(SlippageError, match="not monotone"):
-        allocate_venue_fill(_vfill("1"), _ticket(("a", "1"), ("b", "1"), ("c", "1")), already_filled={"c": Decimal("1")})
-    allocate_venue_fill(_vfill("1"), _ticket(("a", "1"), ("b", "1"), ("c", "1")), already_filled={"a": Decimal("1")})
+def test_allocation_refuses_an_impossible_history() -> None:
+    ticket = _ticket(("a", "1"), ("b", "1"), ("c", "1"))
+    for prior in ({"c": Decimal("2")}, {"z": Decimal("1")}, {"a": Decimal("-1")}):
+        with pytest.raises(SlippageError, match="cannot have allocated"):
+            allocate_venue_fill(_vfill("1"), ticket, already_filled=prior)
+    fills = allocate_venue_fill(_vfill("1"), ticket, already_filled={"c": Decimal("1")})
+    assert [(f.order_id, f.quantity) for f in fills] == [("a", Decimal("1"))]
+
+
+def test_allocation_matches_the_mirror_fold_where_the_cumulative_split_would_not() -> None:
+    # Weights 2,1,2 filled 2 then 1 more: the fold books a:2 b:1 c:0 (no take-back).
+    ticket = _ticket(("a", "2"), ("b", "1"), ("c", "2"))
+    first = allocate_venue_fill(_vfill("2", fid="p1"), ticket)
+    assert [(f.order_id, f.quantity) for f in first] == [("a", Decimal("1")), ("b", Decimal("1"))]
+    second = allocate_venue_fill(_vfill("1", fid="p2"), ticket, already_filled={"a": Decimal("1"), "b": Decimal("1")})
+    assert [(f.order_id, f.quantity) for f in second] == [("a", Decimal("1"))]
 
 
 def test_allocated_venue_fills_feed_the_report() -> None:
@@ -221,3 +233,10 @@ def test_allocated_venue_fills_feed_the_report() -> None:
     sim = [_fill("csp", Side.SELL, "1", "2.10"), _fill("sp", Side.SELL, "3", "2.10")]
     report = _report(sim, list(venue))
     assert [p.slippage_points for p in report.pairs] == [Decimal("0.05"), Decimal("0.05")]
+
+
+def test_the_increment_splits_over_the_unfilled_remainder_not_the_whole_ticket() -> None:
+    # a:1 b:2 c:3, b and c each had 1: lacking 1,1,2 of 4 left; a fill of 2 gives a:1 c:1.
+    ticket = _ticket(("a", "1"), ("b", "2"), ("c", "3"))
+    fills = allocate_venue_fill(_vfill("2"), ticket, already_filled={"b": Decimal("1"), "c": Decimal("1")})
+    assert [(f.order_id, f.quantity) for f in fills] == [("a", Decimal("1")), ("c", Decimal("1"))]

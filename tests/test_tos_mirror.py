@@ -43,6 +43,7 @@ from trade_engine.tos_paper.broker import (
 from trade_engine.tos_paper.reconcile import confirm_ticket, ticket_contracts
 from trade_engine.tos_paper.session import (
     MirrorSessionError,
+    cancel_ticket,
     collect_only,
     mirror_of,
     pending_orders,
@@ -87,6 +88,7 @@ class Venue:
         self.fill_rows_override: list[dict] | None = None
         self.fill_read_raises: Exception | None = None
         self.hide: set[str] = set()  # Order IDs missing from the fill read-back
+        self.prove_ids = True
 
     def connect(self) -> dict[str, str]:
         return {"number": PM_A, "type": "margin"}
@@ -96,6 +98,8 @@ class Venue:
         oid = str(self.next_id)
         self.next_id += 1
         self.orders[oid] = {"ticket": ticket, "filled": 0, "avg": None, "status": "WORKING"}
+        if not self.prove_ids:
+            return {"status": "SENT"}  # sent, but the driver matched no Order Book row
         return {"status": "SENT", "order_id": oid, "book_status": "WORKING"}
 
     def cancel_order(self, order_id: str) -> dict:
@@ -877,3 +881,158 @@ def test_a_closed_ticket_is_not_closed_again_by_a_later_row_state(ledger) -> Non
     collect_only(ledger, _broker(venue, clock=MORNING)[0], clock=MORNING)
     venue.end("5400000001", "CANCELED")
     assert _broker(venue, clock=MORNING)[0].collect_fills(_mirror(ledger)).closes == ()
+
+
+# -- review fixes: open tickets screen, remainder-only cancels, unproven sends halt ----
+
+
+def _mirror_first(ledger, *orders, clock=MORNING):
+    _submit(ledger, *orders)
+    broker, venue = _broker(clock=clock)
+    report = run_mirror(ledger, broker, pending_orders(ledger, _binding(), date(2026, 9, 24), calendar=Calendar()),
+                        clock=clock)
+    return broker, venue, report
+
+
+def _next_batch(ledger, venue, *orders, clock):
+    _submit(ledger, *orders, session=date(2026, 9, 25))
+    pending = pending_orders(ledger, _binding(), date(2026, 9, 25), calendar=Calendar())
+    return run_mirror(ledger, _broker(venue, clock=clock)[0], pending, clock=clock)
+
+
+LATER = Clock(MORNING.now + timedelta(hours=2))
+
+
+def test_a_new_order_opposing_a_resting_ticket_of_another_account_is_refused(ledger) -> None:
+    _, venue, _ = _mirror_first(ledger, _order("csp-1"))  # SELL 1 P200 rests unfilled
+    report = _next_batch(ledger, venue, _order("sp-buy", "OPT_PUT_SPREAD", Side.BUY, created=T + timedelta(days=1)),
+                         clock=LATER)
+    assert [r.strategy_order_id for r in report.refused] == ["sp-buy"] and "opposite side of OPT_CSP" in report.refused[0].reason
+    assert report.queued == () and len(venue.placed) == 1 and not report.halted
+
+
+def test_a_new_order_on_the_same_side_as_a_resting_ticket_is_mirrored_and_expected_once(ledger) -> None:
+    _, venue, _ = _mirror_first(ledger, _order("csp-1"))
+    report = _next_batch(ledger, venue, _order("sp-sell", "OPT_PUT_SPREAD", Side.SELL, created=T + timedelta(days=1)),
+                         clock=LATER)
+    assert report.refused == () and len(report.queued) == 1
+    assert report.drain_reconcile.reconciled and not report.halted  # the resting ticket is not counted twice
+    assert _mirror(ledger).expected() == {P200: Decimal(-2)}
+
+
+def test_a_filled_part_of_a_ticket_screens_through_the_book_and_the_rest_as_resting(ledger) -> None:
+    _, venue, _ = _mirror_first(ledger, _order("csp-1", qty="3"))
+    venue.fill("5400000001", 1, "2.00")
+    assert _mirror(ledger).exposure() == {("OPT_CSP", P200): Decimal(-3)}
+    collect_only(ledger, _broker(venue, clock=MORNING)[0], clock=MORNING)
+    assert _mirror(ledger).exposure() == {("OPT_CSP", P200): Decimal(-3)}  # 1 booked + 2 resting
+    assert dict(_mirror(ledger).book) == {("OPT_CSP", P200): Decimal(-1)}
+
+
+def test_a_closed_ticket_no_longer_screens(ledger) -> None:
+    _, venue, _ = _mirror_first(ledger, _order("csp-1"))
+    venue.end("5400000001", "EXPIRED")
+    collect_only(ledger, _broker(venue, clock=MORNING)[0], clock=MORNING)
+    assert _mirror(ledger).exposure() == {}
+    report = _next_batch(ledger, venue, _order("sp-buy", "OPT_PUT_SPREAD", Side.BUY, created=T + timedelta(days=1)),
+                         clock=LATER)
+    assert report.refused == () and len(report.queued) == 1 and report.drain_reconcile.reconciled
+
+
+def test_cancelling_a_restored_partly_filled_ticket_takes_out_only_the_remainder(ledger) -> None:
+    _, venue, _ = _mirror_first(ledger, _order("csp-1", qty="3"))
+    venue.fill("5400000001", 1, "2.00")
+    collect_only(ledger, _broker(venue, clock=MORNING)[0], clock=MORNING)
+    (key,) = _mirror(ledger).tickets
+    fresh, _ = _broker(venue, clock=LATER)
+    fresh.restore(_mirror(ledger))
+    assert fresh.cancel(key).status == "ACCEPTED"
+    check = fresh.reconcile_now()
+    assert check.reconciled, check  # expected -1 (the booked fill), the venue holds -1
+
+
+def test_cancel_ticket_records_the_cancel_so_it_survives_a_restart(ledger) -> None:
+    _, venue, _ = _mirror_first(ledger, _order("csp-1", qty="3"))
+    venue.fill("5400000001", 1, "2.00")
+    collect_only(ledger, _broker(venue, clock=MORNING)[0], clock=MORNING)
+    (key,) = _mirror(ledger).tickets
+    ack = cancel_ticket(ledger, _broker(venue, clock=LATER)[0], key, clock=LATER)
+    assert ack.status == "ACCEPTED" and venue.orders["5400000001"]["status"] == "CANCELED"
+    ticket = _mirror(ledger).tickets[key]
+    assert ticket.closed and ticket.book_status is OrderState.CANCELLED and ticket.venue_order_id == "5400000001"
+    assert _mirror(ledger).expected() == {P200: Decimal(-1)}
+    del venue.orders["5400000001"]  # the next day the CANCELED row is gone
+    tomorrow = Clock(LATER.now + timedelta(days=1))
+    report = collect_only(ledger, _broker(venue, clock=tomorrow)[0], clock=tomorrow)
+    assert report.reconcile.reconciled and not report.halted
+    count = ledger.count()
+    again = cancel_ticket(ledger, _broker(venue, clock=tomorrow)[0], key, clock=tomorrow)
+    assert again.status == "ACCEPTED" and again.message == "already cancelled" and ledger.count() == count  # idempotent
+
+
+def test_a_cancel_the_venue_did_not_confirm_is_not_recorded(ledger) -> None:
+    _, venue, _ = _mirror_first(ledger, _order("csp-1"))
+    (key,) = _mirror(ledger).tickets
+    venue.cancel_order = lambda order_id: {"status": "UNKNOWN", "order_id": order_id, "note": "menu missing"}
+    count = ledger.count()
+    ack = cancel_ticket(ledger, _broker(venue, clock=LATER)[0], key, clock=LATER)
+    assert ack.status == "PENDING" and ledger.count() == count and not _mirror(ledger).tickets[key].closed
+    assert cancel_ticket(ledger, _broker(venue, clock=LATER)[0], "tos:unknown", clock=LATER).status == "REJECTED"
+    assert ledger.count() == count
+
+
+def test_a_send_that_proved_no_order_id_halts_the_venue(ledger) -> None:
+    _submit(ledger, _order("csp-1"))
+    venue = Venue()
+    venue.prove_ids = False
+    broker, _ = _broker(venue, clock=MORNING)
+    report = run_mirror(ledger, broker, pending_orders(ledger, _binding(), date(2026, 9, 24), calendar=Calendar()),
+                        clock=MORNING)
+    assert [a.status for a in report.acks] == ["ACCEPTED"] and report.acks[0].venue_order_id is None
+    assert report.halted and broker.halted
+    assert PM_A in halted_venues({a: ledger.state(a) for a in ledger.accounts()})
+    notes = [e.payload.note for e in ledger.events_of_kind(EventKind.VENUE_RECONCILE) if not e.payload.reconciled]
+    assert any("no proven venue Order ID" in n for n in notes)
+
+
+def test_a_crash_between_the_drain_and_the_ack_append_halts_the_next_session(ledger, monkeypatch) -> None:
+    _submit(ledger, _order("csp-1"))
+    broker, venue = _broker(clock=MORNING)
+    real = ledger.extend
+
+    def crash_on_acks(events):
+        events = list(events)
+        if any(e.kind is EventKind.MIRROR_ACK for e in events):
+            raise SystemError("process killed")
+        return real(events)
+
+    monkeypatch.setattr(ledger, "extend", crash_on_acks)
+    with pytest.raises(SystemError):
+        run_mirror(ledger, broker, pending_orders(ledger, _binding(), date(2026, 9, 24), calendar=Calendar()),
+                   clock=MORNING)
+    monkeypatch.setattr(ledger, "extend", real)
+    venue.fill("5400000001", 1, "2.00")  # the venue fills it; the mirror could never see the fill
+    report = collect_only(ledger, _broker(venue, clock=LATER)[0], clock=LATER)
+    assert report.halted and len(venue.placed) == 1
+    assert PM_A in halted_venues({a: ledger.state(a) for a in ledger.accounts()})
+
+
+def test_proven_sends_do_not_halt(ledger) -> None:
+    _, venue, report = _mirror_first(ledger, _order("csp-1"))
+    assert not report.halted and report.acks[0].venue_order_id == "5400000001"
+    later = collect_only(ledger, _broker(venue, clock=LATER)[0], clock=LATER)
+    assert not later.halted and later.reconcile.reconciled
+
+
+def test_after_restore_the_expectation_is_the_folds_whatever_holdings_screen(ledger) -> None:
+    _, venue, _ = _mirror_first(ledger, _order("csp-1"))  # SELL 1 P200 rests at the venue
+    fresh, _ = _broker(venue, clock=LATER)
+    fresh.restore(_mirror(ledger))
+    fresh.mirror_batch([_order("csp-2", created=T + timedelta(days=1))], holdings={})
+    fresh.drain()  # a screen told nothing still expects the resting ticket plus the new one
+    check = fresh.reconcile_now()
+    assert check.reconciled, check
+    legacy, _ = _broker(venue, clock=LATER)  # never restored: holdings are the expectation
+    legacy.mirror_batch([_order("csp-3", created=T + timedelta(days=1))], holdings={})
+    legacy.drain()
+    assert not legacy.reconcile_now().reconciled

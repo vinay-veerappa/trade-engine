@@ -430,3 +430,21 @@ def test_an_ack_without_a_book_status_keeps_the_last_one_read() -> None:
     mirror = _fold(_queued(), _ack(book=OrderState.ACCEPTED), _ack(status="PENDING", oid=None, book=None))
     assert mirror.tickets["tos:a"].book_status is OrderState.ACCEPTED
     assert mirror.tickets["tos:a"].venue_order_id == "5400000001"
+
+
+def test_exposure_is_the_book_plus_each_open_tickets_unfilled_part_per_account() -> None:
+    q = _queued(qty="3", allocations=(_alloc("a", "OPT_CSP", "2"), _alloc("b", "OPT_PUT_SPREAD", "1")))
+    assert _fold(q, _ack()).exposure() == {("OPT_CSP", P200): Decimal(-2), ("OPT_PUT_SPREAD", P200): Decimal(-1)}
+    partly = _fold(q, _ack(), _fill(filled="1"))  # a gets the first contract
+    assert partly.exposure() == {("OPT_CSP", P200): Decimal(-2), ("OPT_PUT_SPREAD", P200): Decimal(-1)}
+    assert dict(partly.book) == {("OPT_CSP", P200): Decimal(-1)}
+    closed = _fold(q, _ack(), _fill(filled="1"), _ack(book=OrderState.CANCELLED))
+    assert closed.exposure() == {("OPT_CSP", P200): Decimal(-1)}
+
+
+def test_exposure_of_a_vertical_is_per_leg_and_drops_zeros() -> None:
+    q = _queued(instrument=SPREAD, qty="1", allocations=(_alloc("sp", "OPT_PUT_SPREAD", "1"),))
+    assert _fold(q, _ack()).exposure() == {("OPT_PUT_SPREAD", P200): Decimal(-1), ("OPT_PUT_SPREAD", P190): Decimal(1)}
+    buy_back = _queued("tos:b", side=Side.BUY, allocations=(_alloc("so-2", "OPT_PUT_SPREAD", "1"),))
+    both = _fold(q, buy_back, _ack(), _ack("tos:b", oid="5400000002"))
+    assert both.exposure() == {("OPT_PUT_SPREAD", P190): Decimal(1)}
