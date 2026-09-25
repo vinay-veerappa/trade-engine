@@ -62,3 +62,6 @@ Thumbs.db
 .ci-local-logs/
 *.log
 .worktrees/
+
+# Agent worktrees live inside the repo; never commit them.
+.claude/worktrees/
