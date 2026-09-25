@@ -332,6 +332,28 @@ Three guards are structural:
   lifecycle pass or dividend source, or when an entry has no risk engine.
 - Equity accounts finish at the close, before any of this.
 
+**Entry rules** (`risk_options.OptionRiskEngine`, rules doc §6.1–§6.2). Every rule is
+recorded in the verdict, passed or not. Nothing is resized: the strategy sizes each
+structure, and this layer refuses what would break an account-wide cap. Each figure is
+measured on the book as it would stand once the entry filled. At a snapshot, the book is
+also revalued at that snapshot's quotes. A rule configured as `None` doesn't apply to
+the account, and the verdict says so.
+
+| Rule | Refuses when |
+|---|---|
+| `margin` | the whole book's Reg-T maintenance (O3) passes `max_margin_frac` of equity (§6.1: 50%) |
+| `name_collateral` | the cash securing one underlying passes `max_name_collateral_frac` (CSP: 10%) |
+| `put_notional` | naked put strikes pass the regime's fraction (100% / 50% / 0 = spreads only) |
+| `max_loss` | the structure's worst case passes `max_loss_per_structure_frac` (spread: 2%), or has no bound |
+| `debit`, `total_debit` | a debit passes `max_debit_per_structure_frac` (PMCC: 5%), or all of them `max_total_debit_frac` (30%) |
+| `share_notional` | shares bought pass `max_share_notional_frac` (buy-write: 20%) |
+| `regime` | the regime is unknown or not in `allowed_regimes` |
+| `earnings` | with `no_earnings_before_expiry`, earnings fall on or before expiry, or the date is unknown |
+| `duplicate_entry`, `covered_calls` | the C4 and C3 guards, recorded here so a refusal doesn't fail the run |
+| `duplicate_protection`, `persistent_kill_switch` | as for equity entries |
+
+An input that can't be measured refuses: an unknown regime, earnings date, price or mark.
+
 ## Development
 
 Requires Python >= 3.13.
