@@ -18,6 +18,8 @@ Raw row shapes (the host transport's contract):
 - working order: ``{"symbol": <OCC>, "side": "BUY"|"SELL", "quantity": "2", "filled": "0",
   "order_type": "LMT"|"MKT", "limit_price": "1.25" | None, "status": "WORKING" | ...}``
 - position: ``{"symbol": <OCC>, "quantity": "-1", "avg_price": "2.10"}``
+- order fill (``OrderFillReader``): ``{"order_id": "5403527317", "filled": "1",
+  "avg_price": "1.05" | None, "status": "FILLED" | "WORKING" | "EXPIRED" | ...}``
 """
 
 from __future__ import annotations
@@ -189,6 +191,43 @@ def normalize_working_order(raw: Mapping[str, object]) -> WorkingOrder:
         limit_price=limit,
         state=_ROW_STATES.get(status, OrderState.PENDING_UNKNOWN),
     )
+
+
+def book_state(raw_status: object) -> OrderState:
+    """An Order Book status string → OrderState; anything unrecognised is PENDING_UNKNOWN."""
+    return _ROW_STATES.get(str(raw_status or "").strip().upper(), OrderState.PENDING_UNKNOWN)
+
+
+@dataclass(frozen=True)
+class OrderFill:
+    """One Order Book order's cumulative fill, read back by its venue Order ID."""
+
+    order_id: str
+    filled: Decimal
+    avg_price: Decimal | None  # None only when nothing filled
+    state: OrderState
+
+
+def normalize_order_fill(raw: Mapping[str, object]) -> OrderFill:
+    """One ``read_order_fills`` row → OrderFill. Anything ambiguous raises (I5).
+
+    ``filled`` is a non-negative whole number; a positive fill needs a positive average
+    price; a FILLED row with nothing filled is a contradiction.
+    """
+    oid = raw.get("order_id")
+    if not isinstance(oid, str) or not oid.isdigit():
+        raise NormalizeError(f"order fill row names no all-digit order_id: {oid!r}")
+    filled = _decimal(raw.get("filled"), "filled")
+    if filled < 0 or filled != filled.to_integral_value():
+        raise NormalizeError(f"order {oid} filled {filled}: not a whole non-negative quantity")
+    price_raw = raw.get("avg_price")
+    price = None if price_raw in (None, "") else _decimal(price_raw, "avg_price")
+    if filled > 0 and (price is None or price <= 0):
+        raise NormalizeError(f"order {oid} filled {filled} with no positive average price {price_raw!r}")
+    state = book_state(raw.get("status"))
+    if state is OrderState.FILLED and filled == 0:
+        raise NormalizeError(f"order {oid} reads FILLED with nothing filled")
+    return OrderFill(order_id=oid, filled=filled, avg_price=price if filled > 0 else None, state=state)
 
 
 def normalize_position(raw: Mapping[str, object], as_of: datetime) -> VenuePosition:

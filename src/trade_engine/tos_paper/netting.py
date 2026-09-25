@@ -6,20 +6,24 @@ rules, in order, for each strategy order of a batch (first-in = list order):
 
 1. The order's virtual account must be one this venue account mirrors — a CSP order can
    never reach the IRA (§4.7).
-2. Only single option contracts are mirrored: equities are not (§4.7), and a combo is
-   a multi-leg ticket the adapter does not declare (UnsupportedCapability).
-3. MARKET and LIMIT only, DAY or GTC only, whole-contract quantities only; anything
-   else is refused, never approximated (I5).
-4. Conflicts are across virtual accounts on the same contract: once a first-in order
-   sets the contract's side for the batch, a later order on the opposite side is
-   refused. An order that would leave one virtual account long while another is short
-   the same contract (against the mirror book's current holdings) is refused too.
+2. Single option contracts are mirrored, and 2-leg verticals (same underlying, expiry,
+   right and multiplier, two strikes, one leg bought and one sold, equal ratios).
+   Equities are not (§4.7); any other combo is refused (UnsupportedCapability).
+3. MARKET and LIMIT only (a vertical: LIMIT only, one net price), DAY or GTC only,
+   whole-contract quantities only; anything else is refused, never approximated (I5).
+4. Conflicts are across virtual accounts on the same contract, leg by leg for a
+   vertical: once a first-in order sets the contract's side for the batch, a later
+   order on the opposite side is refused. An order that would leave one virtual account
+   long while another is short the same contract (against the mirror book's current
+   holdings) is refused too.
 
 Refusals happen **at the venue only** — the sim book of record still takes every order.
-Surviving orders are all on one side per contract, so netting is a plain sum: one
-ticket per (contract, order type, TIF, limit). Differing limits are separate tickets,
-never averaged. Every input order ends in exactly one place: a ticket allocation or a
-refusal with its reason (I11).
+Surviving single-contract orders are all on one side per contract, so netting is a plain
+sum: one ticket per (contract, order type, TIF, limit). Differing limits are separate
+tickets, never averaged. A vertical is mirrored 1:1 — its own combo ticket carrying its
+net limit (a SELL collects a credit, a BUY pays a debit), never netted with anything.
+Every input order ends in exactly one place: a ticket allocation or a refusal with its
+reason (I11).
 """
 
 from __future__ import annotations
@@ -83,6 +87,36 @@ def _signed(side: Side, quantity: Decimal) -> Decimal:
     return quantity if side is Side.BUY else -quantity
 
 
+def vertical_reason(combo: Combo) -> str | None:
+    """Why ``combo`` is not a mirrorable 2-leg 1:1 vertical, or None when it is."""
+    legs = combo.legs
+    if len(legs) != 2 or not all(isinstance(leg.contract, OptionContract) for leg in legs):
+        return f"{combo.symbol} is not a 2-leg option combo; only verticals are mirrored"
+    first, second = legs[0].contract, legs[1].contract
+    if first.underlying != second.underlying:
+        return "legs on two underlyings are not a vertical"
+    if first.expiry != second.expiry:
+        return "legs on two expiries (a calendar or diagonal) are not a vertical"
+    if first.right != second.right:
+        return "a call leg and a put leg are not a vertical"
+    if first.multiplier != second.multiplier:
+        return "legs with two multipliers are not a vertical (I6)"
+    if first.strike == second.strike:
+        return "two legs on one strike are not a vertical"
+    if legs[0].side is legs[1].side:
+        return "both legs on one side are not a vertical"
+    if legs[0].ratio != legs[1].ratio:
+        return f"a {legs[0].ratio}:{legs[1].ratio} ratio spread is not a 1:1 vertical"
+    return None
+
+
+def _legs(order: Order) -> tuple[tuple[OptionContract, Side, Decimal], ...]:
+    """(contract, side, contracts) of every contract an order trades: legs as written."""
+    if isinstance(order.instrument, Combo):
+        return tuple((leg.contract, leg.side, order.quantity * leg.ratio) for leg in order.instrument.legs)
+    return ((order.instrument, order.side, order.quantity),)
+
+
 def _screen(order: Order, mirrored: frozenset[str]) -> str | None:
     """Reason this single order cannot go to the venue at all, or None."""
     if order.account_id not in mirrored:
@@ -93,8 +127,12 @@ def _screen(order: Order, mirrored: frozenset[str]) -> str | None:
     if isinstance(order.instrument, Equity):
         return f"{order.instrument.symbol}: equities are not mirrored (§4.7)"
     if isinstance(order.instrument, Combo):
-        return "UnsupportedCapability: multi-leg combo tickets are not supported on this venue"
-    if not isinstance(order.instrument, OptionContract):
+        reason = vertical_reason(order.instrument)
+        if reason is not None:
+            return f"UnsupportedCapability: multi-leg combo: {reason}"
+        if order.order_type is not OrderType.LIMIT:
+            return "UnsupportedCapability: a vertical is mirrored with one net LIMIT price only"
+    elif not isinstance(order.instrument, OptionContract):
         return f"UnsupportedCapability: instrument {order.instrument!r} is not a mirrored option"
     if order.order_type not in MIRRORED_ORDER_TYPES:
         return f"UnsupportedCapability: order type {order.order_type.value} (MARKET/LIMIT only)"
@@ -135,6 +173,7 @@ def net_strategy_orders(
     accepted: dict[Instrument, list[Order]] = {}
     batch_side: dict[Instrument, tuple[Side, str]] = {}
     books: dict[Instrument, dict[str, Decimal]] = {}
+    verticals: list[Order] = []  # one combo ticket each, never netted
 
     for order in orders:  # list order = first-in
         if order.order_id in seen_ids:
@@ -145,40 +184,43 @@ def net_strategy_orders(
         if reason is not None:
             refused.append((order.order_id, reason))
             continue
-        instrument = order.instrument
-        first = batch_side.get(instrument)
-        if first is not None and first[0] is not order.side:
-            refused.append(
-                (
-                    order.order_id,
-                    f"conflict: {order.side.value} {instrument.symbol} opposes first-in "
-                    f"{first[0].value} {first[1]} on the same contract; refused at the venue only",
+        conflict: str | None = None
+        trials: dict[Instrument, dict[str, Decimal]] = {}
+        for contract, side, contracts in _legs(order):  # a vertical is screened leg by leg
+            first = batch_side.get(contract)
+            if first is not None and first[0] is not side:
+                conflict = (
+                    f"conflict: {side.value} {contract.symbol} opposes first-in "
+                    f"{first[0].value} {first[1]} on the same contract; refused at the venue only"
                 )
-            )
-            continue
-        book = books.get(instrument)
-        if book is None:
-            book = {acct: qty for (acct, inst), qty in holdings.items() if inst == instrument}
-            books[instrument] = book
-        trial = dict(book)
-        trial[order.account_id] = trial.get(order.account_id, ZERO) + _signed(order.side, order.quantity)
-        if _mixed_signs(trial):
-            others = sorted(
-                acct for acct, qty in trial.items()
-                if acct != order.account_id and qty != 0
-            )
-            refused.append(
-                (
-                    order.order_id,
-                    f"conflict: {order.side.value} {instrument.symbol} for {order.account_id} would "
+                break
+            book = books.get(contract)
+            if book is None:
+                book = {acct: qty for (acct, inst), qty in holdings.items() if inst == contract}
+            trial = dict(book)
+            trial[order.account_id] = trial.get(order.account_id, ZERO) + _signed(side, contracts)
+            if _mixed_signs(trial):
+                others = sorted(
+                    acct for acct, qty in trial.items()
+                    if acct != order.account_id and qty != 0
+                )
+                conflict = (
+                    f"conflict: {side.value} {contract.symbol} for {order.account_id} would "
                     f"hold the opposite side of {', '.join(others)} in one venue account; "
-                    "refused at the venue only",
+                    "refused at the venue only"
                 )
-            )
+                break
+            trials[contract] = trial
+        if conflict is not None:
+            refused.append((order.order_id, conflict))
             continue
-        books[instrument] = trial
-        batch_side.setdefault(instrument, (order.side, order.order_id))
-        accepted.setdefault(instrument, []).append(order)
+        for contract, side, _contracts in _legs(order):
+            books[contract] = trials[contract]
+            batch_side.setdefault(contract, (side, order.order_id))
+        if isinstance(order.instrument, Combo):
+            verticals.append(order)
+        else:
+            accepted.setdefault(order.instrument, []).append(order)
 
     venue_orders: list[VenueOrder] = []
     for instrument, legs in accepted.items():
@@ -192,6 +234,10 @@ def net_strategy_orders(
             except (ValueError, ArithmeticError) as exc:
                 for leg in group:
                     refused.append((leg.order_id, f"ticket for {instrument.symbol} refused: {exc}"))
+    for order in verticals:
+        venue_orders.append(
+            _ticket(venue_account, order.instrument, order.order_type, order.tif, order.limit_price, [order], at)
+        )
 
     _account_for_everything(orders, venue_orders, refused)
     return NettedBatch(venue_orders=tuple(venue_orders), refused=tuple(refused))
