@@ -529,3 +529,58 @@ def test_a_strategy_that_never_stops_acting_refuses(rig) -> None:
     rig.quotes[S1] = {OptionContract("COHR", EXPIRY, D(200 + n), OptionRight.PUT): ("1.00", "1.10") for n in range(1, 6)}
     with pytest.raises(EodRunnerError, match="still acting"):
         rig.run(S1)
+
+
+# -- the close phase: a combo entry's risk check sees the session's snapshots (O3) ----
+
+
+def test_a_combo_entered_at_the_close_is_judged_with_the_sessions_snapshots(rig) -> None:
+    from trade_engine.domain.instruments import Combo, ComboLeg
+
+    spread = OptionIntent(
+        intent_id="spread", account_id=ACCOUNT,
+        instrument=Combo((ComboLeg(P270, 1, Side.SELL), ComboLeg(P260, 1, Side.BUY))),
+        side=Side.SELL, quantity=D("1"), reason="test", command_id="spread",
+        order_type=OrderType.LIMIT, limit_price=D("3.00"), profit_target=None,
+    )
+    rig.strategy.entries[S1] = [spread]
+    rig.run(S1)
+    [(intent, context)] = rig.risk.seen
+    assert intent.intent_id == "spread" and context.phase == "close"
+    assert context.snapshots["COHR"].as_of == snap_time(S1)  # the quotes its margin is measured on
+
+
+# -- refusals stay the runner's own type ---------------------------------------------
+
+
+def test_a_venue_fill_for_an_unknown_order_refuses_as_the_runners_error(rig) -> None:
+    from trade_engine.interfaces.broker import VenueFill
+
+    class Ghostly(SnapshotVenue):
+        def fills(self, since):
+            ghost = VenueFill(
+                venue_fill_id="ghost:fill:1", venue_order_id="ghost", instrument=P270, quantity=D("1"),
+                price=D("1"), filled_at=snap_time(S1), side=Side.SELL, fee=D("0"),
+            )
+            return [*super().fills(since), ghost]
+
+    rig.venue = Ghostly(ACCOUNT, rig.clock)
+    with pytest.raises(EodRunnerError, match="references unknown order 'ghost'"):
+        rig.run(S1)
+
+
+def test_another_jobs_markers_are_not_this_jobs_history(rig) -> None:
+    """The 0DTE account carries the intraday service's markers; its first after-close run
+    must not be refused for a previous session this job never ran (I3)."""
+    from trade_engine.ledger import EodRun
+
+    rig.ledger.append(Event(
+        account=ACCOUNT, kind=EventKind.EOD_RUN, ts_utc=rig.clock.now_utc(),
+        command_id=f"intraday:intraday:{ACCOUNT}:{S1.isoformat()}",
+        payload=EodRun(session=S1, job="intraday:intraday", account_id=ACCOUNT, bars_processed=3, at_close=rig.clock.now_utc()),
+    ))
+    rig.run(S1)
+    assert rig.ledger.event_by_command(f"eod:eod:{ACCOUNT}:{S1.isoformat()}") is not None
+    # Its own history still gates: skipping a session it did run refuses.
+    with pytest.raises(EodRunnerError, match="no eod marker"):
+        rig.run(S3)

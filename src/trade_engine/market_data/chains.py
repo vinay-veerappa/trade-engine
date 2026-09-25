@@ -43,6 +43,11 @@ class ChainSnapshot:
     ``rate`` and ``dividend_yield`` are the annual continuous fractions the source quoted
     with the chain (None when it gave none; the model greeks then refuse). ``source``
     names where the snapshot came from, e.g. ``"schwab-hub"``.
+
+    ``underlying_as_of`` is when the source last quoted the underlying itself (Schwab's
+    ``underlying.quoteTime``), never after ``as_of``. None means the source did not say:
+    ``as_of`` is only when the answer arrived, so a caller that needs a live market
+    (the intraday service) refuses such a snapshot rather than assuming it (I5).
     """
 
     underlying: str
@@ -52,11 +57,20 @@ class ChainSnapshot:
     rate: Decimal | None
     dividend_yield: Decimal | None
     source: str
+    underlying_as_of: datetime | None = None
 
     def __post_init__(self) -> None:
         underlying = self.underlying.strip().upper()
         object.__setattr__(self, "underlying", underlying)
         object.__setattr__(self, "as_of", _aware(self.as_of, "Snapshot as_of"))
+        if self.underlying_as_of is not None:
+            quoted = _aware(self.underlying_as_of, "Snapshot underlying_as_of")
+            if quoted > self.as_of:
+                raise ValueError(
+                    f"{underlying} was quoted at {quoted.isoformat()}, after the snapshot's "
+                    f"{self.as_of.isoformat()} (I5: no look-ahead)"
+                )
+            object.__setattr__(self, "underlying_as_of", quoted)
         if not isinstance(self.underlying_price, Decimal) or not self.underlying_price.is_finite() or self.underlying_price <= 0:
             raise ValueError(f"Snapshot underlying price must be a positive Decimal, got {self.underlying_price!r} (I5)")
         if not self.source:
@@ -134,20 +148,20 @@ class ChainSnapshot:
     # -- codec -----------------------------------------------------------------
 
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                "schema_version": SCHEMA_VERSION,
-                "underlying": self.underlying,
-                "as_of": self.as_of.isoformat(),
-                "underlying_price": str(self.underlying_price),
-                "rate": None if self.rate is None else str(self.rate),
-                "dividend_yield": None if self.dividend_yield is None else str(self.dividend_yield),
-                "source": self.source,
-                "quotes": [_quote_to_dict(q) for q in self.quotes],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "underlying": self.underlying,
+            "as_of": self.as_of.isoformat(),
+            "underlying_price": str(self.underlying_price),
+            "rate": None if self.rate is None else str(self.rate),
+            "dividend_yield": None if self.dividend_yield is None else str(self.dividend_yield),
+            "source": self.source,
+            "quotes": [_quote_to_dict(q) for q in self.quotes],
+        }
+        if self.underlying_as_of is not None:
+            # Written only when known, so a snapshot without it keeps its old bytes.
+            body["underlying_as_of"] = self.underlying_as_of.isoformat()
+        return json.dumps(body, sort_keys=True, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, text: str) -> ChainSnapshot:
@@ -162,6 +176,9 @@ class ChainSnapshot:
             rate=None if raw["rate"] is None else Decimal(raw["rate"]),
             dividend_yield=None if raw["dividend_yield"] is None else Decimal(raw["dividend_yield"]),
             source=raw["source"],
+            underlying_as_of=(
+                None if raw.get("underlying_as_of") is None else datetime.fromisoformat(raw["underlying_as_of"])
+            ),
         )
 
 

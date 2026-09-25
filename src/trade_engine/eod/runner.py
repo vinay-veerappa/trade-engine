@@ -50,7 +50,7 @@ market data comes from injected providers (I5: no default source).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -60,27 +60,27 @@ from zoneinfo import ZoneInfo
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.domain.exits import ClosePosition, MoveStop, OpenBracket, ReducePosition
 from trade_engine.domain.instruments import Equity, Instrument, OptionContract
-from trade_engine.domain.option_orders import CloseHolding, CloseStructure, OptionIntent
 from trade_engine.domain.option_roots import SettleTime
 from trade_engine.domain.orders import OrderState, OrderType
-from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.risk import RiskVerdict
 from trade_engine.domain.signals import OrderIntent, Signal
 from trade_engine.interfaces.broker import (
     BrokerAdapter,
     VenueFill,
     VenueOrder,
-    VenueOrderAllocation,
     VenuePosition,
 )
 from trade_engine.interfaces.clock import Clock
-from trade_engine.eod.options import OptionContext
+from trade_engine.eod.options_routing import OptionRouter
 from trade_engine.interfaces.market_data import MarketData, StaleDataError
 from trade_engine.ledger import CashFlow, EodRun, Event, EventKind, Ledger, Mark
 from trade_engine.ledger.state import AccountState, fold_account
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
 from trade_engine.oms.options import OptionOrderManager, open_structures
+from trade_engine.oms.reconcile import ReconcileError
+from trade_engine.oms.restore import VENUE_WORKING as _VENUE_WORKING
+from trade_engine.oms.restore import RestoreError
 from trade_engine.risk import RiskContext, RiskEngine
 from trade_engine.sim import SimBroker, SnapshotVenue, underlying_of
 
@@ -88,23 +88,12 @@ MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
 _MARK_COMMAND = "eod:mark:{account}:{session}:{symbol}"
 _RUN_COMMAND = "eod:{job}:{account}:{session}"
-# How many times a strategy may act at one snapshot: a buy-write needs two.
-_SNAPSHOT_ROUNDS = 4
 _TERMINAL = frozenset(
     {
         OrderState.FILLED,
         OrderState.CANCELLED,
         OrderState.EXPIRED,
         OrderState.REJECTED,
-    }
-)
-# States in which the ledger says the venue holds the order.
-_VENUE_WORKING = frozenset(
-    {
-        OrderState.SUBMITTED,
-        OrderState.ACCEPTED,
-        OrderState.PARTIALLY_FILLED,
-        OrderState.PENDING_UNKNOWN,
     }
 )
 
@@ -235,6 +224,17 @@ class EodRunner:
         self._config = config.normalized
         self._managers: dict[str, OrderManager] = {}
         self._option_managers: dict[str, OptionOrderManager] = {}
+        self._option_routers: dict[str, OptionRouter] = {
+            account_id: OptionRouter(
+                ledger,
+                clock,
+                brokers=self._config.brokers,
+                strategies=self._config.strategies,
+                option_risk_engines=self._config.option_risk_engines,
+                journal_accounts=self._config.journal_accounts,
+            )
+            for account_id in self._config.brokers
+        }
 
     # -- entry -------------------------------------------------------------------
 
@@ -315,8 +315,14 @@ class EodRunner:
                 )
 
     def _account_has_history(self, account_id: str) -> bool:
+        """Whether this job has completed a session for the account before.
+
+        Only this job's own markers count: an account the intraday service also runs
+        carries that service's markers, and its first after-close run must not be
+        refused for lacking a previous session it never had (I3).
+        """
         for event in self._ledger.events(account=account_id):
-            if event.kind is EventKind.EOD_RUN:
+            if event.kind is EventKind.EOD_RUN and event.payload.job == self._config.job_name:
                 return True
         return False
 
@@ -476,90 +482,18 @@ class EodRunner:
     ) -> tuple[list[tuple[VenueOrder, OrderState]], list[VenueFill]]:
         """Working orders plus their brackets: a child's cap needs its parent's fills
         and its siblings' exits. NEW orders were never sent, so they stay out."""
-        wanted: set[str] = set()
-        for order in state.orders.values():
-            if order.state not in _VENUE_WORKING:
-                continue
-            if order.state is OrderState.PENDING_UNKNOWN:
-                raise EodRunnerError(
-                    f"Order '{order.order_id}' for '{account_id}' is PENDING_UNKNOWN; the "
-                    f"simulated venue's answer is gone, reconcile it before replay (I5)"
-                )
-            root = order.parent_order_id or order.order_id
-            wanted.add(root)
-            wanted.update(
-                candidate.order_id
-                for candidate in state.orders.values()
-                if candidate.parent_order_id == root and candidate.state is not OrderState.NEW
-            )
-        orders: list[tuple[VenueOrder, OrderState]] = []
-        for order_id in sorted(wanted):
-            order = state.orders[order_id]
-            submission = self._ledger.event_by_command(f"{order.command_id}:submit")
-            if submission is None:
-                raise EodRunnerError(
-                    f"Order '{order_id}' for '{account_id}' has no submission event; cannot "
-                    f"restore when it reached the venue (I5)"
-                )
-            orders.append(
-                (
-                    VenueOrder(
-                        venue_order_id=state.venue_order_ids.get(order_id, order_id),
-                        instrument=order.instrument,
-                        order_type=order.order_type,
-                        side=order.side,
-                        quantity=order.quantity,
-                        submitted_at=submission.ts_utc,
-                        tif=order.tif,
-                        limit_price=order.limit_price,
-                        stop_price=order.stop_price,
-                        trail_amount=order.trail_amount,
-                        allocations=(
-                            VenueOrderAllocation(order_id, order.account_id, order.quantity),
-                        ),
-                        parent_order_id=order.parent_order_id,
-                        oco_group=order.oco_group,
-                    ),
-                    order.state,
-                )
-            )
-        fills = [
-            VenueFill(
-                venue_fill_id=fill.venue_execution_id or fill.fill_id,
-                venue_order_id=state.venue_order_ids.get(fill.order_id, fill.order_id),
-                instrument=fill.instrument,
-                quantity=fill.quantity,
-                price=fill.price,
-                filled_at=fill.filled_at,
-                side=fill.side,
-                fee=fill.fee,
-                leg_id=fill.leg_id,
-            )
-            for fill in state.fills
-            if fill.order_id in wanted
-        ]
-        return orders, fills
+        from trade_engine.oms.restore import restorable
+
+        try:
+            return restorable(self._ledger, account_id, state)
+        except RestoreError as err:
+            raise EodRunnerError(str(err)) from err
 
     @staticmethod
     def _restorable_positions(state: AccountState) -> list[VenuePosition]:
-        positions = []
-        for instrument, position in state.positions.items():
-            if position.quantity == Decimal("0"):
-                continue
-            # SimBroker reads only the quantity; as_of dates it by its latest fill.
-            as_of = max(
-                (fill.filled_at for fill in state.fills if fill.instrument == instrument),
-                default=MIN_TIME,
-            )
-            positions.append(
-                VenuePosition(
-                    instrument=instrument,
-                    quantity=position.quantity,
-                    avg_price=position.avg_cost,
-                    as_of=as_of,
-                )
-            )
-        return positions
+        from trade_engine.oms.restore import restorable_positions
+
+        return restorable_positions(state)
 
     def _replay_instruments(self, state: AccountState) -> tuple[Instrument, ...]:
         """Instruments the session can change: open positions and working orders.
@@ -632,62 +566,25 @@ class EodRunner:
         manager: OrderManager,
         bar_timestamp: datetime | None,
     ) -> int:
-        """Ingest everything the venue changed at this bar, immediately.
+        """Ingest everything the venue changed at this bar, immediately (E4's contract).
 
-        Reconciliation is per bar, never per session: bars simulated before an exit
-        arrived are gone, and SimBroker refuses a late protective stop (the OMS then
-        raises). Nothing here swallows that error; a raise fails the whole EOD run
-        loudly, which is the contract the E4 guard was built for.
+        The rule lives in ``oms.reconcile`` so the intraday service ingests through the
+        same code; a raise fails the whole run loudly, which is what the guard is for.
         """
-        since = MIN_TIME if bar_timestamp is None else bar_timestamp
-        recorded = 0
-        for venue_fill in broker.fills(since):
-            recorded += self._record_venue_fill(account_id, broker, manager, venue_fill)
-        state = self._ledger.state(account_id)
-        for order_state in broker.orders(since):
-            order_id = order_state.venue_order_id
-            if order_id not in state.orders:
-                continue
-            ledger_state = state.orders[order_id].state
-            if ledger_state is OrderState.NEW or ledger_state in _TERMINAL:
-                # NEW children were never sent; terminal states were already folded.
-                continue
-            manager.reconcile_order(order_id)
-        return recorded
+        from trade_engine.oms.reconcile import MIN_TIME, reconcile_after
 
-    def _record_venue_fill(
-        self,
-        account_id: str,
-        broker: BrokerAdapter,
-        manager: OrderManager,
-        venue_fill: VenueFill,
-    ) -> int:
-        if self._ledger.has_command(f"fill:{venue_fill.venue_fill_id}"):
-            return 0
-        state = self._ledger.state(account_id)
-        if venue_fill.venue_order_id not in state.orders:
-            raise EodRunnerError(
-                f"Venue fill '{venue_fill.venue_fill_id}' references unknown order "
-                f"'{venue_fill.venue_order_id}' for '{account_id}' (I5)"
+        try:
+            return reconcile_after(
+                self._ledger,
+                self._clock,
+                broker,
+                manager,
+                account_id,
+                MIN_TIME if bar_timestamp is None else bar_timestamp,
+                journal_account=self._config.journal_accounts.get(account_id),
             )
-        fill = Fill(
-            fill_id=venue_fill.venue_fill_id,
-            order_id=venue_fill.venue_order_id,
-            account_id=account_id,
-            instrument=venue_fill.instrument,
-            quantity=venue_fill.quantity,
-            price=venue_fill.price,
-            venue_env=broker.env,
-            filled_at=venue_fill.filled_at,
-            side=venue_fill.side,
-            fee=venue_fill.fee,
-            venue_order_id=venue_fill.venue_order_id,
-            venue_execution_id=venue_fill.venue_fill_id,
-            leg_id=venue_fill.leg_id,
-        )
-        manager.record_fill(fill)
-        self._enqueue_journal_outbox(account_id, fill)
-        return 1
+        except ReconcileError as err:
+            raise EodRunnerError(str(err)) from err
 
     def _manager_for(self, account_id: str, broker: BrokerAdapter) -> OrderManager:
         if self._is_options(account_id):
@@ -697,51 +594,6 @@ class EodRunner:
             manager = OrderManager(broker, self._clock, self._ledger)
             self._managers[account_id] = manager
         return manager
-
-    def _enqueue_journal_outbox(self, account_id: str, fill: Fill) -> None:
-        journal_account = self._config.journal_accounts.get(account_id)
-        if journal_account is None:
-            return
-        state = self._ledger.state(account_id)
-        order = state.orders[fill.order_id]
-        entry = state.orders[order.parent_order_id] if order.parent_order_id else order
-        children = [
-            candidate
-            for candidate in state.orders.values()
-            if candidate.parent_order_id == entry.order_id
-        ]
-        stop = next((child for child in children if child.order_type is OrderType.STOP), None)
-        target = next((child for child in children if child.order_type is OrderType.LIMIT), None)
-        event = self._ledger.event_by_command(f"fill:{fill.fill_id}")
-        if event is None or event.seq is None:
-            raise EodRunnerError(
-                f"Fill '{fill.fill_id}' was recorded but its ledger event is missing (I1)"
-            )
-        self._ledger.enqueue_outbox(
-            event.seq,
-            f"journal:{journal_account}",
-            {
-                "symbol": fill.instrument.symbol,
-                "side": fill.side.value,
-                "quantity": str(fill.quantity),
-                "price": str(fill.price),
-                "fee": str(fill.fee),
-                "executed_at": fill.filled_at.isoformat(),
-                "account_id": journal_account,
-                "asset_class": "option" if isinstance(fill.instrument, OptionContract) else "equity",
-                "multiplier": fill.instrument.multiplier,
-                "stop_loss": str(stop.stop_price) if stop is not None else None,
-                # A combo's target is a net price, not this leg's.
-                "profit_target": (
-                    str(target.limit_price)
-                    if target is not None and target.instrument == fill.instrument
-                    else None
-                ),
-                "strategy_tag": entry.command_id.split(":")[0],
-                "notes": f"trade-engine {fill.order_id}",
-            },
-            created_at=self._clock.now_utc(),
-        )
 
     def _mark_positions(
         self,
@@ -1102,51 +954,16 @@ class EodRunner:
     def _options_at_snapshot(
         self, account_id: str, session: date, snapshot: ChainSnapshot, tally: "_Tally"
     ) -> None:
-        """Match the account's working orders, then let the strategy act on these quotes.
-
-        What the strategy returns trades on the same snapshot, and the strategy is asked
-        again once it has: a buy-write buys the shares in one round and writes the call on
-        them in the next, both on the quotes it was decided on. It stops when a round
-        brings nothing new; a strategy still acting after ``_SNAPSHOT_ROUNDS`` refuses.
-        """
-        manager = self._option_manager(account_id)
-        self._match_snapshot(account_id, manager, snapshot, session)
-        tally.snapshots_processed += 1
-        tally.snapshots[snapshot.underlying] = snapshot
-        manage = getattr(self._config.strategies.get(account_id), "manage_options", None)
-        if not callable(manage):
-            return
-        for _ in range(_SNAPSHOT_ROUNDS):
-            actions = list(manage(self._option_context(account_id, session, tally, snapshot)))
-            if all(self._taken(action) for action in actions):
-                return  # nothing new: every action is one already taken (I3)
-            self._apply_option_actions(account_id, session, actions, tally, snapshot)
-            # Decided on these quotes, so traded on them.
-            self._match_snapshot(account_id, manager, snapshot, session)
-        raise EodRunnerError(
-            f"The strategy for '{account_id}' was still acting at the {snapshot.underlying} "
-            f"snapshot after {_SNAPSHOT_ROUNDS} rounds; refusing to loop on it"
+        """Match the account's working orders, then let the strategy act on these quotes."""
+        tallied = self._router(account_id).manage_at_snapshot(
+            account_id, session, snapshot, tally.snapshots, self._run_command(account_id, session)
         )
+        tally.orders_submitted += tallied.orders_submitted
+        tally.exit_actions += tallied.exit_actions
+        tally.snapshots_processed += tallied.snapshots_processed
 
-    def _taken(self, action: Any) -> bool:
-        """Whether an action was already routed: ordered, or (an entry) judged by risk."""
-        command_id = getattr(action, "command_id", None)
-        if not command_id:
-            return False
-        if self._ledger.has_command(command_id):
-            return True
-        return isinstance(action, OptionIntent) and self._ledger.has_command(f"risk:{command_id}")
-
-    def _match_snapshot(
-        self, account_id: str, manager: OptionOrderManager, snapshot: ChainSnapshot, session: date
-    ) -> None:
-        broker = self._config.brokers[account_id]
-        broker.process_snapshot(snapshot)
-        self._reconcile_after_bar(account_id, broker, manager.orders, snapshot.as_of)
-        manager.sync(
-            account_id,
-            f"eod:{self._config.job_name}:{account_id}:{session.isoformat()}:{snapshot.underlying}",
-        )
+    def _router(self, account_id: str) -> "OptionRouter":
+        return self._option_routers[account_id]
 
     def _settle_options(self, session: date, options: Sequence[str]) -> None:
         """Expiry, exercise and assignment, on the official prices (O2, I9)."""
@@ -1179,10 +996,26 @@ class EodRunner:
         )
         self._credit_dividends(account_id, session)
         self._mark_options_account(account_id, session, tally)
+        router = self._router(account_id)
         manage = getattr(self._config.strategies.get(account_id), "manage_options", None)
         if callable(manage):
-            actions = list(manage(self._option_context(account_id, session, tally)))
-            self._apply_option_actions(account_id, session, actions, tally, None)
+            actions = list(
+                manage(
+                    router.context(
+                        account_id,
+                        session,
+                        self._clock.now_utc(),
+                        open_structures(self._ledger.state(account_id)),
+                        snapshots=tally.snapshots,
+                    )
+                )
+            )
+            tallied = router.apply(
+                account_id, session, actions, None, tally.snapshots,
+                f"eod:{self._config.job_name}:{account_id}:{session.isoformat()}:close",
+            )
+            tally.orders_submitted += tallied.orders_submitted
+            tally.exit_actions += tallied.exit_actions
         self._submit_new_option_entries(account_id, session, tally)
         self._append_run_marker(account_id, session, tally.bars_processed)
         return AccountRunResult(
@@ -1194,76 +1027,6 @@ class EodRunner:
             snapshots_processed=tally.snapshots_processed,
         )
 
-    def _option_context(
-        self,
-        account_id: str,
-        session: date,
-        tally: "_Tally",
-        snapshot: ChainSnapshot | None = None,
-    ) -> OptionContext:
-        state = self._ledger.state(account_id)
-        return OptionContext(
-            session=session,
-            account_id=account_id,
-            phase="close" if snapshot is None else "snapshot",
-            now=self._clock.now_utc(),
-            state=state,
-            structures=open_structures(state),
-            snapshot=snapshot,
-            snapshots=dict(tally.snapshots),
-        )
-
-    def _apply_option_actions(
-        self,
-        account_id: str,
-        session: date,
-        actions: Iterable[Any],
-        tally: "_Tally",
-        snapshot: ChainSnapshot | None,
-    ) -> None:
-        """Route a strategy's options actions through the risk layer and the OMS.
-
-        At a snapshot, an action must concern that snapshot's underlying: it is matched
-        against those quotes at once, and any other underlying's would not be the ones
-        it was decided on. A refused guard (C3, C4, C5) fails the run loudly.
-        """
-        manager = self._option_manager(account_id)
-        for action in actions:
-            if snapshot is not None and self._action_underlying(account_id, action) != snapshot.underlying:
-                raise EodRunnerError(
-                    f"'{account_id}' returned {type(action).__name__} "
-                    f"'{getattr(action, 'command_id', '?')}' at the {snapshot.underlying} "
-                    f"snapshot for another underlying"
-                )
-            if isinstance(action, OptionIntent):
-                tally.orders_submitted += self._enter_option(account_id, session, action, tally, snapshot)
-            elif isinstance(action, CloseStructure):
-                manager.close(account_id, action)
-                tally.exit_actions += 1
-            elif isinstance(action, CloseHolding):
-                manager.close_holding(account_id, action)
-                tally.exit_actions += 1
-            else:
-                raise EodRunnerError(
-                    f"Strategy for '{account_id}' returned {type(action).__name__}; options "
-                    "actions are OptionIntent, CloseStructure or CloseHolding"
-                )
-
-    def _action_underlying(self, account_id: str, action: Any) -> str:
-        if isinstance(action, OptionIntent):
-            return underlying_of(action.instrument)
-        if isinstance(action, CloseHolding):
-            return action.instrument.symbol
-        if isinstance(action, CloseStructure):
-            entry = self._ledger.state(account_id).orders.get(action.entry_order_id)
-            if entry is None:
-                raise EodRunnerError(
-                    f"Close '{action.command_id}' names '{action.entry_order_id}', which is not "
-                    f"an order of '{account_id}' (I8)"
-                )
-            return underlying_of(entry.instrument)
-        raise EodRunnerError(f"Unknown options action {type(action).__name__}")
-
     def _enter_option(
         self,
         account_id: str,
@@ -1272,30 +1035,11 @@ class EodRunner:
         tally: "_Tally",
         snapshot: ChainSnapshot | None,
     ) -> int:
-        if not isinstance(intent, OptionIntent):
-            raise EodRunnerError(
-                f"Options account '{account_id}' was handed {type(intent).__name__}; it enters "
-                "with OptionIntent"
-            )
-        if intent.account_id != account_id:
-            raise EodRunnerError(
-                f"Intent '{intent.intent_id}' targets account '{intent.account_id}' but was "
-                f"produced for '{account_id}' (I8)"
-            )
-        engine = self._config.option_risk_engines.get(account_id)
-        if engine is None:
-            raise EodRunnerError(
-                f"'{account_id}' asked to enter '{intent.intent_id}' and has no options risk "
-                f"engine; nothing enters unchecked (I5)"
-            )
-        verdict = engine.evaluate(intent, self._option_context(account_id, session, tally, snapshot))
-        self._record_verdict(account_id, intent, verdict)
-        if not verdict.accepted:
-            return 0
-        if verdict.approved_quantity is not None and verdict.approved_quantity != intent.quantity:
-            intent = replace(intent, quantity=verdict.approved_quantity)
-        self._option_manager(account_id).open(intent)
-        return 1
+        # The risk engine sees the session's snapshots, as every entry decided at the
+        # close always did: a combo's margin needs its underlying's quotes (O3).
+        return self._router(account_id).enter_option(
+            account_id, session, intent, snapshot, tally.snapshots
+        )
 
     def _submit_new_option_entries(self, account_id: str, session: date, tally: "_Tally") -> None:
         adapter = self._config.signal_adapters.get(account_id)
@@ -1305,7 +1049,14 @@ class EodRunner:
         signals = adapter.read_signals(session)
         for signal in signals:
             self._record_signal(account_id, signal)
-        for intent in strategy.generate_intents(signals, self._option_context(account_id, session, tally)):
+        context = self._router(account_id).context(
+            account_id,
+            session,
+            self._clock.now_utc(),
+            open_structures(self._ledger.state(account_id)),
+            snapshots=tally.snapshots,
+        )
+        for intent in strategy.generate_intents(signals, context):
             tally.orders_submitted += self._enter_option(account_id, session, intent, tally, None)
 
     def _credit_dividends(self, account_id: str, session: date) -> None:

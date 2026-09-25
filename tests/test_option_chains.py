@@ -165,6 +165,25 @@ def test_snapshot_json_round_trips() -> None:
     assert again.to_json() == snap.to_json()
 
 
+def test_the_underlyings_quote_time_round_trips_and_is_left_out_when_unknown() -> None:
+    from dataclasses import replace
+
+    plain = snapshot()
+    assert plain.underlying_as_of is None and "underlying_as_of" not in plain.to_json()
+    quoted = replace(plain, underlying_as_of=T0 - timedelta(seconds=2))
+    again = ChainSnapshot.from_json(quoted.to_json())
+    assert again == quoted and again.underlying_as_of == T0 - timedelta(seconds=2)
+
+
+def test_an_underlying_quoted_after_its_snapshot_refuses() -> None:
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match="look-ahead"):
+        replace(snapshot(), underlying_as_of=T0 + timedelta(seconds=1))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        replace(snapshot(), underlying_as_of=T0.replace(tzinfo=None))
+
+
 def test_greeks_refuse_non_finite_or_impossible_values() -> None:
     with pytest.raises(ValueError, match="finite"):
         Greeks(delta=float("nan"), gamma=0, theta=0, vega=0, rho=0, source="vendor")

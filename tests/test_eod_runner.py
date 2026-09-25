@@ -1812,3 +1812,27 @@ def test_triggered_stop_limit_entry_fills_back_under_its_limit_then_exits_at_tar
     assert state.orders["chase:stop"].state is OrderState.CANCELLED
     assert state.positions[INSTRUMENT].quantity == Decimal("0")
     ledger.close()
+
+
+def test_a_bar_path_fill_for_an_unknown_order_refuses_as_the_runners_error(tmp_path: Path) -> None:
+    """The shared reconcile raises its own error; the EOD runner's hosts catch EodRunnerError."""
+    from trade_engine.interfaces.broker import VenueFill
+
+    class Ghostly:
+        def fills(self, since):
+            return [VenueFill(
+                venue_fill_id="ghost:1", venue_order_id="ghost", instrument=INSTRUMENT, quantity=Decimal("1"),
+                price=Decimal("100"), filled_at=SESSION_OPEN, side=Side.BUY, fee=Decimal("0"),
+            )]
+
+        def orders(self, since):
+            return []
+
+    clock = SettableClock(SESSION_OPEN)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    runner = EodRunner(ledger, clock, CALENDAR, FakeMarketData(), EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker}))
+    with pytest.raises(EodRunnerError, match="references unknown order 'ghost'"):
+        runner._reconcile_after_bar(ACCOUNT, Ghostly(), runner._manager_for(ACCOUNT, broker), None)
+    ledger.close()
