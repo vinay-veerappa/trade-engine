@@ -5,8 +5,10 @@ replays the log and arrives at the same state, which is the point of I2. A snaps
 is only ever an optimisation — correctness is defined by `fold()`.
 
 Option expiry, exercise and assignment fold here from ``OptionLifecycle`` events (O2,
-``domain.option_lifecycle``). Kinds no work package owns yet (corporate actions) are
-refused rather than guessed (I5): a ledger containing one cannot be folded, loudly.
+``domain.option_lifecycle``). A combo order folds leg by leg (O4): each fill names its
+leg and becomes a position in that leg's contract. Dividends arrive as ``CashFlow``
+events. Kinds no work package owns yet (other corporate actions) are refused rather
+than guessed (I5): a ledger containing one cannot be folded, loudly.
 """
 
 from __future__ import annotations
@@ -18,7 +20,13 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
-from trade_engine.domain.instruments import Instrument, Side, UnresolvableInstrumentError
+from trade_engine.domain.instruments import (
+    Combo,
+    ComboLeg,
+    Instrument,
+    Side,
+    UnresolvableInstrumentError,
+)
 from trade_engine.domain.option_lifecycle import (
     EXERCISE_THRESHOLD,
     can_exercise_early,
@@ -75,6 +83,11 @@ class AccountState:
     positions: Mapping[Instrument, Position] = field(default_factory=lambda: MappingProxyType({}))
     orders: Mapping[str, Order] = field(default_factory=lambda: MappingProxyType({}))
     filled_quantity: Mapping[str, Decimal] = field(default_factory=lambda: MappingProxyType({}))
+    # Contracts filled per (combo order id, leg index). A combo's filled_quantity is the
+    # number of whole units every leg has completed.
+    leg_filled: Mapping[tuple[str, int], Decimal] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     venue_order_ids: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     emulated_orders: Mapping[str, EmulatedOrderState] = field(default_factory=lambda: MappingProxyType({}))
     fills: tuple[Fill, ...] = ()
@@ -108,8 +121,40 @@ def _multiplier(instrument: Instrument) -> int:
         return instrument.multiplier
     except ValueError as err:
         raise LedgerFoldError(
-            f"Cannot value a mixed-multiplier combo in E1; per-leg accounting is O4's: {err}"
+            f"Cannot value a mixed-multiplier combo as one instrument; value it per leg: {err}"
         ) from err
+
+
+def _combo_leg(order: Order, fill: Fill) -> tuple[int, ComboLeg | None]:
+    """The leg of a combo order a fill belongs to, or (−1, None) for a single instrument.
+
+    A combo is one order over several contracts (Architecture §4.1). The venue reports it
+    leg by leg, each fill naming its leg by index in ``fill.leg_id``. The legs trade as
+    written whether the combo is paid for (BUY, a net debit) or collected (SELL, a net
+    credit), so a leg's fill takes the leg's side, not the order's. A fill that names no
+    leg, a leg that does not exist, or another contract or side than its leg refuses (I5).
+    """
+    if not isinstance(order.instrument, Combo):
+        return -1, None
+    legs = order.instrument.legs
+    if fill.leg_id is None or not fill.leg_id.isdigit() or int(fill.leg_id) >= len(legs):
+        raise LedgerFillMismatchError(
+            f"Fill {fill.fill_id} on combo order '{fill.order_id}' names leg "
+            f"{fill.leg_id!r}; a combo fill must name one of its {len(legs)} legs by index (I5)"
+        )
+    index = int(fill.leg_id)
+    leg = legs[index]
+    if fill.instrument != leg.contract:
+        raise LedgerFillMismatchError(
+            f"Fill {fill.fill_id} on {fill.instrument.symbol} was filed against leg {index} "
+            f"of combo order '{fill.order_id}', which is {leg.contract.symbol} (I5)"
+        )
+    if fill.side is not leg.side:
+        raise LedgerFillMismatchError(
+            f"Fill {fill.fill_id} is a {fill.side.value} but leg {index} of combo order "
+            f"'{fill.order_id}' is a {leg.side.value}; refusing the wrong direction (I5)"
+        )
+    return index, leg
 
 
 def _check_fill_finite(fill: Fill) -> None:
@@ -278,6 +323,7 @@ def _replace(state: AccountState, **changes: Any) -> AccountState:
         "positions": state.positions,
         "orders": state.orders,
         "filled_quantity": state.filled_quantity,
+        "leg_filled": state.leg_filled,
         "venue_order_ids": state.venue_order_ids,
         "emulated_orders": state.emulated_orders,
         "fills": state.fills,
@@ -322,13 +368,15 @@ def _on_fill(state: AccountState, event: Event) -> AccountState:
     # A fill that disagrees with its order would silently invent or reverse a position,
     # the exact corruption the ledger exists to make impossible (I1). The venue ids are
     # provenance; the order is the record of intent.
-    if fill.instrument != order.instrument:
+    # A combo fills leg by leg; _combo_leg checks the fill against its own leg.
+    leg_index, leg = _combo_leg(order, fill)
+    if leg is None and fill.instrument != order.instrument:
         raise LedgerFillMismatchError(
             f"Fill {fill.fill_id} on instrument {fill.instrument.symbol} was filed against "
             f"order '{fill.order_id}' for {order.instrument.symbol}; the log contradicts "
             f"the order (I5)"
         )
-    if fill.side is not order.side:
+    if leg is None and fill.side is not order.side:
         raise LedgerFillMismatchError(
             f"Fill {fill.fill_id} is a {fill.side.value} but its order '{fill.order_id}' is a "
             f"{order.side.value}; refusing to apply the wrong direction (I5)"
@@ -358,7 +406,23 @@ def _on_fill(state: AccountState, event: Event) -> AccountState:
     positions[fill.instrument] = updated
 
     filled = dict(state.filled_quantity)
-    filled[fill.order_id] = filled.get(fill.order_id, ZERO) + fill.quantity
+    leg_filled = dict(state.leg_filled)
+    if leg is None:
+        filled[fill.order_id] = filled.get(fill.order_id, ZERO) + fill.quantity
+    else:
+        key = (fill.order_id, leg_index)
+        leg_filled[key] = leg_filled.get(key, ZERO) + fill.quantity
+        if leg_filled[key] > order.quantity * leg.ratio:
+            raise LedgerFoldError(
+                f"Fill {fill.fill_id} would take leg {leg_index} of combo order "
+                f"'{fill.order_id}' to {leg_filled[key]} contracts against "
+                f"{order.quantity * leg.ratio} ordered; refusing the over-fill (I5)"
+            )
+        # Units every leg has completed: a combo is filled only when all its legs are.
+        filled[fill.order_id] = min(
+            leg_filled.get((fill.order_id, index), ZERO) / combo_leg.ratio
+            for index, combo_leg in enumerate(order.instrument.legs)
+        )
 
     orders = dict(state.orders)
     total = filled[fill.order_id]
@@ -388,6 +452,7 @@ def _on_fill(state: AccountState, event: Event) -> AccountState:
         positions=MappingProxyType(positions),
         orders=MappingProxyType(orders),
         filled_quantity=MappingProxyType(filled),
+        leg_filled=MappingProxyType(leg_filled),
         realized_pnl=state.realized_pnl + (updated.realized_pnl - prior_realized),
         fills=state.fills + (fill,),
         fill_ids=state.fill_ids | {fill.fill_id},

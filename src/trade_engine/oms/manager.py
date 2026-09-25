@@ -900,6 +900,7 @@ class OrderManager:
                     fee=item.fee,
                     venue_order_id=item.venue_order_id,
                     venue_execution_id=item.venue_fill_id,
+                    leg_id=item.leg_id,
                 )
             )
         recorded = self._context(order.order_id).filled

@@ -22,7 +22,7 @@ from trade_engine.interfaces.market_data import CorporateAction
 SCHEMA_VERSION = 1
 
 # The §4.2 CashFlow parenthetical: interest, borrow, fees, deposits.
-CASH_FLOW_KINDS = ("interest", "borrow", "fee", "deposit", "withdrawal")
+CASH_FLOW_KINDS = ("interest", "borrow", "fee", "deposit", "withdrawal", "dividend")
 
 
 class EventKind(StrEnum):

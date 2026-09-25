@@ -6,10 +6,14 @@ from trade_engine.sim.broker import (
     SimBrokerError,
     UnknownVenueOrderError,
 )
+from trade_engine.sim.snapshot_venue import SnapshotVenue, SnapshotVenueError, underlying_of
 
 __all__ = [
     "MissingBarError",
     "SimBroker",
     "SimBrokerError",
+    "SnapshotVenue",
+    "SnapshotVenueError",
     "UnknownVenueOrderError",
+    "underlying_of",
 ]
