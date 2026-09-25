@@ -40,7 +40,12 @@ from trade_engine.ledger.events import VenueReconcile
 from trade_engine.tos_paper import normalize as norm
 from trade_engine.tos_paper.netting import NettedBatch, net_strategy_orders
 from trade_engine.tos_paper.reconcile import confirm_ticket, position_book, reconcile, unreadable
-from trade_engine.tos_paper.transport import BalanceReader, TosOrderTransport, ticket_for
+from trade_engine.tos_paper.transport import (
+    BalanceReader,
+    OrderCanceller,
+    TosOrderTransport,
+    ticket_for,
+)
 
 ZERO = Decimal("0")
 
@@ -120,6 +125,10 @@ class TosPaperBroker(BrokerAdapter):
         self._queue: list[VenueOrder] = []
         self._keys: set[str] = set()  # ticket keys queued or sent (I3)
         self._expected: dict[Instrument, Decimal] = {}
+        # ticket key -> (ticket, venue Order ID) for sends whose Order Book row was matched.
+        # In memory only: after a restart a cancel refuses rather than guess the row.
+        self._sent: dict[str, tuple[VenueOrder, str]] = {}
+        self._cancelled: set[str] = set()  # ticket keys a cancel proved (idempotent)
         self.capabilities = Capabilities(
             supported_order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}),
             supported_tifs=frozenset({TimeInForce.DAY, TimeInForce.GTC}),
@@ -322,6 +331,9 @@ class TosPaperBroker(BrokerAdapter):
             raw = self.transport.place_order(spec, ticket.venue_order_id)
         except Exception as exc:  # noqa: BLE001 — mapped, never propagated out of a batch
             return norm.normalize_place_exception(exc, ticket.venue_order_id, self._clock.now_utc())
+        order_id = norm.placed_order_id(raw)
+        if order_id is not None:
+            self._sent[ticket.venue_order_id] = (ticket, order_id)
         return norm.normalize_place_result(raw, ticket.venue_order_id, self._clock.now_utc())
 
     def _ack(self, ticket: VenueOrder, status: str, message: str) -> VenueAck:
@@ -345,13 +357,51 @@ class TosPaperBroker(BrokerAdapter):
         return self._send(order)
 
     def cancel(self, venue_order_id: str) -> VenueAck:
-        raise TosPaperBrokerError(
-            "cancel requires row selection over JAB, unproven — refusing (I5)"
-        )
+        """Cancel one ticket by its key. Allowed while halted: a cancel only lowers risk.
+
+        A still-queued ticket is dropped from the queue (nothing reached the venue). A
+        sent one is cancelled by the venue Order ID its send proved; with no proven id,
+        or a transport without :class:`OrderCanceller`, the cancel is REJECTED (I5).
+        ACCEPTED only when the Order Book row reads CANCELED; then the ticket leaves the
+        mirror book's expectation (a partial fill before the cancel shows as drift).
+        """
+        self._require_connected("cancel")
+        now = self._clock.now_utc()
+        if venue_order_id in self._cancelled:
+            return VenueAck(venue_order_id, "ACCEPTED", now, "already cancelled")
+        for index, queued in enumerate(self._queue):
+            if queued.venue_order_id == venue_order_id:
+                del self._queue[index]
+                self._unexpect(queued)
+                self._cancelled.add(venue_order_id)
+                return VenueAck(venue_order_id, "ACCEPTED", now, "cancelled before send: dropped from the queue")
+        sent = self._sent.get(venue_order_id)
+        if sent is None:
+            return VenueAck(
+                venue_order_id, "REJECTED", now,
+                "no venue Order ID was proven for this ticket; refusing to guess the row (I5)",
+            )
+        if not isinstance(self.transport, OrderCanceller):
+            return VenueAck(venue_order_id, "REJECTED", now, "the transport cannot cancel; refusing")
+        ticket, order_id = sent
+        try:
+            raw = self.transport.cancel_order(order_id)
+        except Exception as exc:  # noqa: BLE001 — mapped, never propagated
+            return norm.normalize_cancel_exception(exc, venue_order_id, self._clock.now_utc())
+        ack = norm.normalize_cancel_result(raw, venue_order_id, self._clock.now_utc())
+        if ack.status == "ACCEPTED":
+            del self._sent[venue_order_id]
+            self._unexpect(ticket)
+            self._cancelled.add(venue_order_id)
+        return ack
+
+    def _unexpect(self, ticket: VenueOrder) -> None:
+        self._expected[ticket.instrument] = self._expected.get(ticket.instrument, ZERO) - _signed(ticket)
 
     def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
         raise TosPaperBrokerError(
-            "replace is cancel-then-submit, and cancel is not proven over JAB; refusing"
+            "replace (TOS Cancel/replace order) is not mapped over JAB yet; "
+            "cancel() and submit a new ticket instead"
         )
 
     def orders(self, since: datetime) -> list[VenueOrderState]:

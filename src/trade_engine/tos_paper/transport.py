@@ -112,6 +112,8 @@ class TosOrderTransport(Protocol):
       result mapping ``{"status": ..., "reason": ...}`` (see ``normalize``), raises
       :class:`TransportRefused` when nothing was sent, :class:`TransportReplay` on a
       used key. "Sent" is never a fill: confirmation comes only from the read-backs.
+      A ``SENT`` result may carry the venue's own ``order_id`` with the ``book_status``
+      of its Order Book row; that id is what :class:`OrderCanceller` cancels.
     - ``read_working_orders`` / ``read_positions`` return the raw Order Book and
       Position rows (see ``normalize`` for the row shapes).
     """
@@ -128,3 +130,18 @@ class BalanceReader(Protocol):
     """The venue account's net liquidation value, read by the host (§4.7 funding)."""
 
     def net_liquidation(self) -> Decimal | int | str: ...
+
+
+@runtime_checkable
+class OrderCanceller(Protocol):
+    """Optional transport capability: cancel one resting order by the venue's Order ID.
+
+    Separate from :class:`TosOrderTransport` so a transport without it stays a
+    transport; the adapter refuses a cancel when it is absent. ``cancel_order`` returns
+    ``{"status": "CANCELED" | "UNKNOWN", ...}`` (``CANCELED`` only when the Order Book
+    row reads CANCELED, also for an order that already was), and raises
+    :class:`TransportRefused` when it clicked nothing (not WORKING, row not found,
+    menu mismatch).
+    """
+
+    def cancel_order(self, order_id: str) -> Mapping[str, object]: ...

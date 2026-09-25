@@ -5,13 +5,16 @@ no I/O, so every shape is pinned by golden vectors (tests/test_tos_normalize.py)
 
 Rules: a send is never a fill. ``SENT`` and ``DRY_RUN`` are PENDING, anything the
 module does not recognise is PENDING (unknown state => pending), and only a known
-refusal is REJECTED. Nothing here returns ACCEPTED: acceptance and fills are proven
-only by the Order Book and Position read-backs. A row this module cannot read raises
+refusal is REJECTED. No place result is ACCEPTED: acceptance and fills are proven
+only by the Order Book and Position read-backs. A cancel is ACCEPTED only when the
+transport read the Order Book row back as CANCELED. A row this module cannot read raises
 :class:`NormalizeError` — the caller treats the read as failed, never as empty (I5).
 
 Raw row shapes (the host transport's contract):
 
-- place result: ``{"status": "SENT" | "DRY_RUN" | "REFUSED" | "REJECTED" | ..., "reason": str}``
+- place result: ``{"status": "SENT" | "DRY_RUN" | "REFUSED" | "REJECTED" | ..., "reason": str}``,
+  and on ``SENT`` optionally ``"order_id": "5403527317", "book_status": "WORKING"``
+- cancel result: ``{"status": "CANCELED" | "UNKNOWN", "order_id": str, "note": str}``
 - working order: ``{"symbol": <OCC>, "side": "BUY"|"SELL", "quantity": "2", "filled": "0",
   "order_type": "LMT"|"MKT", "limit_price": "1.25" | None, "status": "WORKING" | ...}``
 - position: ``{"symbol": <OCC>, "quantity": "-1", "avg_price": "2.10"}``
@@ -65,6 +68,44 @@ def normalize_place_exception(exc: BaseException, venue_order_id: str, at: datet
         "PENDING",
         at,
         f"transport error {type(exc).__name__}: {exc}; uncertain whether sent, awaiting reconcile",
+    )
+
+
+def placed_order_id(raw: object) -> str | None:
+    """The venue Order ID a SENT result proves, or None; never a guess (I5).
+
+    Only a SENT result whose new Order Book row was matched to this ticket (a
+    ``book_status`` other than UNKNOWN) names the order, and only an all-digit id.
+    """
+    if not isinstance(raw, Mapping) or str(raw.get("status", "")).strip().upper() != "SENT":
+        return None
+    book = str(raw.get("book_status", "")).strip().upper()
+    oid = raw.get("order_id")
+    if not book or book == "UNKNOWN" or not isinstance(oid, str) or not oid.isdigit():
+        return None
+    return oid
+
+
+def normalize_cancel_result(raw: object, venue_order_id: str, at: datetime) -> VenueAck:
+    """A cancel result → ACCEPTED only for a CANCELED Order Book row, else PENDING."""
+    if not isinstance(raw, Mapping):
+        return VenueAck(venue_order_id, "PENDING", at, f"unreadable cancel result {raw!r}; awaiting reconcile")
+    status = str(raw.get("status", "")).strip().upper()
+    if status == "CANCELED":
+        return VenueAck(venue_order_id, "ACCEPTED", at, f"cancelled: order {raw.get('order_id')} reads CANCELED")
+    note = raw.get("note") or status or "no status"
+    return VenueAck(venue_order_id, "PENDING", at, f"cancel not confirmed ({note}); awaiting reconcile")
+
+
+def normalize_cancel_exception(exc: BaseException, venue_order_id: str, at: datetime) -> VenueAck:
+    """A cancel exception → REJECTED if provably nothing was clicked, else PENDING."""
+    if isinstance(exc, TransportRefused):
+        return VenueAck(venue_order_id, "REJECTED", at, f"transport refused the cancel: {exc}")
+    return VenueAck(
+        venue_order_id,
+        "PENDING",
+        at,
+        f"cancel error {type(exc).__name__}: {exc}; uncertain whether cancelled, awaiting reconcile",
     )
 
 

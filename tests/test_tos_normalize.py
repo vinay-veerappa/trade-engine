@@ -18,6 +18,9 @@ from trade_engine.domain.orders import OrderState, OrderType
 from trade_engine.interfaces.broker import VenueAck, VenuePosition
 from trade_engine.tos_paper.normalize import (
     NormalizeError,
+    placed_order_id,
+    normalize_cancel_exception,
+    normalize_cancel_result,
     WorkingOrder,
     normalize_place_exception,
     normalize_place_result,
@@ -150,3 +153,47 @@ def test_a_valid_ticket_builds() -> None:
 def test_ticket_refuses_what_the_driver_cannot_echo(changes) -> None:
     with pytest.raises(ValueError):
         _ticket(**changes)
+
+
+# -- the venue Order ID a send proves, and cancel results ------------------------------
+
+ORDER_ID_VECTORS = [
+    ({"status": "SENT", "order_id": "5403527317", "book_status": "WORKING"}, "5403527317"),
+    ({"status": "sent", "order_id": "5403527317", "book_status": "FILLED"}, "5403527317"),
+    ({"status": "SENT", "order_id": "5403527317", "book_status": "UNKNOWN"}, None),
+    ({"status": "SENT", "order_id": "5403527317"}, None),
+    ({"status": "SENT", "book_status": "WORKING"}, None),
+    ({"status": "SENT", "order_id": "54035x", "book_status": "WORKING"}, None),
+    ({"status": "SENT", "order_id": 5403527317, "book_status": "WORKING"}, None),
+    ({"status": "DRY_RUN", "order_id": "5403527317", "book_status": "WORKING"}, None),
+    (None, None),
+]
+
+
+@pytest.mark.parametrize("raw,expected", ORDER_ID_VECTORS)
+def test_placed_order_id_only_from_a_matched_sent_row(raw, expected) -> None:
+    assert placed_order_id(raw) == expected
+
+
+CANCEL_VECTORS = [
+    ({"status": "CANCELED", "order_id": "5403527317", "book_status": "CANCELED"},
+     ("ACCEPTED", "cancelled: order 5403527317 reads CANCELED")),
+    ({"status": "canceled", "order_id": "1"}, ("ACCEPTED", "cancelled: order 1 reads CANCELED")),
+    ({"status": "UNKNOWN", "order_id": "1", "note": "row still WORKING"},
+     ("PENDING", "cancel not confirmed (row still WORKING); awaiting reconcile")),
+    ({"status": "CANCELLED"}, ("PENDING", "cancel not confirmed (CANCELLED); awaiting reconcile")),
+    ({}, ("PENDING", "cancel not confirmed (no status); awaiting reconcile")),
+    (None, ("PENDING", "unreadable cancel result None; awaiting reconcile")),
+]
+
+
+@pytest.mark.parametrize("raw,expected", CANCEL_VECTORS)
+def test_cancel_result_golden_vectors(raw, expected) -> None:
+    assert normalize_cancel_result(raw, "tos:k", T) == VenueAck("tos:k", expected[0], T, expected[1])
+
+
+def test_cancel_exceptions_map_to_rejected_only_when_nothing_was_clicked() -> None:
+    refused = normalize_cancel_exception(TransportRefused("order is FILLED"), "tos:k", T)
+    assert refused.status == "REJECTED" and "FILLED" in refused.message
+    other = normalize_cancel_exception(TimeoutError("JAB hung"), "tos:k", T)
+    assert other.status == "PENDING" and "TimeoutError" in other.message
