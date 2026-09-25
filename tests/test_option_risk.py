@@ -201,6 +201,28 @@ def test_a_spread_with_no_quotes_to_price_its_legs_refuses(ledger) -> None:
     assert not rule(verdict, "margin").passed
 
 
+# -- margin per name (the owner's reading of §6.2's 10%) ------------------------------------
+
+
+def test_margin_on_one_name_within_ten_percent_passes(ledger) -> None:
+    # Seven 45 puts at 700 each: 4,900 of 5,000.
+    verdict = evaluate(ledger, rules(max_name_margin_frac=D("0.10")), intent(quantity="7"), Book().context())
+    assert rule(verdict, "name_margin").passed and rule(verdict, "name_margin").measured_value == D("4900")
+
+
+def test_margin_on_one_name_past_ten_percent_refuses(ledger) -> None:
+    verdict = evaluate(ledger, rules(max_name_margin_frac=D("0.10")), intent(quantity="8"), Book().context())
+    assert not rule(verdict, "name_margin").passed
+
+
+def test_name_margin_counts_that_names_shares_and_no_other_name(ledger) -> None:
+    other = OptionContract("ABC", EXPIRY, D("45"), OptionRight.PUT)
+    book = Book().trade(XYZ, Side.BUY, "100", "50").trade(other, Side.SELL, "5", "2.00").mark(Equity("ABC"), "50")
+    verdict = evaluate(ledger, rules(max_name_margin_frac=D("0.10")), intent(quantity="1"), book.context())
+    # 100 XYZ shares at 25% maintenance (1,250) plus one 45 put (700); the ABC puts don't count.
+    assert rule(verdict, "name_margin").measured_value == D("1950")
+
+
 # -- cash per name (§6.2 CSP: 10%) ------------------------------------------------------
 
 

@@ -344,7 +344,8 @@ the account, and the verdict says so.
 | Rule | Refuses when |
 |---|---|
 | `margin` | the whole book's Reg-T maintenance (O3) passes `max_margin_frac` of equity (§6.1: 50%) |
-| `name_collateral` | the cash securing one underlying passes `max_name_collateral_frac` (CSP: 10%) |
+| `name_margin` | one underlying's Reg-T maintenance, shares included, passes `max_name_margin_frac` (the owner's reading of §6.2's 10% per name) |
+| `name_collateral` | the cash securing one underlying passes `max_name_collateral_frac` (§6.2 read literally) |
 | `put_notional` | naked put strikes pass the regime's fraction (100% / 50% / 0 = spreads only) |
 | `max_loss` | the structure's worst case passes `max_loss_per_structure_frac` (spread: 2%), or has no bound |
 | `debit`, `total_debit` | a debit passes `max_debit_per_structure_frac` (PMCC: 5%), or all of them `max_total_debit_frac` (30%) |

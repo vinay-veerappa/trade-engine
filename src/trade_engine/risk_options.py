@@ -16,8 +16,11 @@ Rules (a rule configured as None does not apply to the account, and says so):
 - ``margin``: the Reg-T maintenance requirement of the whole book at most
   ``max_margin_frac`` of equity (§6.1: 50%, so a 2–3x premium expansion cannot force a
   margin call).
+- ``name_margin``: the Reg-T maintenance of one underlying's strategies and shares at
+  most ``max_name_margin_frac`` of equity. The owner's reading of §6.2's "10% per name"
+  (2026-09-24): measured in cash, it would allow only strikes up to $50 on $50,000.
 - ``name_collateral``: the cash securing one underlying's strategies at most
-  ``max_name_collateral_frac`` of equity (§6.2 CSP: 10% per name).
+  ``max_name_collateral_frac`` of equity (§6.2 read literally).
 - ``put_notional``: the strikes of every naked short put at most the regime's fraction of
   equity (§6.2: 100% in BULL_EXPLOSIVE, 50% in BULL_CHOPIER, 0 — spreads only — in
   BEAR_PROTECTIVE). A regime with no fraction configured refuses.
@@ -85,6 +88,7 @@ class OptionRiskRules:
     max_margin_frac: Decimal
     allowed_regimes: frozenset[str]
     no_earnings_before_expiry: bool
+    max_name_margin_frac: Decimal | None = None
     max_name_collateral_frac: Decimal | None = None
     put_notional_frac_by_regime: Mapping[str, Decimal] | None = None
     max_loss_per_structure_frac: Decimal | None = None
@@ -95,6 +99,7 @@ class OptionRiskRules:
     def __post_init__(self) -> None:
         _fraction(self.max_margin_frac, "max_margin_frac")
         for name in (
+            "max_name_margin_frac",
             "max_name_collateral_frac",
             "max_loss_per_structure_frac",
             "max_debit_per_structure_frac",
@@ -204,6 +209,25 @@ class OptionRiskEngine:
             "Reg-T requirement with the entry is within the account cap",
             "Reg-T requirement is unknown or would exceed the account cap",
         )
+
+        # margin on this underlying: its strategies and any of its shares margined alone
+        if rules.max_name_margin_frac is None:
+            not_configured("name_margin")
+        else:
+            on_name = None
+            if margin is not None:
+                on_name = sum(
+                    (s.maintenance for s in margin.strategies if s.underlying == underlying), ZERO
+                ) + sum((p.maintenance for p in margin.positions if p.symbol == underlying), ZERO)
+            limit = equity * rules.max_name_margin_frac if equity is not None and equity > 0 else None
+            record(
+                "name_margin",
+                on_name is not None and limit is not None and on_name <= limit,
+                on_name if on_name is not None else "UNKNOWN",
+                limit if limit is not None else "UNKNOWN",
+                f"Margin on {underlying} is within the per-name cap",
+                f"Margin on {underlying} is unknown or over the per-name cap",
+            )
 
         # cash securing this underlying's strategies
         if rules.max_name_collateral_frac is None:
