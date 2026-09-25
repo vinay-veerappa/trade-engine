@@ -268,6 +268,70 @@ Where this differs from LEAN:
 Missing inputs refuse: an option or underlying without a price, a fractional contract,
 mixed contract multipliers on one underlying, or a `Combo` held as a single position.
 
+## Options Accounts
+
+An account whose venue is `sim.SnapshotVenue` trades options. There are no historical
+intraday option quotes, so its orders are matched against one chain snapshot per session
+(the 15:45 ET pull). The EOD run replays that snapshot at its own `as_of`, the same way
+one-minute bars replay equity fills. That makes it re-runnable, and it never uses a price
+from after the clock.
+
+**Fills.** A leg trades halfway between mid and natural: a sale at mid − ¼ spread, a
+purchase at mid + ¼ spread (`fill_fraction`).
+- A MARKET order fills at those prices, and is rejected if a leg has no usable quote.
+- A LIMIT order fills at its limit once those prices are at or through it. Otherwise it
+  keeps working.
+- A combo trades its legs as written. SELL collects a net credit and BUY pays a net
+  debit, and the limit is that net per unit. At a limit fill, the legs on the favourable
+  side are scaled so the legs add up to the limit exactly.
+- Shares on the snapshot's underlying fill at its price, less 5 bps against the order.
+- Orders fill all or nothing. Options pay $0.65 a contract; shares trade free.
+- A quote older than `max_quote_age_seconds` prices nothing.
+- A DAY order lapses at the close, but only once a snapshot of its underlying from that
+  session has been processed.
+
+**Ledger.** A combo is one order, and it fills leg by leg. Each fill names its leg by
+index (`Fill.leg_id`) and becomes a position in that leg's contract. `leg_filled` counts
+contracts per leg, and the order's `filled_quantity` counts the units every leg has
+completed.
+
+**Structures** (`oms.options.OptionOrderManager`). An entry (`domain.option_orders.OptionIntent`)
+over a contract or an options combo may carry a `profit_target`. That net price rests as
+a GTC closing limit from the moment the entry fills. `CloseStructure` closes whatever is
+still open, and cancels the target first. `CloseHolding` sells shares held outside any
+structure. `open_structures(state)` is the strategy's view, folded from the ledger.
+Three guards are structural:
+- **No calls on shares the account doesn't hold (C3, I8).** A short call needs this
+  account's own shares (100 a contract) or a long call on the same underlying that
+  expires no earlier: a diagonal, or the poor man's covered call. Shares a working order
+  is selling don't count. Shares that cover a call can't be sold on their own, unless
+  that call's close is already working.
+- **No duplicate entry (C4).** A command id opens one structure, and replaying it
+  returns that structure. A new entry on a contract the account holds, or is already
+  entering, refuses.
+- **A structure closes once (C5).** A structure with nothing open can't be closed, and
+  neither can one whose close is already working.
+
+**The EOD run.**
+- Each chain snapshot (`chain_snapshots`) is matched at its instant.
+- Then the strategy's `manage_options(context)` runs (`eod.options.OptionContext`, phase
+  `"snapshot"`). Whatever it returns for that underlying trades on the same quotes.
+- After the close, the clock moves on by `settle_delay` (105 minutes, to 17:45 ET), when
+  the official close is known. Then, in order:
+  1. the O2 `lifecycle` pass settles expiries and assignments;
+  2. the settled structures' exits are cancelled;
+  3. today's ex-dividends are credited on the shares held at the open, and a short
+     holding pays them;
+  4. options are marked at the snapshot's mid, and shares and every held option's
+     underlying at the official close (`settlements`);
+  5. close-phase `manage_options` runs, then `generate_intents`, whose entries go through
+     the account's `option_risk_engines`.
+- These all work at the next session's snapshot.
+- The run refuses when a held option has no snapshot or quote, or a close or dividend is
+  missing or stamped after the clock. It also refuses when an options account has no
+  lifecycle pass or dividend source, or when an entry has no risk engine.
+- Equity accounts finish at the close, before any of this.
+
 ## Development
 
 Requires Python >= 3.13.

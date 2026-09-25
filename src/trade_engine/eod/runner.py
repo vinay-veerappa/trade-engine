@@ -26,17 +26,32 @@ The 17:45 ET job per account and session, in order:
    session.
 6. Outbox: every configured destination drains in order (I12).
 
-The runner owns orchestration only. Option positions and orders are refused here: an
-option is marked from a chain snapshot and settled by ``lifecycle.LifecyclePass``
-(O2), and wiring both into this pass is O4's. EOD exit rules belong to strategy plugins
-(I13) and reach the venue only through the OMS, and market data comes from an injected
-provider (I5: no default source).
+Options accounts (O4) are those whose venue matches chain snapshots
+(``SnapshotVenue``). They replay no bars. Instead:
+
+- each of the session's chain snapshots (``chain_snapshots``) is matched at its own
+  ``as_of`` inside the same timeline, and the strategy's ``manage_options`` runs right
+  after it (``eod.options``);
+- after the close the clock moves on by ``settle_delay``, to when the official close is
+  known (daily bars settle at 17:00 ET). The O2 lifecycle pass then settles expiries and
+  assignments, dividends going ex next session are credited on the shares held at the
+  close, and positions are marked: options at the newest snapshot's mid, shares and
+  underlyings at the official close (``settlements``);
+- close-phase exits and D+1 entries go through the options OMS (``oms.options``), with the
+  C3/C4/C5 guards, and entries through the account's options risk engine.
+
+Equity accounts finish at the close before any of that, so their marks keep the close's
+stamp.
+
+The runner owns orchestration only. Expiry/assignment semantics stay with O2, EOD exit
+rules belong to strategy plugins (I13) and reach the venue only through the OMS, and
+market data comes from injected providers (I5: no default source).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -44,7 +59,9 @@ from zoneinfo import ZoneInfo
 
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.domain.exits import ClosePosition, MoveStop, OpenBracket, ReducePosition
-from trade_engine.domain.instruments import Equity, Instrument
+from trade_engine.domain.instruments import Equity, Instrument, OptionContract, Side
+from trade_engine.domain.option_orders import CloseHolding, CloseStructure, OptionIntent
+from trade_engine.domain.option_roots import SettleTime
 from trade_engine.domain.orders import OrderState, OrderType
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.risk import RiskVerdict
@@ -57,12 +74,15 @@ from trade_engine.interfaces.broker import (
     VenuePosition,
 )
 from trade_engine.interfaces.clock import Clock
-from trade_engine.interfaces.market_data import MarketData
-from trade_engine.ledger import EodRun, Event, EventKind, Ledger, Mark
-from trade_engine.ledger.state import AccountState
+from trade_engine.eod.options import OptionContext
+from trade_engine.interfaces.market_data import MarketData, StaleDataError
+from trade_engine.ledger import CashFlow, EodRun, Event, EventKind, Ledger, Mark
+from trade_engine.ledger.state import AccountState, fold_account
+from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
+from trade_engine.oms.options import OptionOrderManager, open_structures
 from trade_engine.risk import RiskContext, RiskEngine
-from trade_engine.sim import SimBroker
+from trade_engine.sim import SimBroker, SnapshotVenue, underlying_of
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
@@ -112,6 +132,13 @@ class EodRunnerConfig:
     marks and a marker but no D+1 entries. ``sinks`` maps an outbox destination to an
     object with ``publish``; ``journal_accounts`` maps an engine account to the journal
     account id from config (never "first account", I5).
+
+    Options accounts (a venue with ``process_snapshot``) also need: ``chain_snapshots``,
+    the session's snapshots to match (the host picks them, e.g. the 15:45 pull);
+    ``settlements``, the official closes that mark shares and underlyings; and, for an
+    account that enters, ``option_risk_engines``. ``lifecycle`` settles expiries and
+    assignments, and ``dividends`` credits dividends on shares held. ``settle_delay`` is
+    how long after the close the after-close work runs.
     """
 
     job_name: str
@@ -123,19 +150,23 @@ class EodRunnerConfig:
     sinks: Mapping[str, Any] | None = None
     journal_accounts: Mapping[str, str] | None = None
     bars_max_age_seconds: float = 10.0**9
+    chain_snapshots: Callable[[date], Sequence[ChainSnapshot]] | None = None
+    settlements: Any | None = None
+    lifecycle: Any | None = None
+    dividends: Any | None = None
+    option_risk_engines: Mapping[str, Any] | None = None
+    settle_delay: timedelta = timedelta(minutes=105)
 
     @property
     def normalized(self) -> "EodRunnerConfig":
-        return EodRunnerConfig(
-            job_name=self.job_name,
-            brokers=self.brokers,
+        return replace(
+            self,
             risk_engines=_normalize(self.risk_engines),
             signal_adapters=_normalize(self.signal_adapters),
             strategies=_normalize(self.strategies),
-            context_builder=self.context_builder,
             sinks=_normalize(self.sinks),
             journal_accounts=_normalize(self.journal_accounts),
-            bars_max_age_seconds=self.bars_max_age_seconds,
+            option_risk_engines=_normalize(self.option_risk_engines),
         )
 
     def __post_init__(self) -> None:
@@ -149,6 +180,8 @@ class EodRunnerConfig:
             or self.bars_max_age_seconds <= 0
         ):
             raise EodRunnerError("bars_max_age_seconds must be positive")
+        if not isinstance(self.settle_delay, timedelta) or self.settle_delay < timedelta(0):
+            raise EodRunnerError("settle_delay must be a non-negative timedelta")
 
 
 @dataclass(frozen=True)
@@ -159,6 +192,7 @@ class AccountRunResult:
     marks_appended: int = 0
     orders_submitted: int = 0
     exit_actions: int = 0
+    snapshots_processed: int = 0
 
 
 @dataclass(frozen=True)
@@ -174,6 +208,11 @@ class _Tally:
     fills_before: int
     bars_processed: int = 0
     last_regular_closes: dict[Instrument, Decimal] = field(default_factory=dict)
+    snapshots_processed: int = 0
+    exit_actions: int = 0
+    orders_submitted: int = 0
+    # The newest snapshot matched per underlying (options accounts).
+    snapshots: dict[str, ChainSnapshot] = field(default_factory=dict)
 
 
 class EodRunner:
@@ -193,6 +232,7 @@ class EodRunner:
         self._market_data = market_data
         self._config = config.normalized
         self._managers: dict[str, OrderManager] = {}
+        self._option_managers: dict[str, OptionOrderManager] = {}
 
     # -- entry -------------------------------------------------------------------
 
@@ -218,22 +258,39 @@ class EodRunner:
             account_id: _Tally(fills_before=self._fill_count(account_id))
             for account_id in pending
         }
-        self._replay_session(session, replays, tallies)
+        options = [account_id for account_id in pending if self._is_options(account_id)]
+        snapshots = self._session_snapshots(session, options)
+        self._replay_session(session, replays, tallies, snapshots, options)
 
         # The session is over before anything is marked or entered: a DAY entry for D+1
         # submitted while the clock still read 15:59 would belong to *this* session and
         # expire at the next open without ever working.
-        self._advance_clock(self._calendar.session_close(session))
-        results: list[AccountRunResult] = []
+        close = self._calendar.session_close(session)
+        self._advance_clock(close)
+        results: dict[str, AccountRunResult] = {}
         for account_id in sorted(self._config.brokers):
             if account_id not in replays:
-                results.append(AccountRunResult(account_id=account_id))
-                continue
-            results.append(
-                self._finish_account(account_id, session, replays[account_id], tallies[account_id])
-            )
+                results[account_id] = AccountRunResult(account_id=account_id)
+            elif account_id not in options:
+                results[account_id] = self._finish_account(
+                    account_id, session, replays[account_id], tallies[account_id]
+                )
+        if options:
+            # After-close work waits for the official close (I9).
+            self._advance_clock(close + self._config.settle_delay)
+            self._settle_options(session, options)
+            for account_id in options:
+                results[account_id] = self._finish_options_account(
+                    account_id, session, tallies[account_id]
+                )
         self._drain_outbox()
-        return EodRunResult(session=session, accounts=tuple(results))
+        return EodRunResult(
+            session=session,
+            accounts=tuple(results[account_id] for account_id in sorted(self._config.brokers)),
+        )
+
+    def _is_options(self, account_id: str) -> bool:
+        return callable(getattr(self._config.brokers[account_id], "process_snapshot", None))
 
     def _run_command(self, account_id: str, session: date) -> str:
         return _RUN_COMMAND.format(
@@ -267,7 +324,9 @@ class EodRunner:
         broker = self._config.brokers[account_id]
         broker.connect()
         state = self._ledger.state(account_id)
-        instruments = self._replay_instruments(state)
+        # An options account's orders fill at snapshots and its shares are marked at the
+        # official close, so it replays no bars.
+        instruments = () if self._is_options(account_id) else self._replay_instruments(state)
         self._rehydrate_venue(account_id, broker, state)
         return instruments
 
@@ -276,19 +335,23 @@ class EodRunner:
         session: date,
         replays: Mapping[str, tuple[Instrument, ...]],
         tallies: Mapping[str, "_Tally"],
+        snapshots: Sequence[ChainSnapshot] = (),
+        options: Sequence[str] = (),
     ) -> None:
         """Feed every account's bars on one timeline, minute by minute.
 
         One clock serves every account, and the ledger records events in the order they
         happened: instrument by instrument, a 09:31 fill in the second symbol would land
         after a 15:00 exit in the first, stamped 15:59 (I7). Each bar goes to every
-        account holding its instrument, and each account reconciles immediately.
+        account holding its instrument, and each account reconciles immediately. A chain
+        snapshot takes its place at its own ``as_of``, ahead of the bar that opens at the
+        same instant, and goes to every options account.
         """
         holders: dict[Instrument, list[str]] = {}
         for account_id, instruments in replays.items():
             for instrument in instruments:
                 holders.setdefault(instrument, []).append(account_id)
-        if not holders:
+        if not holders and not snapshots:
             return
         session_open = self._calendar.session_open(session)
         session_close = self._calendar.session_close(session)
@@ -302,10 +365,17 @@ class EodRunner:
         timeline = []
         for instrument in sorted(holders, key=lambda value: value.symbol):
             for bar, is_regular in self._load_bars(instrument, session_open, session_close):
-                timeline.append((bar.timestamp, instrument.symbol, bar, is_regular))
-        timeline.sort(key=lambda item: (item[0], item[1]))
-        for timestamp, _, bar, is_regular in timeline:
+                timeline.append((bar.timestamp, 1, instrument.symbol, bar, is_regular))
+        for snapshot in snapshots:
+            timeline.append((snapshot.as_of, 0, snapshot.underlying, snapshot, False))
+        timeline.sort(key=lambda item: (item[0], item[1], item[2]))
+        for timestamp, kind, _, item, is_regular in timeline:
             self._advance_clock(timestamp)
+            if kind == 0:
+                for account_id in options:
+                    self._options_at_snapshot(account_id, session, item, tallies[account_id])
+                continue
+            bar = item
             for account_id in sorted(holders[bar.instrument]):
                 broker = self._config.brokers[account_id]
                 tally = tallies[account_id]
@@ -373,7 +443,7 @@ class EodRunner:
         order it does not hold would silently never fill, so the run refuses (I5).
         """
         if (
-            isinstance(broker, SimBroker)
+            isinstance(broker, (SimBroker, SnapshotVenue))
             and not broker.orders(MIN_TIME)
             and not broker.fills(MIN_TIME)
         ):
@@ -461,6 +531,7 @@ class EodRunner:
                 filled_at=fill.filled_at,
                 side=fill.side,
                 fee=fill.fee,
+                leg_id=fill.leg_id,
             )
             for fill in state.fills
             if fill.order_id in wanted
@@ -610,12 +681,15 @@ class EodRunner:
             fee=venue_fill.fee,
             venue_order_id=venue_fill.venue_order_id,
             venue_execution_id=venue_fill.venue_fill_id,
+            leg_id=venue_fill.leg_id,
         )
         manager.record_fill(fill)
         self._enqueue_journal_outbox(account_id, fill)
         return 1
 
     def _manager_for(self, account_id: str, broker: BrokerAdapter) -> OrderManager:
+        if self._is_options(account_id):
+            return self._option_manager(account_id).orders
         manager = self._managers.get(account_id)
         if manager is None:
             manager = OrderManager(broker, self._clock, self._ledger)
@@ -652,10 +726,15 @@ class EodRunner:
                 "fee": str(fill.fee),
                 "executed_at": fill.filled_at.isoformat(),
                 "account_id": journal_account,
-                "asset_class": "equity",
-                "multiplier": 1,
+                "asset_class": "option" if isinstance(fill.instrument, OptionContract) else "equity",
+                "multiplier": fill.instrument.multiplier,
                 "stop_loss": str(stop.stop_price) if stop is not None else None,
-                "profit_target": str(target.limit_price) if target is not None else None,
+                # A combo's target is a net price, not this leg's.
+                "profit_target": (
+                    str(target.limit_price)
+                    if target is not None and target.instrument == fill.instrument
+                    else None
+                ),
                 "strategy_tag": entry.command_id.split(":")[0],
                 "notes": f"trade-engine {fill.order_id}",
             },
@@ -956,6 +1035,387 @@ class EodRunner:
             venue_daily_pnl=None,
             current_position_quantity=int(held.quantity) if held is not None else 0,
         )
+
+    # -- options accounts (O4) ---------------------------------------------------
+
+    def _option_manager(self, account_id: str) -> OptionOrderManager:
+        manager = self._option_managers.get(account_id)
+        if manager is None:
+            manager = OptionOrderManager(self._config.brokers[account_id], self._clock, self._ledger)
+            self._option_managers[account_id] = manager
+        return manager
+
+    def _session_snapshots(self, session: date, options: Sequence[str]) -> list[ChainSnapshot]:
+        """The session's chain snapshots, checked before anything is replayed (I5).
+
+        Each must lie inside the session. Every underlying an options account holds an
+        option on or has an order working on needs one: without it nothing could fill
+        or be marked, and a guess is not a mark.
+        """
+        if not options:
+            return []
+        if self._config.chain_snapshots is None or self._config.settlements is None:
+            raise EodRunnerError(
+                f"Options accounts {list(options)} need chain_snapshots to fill and mark "
+                f"options and settlements to mark shares; neither may be defaulted (I5)"
+            )
+        session_open = self._calendar.session_open(session)
+        session_close = self._calendar.session_close(session)
+        snapshots = sorted(
+            self._config.chain_snapshots(session), key=lambda item: (item.as_of, item.underlying)
+        )
+        for snapshot in snapshots:
+            if not isinstance(snapshot, ChainSnapshot):
+                raise EodRunnerError(f"chain_snapshots returned {type(snapshot).__name__} (I5)")
+            if not session_open <= snapshot.as_of <= session_close:
+                raise ReplayDataError(
+                    f"{snapshot.underlying} snapshot of {snapshot.as_of.isoformat()} is outside "
+                    f"the {session.isoformat()} session (I7)"
+                )
+        have = {snapshot.underlying for snapshot in snapshots}
+        for account_id in options:
+            missing = sorted(self._option_underlyings(self._ledger.state(account_id)) - have)
+            if missing:
+                raise ReplayDataError(
+                    f"No {session.isoformat()} chain snapshot for {', '.join(missing)}, which "
+                    f"'{account_id}' holds options on or has orders working on; refusing to "
+                    f"fill or mark them from memory (I5)"
+                )
+        return snapshots
+
+    @staticmethod
+    def _option_underlyings(state: AccountState) -> set[str]:
+        needed = {
+            underlying_of(instrument)
+            for instrument, position in state.positions.items()
+            if isinstance(instrument, OptionContract) and position.quantity != 0
+        }
+        needed |= {
+            underlying_of(order.instrument)
+            for order in state.orders.values()
+            if order.state in _VENUE_WORKING
+        }
+        return needed
+
+    def _options_at_snapshot(
+        self, account_id: str, session: date, snapshot: ChainSnapshot, tally: "_Tally"
+    ) -> None:
+        """Match the account's working orders, then let the strategy act on these quotes."""
+        manager = self._option_manager(account_id)
+        self._match_snapshot(account_id, manager, snapshot, session)
+        tally.snapshots_processed += 1
+        tally.snapshots[snapshot.underlying] = snapshot
+        manage = getattr(self._config.strategies.get(account_id), "manage_options", None)
+        if not callable(manage):
+            return
+        actions = list(manage(self._option_context(account_id, session, tally, snapshot)))
+        if not actions:
+            return
+        self._apply_option_actions(account_id, session, actions, tally, snapshot)
+        # Decided on these quotes, so traded on them.
+        self._match_snapshot(account_id, manager, snapshot, session)
+
+    def _match_snapshot(
+        self, account_id: str, manager: OptionOrderManager, snapshot: ChainSnapshot, session: date
+    ) -> None:
+        broker = self._config.brokers[account_id]
+        broker.process_snapshot(snapshot)
+        self._reconcile_after_bar(account_id, broker, manager.orders, snapshot.as_of)
+        manager.sync(
+            account_id,
+            f"eod:{self._config.job_name}:{account_id}:{session.isoformat()}:{snapshot.underlying}",
+        )
+
+    def _settle_options(self, session: date, options: Sequence[str]) -> None:
+        """Expiry, exercise and assignment, on the official prices (O2, I9)."""
+        holding = [
+            account_id
+            for account_id in options
+            if any(
+                isinstance(instrument, OptionContract) and position.quantity != 0
+                for instrument, position in self._ledger.state(account_id).positions.items()
+            )
+        ]
+        if not holding:
+            return
+        if self._config.lifecycle is None:
+            raise EodRunnerError(
+                f"{holding} hold options and no lifecycle pass is configured; expiry and "
+                f"assignment cannot be decided (I9)"
+            )
+        self._config.lifecycle.run(session, holding)
+
+    def _finish_options_account(
+        self, account_id: str, session: date, tally: "_Tally"
+    ) -> AccountRunResult:
+        broker = self._config.brokers[account_id]
+        manager = self._option_manager(account_id)
+        # A closing sweep: DAY orders lapsed at the close, settled structures' exits.
+        self._reconcile_after_bar(account_id, broker, manager.orders, None)
+        manager.sync(
+            account_id, f"eod:{self._config.job_name}:{account_id}:{session.isoformat()}:settled"
+        )
+        self._credit_dividends(account_id, session)
+        self._mark_options_account(account_id, session, tally)
+        manage = getattr(self._config.strategies.get(account_id), "manage_options", None)
+        if callable(manage):
+            actions = list(manage(self._option_context(account_id, session, tally)))
+            self._apply_option_actions(account_id, session, actions, tally, None)
+        self._submit_new_option_entries(account_id, session, tally)
+        self._append_run_marker(account_id, session, tally.bars_processed)
+        return AccountRunResult(
+            account_id=account_id,
+            fills_recorded=self._fill_count(account_id) - tally.fills_before,
+            marks_appended=self._marks_appended(account_id, session),
+            orders_submitted=tally.orders_submitted,
+            exit_actions=tally.exit_actions,
+            snapshots_processed=tally.snapshots_processed,
+        )
+
+    def _option_context(
+        self,
+        account_id: str,
+        session: date,
+        tally: "_Tally",
+        snapshot: ChainSnapshot | None = None,
+    ) -> OptionContext:
+        state = self._ledger.state(account_id)
+        return OptionContext(
+            session=session,
+            account_id=account_id,
+            phase="close" if snapshot is None else "snapshot",
+            now=self._clock.now_utc(),
+            state=state,
+            structures=open_structures(state),
+            snapshot=snapshot,
+            snapshots=dict(tally.snapshots),
+        )
+
+    def _apply_option_actions(
+        self,
+        account_id: str,
+        session: date,
+        actions: Iterable[Any],
+        tally: "_Tally",
+        snapshot: ChainSnapshot | None,
+    ) -> None:
+        """Route a strategy's options actions through the risk layer and the OMS.
+
+        At a snapshot, an action must concern that snapshot's underlying: it is matched
+        against those quotes at once, and any other underlying's would not be the ones
+        it was decided on. A refused guard (C3, C4, C5) fails the run loudly.
+        """
+        manager = self._option_manager(account_id)
+        for action in actions:
+            if snapshot is not None and self._action_underlying(account_id, action) != snapshot.underlying:
+                raise EodRunnerError(
+                    f"'{account_id}' returned {type(action).__name__} "
+                    f"'{getattr(action, 'command_id', '?')}' at the {snapshot.underlying} "
+                    f"snapshot for another underlying"
+                )
+            if isinstance(action, OptionIntent):
+                tally.orders_submitted += self._enter_option(account_id, session, action, tally, snapshot)
+            elif isinstance(action, CloseStructure):
+                manager.close(account_id, action)
+                tally.exit_actions += 1
+            elif isinstance(action, CloseHolding):
+                manager.close_holding(account_id, action)
+                tally.exit_actions += 1
+            else:
+                raise EodRunnerError(
+                    f"Strategy for '{account_id}' returned {type(action).__name__}; options "
+                    "actions are OptionIntent, CloseStructure or CloseHolding"
+                )
+
+    def _action_underlying(self, account_id: str, action: Any) -> str:
+        if isinstance(action, OptionIntent):
+            return underlying_of(action.instrument)
+        if isinstance(action, CloseHolding):
+            return action.instrument.symbol
+        if isinstance(action, CloseStructure):
+            entry = self._ledger.state(account_id).orders.get(action.entry_order_id)
+            if entry is None:
+                raise EodRunnerError(
+                    f"Close '{action.command_id}' names '{action.entry_order_id}', which is not "
+                    f"an order of '{account_id}' (I8)"
+                )
+            return underlying_of(entry.instrument)
+        raise EodRunnerError(f"Unknown options action {type(action).__name__}")
+
+    def _enter_option(
+        self,
+        account_id: str,
+        session: date,
+        intent: Any,
+        tally: "_Tally",
+        snapshot: ChainSnapshot | None,
+    ) -> int:
+        if not isinstance(intent, OptionIntent):
+            raise EodRunnerError(
+                f"Options account '{account_id}' was handed {type(intent).__name__}; it enters "
+                "with OptionIntent"
+            )
+        if intent.account_id != account_id:
+            raise EodRunnerError(
+                f"Intent '{intent.intent_id}' targets account '{intent.account_id}' but was "
+                f"produced for '{account_id}' (I8)"
+            )
+        engine = self._config.option_risk_engines.get(account_id)
+        if engine is None:
+            raise EodRunnerError(
+                f"'{account_id}' asked to enter '{intent.intent_id}' and has no options risk "
+                f"engine; nothing enters unchecked (I5)"
+            )
+        verdict = engine.evaluate(intent, self._option_context(account_id, session, tally, snapshot))
+        self._record_verdict(account_id, intent, verdict)
+        if not verdict.accepted:
+            return 0
+        if verdict.approved_quantity is not None and verdict.approved_quantity != intent.quantity:
+            intent = replace(intent, quantity=verdict.approved_quantity)
+        self._option_manager(account_id).open(intent)
+        return 1
+
+    def _submit_new_option_entries(self, account_id: str, session: date, tally: "_Tally") -> None:
+        adapter = self._config.signal_adapters.get(account_id)
+        strategy = self._config.strategies.get(account_id)
+        if adapter is None or strategy is None:
+            return
+        signals = adapter.read_signals(session)
+        for signal in signals:
+            self._record_signal(account_id, signal)
+        for intent in strategy.generate_intents(signals, self._option_context(account_id, session, tally)):
+            tally.orders_submitted += self._enter_option(account_id, session, intent, tally, None)
+
+    def _credit_dividends(self, account_id: str, session: date) -> None:
+        """Credit (or charge) today's ex-dividends on the shares held at the open.
+
+        Whoever holds a share when it opens ex-dividend is owed the dividend, so the
+        holding is the account as it stood before the session opened. A short holding
+        pays it. The cash is booked on the ex-date, the day the price drops by it.
+        """
+        session_open = self._calendar.session_open(session)
+        before = fold_account(
+            (event for event in self._ledger.events(account=account_id) if event.ts_utc < session_open),
+            account_id,
+        )
+        shares = sorted(
+            (
+                (instrument, position)
+                for instrument, position in before.positions.items()
+                if isinstance(instrument, Equity) and position.quantity != 0
+            ),
+            key=lambda item: item[0].symbol,
+        )
+        if not shares:
+            return
+        source = self._config.dividends
+        if source is None:
+            raise EodRunnerError(
+                f"'{account_id}' holds shares and no dividend source is configured; a dividend "
+                f"going ex would be missed (I5)"
+            )
+        now = self._clock.now_utc()
+        for instrument, position in shares:
+            try:
+                found = source.dividends(instrument.symbol, session)
+            except StaleDataError as err:
+                raise ReplayDataError(f"'{account_id}' holds {instrument.symbol}: {err}") from err
+            for dividend in found:
+                if dividend.as_of > now:
+                    raise ReplayDataError(
+                        f"{instrument.symbol} dividend record is stamped {dividend.as_of.isoformat()}, "
+                        f"after the clock: look-ahead (I7)"
+                    )
+            per_share = sum((dividend.amount for dividend in found), Decimal("0"))
+            if per_share == 0:
+                continue
+            self._ledger.append(
+                Event(
+                    account=account_id,
+                    kind=EventKind.CASH_FLOW,
+                    payload=CashFlow(
+                        amount=position.quantity * per_share,
+                        kind="dividend",
+                        as_of=now,
+                        note=(
+                            f"{instrument.symbol} ex-dividend {session.isoformat()}: {per_share} "
+                            f"a share on {position.quantity} held at the open"
+                        ),
+                    ),
+                    ts_utc=now,
+                    command_id=f"dividend:{account_id}:{instrument.symbol}:{session.isoformat()}",
+                )
+            )
+
+    def _mark_options_account(self, account_id: str, session: date, tally: "_Tally") -> None:
+        """Options at the newest snapshot's mid; shares and underlyings at the official close.
+
+        The underlying of every option held is marked too, held or not: its option
+        margin is measured against it (O3). Anything without a price refuses (I5).
+        """
+        state = self._ledger.state(account_id)
+        marks: dict[Instrument, tuple[Decimal, str]] = {}
+        underlyings: set[str] = set()
+        for instrument, position in sorted(state.positions.items(), key=lambda item: item[0].symbol):
+            if position.quantity == 0:
+                continue
+            if isinstance(instrument, OptionContract):
+                underlying = underlying_of(instrument)
+                snapshot = tally.snapshots.get(underlying)
+                quote = None if snapshot is None else snapshot.get(instrument)
+                if quote is None or quote.mid <= 0:
+                    raise ReplayDataError(
+                        f"No usable {session.isoformat()} quote for {instrument.occ.strip()} in "
+                        f"'{account_id}'; refusing to mark it (I5)"
+                    )
+                marks[instrument] = (quote.mid, f"snapshot:{snapshot.as_of.isoformat()}")
+                underlyings.add(underlying)
+            elif isinstance(instrument, Equity):
+                marks[instrument] = self._official_close(instrument.symbol, session)
+            else:
+                raise EodRunnerError(f"'{account_id}' holds {instrument.symbol}, which cannot be marked (I6)")
+        for underlying in sorted(underlyings):
+            if Equity(underlying) not in marks:
+                marks[Equity(underlying)] = self._official_close(underlying, session)
+        now = self._clock.now_utc()
+        for instrument, (price, source) in sorted(marks.items(), key=lambda item: item[0].symbol):
+            command = _MARK_COMMAND.format(
+                account=account_id, session=session.isoformat(), symbol=instrument.symbol
+            )
+            if self._ledger.event_by_command(command) is not None:
+                continue
+            self._ledger.append(
+                Event(
+                    account=account_id,
+                    kind=EventKind.MARK,
+                    payload=Mark(instrument=instrument, price=price, as_of=now, source=source),
+                    ts_utc=now,
+                    command_id=command,
+                )
+            )
+
+    def _official_close(self, symbol: str, session: date) -> tuple[Decimal, str]:
+        try:
+            price = self._config.settlements.settlement(symbol, session, SettleTime.PM)
+        except StaleDataError as err:
+            raise ReplayDataError(f"No official {session.isoformat()} close for {symbol}: {err}") from err
+        if (price.underlying, price.session, price.settle_time) != (symbol, session, SettleTime.PM):
+            raise ReplayDataError(
+                f"Asked for the {session.isoformat()} close of {symbol}, got {price.underlying} "
+                f"{price.settle_time.value} on {price.session} (I5)"
+            )
+        now = self._clock.now_utc()
+        if price.as_of > now:
+            raise ReplayDataError(
+                f"{symbol} close is stamped {price.as_of.isoformat()}, after the clock "
+                f"{now.isoformat()}: look-ahead (I7)"
+            )
+        if price.as_of < self._calendar.session_close(session):
+            raise ReplayDataError(
+                f"{symbol} close is stamped {price.as_of.isoformat()}, before the session "
+                f"closed; it cannot be the official close (I9)"
+            )
+        return price.price, price.source
 
     # -- sinks -------------------------------------------------------------------
 

@@ -145,6 +145,8 @@ class VenueFill:
     filled_at: datetime
     side: Side  # Required: a defaulted side would guess the direction (I5)
     fee: Decimal = Decimal("0")
+    # A combo order is reported leg by leg: the index of the leg this fill executed.
+    leg_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.quantity <= Decimal("0"):

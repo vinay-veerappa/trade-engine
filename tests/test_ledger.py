@@ -650,7 +650,15 @@ def test_cash_flow_moves_cash_and_validates_kind() -> None:
     assert state.cash == Decimal("25.50")
 
     with pytest.raises(EventPayloadError, match="CashFlow.kind must be one of"):
-        CashFlow(amount=Decimal("1"), kind="dividend", as_of=TS)
+        CashFlow(amount=Decimal("1"), kind="rebate", as_of=TS)
+
+
+def test_a_dividend_is_a_cash_flow_and_moves_cash() -> None:
+    # O4 books dividends on shares held as cash; a short holding pays it (negative).
+    state = fold(
+        [Event(account="ACC", kind=EventKind.CASH_FLOW, payload=CashFlow(amount=Decimal("-26.00"), kind="dividend", as_of=TS), ts_utc=TS, seq=1)]
+    )["ACC"]
+    assert state.cash == Decimal("-26.00")
 
 
 def test_mark_updates_marks_map() -> None:
@@ -719,8 +727,9 @@ def test_fold_is_per_account_isolated() -> None:
     assert states["B"].cash == Decimal("-5")
 
 
-def test_mixed_multiplier_combo_refuses_to_be_valued() -> None:
-    """A stock+option combo has no single multiplier; valuation must refuse (I6)."""
+def test_a_combo_filled_as_one_instrument_refuses() -> None:
+    """A combo has no single price or multiplier (a stock+option one has neither); it fills
+    leg by leg, each fill naming its leg (O4, tests/test_combo_fold.py). I6."""
     from trade_engine.domain.instruments import Combo, ComboLeg
 
     combo = Combo(legs=[ComboLeg(contract=AAPL, ratio=1, side=Side.BUY), ComboLeg(contract=SPXW, ratio=1, side=Side.SELL)])
@@ -729,7 +738,7 @@ def test_mixed_multiplier_combo_refuses_to_be_valued() -> None:
         Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=order, ts_utc=TS, seq=1),
         Event(account="ACC", kind=EventKind.FILL, payload=a_fill("fc", "oc", instrument=combo, quantity="1"), ts_utc=TS, seq=2),
     ]
-    with pytest.raises(LedgerFoldError, match="mixed-multiplier"):
+    with pytest.raises(LedgerFoldError, match="must name one of its 2 legs"):
         fold(events)
 
 
