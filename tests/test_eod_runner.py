@@ -871,7 +871,7 @@ def test_options_positions_refuse_eod_replay(tmp_path: Path) -> None:
             command_id="opt-seed:entry",
         )
     )
-    with pytest.raises(EodRunnerError, match="O2"):
+    with pytest.raises(EodRunnerError, match="O4"):
         EodRunner(
             ledger,
             clock,

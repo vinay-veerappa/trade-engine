@@ -12,7 +12,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from trade_engine.domain.instruments import Instrument
+from trade_engine.domain.instruments import Instrument, OptionContract, Side
 from trade_engine.domain.orders import Order
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.risk import RiskControlChange, RiskVerdict
@@ -59,17 +59,15 @@ class EventPayloadError(ValueError):
 class UnhandledEventError(RuntimeError):
     """Raised by fold() for a kind whose semantics are owned by a later work package.
 
-    E1 refuses rather than inventing semantics it does not own (I5). See FOLD_OWNERS.
+    The fold refuses rather than inventing semantics nobody owns yet (I5). See FOLD_OWNERS.
     """
 
 
-# Kinds whose ledger semantics are deliberately out of E1's scope. Options expiry,
-# assignment, exercise and corporate actions are owned by O2 (lifecycle).
+# Kinds whose ledger semantics no work package has taken on yet. O2 owns expiry,
+# assignment and exercise (see OptionLifecycle); what a dividend, split or symbol
+# change does to a holding is not modelled, so a ledger recording one refuses to fold.
 FOLD_OWNERS: dict[EventKind, str] = {
-    EventKind.ASSIGNMENT: "O2 (options lifecycle)",
-    EventKind.EXERCISE: "O2 (options lifecycle)",
-    EventKind.EXPIRY: "O2 (options lifecycle)",
-    EventKind.CORPORATE_ACTION: "O2 (options lifecycle)",
+    EventKind.CORPORATE_ACTION: "a later work package (dividends and splits are not modelled)",
 }
 
 
@@ -229,29 +227,52 @@ class VenueReconcile:
 
 
 @dataclass(frozen=True)
-class LifecycleNotice:
-    """A stated position/cash effect from an option lifecycle event.
+class OptionLifecycle:
+    """What became of an option position: it expired, was exercised or was assigned (O2).
 
-    This carries the *exact* effect the lifecycle owner computed; E1 never infers
-    intrinsic value (I5). fold() refuses these kinds until O2 registers handlers.
+    Filed under ``Expiry`` (worthless), ``Exercise`` (a long position, exercised) or
+    ``Assignment`` (a short position, assigned). The event states the contract, how many
+    contracts and which way they were held, and the underlying's price it was decided
+    on; the fold works out the effect from the position's own lots (``lifecycle.rules``),
+    so the effect cannot disagree with the book it applies to (I2, I9).
     """
 
-    instrument: Instrument
-    quantity_delta: Decimal
-    cash_delta: Decimal
+    account_id: str
+    contract: OptionContract
+    quantity: Decimal  # contracts, strictly positive
+    held: Side  # BUY: long contracts; SELL: short contracts
+    underlying_price: Decimal  # the official settlement (or close) it was decided on
+    price_source: str
     as_of: datetime
-    note: str | None = None
+    reason: str
+    early: bool = False  # assigned before expiry
 
     def __post_init__(self) -> None:
-        if not isinstance(self.instrument, Instrument):
-            raise EventPayloadError("LifecycleNotice.instrument must be an Instrument (I6)")
+        if not self.account_id:
+            raise EventPayloadError("OptionLifecycle.account_id must be non-empty")
+        if not isinstance(self.contract, OptionContract):
+            raise EventPayloadError("OptionLifecycle.contract must be an OptionContract (I6)")
+        object.__setattr__(self, "quantity", _as_decimal(self.quantity, "OptionLifecycle.quantity"))
+        if self.quantity <= 0 or self.quantity != self.quantity.to_integral_value():
+            raise EventPayloadError(
+                f"OptionLifecycle.quantity must be a positive whole number of contracts, got {self.quantity}"
+            )
+        if not isinstance(self.held, Side):
+            raise EventPayloadError(f"OptionLifecycle.held must be a Side, got {self.held!r} (I5)")
         object.__setattr__(
-            self, "quantity_delta", _as_decimal(self.quantity_delta, "LifecycleNotice.quantity_delta")
+            self, "underlying_price", _as_decimal(self.underlying_price, "OptionLifecycle.underlying_price")
         )
-        object.__setattr__(
-            self, "cash_delta", _as_decimal(self.cash_delta, "LifecycleNotice.cash_delta")
-        )
-        _require_utc(self.as_of, "LifecycleNotice.as_of")
+        if self.underlying_price <= 0:
+            raise EventPayloadError(
+                f"OptionLifecycle.underlying_price must be positive, got {self.underlying_price} (I5)"
+            )
+        if not self.price_source:
+            raise EventPayloadError("OptionLifecycle.price_source must be non-empty (I11)")
+        if not self.reason:
+            raise EventPayloadError("OptionLifecycle.reason must be non-empty (I11)")
+        _require_utc(self.as_of, "OptionLifecycle.as_of")
+        if not isinstance(self.early, bool):
+            raise EventPayloadError("OptionLifecycle.early must be a bool")
 
 
 @dataclass(frozen=True)
@@ -295,9 +316,9 @@ PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.ORDER_EXPIRED: OrderStateChange,
     EventKind.ORDER_EMULATION_UPDATED: EmulatedOrderState,
     EventKind.FILL: Fill,
-    EventKind.ASSIGNMENT: LifecycleNotice,
-    EventKind.EXERCISE: LifecycleNotice,
-    EventKind.EXPIRY: LifecycleNotice,
+    EventKind.ASSIGNMENT: OptionLifecycle,
+    EventKind.EXERCISE: OptionLifecycle,
+    EventKind.EXPIRY: OptionLifecycle,
     EventKind.CORPORATE_ACTION: CorporateAction,
     EventKind.CASH_FLOW: CashFlow,
     EventKind.MARK: Mark,
