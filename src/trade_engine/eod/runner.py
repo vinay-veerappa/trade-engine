@@ -50,7 +50,7 @@ market data comes from injected providers (I5: no default source).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -60,21 +60,17 @@ from zoneinfo import ZoneInfo
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.domain.exits import ClosePosition, MoveStop, OpenBracket, ReducePosition
 from trade_engine.domain.instruments import Equity, Instrument, OptionContract
-from trade_engine.domain.option_orders import CloseHolding, CloseStructure, OptionIntent
 from trade_engine.domain.option_roots import SettleTime
 from trade_engine.domain.orders import OrderState, OrderType
-from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.risk import RiskVerdict
 from trade_engine.domain.signals import OrderIntent, Signal
 from trade_engine.interfaces.broker import (
     BrokerAdapter,
     VenueFill,
     VenueOrder,
-    VenueOrderAllocation,
     VenuePosition,
 )
 from trade_engine.interfaces.clock import Clock
-from trade_engine.eod.options import OptionContext
 from trade_engine.eod.options_routing import OptionRouter
 from trade_engine.interfaces.market_data import MarketData, StaleDataError
 from trade_engine.ledger import CashFlow, EodRun, Event, EventKind, Ledger, Mark
@@ -82,6 +78,9 @@ from trade_engine.ledger.state import AccountState, fold_account
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
 from trade_engine.oms.options import OptionOrderManager, open_structures
+from trade_engine.oms.reconcile import ReconcileError
+from trade_engine.oms.restore import VENUE_WORKING as _VENUE_WORKING
+from trade_engine.oms.restore import RestoreError
 from trade_engine.risk import RiskContext, RiskEngine
 from trade_engine.sim import SimBroker, SnapshotVenue, underlying_of
 
@@ -89,23 +88,12 @@ MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
 _MARK_COMMAND = "eod:mark:{account}:{session}:{symbol}"
 _RUN_COMMAND = "eod:{job}:{account}:{session}"
-# How many times a strategy may act at one snapshot: a buy-write needs two.
-_SNAPSHOT_ROUNDS = 4
 _TERMINAL = frozenset(
     {
         OrderState.FILLED,
         OrderState.CANCELLED,
         OrderState.EXPIRED,
         OrderState.REJECTED,
-    }
-)
-# States in which the ledger says the venue holds the order.
-_VENUE_WORKING = frozenset(
-    {
-        OrderState.SUBMITTED,
-        OrderState.ACCEPTED,
-        OrderState.PARTIALLY_FILLED,
-        OrderState.PENDING_UNKNOWN,
     }
 )
 
@@ -327,8 +315,14 @@ class EodRunner:
                 )
 
     def _account_has_history(self, account_id: str) -> bool:
+        """Whether this job has completed a session for the account before.
+
+        Only this job's own markers count: an account the intraday service also runs
+        carries that service's markers, and its first after-close run must not be
+        refused for lacking a previous session it never had (I3).
+        """
         for event in self._ledger.events(account=account_id):
-            if event.kind is EventKind.EOD_RUN:
+            if event.kind is EventKind.EOD_RUN and event.payload.job == self._config.job_name:
                 return True
         return False
 
@@ -490,7 +484,10 @@ class EodRunner:
         and its siblings' exits. NEW orders were never sent, so they stay out."""
         from trade_engine.oms.restore import restorable
 
-        return restorable(self._ledger, account_id, state)
+        try:
+            return restorable(self._ledger, account_id, state)
+        except RestoreError as err:
+            raise EodRunnerError(str(err)) from err
 
     @staticmethod
     def _restorable_positions(state: AccountState) -> list[VenuePosition]:
@@ -576,15 +573,18 @@ class EodRunner:
         """
         from trade_engine.oms.reconcile import MIN_TIME, reconcile_after
 
-        return reconcile_after(
-            self._ledger,
-            self._clock,
-            broker,
-            manager,
-            account_id,
-            MIN_TIME if bar_timestamp is None else bar_timestamp,
-            journal_account=self._config.journal_accounts.get(account_id),
-        )
+        try:
+            return reconcile_after(
+                self._ledger,
+                self._clock,
+                broker,
+                manager,
+                account_id,
+                MIN_TIME if bar_timestamp is None else bar_timestamp,
+                journal_account=self._config.journal_accounts.get(account_id),
+            )
+        except ReconcileError as err:
+            raise EodRunnerError(str(err)) from err
 
     def _manager_for(self, account_id: str, broker: BrokerAdapter) -> OrderManager:
         if self._is_options(account_id):
@@ -1035,9 +1035,10 @@ class EodRunner:
         tally: "_Tally",
         snapshot: ChainSnapshot | None,
     ) -> int:
-        router = self._router(account_id)
-        return router._enter_option(
-            account_id, session, intent, snapshot, None
+        # The risk engine sees the session's snapshots, as every entry decided at the
+        # close always did: a combo's margin needs its underlying's quotes (O3).
+        return self._router(account_id).enter_option(
+            account_id, session, intent, snapshot, tally.snapshots
         )
 
     def _submit_new_option_entries(self, account_id: str, session: date, tally: "_Tally") -> None:

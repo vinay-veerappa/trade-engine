@@ -1,4 +1,4 @@
-"""How a strategy's option actions reach the venue â€” shared by both runners (O4, I13).
+"""How a strategy's option actions reach the venue — shared by both runners (O4, I13).
 
 Extracted from the EOD runner so the intraday service routes its actions through the
 same rules instead of a second implementation drifting away (I13): the underlying
@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from trade_engine.domain.instruments import Equity, Instrument, OptionContract
 from trade_engine.domain.option_orders import (
     CloseHolding,
     CloseStructure,
@@ -22,14 +21,13 @@ from trade_engine.domain.option_orders import (
 )
 from trade_engine.domain.risk import RiskVerdict
 from trade_engine.eod.options import OptionContext
-from trade_engine.interfaces.broker import BrokerAdapter
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.options import OptionOrderManager, open_structures
 from trade_engine.sim import underlying_of
 
-ROUNDS = 4  # how many times a strategy may act at one snapshot: a buy-write needs two  # how many times a strategy may act at one snapshot: a buy-write needs two
+ROUNDS = 4  # how many times a strategy may act at one snapshot: a buy-write needs two
 
 
 @dataclass
@@ -123,17 +121,20 @@ class OptionRouter:
         """Fill the account's working orders on this snapshot, then ingest immediately."""
         broker = self._brokers[account_id]
         broker.process_snapshot(snapshot)
-        from trade_engine.oms.reconcile import MIN_TIME, reconcile_after
+        from trade_engine.oms.reconcile import MIN_TIME, ReconcileError, reconcile_after
 
-        recorded = reconcile_after(
-            self._ledger,
-            self._clock,
-            broker,
-            self.manager(account_id).orders,
-            account_id,
-            since if since is not None else MIN_TIME,
-            journal_account=self._journal_accounts.get(account_id),
-        )
+        try:
+            recorded = reconcile_after(
+                self._ledger,
+                self._clock,
+                broker,
+                self.manager(account_id).orders,
+                account_id,
+                since if since is not None else MIN_TIME,
+                journal_account=self._journal_accounts.get(account_id),
+            )
+        except ReconcileError as err:
+            raise _fail(str(err)) from err
         self.manager(account_id).sync(
             account_id,
             f"{cause}:{snapshot.underlying}",
@@ -211,7 +212,7 @@ class OptionRouter:
                     "with OptionIntent"
                 )
             if isinstance(action, OptionIntent):
-                tally.orders_submitted += self._enter_option(account_id, session, action, snapshot, snapshots)
+                tally.orders_submitted += self.enter_option(account_id, session, action, snapshot, snapshots)
             elif isinstance(action, CloseStructure):
                 manager.close(account_id, action)
                 tally.exit_actions += 1
@@ -240,7 +241,7 @@ class OptionRouter:
             return underlying_of(entry.instrument)
         raise _fail(f"Unknown options action {type(action).__name__}")
 
-    def _enter_option(
+    def enter_option(
         self,
         account_id: str,
         session: date,

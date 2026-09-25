@@ -7,7 +7,7 @@ late protective stop. Nothing here swallows that error; a raise fails the run lo
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from trade_engine.domain.orders import OrderState, OrderType
@@ -15,11 +15,11 @@ from trade_engine.domain.instruments import OptionContract
 from trade_engine.domain.portfolio import Fill
 from trade_engine.interfaces.broker import BrokerAdapter, VenueFill
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Event, EventKind, Ledger
+from trade_engine.ledger import Event, Ledger
 from trade_engine.ledger.state import AccountState
 from trade_engine.oms.manager import OrderManager
 
-MIN_TIME = datetime.min.replace(tzinfo=__import__("datetime").timezone.utc)
+MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 TERMINAL = frozenset(
     {
         OrderState.FILLED,
@@ -28,6 +28,14 @@ TERMINAL = frozenset(
         OrderState.REJECTED,
     }
 )
+
+
+class ReconcileError(RuntimeError):
+    """What the venue reports cannot be squared with the ledger (I5).
+
+    Each runner re-raises it as its own refusal (``EodRunnerError``,
+    ``IntradayServiceError``), so a host catches one type per runner.
+    """
 
 
 def reconcile_after(
@@ -74,7 +82,7 @@ def _record_venue_fill(
         return 0
     state: AccountState = ledger.state(account_id)
     if venue_fill.venue_order_id not in state.orders:
-        raise ValueError(
+        raise ReconcileError(
             f"Venue fill '{venue_fill.venue_fill_id}' references unknown order "
             f"'{venue_fill.venue_order_id}' for '{account_id}' (I5)"
         )
@@ -122,7 +130,7 @@ def enqueue_journal_fill(
     target = next((child for child in children if child.order_type is OrderType.LIMIT), None)
     event = ledger.event_by_command(f"fill:{fill.fill_id}")
     if event is None or event.seq is None:
-        raise ValueError(f"Fill '{fill.fill_id}' was recorded but its ledger event is missing (I1)")
+        raise ReconcileError(f"Fill '{fill.fill_id}' was recorded but its ledger event is missing (I1)")
     return ledger.enqueue_outbox(
         event.seq,
         f"journal:{journal_account}",
