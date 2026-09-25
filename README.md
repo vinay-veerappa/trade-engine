@@ -315,7 +315,9 @@ Three guards are structural:
 **The EOD run.**
 - Each chain snapshot (`chain_snapshots`) is matched at its instant.
 - Then the strategy's `manage_options(context)` runs (`eod.options.OptionContext`, phase
-  `"snapshot"`). Whatever it returns for that underlying trades on the same quotes.
+  `"snapshot"`). Whatever it returns for that underlying trades on the same quotes, and
+  the strategy is asked again until a round brings nothing new (at most 4). That's how a
+  buy-write buys the shares and then writes the call on them.
 - After the close, the clock moves on by `settle_delay` (105 minutes, to 17:45 ET), when
   the official close is known. Then, in order:
   1. the O2 `lifecycle` pass settles expiries and assignments;

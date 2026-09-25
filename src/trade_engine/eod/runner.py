@@ -88,6 +88,8 @@ MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
 _MARK_COMMAND = "eod:mark:{account}:{session}:{symbol}"
 _RUN_COMMAND = "eod:{job}:{account}:{session}"
+# How many times a strategy may act at one snapshot: a buy-write needs two.
+_SNAPSHOT_ROUNDS = 4
 _TERMINAL = frozenset(
     {
         OrderState.FILLED,
@@ -1100,7 +1102,13 @@ class EodRunner:
     def _options_at_snapshot(
         self, account_id: str, session: date, snapshot: ChainSnapshot, tally: "_Tally"
     ) -> None:
-        """Match the account's working orders, then let the strategy act on these quotes."""
+        """Match the account's working orders, then let the strategy act on these quotes.
+
+        What the strategy returns trades on the same snapshot, and the strategy is asked
+        again once it has: a buy-write buys the shares in one round and writes the call on
+        them in the next, both on the quotes it was decided on. It stops when a round
+        brings nothing new; a strategy still acting after ``_SNAPSHOT_ROUNDS`` refuses.
+        """
         manager = self._option_manager(account_id)
         self._match_snapshot(account_id, manager, snapshot, session)
         tally.snapshots_processed += 1
@@ -1108,12 +1116,26 @@ class EodRunner:
         manage = getattr(self._config.strategies.get(account_id), "manage_options", None)
         if not callable(manage):
             return
-        actions = list(manage(self._option_context(account_id, session, tally, snapshot)))
-        if not actions:
-            return
-        self._apply_option_actions(account_id, session, actions, tally, snapshot)
-        # Decided on these quotes, so traded on them.
-        self._match_snapshot(account_id, manager, snapshot, session)
+        for _ in range(_SNAPSHOT_ROUNDS):
+            actions = list(manage(self._option_context(account_id, session, tally, snapshot)))
+            if all(self._taken(action) for action in actions):
+                return  # nothing new: every action is one already taken (I3)
+            self._apply_option_actions(account_id, session, actions, tally, snapshot)
+            # Decided on these quotes, so traded on them.
+            self._match_snapshot(account_id, manager, snapshot, session)
+        raise EodRunnerError(
+            f"The strategy for '{account_id}' was still acting at the {snapshot.underlying} "
+            f"snapshot after {_SNAPSHOT_ROUNDS} rounds; refusing to loop on it"
+        )
+
+    def _taken(self, action: Any) -> bool:
+        """Whether an action was already routed: ordered, or (an entry) judged by risk."""
+        command_id = getattr(action, "command_id", None)
+        if not command_id:
+            return False
+        if self._ledger.has_command(command_id):
+            return True
+        return isinstance(action, OptionIntent) and self._ledger.has_command(f"risk:{command_id}")
 
     def _match_snapshot(
         self, account_id: str, manager: OptionOrderManager, snapshot: ChainSnapshot, session: date

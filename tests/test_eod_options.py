@@ -465,3 +465,67 @@ def test_the_daily_snapshot_margins_the_put_against_the_marked_underlying(rig) -
     snapshot = daily_snapshots(list(rig.ledger.events()), ACCOUNT)[-1]
     # Naked put 270 at S=300 marked 10.35: max(20% x 300 - 30 OTM, 10% x 270) + 10.35, x100.
     assert snapshot.margin_used == D("4035")
+
+
+
+# -- acting in rounds at one snapshot ---------------------------------------------------
+
+
+class BuyWrite:
+    """Buy the shares, then write the call on them: two rounds at one snapshot."""
+
+    name = "buy-write"
+
+    def manage_options(self, context):
+        if context.phase != "snapshot":
+            return []
+        shares = context.state.positions.get(COHR)
+        if shares is None or shares.quantity == 0:
+            return [OptionIntent(intent_id="bw-shares", account_id=ACCOUNT, instrument=COHR, side=Side.BUY,
+                                 quantity=D(100), reason="buy-write shares", command_id="bw-shares",
+                                 order_type=OrderType.MARKET)]
+        if not context.structures:
+            return [OptionIntent(intent_id="bw-call", account_id=ACCOUNT, instrument=C330, side=Side.SELL,
+                                 quantity=D(1), reason="buy-write call", command_id="bw-call",
+                                 order_type=OrderType.MARKET)]
+        return []
+
+    def generate_intents(self, signals, context):
+        return []
+
+
+def test_a_buy_write_buys_the_shares_then_writes_the_call_on_the_same_snapshot(rig) -> None:
+    rig.strategy = BuyWrite()
+    rig.run(S1)
+    assert rig.held(COHR) == 100 and rig.held(C330) == -1
+    assert {f.filled_at for f in rig.state.fills} == {snap_time(S1)}
+
+
+def test_a_refused_entry_is_not_asked_for_again_and_again(tmp_path) -> None:
+    rig = Rig(tmp_path, risk=Approve(accept=False))
+    rig.strategy.at_snapshot[S1] = [csp()]
+    rig.run(S1)
+    assert len(rig.risk.seen) == 1
+
+
+class Runaway:
+    name = "runaway"
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def manage_options(self, context):
+        if context.phase != "snapshot":
+            return []
+        self.n += 1
+        return [csp(name=f"runaway-{self.n}", contract=OptionContract("COHR", EXPIRY, D(200 + self.n), OptionRight.PUT))]
+
+    def generate_intents(self, signals, context):
+        return []
+
+
+def test_a_strategy_that_never_stops_acting_refuses(rig) -> None:
+    rig.strategy = Runaway()
+    rig.quotes[S1] = {OptionContract("COHR", EXPIRY, D(200 + n), OptionRight.PUT): ("1.00", "1.10") for n in range(1, 6)}
+    with pytest.raises(EodRunnerError, match="still acting"):
+        rig.run(S1)
