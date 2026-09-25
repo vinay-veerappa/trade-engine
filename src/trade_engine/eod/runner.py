@@ -59,7 +59,7 @@ from zoneinfo import ZoneInfo
 
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.domain.exits import ClosePosition, MoveStop, OpenBracket, ReducePosition
-from trade_engine.domain.instruments import Equity, Instrument, OptionContract, Side
+from trade_engine.domain.instruments import Equity, Instrument, OptionContract
 from trade_engine.domain.option_orders import CloseHolding, CloseStructure, OptionIntent
 from trade_engine.domain.option_roots import SettleTime
 from trade_engine.domain.orders import OrderState, OrderType
