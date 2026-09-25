@@ -223,6 +223,25 @@ def test_name_margin_counts_that_names_shares_and_no_other_name(ledger) -> None:
     assert rule(verdict, "name_margin").measured_value == D("1950")
 
 
+def test_a_call_written_on_shares_over_the_name_cap_passes_because_it_lowers_the_margin(ledger) -> None:
+    # 300 XYZ shares: 3,750 of maintenance, over a 5% (2,500) name cap on their own.
+    book = Book().trade(XYZ, Side.BUY, "300", "50")
+    r = rules(max_name_margin_frac=D("0.05"))
+    call = evaluate(ledger, r, intent(C55, quantity="3", limit="1.10"), book.context())
+    put = evaluate(ledger, r, intent(P45, quantity="1"), book.context())
+    assert rule(call, "name_margin").passed
+    assert not rule(put, "name_margin").passed  # a put adds to the name
+
+
+def test_an_entry_that_lowers_margin_passes_on_a_book_over_the_cap(ledger) -> None:
+    # 30 short 35 puts marked at 7.00 (31,500) and 100 shares (1,250) on 29,750 of equity.
+    book = Book().trade(P35, Side.SELL, "30", "0.25", mark="7.00").trade(XYZ, Side.BUY, "100", "50")
+    covered = evaluate(ledger, rules(), intent(C55, limit="1.10"), book.context())
+    more = evaluate(ledger, rules(), intent(P45, quantity="30"), book.context())
+    assert rule(covered, "margin").passed and "no higher than before" in rule(covered, "margin").reason
+    assert not rule(more, "margin").passed
+
+
 # -- cash per name (§6.2 CSP: 10%) ------------------------------------------------------
 
 
@@ -347,6 +366,16 @@ def test_earnings_before_expiry_refuse_and_after_pass(ledger) -> None:
     assert not rule(before, "earnings").passed and rule(after, "earnings").passed and not rule(on, "earnings").passed
 
 
+def test_earnings_are_measured_against_the_short_legs_only(ledger) -> None:
+    r = rules(no_earnings_before_expiry=True)
+    report = Earnings(date(2026, 12, 1))  # after the October short, before the June LEAPS
+    leaps = evaluate(ledger, r, intent(C40_LEAPS, Side.BUY, "1", "13.50"), Book().context(), earnings=report)
+    diagonal = Combo((ComboLeg(C40_LEAPS, 1, Side.BUY), ComboLeg(C55, 1, Side.SELL)))
+    pmcc = evaluate(ledger, r, intent(diagonal, Side.BUY, "1", "12.40"), Book().context(), earnings=report)
+    assert rule(leaps, "earnings").passed and rule(leaps, "earnings").reason == "The entry sells no option"
+    assert rule(pmcc, "earnings").passed and rule(pmcc, "earnings").threshold == "after 2026-10-30"
+
+
 def test_an_unknown_earnings_date_refuses_and_none_scheduled_passes(ledger) -> None:
     r = rules(no_earnings_before_expiry=True)
     assert not rule(evaluate(ledger, r, intent(), Book().context(), earnings=Earnings(unknown=True)), "earnings").passed
@@ -386,6 +415,22 @@ def test_the_kill_switch_refuses(ledger) -> None:
     ledger.append(Event(account="__venue__:sim", kind=EventKind.RISK_CONTROL, ts_utc=NOW, command_id="kill",
                         payload=RiskControlChange("kill_switch", True, "test", NOW)))
     assert not rule(evaluate(ledger, rules(), intent(), Book().context()), "persistent_kill_switch").passed
+
+
+def test_a_verdict_can_be_stored_in_the_ledger(ledger) -> None:
+    # The runner appends every verdict (I11); a measurement the codec can't store fails the run.
+    from trade_engine.ledger.codec import decode_payload, encode_payload
+
+    book = Book().trade(P45, Side.SELL, "1", "2.00")
+    for verdict in (
+        evaluate(ledger, rules(), intent(), book.context(), regime=None),
+        evaluate(ledger, rules(no_earnings_before_expiry=True, put_notional_frac_by_regime=BY_REGIME,
+                               max_name_margin_frac=D("0.1"), max_name_collateral_frac=D("0.1"),
+                               max_loss_per_structure_frac=D("0.02"), max_debit_per_structure_frac=D("0.05"),
+                               max_total_debit_frac=D("0.3"), max_share_notional_frac=D("0.2")),
+                 intent(C55, limit="1.10"), book.context(), earnings=Earnings(unknown=True)),
+    ):
+        assert decode_payload(encode_payload(verdict)) == verdict
 
 
 def test_every_rule_is_recorded_even_when_one_refuses(ledger) -> None:

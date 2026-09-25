@@ -15,10 +15,12 @@ Rules (a rule configured as None does not apply to the account, and says so):
 
 - ``margin``: the Reg-T maintenance requirement of the whole book at most
   ``max_margin_frac`` of equity (§6.1: 50%, so a 2–3x premium expansion cannot force a
-  margin call).
+  margin call). An entry that leaves it no higher than before (a call written on held
+  shares) reduces risk and passes, as it would at a broker.
 - ``name_margin``: the Reg-T maintenance of one underlying's strategies and shares at
   most ``max_name_margin_frac`` of equity. The owner's reading of §6.2's "10% per name"
-  (2026-09-24): measured in cash, it would allow only strikes up to $50 on $50,000.
+  (2026-09-24): measured in cash, it would allow only strikes up to $50 on $50,000. An
+  entry that leaves the name's margin no higher passes, like ``margin``.
 - ``name_collateral``: the cash securing one underlying's strategies at most
   ``max_name_collateral_frac`` of equity (§6.2 read literally).
 - ``put_notional``: the strikes of every naked short put at most the regime's fraction of
@@ -32,8 +34,9 @@ Rules (a rule configured as None does not apply to the account, and says so):
 - ``share_notional``: shares bought at most ``max_share_notional_frac`` (§6.2 buy-write:
   100 × S ≤ 20%).
 - ``regime``: a known regime in ``allowed_regimes``. UNKNOWN never is.
-- ``earnings``: with ``no_earnings_before_expiry``, no earnings date on or before the
-  structure's expiry. A date the source cannot give refuses.
+- ``earnings``: with ``no_earnings_before_expiry``, no earnings date on or before a
+  short leg expires. Earnings risk is short premium's, so a long option (a PMCC's LEAPS)
+  passes. A date the source cannot give refuses.
 - ``duplicate_entry`` (C4) and ``covered_calls`` (C3): the OMS guards, measured here too,
   so a strategy that proposes one is refused and recorded rather than failing the run.
 - ``duplicate_protection`` and ``persistent_kill_switch``: as for equity entries.
@@ -135,6 +138,7 @@ class _Book:
     equity: Decimal | None
     after: AccountState | None
     error: str | None
+    before: AccountState | None = None  # the account now, at the same prices
 
 
 class OptionRiskEngine:
@@ -188,25 +192,31 @@ class OptionRiskEngine:
             "regime",
             regime in rules.allowed_regimes,
             regime or "UNKNOWN",
-            sorted(rules.allowed_regimes),
+            ", ".join(sorted(rules.allowed_regimes)),
             "Regime permits options entries",
             "Regime is unknown or not one this account enters in",
         )
 
         # margin, measured on the whole book with the entry in it
-        margin = None
+        margin = previous = None
         if book.after is not None:
             try:
                 margin = account_margin(book.after)
+                previous = account_margin(book.before)
             except (OptionMarginError, ValueError) as err:
-                book_error = str(err)
+                margin, book_error = None, str(err)
         cap = equity * rules.max_margin_frac if equity is not None and equity > 0 else None
+        # An entry that leaves the requirement no higher (a call written on held shares)
+        # reduces risk, and passes even on a book already over the cap.
+        reduces = margin is not None and previous is not None and margin.margin_used <= previous.margin_used
         record(
             "margin",
-            margin is not None and cap is not None and margin.margin_used <= cap,
+            margin is not None and cap is not None and (margin.margin_used <= cap or reduces),
             margin.margin_used if margin is not None else f"UNKNOWN ({book_error})",
             cap if cap is not None else "UNKNOWN",
-            "Reg-T requirement with the entry is within the account cap",
+            "Reg-T requirement with the entry is within the account cap"
+            if margin is None or cap is None or margin.margin_used <= cap
+            else f"Reg-T requirement {margin.margin_used} is over the cap but no higher than before",
             "Reg-T requirement is unknown or would exceed the account cap",
         )
 
@@ -214,15 +224,17 @@ class OptionRiskEngine:
         if rules.max_name_margin_frac is None:
             not_configured("name_margin")
         else:
-            on_name = None
-            if margin is not None:
-                on_name = sum(
-                    (s.maintenance for s in margin.strategies if s.underlying == underlying), ZERO
-                ) + sum((p.maintenance for p in margin.positions if p.symbol == underlying), ZERO)
+            on_name = was = None
+            if margin is not None and previous is not None:
+                on_name, was = (
+                    sum((s.maintenance for s in m.strategies if s.underlying == underlying), ZERO)
+                    + sum((p.maintenance for p in m.positions if p.symbol == underlying), ZERO)
+                    for m in (margin, previous)
+                )
             limit = equity * rules.max_name_margin_frac if equity is not None and equity > 0 else None
             record(
                 "name_margin",
-                on_name is not None and limit is not None and on_name <= limit,
+                on_name is not None and limit is not None and (on_name <= limit or on_name <= was),
                 on_name if on_name is not None else "UNKNOWN",
                 limit if limit is not None else "UNKNOWN",
                 f"Margin on {underlying} is within the per-name cap",
@@ -342,11 +354,19 @@ class OptionRiskEngine:
         else:
             results.append(RiskRuleResult("share_notional", True, "n/a", "n/a", "No shares are bought"))
 
-        # earnings before expiry
+        # earnings before a short leg expires
+        short_expiries = [
+            leg.contract.expiry
+            for leg in legs_of(intent.instrument, intent.side)
+            if leg.side is Side.SELL and isinstance(leg.contract, OptionContract)
+        ]
         if not rules.no_earnings_before_expiry or not is_structure(intent.instrument):
             not_configured("earnings")
+        elif not short_expiries:
+            # A long option carries no short premium through the report (a PMCC's LEAPS).
+            results.append(RiskRuleResult("earnings", True, "n/a", "n/a", "The entry sells no option"))
         else:
-            expiry = max(leg.contract.expiry for leg in legs_of(intent.instrument, intent.side))
+            expiry = max(short_expiries)
             try:
                 earnings = self._earnings.next_earnings(underlying, context.session)
                 known = True
@@ -377,7 +397,7 @@ class OptionRiskEngine:
             record(
                 "duplicate_entry",
                 not clash,
-                clash or "none",
+                ", ".join(clash) or "none",
                 "no contract already held or being entered",
                 "No contract of the entry is already held or being entered (C4)",
                 "A contract of the entry is already held or being entered (C4)",
@@ -495,7 +515,8 @@ class OptionRiskEngine:
                 marks.setdefault(Equity(underlying_of(leg.contract)), self._underlying_price(leg.contract, state, snapshot))
         marks = {k: v for k, v in marks.items() if v is not None}
         after = replace(state, positions=MappingProxyType(positions), marks=MappingProxyType(marks), cash=cash)
-        return _Book(equity, after, None)
+        before = replace(state, marks=MappingProxyType(marks))
+        return _Book(equity, after, None, before)
 
     @staticmethod
     def _underlying_price(contract: OptionContract, state: AccountState, snapshot) -> Decimal | None:

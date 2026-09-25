@@ -351,11 +351,14 @@ the account, and the verdict says so.
 | `debit`, `total_debit` | a debit passes `max_debit_per_structure_frac` (PMCC: 5%), or all of them `max_total_debit_frac` (30%) |
 | `share_notional` | shares bought pass `max_share_notional_frac` (buy-write: 20%) |
 | `regime` | the regime is unknown or not in `allowed_regimes` |
-| `earnings` | with `no_earnings_before_expiry`, earnings fall on or before expiry, or the date is unknown |
+| `earnings` | with `no_earnings_before_expiry`, earnings fall on or before a short leg's expiry, or the date is unknown (a long option, like a PMCC's LEAPS, passes) |
 | `duplicate_entry`, `covered_calls` | the C4 and C3 guards, recorded here so a refusal doesn't fail the run |
 | `duplicate_protection`, `persistent_kill_switch` | as for equity entries |
 
-An input that can't be measured refuses: an unknown regime, earnings date, price or mark.
+An entry that leaves the account's (or the name's) margin no higher than before, such as a
+call written on shares already held, passes the margin rules even on a book over its cap.
+It reduces risk, as a broker would treat it. An input that can't be measured refuses: an
+unknown regime, earnings date, price or mark.
 
 ## Development
 
