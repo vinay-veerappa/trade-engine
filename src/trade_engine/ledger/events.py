@@ -2,6 +2,12 @@
 
 The ledger stores one row per event; this module defines what an event *is* and
 which payload type each kind must carry. Nothing here performs I/O.
+
+The ``Mirror*`` kinds record a venue mirror (T2, the thinkorswim paperMoney mirror,
+§4.7): tickets queued, strategy orders refused at the venue only, send outcomes, and the
+venue's own cumulative fills. They are filed under the venue's ledger account
+(:func:`mirror_account`) and fold into a separate per-venue mirror state
+(``ledger.mirror``) — never into any account's sim positions or cash.
 """
 
 from __future__ import annotations
@@ -12,8 +18,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from trade_engine.domain.instruments import Instrument, OptionContract, Side
-from trade_engine.domain.orders import Order
+from trade_engine.domain.instruments import Combo, Instrument, OptionContract, Side
+from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.risk import RiskControlChange, RiskVerdict
 from trade_engine.domain.signals import Signal
@@ -50,6 +56,10 @@ class EventKind(StrEnum):
     MARK = "Mark"
     VENUE_RECONCILE = "VenueReconcile"
     EOD_RUN = "EodRun"
+    MIRROR_QUEUED = "MirrorQueued"
+    MIRROR_REFUSED = "MirrorRefused"
+    MIRROR_ACK = "MirrorAck"
+    MIRROR_FILL = "MirrorFill"
 
 
 class EventPayloadError(ValueError):
@@ -300,6 +310,226 @@ class EodRun:
         _require_utc(self.at_close, "EodRun.at_close")
 
 
+# -- the venue mirror (T2, §4.7) -----------------------------------------------------
+
+MIRROR_ACCOUNT_PREFIX = "__venue__:"
+MIRROR_ACK_STATUSES = ("ACCEPTED", "REJECTED", "PENDING")
+MIRROR_ORDER_TYPES = frozenset({OrderType.MARKET, OrderType.LIMIT})
+MIRROR_TIFS = frozenset({TimeInForce.DAY, TimeInForce.GTC})
+
+
+def mirror_account(venue: str) -> str:
+    """The ledger account a venue's mirror events are filed under (one per venue).
+
+    One account per venue lets the fold check every mirror event against that venue's
+    whole mirror state on append (I2), and keeps the mirror out of every virtual
+    account's sim book.
+    """
+    if not venue:
+        raise EventPayloadError("a mirror venue must be non-empty")
+    return f"{MIRROR_ACCOUNT_PREFIX}{venue}"
+
+
+def _require_whole(value: Decimal, name: str, *, positive: bool) -> Decimal:
+    value = _as_decimal(value, name)
+    if value != value.to_integral_value() or value < 0 or (positive and value == 0):
+        kind = "a positive" if positive else "a non-negative"
+        raise EventPayloadError(f"{name} must be {kind} whole number of contracts, got {value} (I5)")
+    return value
+
+
+def _require_vertical(combo: Combo, name: str) -> None:
+    """Only a 2-leg vertical is mirrored as a combo: anything else is refused (I5)."""
+    legs = combo.legs
+    if len(legs) != 2 or not all(isinstance(leg.contract, OptionContract) for leg in legs):
+        raise EventPayloadError(f"{name}: a mirrored combo is a 2-leg option vertical, got {combo.symbol}")
+    first, second = legs[0].contract, legs[1].contract
+    if (
+        first.underlying != second.underlying
+        or first.expiry != second.expiry
+        or first.right != second.right
+        or first.multiplier != second.multiplier
+        or first.strike == second.strike
+        or legs[0].side is legs[1].side
+        or legs[0].ratio != legs[1].ratio
+    ):
+        raise EventPayloadError(f"{name}: {combo.symbol} is not a 1:1 vertical")
+
+
+@dataclass(frozen=True)
+class MirrorAllocation:
+    """The part of a mirror ticket one strategy order owns (§4.4).
+
+    ``strategy_account`` is the virtual account of the strategy order — deliberately not
+    ``account_id``: the event is filed under the venue's account, not this one.
+    """
+
+    strategy_order_id: str
+    strategy_account: str
+    quantity: Decimal
+
+    def __post_init__(self) -> None:
+        if not self.strategy_order_id:
+            raise EventPayloadError("MirrorAllocation.strategy_order_id must be non-empty")
+        if not self.strategy_account:
+            raise EventPayloadError("MirrorAllocation.strategy_account must be non-empty")
+        object.__setattr__(
+            self, "quantity", _require_whole(self.quantity, "MirrorAllocation.quantity", positive=True)
+        )
+
+
+@dataclass(frozen=True)
+class MirrorQueued:
+    """A venue ticket queued for sending: written ahead of the send (I2, I3).
+
+    ``instrument`` is one option contract, or a 2-leg vertical ``Combo`` whose legs trade
+    as written; for a combo ``side`` is the price effect (SELL collects a net credit,
+    BUY pays a net debit) and ``quantity`` counts spread units.
+    """
+
+    venue: str
+    ticket_key: str
+    instrument: Instrument
+    side: Side
+    quantity: Decimal
+    order_type: OrderType
+    limit_price: Decimal | None
+    tif: TimeInForce
+    allocations: tuple[MirrorAllocation, ...]
+    at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.venue:
+            raise EventPayloadError("MirrorQueued.venue must be non-empty")
+        if not self.ticket_key:
+            raise EventPayloadError("MirrorQueued.ticket_key must be non-empty (I3)")
+        if isinstance(self.instrument, Combo):
+            _require_vertical(self.instrument, "MirrorQueued.instrument")
+        elif not isinstance(self.instrument, OptionContract):
+            raise EventPayloadError(
+                f"MirrorQueued.instrument must be an option contract or a vertical, got {self.instrument!r} (I6)"
+            )
+        if not isinstance(self.side, Side):
+            raise EventPayloadError(f"MirrorQueued.side must be a Side, got {self.side!r}")
+        object.__setattr__(
+            self, "quantity", _require_whole(self.quantity, "MirrorQueued.quantity", positive=True)
+        )
+        if self.order_type not in MIRROR_ORDER_TYPES:
+            raise EventPayloadError(f"MirrorQueued.order_type must be MARKET or LIMIT, got {self.order_type!r}")
+        if self.tif not in MIRROR_TIFS:
+            raise EventPayloadError(f"MirrorQueued.tif must be DAY or GTC, got {self.tif!r}")
+        if self.order_type is OrderType.LIMIT:
+            if self.limit_price is None:
+                raise EventPayloadError("MirrorQueued: a LIMIT ticket needs a limit_price (I5)")
+            object.__setattr__(self, "limit_price", _as_decimal(self.limit_price, "MirrorQueued.limit_price"))
+            if self.limit_price <= 0:
+                raise EventPayloadError("MirrorQueued.limit_price must be positive (I5)")
+        elif self.limit_price is not None:
+            raise EventPayloadError("MirrorQueued: a MARKET ticket cannot carry a limit_price")
+        object.__setattr__(self, "allocations", tuple(self.allocations))
+        if not self.allocations or not all(isinstance(a, MirrorAllocation) for a in self.allocations):
+            raise EventPayloadError("MirrorQueued.allocations must be MirrorAllocations, at least one (§4.4)")
+        ids = [a.strategy_order_id for a in self.allocations]
+        if len(set(ids)) != len(ids):
+            raise EventPayloadError("MirrorQueued allocates one strategy order twice (I3)")
+        total = sum((a.quantity for a in self.allocations), Decimal("0"))
+        if total != self.quantity:
+            raise EventPayloadError(
+                f"MirrorQueued allocations total {total} but the ticket is {self.quantity} (I11)"
+            )
+        _require_utc(self.at, "MirrorQueued.at")
+
+
+@dataclass(frozen=True)
+class MirrorRefused:
+    """A strategy order refused at the venue only: the I11 record (the sim still has it)."""
+
+    venue: str
+    strategy_order_id: str
+    strategy_account: str
+    reason: str
+    at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.venue:
+            raise EventPayloadError("MirrorRefused.venue must be non-empty")
+        if not self.strategy_order_id:
+            raise EventPayloadError("MirrorRefused.strategy_order_id must be non-empty")
+        if not self.strategy_account:
+            raise EventPayloadError("MirrorRefused.strategy_account must be non-empty")
+        if not self.reason:
+            raise EventPayloadError("MirrorRefused.reason must be non-empty (I11)")
+        _require_utc(self.at, "MirrorRefused.at")
+
+
+@dataclass(frozen=True)
+class MirrorAck:
+    """What the venue proved about one ticket: a send's outcome, or its Order Book row.
+
+    ``venue_order_id`` is the venue's own Order ID (TOS Order Book), present only when a
+    read-back proved it; it is what a cancel and the fill read-back match on after a
+    restart. ``book_status`` is the Order Book row's state when one was read.
+    """
+
+    venue: str
+    ticket_key: str
+    status: str
+    message: str
+    at: datetime
+    venue_order_id: str | None = None
+    book_status: OrderState | None = None
+
+    def __post_init__(self) -> None:
+        if not self.venue:
+            raise EventPayloadError("MirrorAck.venue must be non-empty")
+        if not self.ticket_key:
+            raise EventPayloadError("MirrorAck.ticket_key must be non-empty")
+        if self.status not in MIRROR_ACK_STATUSES:
+            raise EventPayloadError(f"MirrorAck.status must be one of {MIRROR_ACK_STATUSES}, got {self.status!r}")
+        if not self.message:
+            raise EventPayloadError("MirrorAck.message must be non-empty (I11)")
+        if self.venue_order_id is not None and (
+            not isinstance(self.venue_order_id, str) or not self.venue_order_id.isdigit()
+        ):
+            raise EventPayloadError(f"MirrorAck.venue_order_id must be an all-digit id, got {self.venue_order_id!r}")
+        if self.book_status is not None and not isinstance(self.book_status, OrderState):
+            raise EventPayloadError(f"MirrorAck.book_status must be an OrderState, got {self.book_status!r}")
+        _require_utc(self.at, "MirrorAck.at")
+
+
+@dataclass(frozen=True)
+class MirrorFill:
+    """The venue's cumulative fill of one ticket, read back by its proven Order ID.
+
+    Cumulative, so re-recording the same total is a no-op and a lower one refuses (I3);
+    the fold allocates the increment pro-rata to the ticket's strategy orders. For a
+    vertical, ``filled`` counts spread units and ``avg_price`` is the net price per unit.
+    """
+
+    venue: str
+    ticket_key: str
+    venue_order_id: str
+    filled: Decimal
+    avg_price: Decimal
+    at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.venue:
+            raise EventPayloadError("MirrorFill.venue must be non-empty")
+        if not self.ticket_key:
+            raise EventPayloadError("MirrorFill.ticket_key must be non-empty")
+        if not isinstance(self.venue_order_id, str) or not self.venue_order_id.isdigit():
+            raise EventPayloadError(f"MirrorFill.venue_order_id must be an all-digit id, got {self.venue_order_id!r}")
+        object.__setattr__(self, "filled", _require_whole(self.filled, "MirrorFill.filled", positive=True))
+        object.__setattr__(self, "avg_price", _as_decimal(self.avg_price, "MirrorFill.avg_price"))
+        if self.avg_price <= 0:
+            raise EventPayloadError(f"MirrorFill.avg_price must be positive, got {self.avg_price} (I5)")
+        _require_utc(self.at, "MirrorFill.at")
+
+
+MIRROR_PAYLOADS = (MirrorQueued, MirrorRefused, MirrorAck, MirrorFill)
+
+
 # Each kind must carry exactly this payload type; anything else is refused (I5).
 PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.SIGNAL_SEEN: Signal,
@@ -324,6 +554,10 @@ PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.MARK: Mark,
     EventKind.VENUE_RECONCILE: VenueReconcile,
     EventKind.EOD_RUN: EodRun,
+    EventKind.MIRROR_QUEUED: MirrorQueued,
+    EventKind.MIRROR_REFUSED: MirrorRefused,
+    EventKind.MIRROR_ACK: MirrorAck,
+    EventKind.MIRROR_FILL: MirrorFill,
 }
 
 
@@ -379,6 +613,11 @@ class Event:
             raise EventPayloadError(
                 f"{self.kind.value} payload belongs to account '{payload_account}' but the "
                 f"event is filed under '{self.account}' (I8)"
+            )
+        if isinstance(self.payload, MIRROR_PAYLOADS) and self.account != mirror_account(self.payload.venue):
+            raise EventPayloadError(
+                f"{self.kind.value} for venue '{self.payload.venue}' must be filed under "
+                f"'{mirror_account(self.payload.venue)}', not '{self.account}' (I8)"
             )
         if isinstance(self.payload, OrdersCreated) and any(
             order.account_id != self.account for order in self.payload.orders

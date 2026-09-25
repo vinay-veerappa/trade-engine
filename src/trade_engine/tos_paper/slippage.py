@@ -22,6 +22,7 @@ from decimal import ROUND_FLOOR, Decimal
 from trade_engine.domain.instruments import Side
 from trade_engine.domain.portfolio import Fill
 from trade_engine.interfaces.broker import VenueFill, VenueOrder
+from trade_engine.ledger.mirror import pro_rata
 
 BPS = Decimal("10000")
 ZERO = Decimal("0")
@@ -62,7 +63,7 @@ def allocate_venue_fill(
         raise SlippageError(
             f"fill {fill.venue_fill_id} takes the ticket to {total} of {ticket.quantity}; overfill (I5)"
         )
-    targets = _pro_rata([a.quantity for a in ticket.allocations], ticket.quantity, total)
+    targets = pro_rata([a.quantity for a in ticket.allocations], ticket.quantity, total)
     pieces: list[tuple[int, Decimal]] = []
     for index, (allocation, target) in enumerate(zip(ticket.allocations, targets)):
         piece = target - prior.get(allocation.strategy_order_id, ZERO)
@@ -96,17 +97,6 @@ def allocate_venue_fill(
             )
         )
     return tuple(fills)
-
-
-def _pro_rata(weights: Sequence[Decimal], whole: Decimal, amount: Decimal) -> list[Decimal]:
-    """Integer shares of ``amount`` by weight: floors, remainder one each to first-in."""
-    shares = [(w * amount / whole).to_integral_value(rounding=ROUND_FLOOR) for w in weights]
-    # The remainder is under the number of legs (each floor drops < 1), so one pass
-    # suffices and no share can pass its weight (floor + 1 <= weight when floor < weight).
-    remainder = int(amount - sum(shares, ZERO))
-    for index in range(remainder):
-        shares[index] += 1
-    return shares
 
 
 # -- the report --------------------------------------------------------------

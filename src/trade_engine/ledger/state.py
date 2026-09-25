@@ -9,6 +9,10 @@ Option expiry, exercise and assignment fold here from ``OptionLifecycle`` events
 leg and becomes a position in that leg's contract. Dividends arrive as ``CashFlow``
 events. Kinds no work package owns yet (other corporate actions) are refused rather
 than guessed (I5): a ledger containing one cannot be folded, loudly.
+
+A venue mirror's ``Mirror*`` events (T2) fold into ``AccountState.mirror`` of the
+venue's own ledger account (``ledger.mirror``), never into sim positions or cash: only
+``Fill`` events move a book of record.
 """
 
 from __future__ import annotations
@@ -58,6 +62,8 @@ from trade_engine.ledger.events import (
     UnhandledEventError,
     VenueReconcile,
 )
+from trade_engine.ledger import mirror as _mirror
+from trade_engine.ledger.mirror import MirrorState
 
 ZERO = Decimal("0")
 
@@ -103,6 +109,8 @@ class AccountState:
     # Sticky: a later clean reconcile never clears it (§4.5).
     halted_venues: frozenset[str] = frozenset()
     risk_controls: Mapping[str, bool] = field(default_factory=lambda: MappingProxyType({}))
+    # A venue mirror (T2): populated only for a venue's ledger account (``mirror_account``).
+    mirror: MirrorState = field(default_factory=MirrorState)
     last_seq: int = 0
 
 
@@ -340,6 +348,7 @@ def _replace(state: AccountState, **changes: Any) -> AccountState:
         "venue_halted": state.venue_halted,
         "halted_venues": state.halted_venues,
         "risk_controls": state.risk_controls,
+        "mirror": state.mirror,
         "last_seq": state.last_seq,
     }
     data.update(changes)
@@ -780,6 +789,19 @@ def _on_eod_run(state: AccountState, event: Event) -> AccountState:
     return state
 
 
+def _mirror_handler(step: Callable[[MirrorState, Any], MirrorState]) -> Callable[[AccountState, Event], AccountState]:
+    """Fold a ``Mirror*`` event into the venue's mirror state only (T2): no sim effect."""
+
+    def handler(state: AccountState, event: Event) -> AccountState:
+        try:
+            mirror = step(state.mirror, event.payload)
+        except _mirror.MirrorFoldError as err:
+            raise LedgerFoldError(f"{event.kind.value}: {err}") from err
+        return state if mirror is state.mirror else _replace(state, mirror=mirror)
+
+    return handler
+
+
 # Event kinds E1 knows how to fold. Everything else refuses (see FOLD_OWNERS).
 HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.SIGNAL_SEEN: _on_signal_seen,
@@ -803,6 +825,10 @@ HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.EXPIRY: _lifecycle_handler(EventKind.EXPIRY),
     EventKind.EXERCISE: _lifecycle_handler(EventKind.EXERCISE),
     EventKind.ASSIGNMENT: _lifecycle_handler(EventKind.ASSIGNMENT),
+    EventKind.MIRROR_QUEUED: _mirror_handler(_mirror.on_queued),
+    EventKind.MIRROR_REFUSED: _mirror_handler(_mirror.on_refused),
+    EventKind.MIRROR_ACK: _mirror_handler(_mirror.on_ack),
+    EventKind.MIRROR_FILL: _mirror_handler(_mirror.on_fill),
 }
 
 
@@ -843,6 +869,11 @@ def halted_venues(states: Mapping[str, AccountState]) -> frozenset[str]:
     for state in states.values():
         halted |= state.halted_venues
     return halted
+
+
+def mirror_state(states: Mapping[str, AccountState], venue: str) -> MirrorState:
+    """The venue's mirror from a fold (T2): empty when the venue was never mirrored."""
+    return _mirror.mirror_states(states, venue)
 
 
 def fold(events: Iterable[Event]) -> dict[str, AccountState]:
@@ -937,5 +968,7 @@ __all__ = [
     "apply_fill",
     "fold",
     "fold_account",
+    "halted_venues",
+    "mirror_state",
     "register_handler",
 ]
