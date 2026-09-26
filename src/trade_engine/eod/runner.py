@@ -43,15 +43,16 @@ Options accounts (O4) are those whose venue matches chain snapshots
 Equity accounts finish at the close before any of that, so their marks keep the close's
 stamp.
 
-The morning pass (``run_morning(session, through)``) runs an options account's part of
-the session up to ``through``, while the market is open: the session's snapshots taken so
-far are matched and the strategy acts on them, exactly as the after-close run would have.
-An entry the strategy makes on a morning snapshot is decided and filled on that
-morning's quotes, not the evening's. The pass claims its own marker
-(``eod:<job>-morning:<account>:<session>``, ``at_close`` = ``through``), and the
-after-close run of the session then skips every snapshot at or before it, taking each
-only as the newest quote of its underlying. Nothing is settled, marked or entered from
-signals in the morning: that is still the after-close run's.
+An in-session pass (``run_pass(session, through, name)``, ``name`` one of ``PASSES``;
+``run_morning`` is the morning one) runs an options account's part of the session up to
+``through``, while the market is open: the session's snapshots taken since the account's
+previous pass are matched and the strategy acts on them, exactly as the after-close run
+would have. What the strategy decides at a pass's snapshot is decided and filled on those
+quotes, so the host can send it to a venue while the market is still open. Each pass
+claims its own marker (``eod:<job>-<name>:<account>:<session>``, ``at_close`` =
+``through``); a later pass, and the after-close run, skip every snapshot at or before the
+newest of them, taking each only as the newest quote of its underlying. Nothing is
+settled, marked or entered from signals in a pass: that is still the after-close run's.
 
 The runner owns orchestration only. Expiry/assignment semantics stay with O2, EOD exit
 rules belong to strategy plugins (I13) and reach the venue only through the OMS, and
@@ -99,6 +100,9 @@ NEW_YORK = ZoneInfo("America/New_York")
 _MARK_COMMAND = "eod:mark:{account}:{session}:{symbol}"
 _RUN_COMMAND = "eod:{job}:{account}:{session}"
 MORNING_SUFFIX = "-morning"
+# The in-session passes, in the order a session runs them: the morning's entries, then
+# the midday and late exits (owner, 2026-09-26: exits reach the venue the same day).
+PASSES = ("morning", "midday", "late")
 _TERMINAL = frozenset(
     {
         OrderState.FILLED,
@@ -107,6 +111,14 @@ _TERMINAL = frozenset(
         OrderState.REJECTED,
     }
 )
+
+
+def pass_of(job: str) -> str | None:
+    """The in-session pass a run marker's job names (``eod-midday``), or None."""
+    for name in PASSES:
+        if job.endswith("-" + name):
+            return name
+    return None
 
 
 class EodRunnerError(RuntimeError):
@@ -276,7 +288,7 @@ class EodRunner:
         mornings = {
             account_id: through
             for account_id in options
-            if (through := self._morning_through(account_id, session)) is not None
+            if (through := self._passes_through(account_id, session)) is not None
         }
         self._replay_session(session, replays, tallies, snapshots, options, mornings)
 
@@ -308,13 +320,21 @@ class EodRunner:
         )
 
     def run_morning(self, session: date, through: datetime) -> EodRunResult:
+        """The morning pass of ``session`` (``run_pass`` with ``"morning"``)."""
+        return self.run_pass(session, through, "morning")
+
+    def run_pass(self, session: date, through: datetime, name: str) -> EodRunResult:
         """Run options accounts' snapshots of ``session`` up to ``through`` (see above).
 
-        Only options accounts take part; an account whose morning or after-close run of
-        the session is already recorded is left alone (I3). The previous session must be
-        complete, as for ``run``. A held underlying with no morning snapshot is not
-        refused: nothing is marked in the morning, and its orders work at a later one.
+        Only options accounts take part; an account whose ``name`` pass or after-close run
+        of the session is already recorded is left alone (I3). A pass must end after the
+        account's previous pass of the session: the snapshots up to that one are already
+        matched. The previous session must be complete, as for ``run``. A held
+        underlying with no snapshot yet is not refused: nothing is marked in a pass, and
+        its orders work at a later one.
         """
+        if name not in PASSES:
+            raise EodRunnerError(f"Unknown pass {name!r}; the passes are {', '.join(PASSES)}")
         if not isinstance(session, date) or isinstance(session, datetime):
             raise EodRunnerError(f"session must be a date, got {type(session).__name__}")
         if not self._calendar.is_session(session):
@@ -328,7 +348,7 @@ class EodRunner:
         session_close = self._calendar.session_close(session)
         if not session_open <= through < session_close:
             raise EodRunnerError(
-                f"The morning pass of {session.isoformat()} must end inside the session "
+                f"The {name} pass of {session.isoformat()} must end inside the session "
                 f"({session_open.isoformat()} to {session_close.isoformat()}), got "
                 f"{through.isoformat()}"
             )
@@ -338,8 +358,20 @@ class EodRunner:
             for account_id in sorted(self._config.brokers)
             if self._is_options(account_id)
             and self._ledger.event_by_command(self._run_command(account_id, session)) is None
-            and self._ledger.event_by_command(self._morning_command(account_id, session)) is None
+            and self._ledger.event_by_command(self._pass_command(account_id, session, name)) is None
         ]
+        earlier = {
+            account_id: since
+            for account_id in options
+            if (since := self._passes_through(account_id, session)) is not None
+        }
+        for account_id, since in sorted(earlier.items()):
+            if through <= since:
+                raise EodRunnerError(
+                    f"The {name} pass of {session.isoformat()} must end after the previous "
+                    f"pass of '{account_id}', which ran to {since.isoformat()}; got "
+                    f"{through.isoformat()} (I7)"
+                )
         replays = {account_id: self._prepare_account(account_id) for account_id in options}
         tallies = {account_id: _Tally(fills_before=self._fill_count(account_id)) for account_id in options}
         snapshots = [
@@ -347,8 +379,8 @@ class EodRunner:
             for snapshot in self._session_snapshots(session, options, covered=False)
             if snapshot.as_of <= through
         ]
-        self._replay_session(session, replays, tallies, snapshots, options)
-        self._advance_clock(through)  # the marker's at_close: where the after-close run resumes
+        self._replay_session(session, replays, tallies, snapshots, options, earlier)
+        self._advance_clock(through)  # the marker's at_close: where the next run resumes
         results: dict[str, AccountRunResult] = {}
         for account_id in sorted(self._config.brokers):
             tally = tallies.get(account_id)
@@ -356,8 +388,8 @@ class EodRunner:
                 results[account_id] = AccountRunResult(account_id=account_id)
                 continue
             self._append_run_marker(
-                account_id, session, 0, job=self._morning_job,
-                command_id=self._morning_command(account_id, session),
+                account_id, session, 0, job=self._pass_job(name),
+                command_id=self._pass_command(account_id, session, name),
             )
             results[account_id] = AccountRunResult(
                 account_id=account_id,
@@ -372,17 +404,20 @@ class EodRunner:
             accounts=tuple(results[account_id] for account_id in sorted(self._config.brokers)),
         )
 
-    @property
-    def _morning_job(self) -> str:
-        return self._config.job_name + MORNING_SUFFIX
+    def _pass_job(self, name: str) -> str:
+        return f"{self._config.job_name}-{name}"
 
-    def _morning_command(self, account_id: str, session: date) -> str:
-        return _RUN_COMMAND.format(job=self._morning_job, account=account_id, session=session.isoformat())
+    def _pass_command(self, account_id: str, session: date, name: str) -> str:
+        return _RUN_COMMAND.format(job=self._pass_job(name), account=account_id, session=session.isoformat())
 
-    def _morning_through(self, account_id: str, session: date) -> datetime | None:
-        """When the session's morning pass stopped for the account, if it ran."""
-        event = self._ledger.event_by_command(self._morning_command(account_id, session))
-        return None if event is None else event.payload.at_close
+    def _passes_through(self, account_id: str, session: date) -> datetime | None:
+        """Where the account's newest pass of the session stopped, if one ran."""
+        ends = [
+            event.payload.at_close
+            for name in PASSES
+            if (event := self._ledger.event_by_command(self._pass_command(account_id, session, name))) is not None
+        ]
+        return max(ends) if ends else None
 
     def _is_options(self, account_id: str) -> bool:
         return callable(getattr(self._config.brokers[account_id], "process_snapshot", None))
@@ -412,10 +447,10 @@ class EodRunner:
 
         Only this job's own markers count: an account the intraday service also runs
         carries that service's markers, and its first after-close run must not be
-        refused for lacking a previous session it never had (I3). A morning pass is this
-        job's own: the session it began still needs its after-close run.
+        refused for lacking a previous session it never had (I3). An in-session pass is
+        this job's own: the session it began still needs its after-close run.
         """
-        jobs = (self._config.job_name, self._morning_job)
+        jobs = (self._config.job_name, *(self._pass_job(name) for name in PASSES))
         for event in self._ledger.events(account=account_id):
             if event.kind is EventKind.EOD_RUN and event.payload.job in jobs:
                 return True

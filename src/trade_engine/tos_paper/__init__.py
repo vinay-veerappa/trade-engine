@@ -18,5 +18,7 @@ and never touch a sim account's positions or cash.
   restore from the fold, fill read-back.
 - ``session``: one host-callable mirror session (collect → reconcile → queue → drain),
   every step appended to the ledger, idempotent on re-run.
+- ``exits``: the sim's exits at each in-session pass: the venue closes what the sim no
+  longer holds and rests the sim's profit targets, as LIMIT DAY tickets.
 - ``slippage``: venue fills allocated down to strategy orders; the sim-vs-venue report.
 """
