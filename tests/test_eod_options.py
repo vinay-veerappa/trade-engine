@@ -768,3 +768,111 @@ def test_a_morning_pass_that_does_not_end_inside_the_session_refuses(rig, throug
     with pytest.raises(EodRunnerError, match="through|inside the session"):
         run_morning(rig, S2, through)
 
+
+
+# -- the midday and late passes: exits decided and filled while the market is open ------------
+
+
+def midday_time(session: date) -> datetime:
+    return CAL.session_open(session) + timedelta(hours=3)  # 12:30 ET
+
+
+def passes_rig(rig: Rig, session: date = S2, midday_quotes: dict | None = None) -> Rig:
+    """S1 done; ``session`` has a 09:45, a 12:30 and the 15:45 snapshot."""
+    morning_rig(rig, session)
+    rig.snapshots[session] = [chain_at(morning_time(session)), chain_at(midday_time(session), midday_quotes),
+                              chain(session)]
+    return rig
+
+
+def run_pass(rig: Rig, session: date, name: str, through: datetime):
+    new_process(rig, session)
+    runner = EodRunner(rig.ledger, rig.clock, CAL, NoBars(), rig.config())
+    return runner.run_pass(session, through, name)
+
+
+def pass_marker(session: date, name: str):
+    return rig_marker(f"eod-{name}", session)
+
+
+def rig_marker(job: str, session: date):
+    return f"eod:{job}:{ACCOUNT}:{session.isoformat()}"
+
+
+def test_a_midday_pass_matches_only_the_snapshots_since_the_morning_pass(rig) -> None:
+    passes_rig(rig, midday_quotes={P270: ("4.00", "4.40")})
+    rig.strategy.by_time[morning_time(S2)] = [csp(target=None)]
+    rig.strategy.by_time[midday_time(S2)] = [CloseStructure("csp:entry", "take profit", "csp:close")]
+    run_morning(rig, S2)
+    before = len(rig.strategy.seen)
+    result = run_pass(rig, S2, "midday", midday_time(S2) + timedelta(minutes=5))
+    assert seen(rig, before) == [midday_time(S2)]
+    assert rig.held(P270) == 0
+    [fill] = [f for f in rig.state.fills if f.order_id == "csp:entry:close:1"]
+    assert fill.filled_at == midday_time(S2) and D("4.00") <= fill.price <= D("4.40")
+    assert result.accounts[0].snapshots_processed == 1 and result.accounts[0].exit_actions == 1
+    marker = rig.ledger.event_by_command(pass_marker(S2, "midday")).payload
+    assert marker.job == "eod-midday" and marker.at_close == midday_time(S2) + timedelta(minutes=5)
+
+
+def test_the_after_close_run_resumes_after_the_newest_pass(rig) -> None:
+    passes_rig(rig)
+    run_morning(rig, S2)
+    run_pass(rig, S2, "midday", midday_time(S2) + timedelta(minutes=5))
+    before = len(rig.strategy.seen)
+    new_process(rig, S2)
+    result = rig.run(S2)
+    assert seen(rig, before) == [snap_time(S2)] and result.accounts[0].snapshots_processed == 1
+
+
+def test_after_a_late_pass_the_after_close_run_matches_no_snapshot_again(rig) -> None:
+    passes_rig(rig)
+    run_morning(rig, S2)
+    run_pass(rig, S2, "late", snap_time(S2) + timedelta(minutes=2))
+    before = len(rig.strategy.seen)
+    new_process(rig, S2)
+    result = rig.run(S2)
+    assert seen(rig, before) == [] and result.accounts[0].snapshots_processed == 0
+    [close] = [c for c in rig.strategy.contexts if c.phase == "close" and c.session == S2]
+    assert close.snapshots["COHR"].as_of == snap_time(S2)  # still the session's newest quotes
+    assert rig.ledger.event_by_command(rig_marker("eod", S2)) is not None
+
+
+@pytest.mark.parametrize("minutes", [0, -5])
+def test_a_pass_that_does_not_end_after_the_previous_one_refuses(rig, minutes) -> None:
+    passes_rig(rig)
+    end = morning_time(S2) + timedelta(minutes=5)
+    run_morning(rig, S2, end)
+    with pytest.raises(EodRunnerError, match="must end after the previous pass"):
+        run_pass(rig, S2, "midday", end + timedelta(minutes=minutes))
+
+
+def test_a_pass_just_after_the_previous_one_runs(rig) -> None:
+    passes_rig(rig)
+    end = morning_time(S2) + timedelta(minutes=5)
+    run_morning(rig, S2, end)
+    run_pass(rig, S2, "midday", end + timedelta(seconds=1))
+    assert rig.ledger.event_by_command(pass_marker(S2, "midday")) is not None
+
+
+def test_an_unknown_pass_refuses(rig) -> None:
+    passes_rig(rig)
+    with pytest.raises(EodRunnerError, match="Unknown pass 'evening'"):
+        run_pass(rig, S2, "evening", midday_time(S2))
+
+
+def test_rerunning_a_midday_pass_appends_nothing(rig) -> None:
+    passes_rig(rig)
+    run_pass(rig, S2, "midday", midday_time(S2) + timedelta(minutes=5))
+    count = len(list(rig.ledger.events(account=ACCOUNT)))
+    result = run_pass(rig, S2, "midday", midday_time(S2) + timedelta(minutes=5))
+    assert len(list(rig.ledger.events(account=ACCOUNT))) == count and result.accounts[0].snapshots_processed == 0
+
+
+def test_a_session_begun_with_a_midday_pass_still_needs_its_after_close_run(rig) -> None:
+    rig.strategy = Timed()
+    rig.snapshots[S1] = [chain_at(midday_time(S1)), chain(S1)]
+    run_pass(rig, S1, "midday", midday_time(S1) + timedelta(minutes=5))  # the account's first ever pass
+    new_process(rig, S2)
+    with pytest.raises(EodRunnerError, match="no eod marker"):
+        rig.run(S2)

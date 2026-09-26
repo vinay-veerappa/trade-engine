@@ -1135,3 +1135,20 @@ def test_a_morning_entry_the_sim_filled_is_sent_to_the_venue(ledger) -> None:
     assert not report.halted and len(report.queued) == 1 and len(venue.placed) == 1
     assert report.drain_reconcile.reconciled
     assert morning_orders(ledger, _binding(), S2, calendar=SessionCalendar()) == ()  # handled
+
+
+@pytest.mark.parametrize("name", ["midday", "late"])
+def test_a_later_passes_marker_is_neither_the_after_close_runs_nor_the_mornings(ledger, name) -> None:
+    _morning(ledger, _order("csp-1", created=AT_0945), fill=("csp-1",))
+    _morning(ledger, job=f"eod-{name}")  # the same session's later pass
+    _submit(ledger, _order("next-day", created=datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)), session=S2)
+    assert _ids(pending_orders(ledger, _binding(), S2, calendar=SessionCalendar())) == ["next-day"]
+    assert _ids(morning_orders(ledger, _binding(), S2, calendar=SessionCalendar())) == ["csp-1"]
+
+
+def test_a_later_pass_alone_is_not_a_morning_pass(ledger) -> None:
+    _morning(ledger, _order("csp-1", created=AT_0945), job="eod-midday")
+    with pytest.raises(MirrorSessionError, match="no morning pass"):
+        morning_orders(ledger, _binding(), S2, calendar=SessionCalendar())
+    with pytest.raises(MirrorSessionError, match="no EOD run"):
+        pending_orders(ledger, _binding(), S2, calendar=SessionCalendar())

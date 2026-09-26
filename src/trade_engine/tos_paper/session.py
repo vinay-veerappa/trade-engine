@@ -22,9 +22,9 @@ ledger, a connected :class:`TosPaperBroker` and an injected clock (I7):
   record it (``MirrorAck`` with ``book_status`` CANCELLED), so the cancel survives a
   restart even after the CANCELED row leaves the Order Book.
 
-**Entries only.** Exits, closes and profit targets (orders with a parent order) are
-not mirrored yet: a position the sim closes stays open at the venue, and the reconcile
-keeps expecting it. Mirroring exits is a later step.
+**Entries only.** The batches here are the sim's entries; its exits and profit targets
+(orders with a parent order) are never sent as themselves. At an in-session pass,
+``tos_paper.exits`` sends the venue what closes the gap between the two books instead.
 
 Every append goes through ``Ledger.append``/``extend`` under a derived command id, so a
 re-run is idempotent (I3): a second run the same day queues nothing new, and a fill
@@ -56,7 +56,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 
 from trade_engine.domain.orders import Order, OrderState
-from trade_engine.eod.runner import MORNING_SUFFIX
+from trade_engine.eod.runner import MORNING_SUFFIX, pass_of
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.ledger.codec import encode_payload
@@ -121,7 +121,7 @@ def _halted(ledger: Ledger) -> frozenset[str]:
 def working_orders(ledger: Ledger, binding: MirrorBinding) -> tuple[Order, ...]:
     """Every entry the mirrored accounts' sim still works that this venue has not handled.
 
-    Entries only (no parent order): exits and profit targets are not mirrored. In account
+    Entries only (no parent order): exits reach the venue through ``tos_paper.exits``. In account
     order, then order-id order, so the first-in rule is deterministic.
     """
     mirror = mirror_of(ledger, binding.venue_account)
@@ -193,7 +193,7 @@ def _batch(ledger: Ledger, binding: MirrorBinding, session: date, job: str | Non
             event
             for event in ledger.events_of_kind(EventKind.EOD_RUN, account=account)
             if event.payload.session == session
-            and event.payload.job.endswith(MORNING_SUFFIX) is morning
+            and pass_of(event.payload.job) == ("morning" if morning else None)
             and (job is None or event.payload.job == job)
         ]
         if not markers:
