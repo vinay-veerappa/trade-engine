@@ -46,6 +46,7 @@ from trade_engine.tos_paper.session import (
     cancel_ticket,
     collect_only,
     mirror_of,
+    morning_orders,
     pending_orders,
     run_mirror,
     working_orders,
@@ -1036,3 +1037,101 @@ def test_after_restore_the_expectation_is_the_folds_whatever_holdings_screen(led
     legacy.mirror_batch([_order("csp-3", created=T + timedelta(days=1))], holdings={})
     legacy.drain()
     assert not legacy.reconcile_now().reconciled
+
+
+# -- the morning batch: entries the morning pass made and the sim filled at once -------------
+
+S2 = date(2026, 9, 25)
+OPEN_S2 = datetime(2026, 9, 25, 13, 30, tzinfo=timezone.utc)
+AT_0945 = OPEN_S2 + timedelta(minutes=15)
+
+
+class SessionCalendar(Calendar):
+    def session_open(self, d: date) -> datetime:
+        return datetime(d.year, d.month, d.day, 13, 30, tzinfo=timezone.utc)
+
+
+def _morning(ledger: Ledger, *orders: Order, fill: tuple[str, ...] = (), job: str = "eod-morning",
+             session: date | None = S2) -> None:
+    """What the morning pass writes: entries created, submitted and (at the snapshot)
+    filled, then its marker."""
+    for order in orders:
+        ledger.append(Event(account=order.account_id, kind=EventKind.ORDERS_CREATED,
+                            payload=OrdersCreated(orders=(order,), fingerprint=order.order_id, reason="entry"),
+                            ts_utc=AT_0945, command_id=f"create:{order.order_id}"))
+        submitted = order.transition_to(OrderState.SUBMITTED)
+        ledger.append(Event(account=order.account_id, kind=EventKind.ORDER_UPDATED,
+                            payload=OrderUpdated(order=submitted, reason="submit"),
+                            ts_utc=AT_0945, command_id=f"submit:{order.order_id}"))
+        if order.order_id in fill:
+            ledger.append(Event(account=order.account_id, kind=EventKind.ORDER_UPDATED,
+                                payload=OrderUpdated(order=submitted.transition_to(OrderState.FILLED), reason="fill"),
+                                ts_utc=AT_0945, command_id=f"filled:{order.order_id}"))
+    if session is not None:
+        for account in _binding().mirrored_accounts:
+            ledger.append(Event(account=account, kind=EventKind.EOD_RUN,
+                                payload=EodRun(session=session, job=job, account_id=account, bars_processed=0,
+                                               at_close=AT_0945 + timedelta(minutes=5)),
+                                ts_utc=AT_0945, command_id=f"eod:{job}:{account}:{session.isoformat()}"))
+
+
+def _ids(orders) -> list[str]:
+    return [o.order_id for o in orders]
+
+
+def test_morning_orders_takes_the_morning_entries_the_sim_filled(ledger) -> None:
+    _submit(ledger, _order("yesterday"))  # the 09-24 after-close batch: not the morning's
+    _morning(ledger, _order("csp-1", created=AT_0945), _order("sp-1", "OPT_PUT_SPREAD", instrument=SPREAD,
+             limit="1.05", created=AT_0945), _order("exit", parent="csp-0", created=AT_0945), fill=("csp-1",))
+    orders = morning_orders(ledger, _binding(), S2, calendar=SessionCalendar())
+    assert _ids(orders) == ["csp-1", "sp-1"]
+    assert [o.state for o in orders] == [OrderState.FILLED, OrderState.SUBMITTED]
+
+
+def test_morning_orders_skips_what_the_sim_ended_unfilled(ledger) -> None:
+    _morning(ledger, _order("csp-1", created=AT_0945), _order("csp-2", created=AT_0945), session=None)
+    ledger.append(Event(account="OPT_CSP", kind=EventKind.ORDER_CANCELLED,
+                        payload=OrderStateChange("csp-2", "strategy cancelled"), ts_utc=AT_0945))
+    _morning(ledger)
+    assert _ids(morning_orders(ledger, _binding(), S2, calendar=SessionCalendar())) == ["csp-1"]
+
+
+def test_morning_orders_ignores_entries_after_the_marker(ledger) -> None:
+    _morning(ledger, _order("csp-1", created=AT_0945))
+    _morning(ledger, _order("later", created=AT_0945 + timedelta(hours=6)), session=None)
+    assert _ids(morning_orders(ledger, _binding(), S2, calendar=SessionCalendar())) == ["csp-1"]
+
+
+def test_morning_orders_refuses_a_session_without_its_morning_marker(ledger) -> None:
+    _morning(ledger, _order("csp-1", created=AT_0945), session=None)
+    for account in _binding().mirrored_accounts:
+        _marker(ledger, account, S2)  # the after-close marker is not the morning's
+    with pytest.raises(MirrorSessionError, match="no morning pass"):
+        morning_orders(ledger, _binding(), S2, calendar=SessionCalendar())
+
+
+def test_morning_orders_refuses_two_jobs_unless_one_is_named(ledger) -> None:
+    _morning(ledger, _order("csp-1", created=AT_0945))
+    _morning(ledger, job="other-morning")
+    with pytest.raises(MirrorSessionError, match="name the job"):
+        morning_orders(ledger, _binding(), S2, calendar=SessionCalendar())
+    assert _ids(morning_orders(ledger, _binding(), S2, calendar=SessionCalendar(), job="eod")) == ["csp-1"]
+
+
+def test_the_after_close_batch_is_not_the_morning_passes(ledger) -> None:
+    # A session with both markers: pending_orders reads the after-close run's alone.
+    _morning(ledger, _order("csp-1", created=AT_0945), fill=("csp-1",))
+    _submit(ledger, _order("next-day", created=datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)), session=S2)
+    assert _ids(pending_orders(ledger, _binding(), S2, calendar=SessionCalendar())) == ["next-day"]
+    with pytest.raises(MirrorSessionError, match="no EOD run"):
+        pending_orders(ledger, _binding(), date(2026, 9, 28), calendar=SessionCalendar())
+
+
+def test_a_morning_entry_the_sim_filled_is_sent_to_the_venue(ledger) -> None:
+    _morning(ledger, _order("csp-1", created=AT_0945), fill=("csp-1",))
+    now = Clock(AT_0945 + timedelta(minutes=10))
+    broker, venue = _broker(clock=now)
+    report = run_mirror(ledger, broker, morning_orders(ledger, _binding(), S2, calendar=SessionCalendar()), clock=now)
+    assert not report.halted and len(report.queued) == 1 and len(venue.placed) == 1
+    assert report.drain_reconcile.reconciled
+    assert morning_orders(ledger, _binding(), S2, calendar=SessionCalendar()) == ()  # handled
