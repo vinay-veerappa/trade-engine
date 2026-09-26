@@ -584,3 +584,187 @@ def test_another_jobs_markers_are_not_this_jobs_history(rig) -> None:
     # Its own history still gates: skipping a session it did run refuses.
     with pytest.raises(EodRunnerError, match="no eod marker"):
         rig.run(S3)
+
+
+# -- the morning pass: entries decided and filled on the morning's quotes ---------------------
+
+
+def morning_time(session: date) -> datetime:
+    return CAL.session_open(session) + timedelta(minutes=15)  # 09:45 ET
+
+
+def chain_at(at: datetime, quotes: dict | None = None, price: str = "300", underlying: str = "COHR") -> ChainSnapshot:
+    book = dict(BASE)
+    book.update(quotes or {})
+    rows = tuple(OptionQuote(c, D(b), D(a), D(10), D(10), at) for c, (b, a) in book.items() if c.underlying == underlying)
+    return ChainSnapshot(underlying, at, D(price), rows, None, None, "test")
+
+
+class Timed(Scripted):
+    """Acts at the snapshot taken at a given instant, and records every snapshot it saw."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.by_time: dict[datetime, list] = {}
+        self.seen: list[datetime] = []
+
+    def manage_options(self, context):
+        self.contexts.append(context)
+        if context.phase != "snapshot":
+            return list(self.at_close.get(context.session, ()))
+        self.seen.append(context.snapshot.as_of)
+        return list(self.by_time.get(context.snapshot.as_of, ()))
+
+
+def morning_rig(rig: Rig, session: date = S2, morning_quotes: dict | None = None) -> Rig:
+    """S1 done; ``session`` has a 09:45 snapshot and the 15:45 one."""
+    rig.strategy = Timed()
+    rig.run(S1)
+    rig.snapshots[session] = [chain_at(morning_time(session), morning_quotes), chain(session)]
+    return rig
+
+
+def run_morning(rig: Rig, session: date, through: datetime | None = None, **changes):
+    if rig.clock.now_utc() < CAL.session_open(session):
+        rig.clock.advance_to(CAL.session_open(session))
+    runner = EodRunner(rig.ledger, rig.clock, CAL, NoBars(), rig.config(**changes))
+    return runner.run_morning(session, through or morning_time(session) + timedelta(minutes=5))
+
+
+def seen(rig: Rig, since: int) -> list[datetime]:
+    """The snapshots the strategy acted at since ``since``, each once (it is asked again
+    after each action until it brings nothing new)."""
+    return list(dict.fromkeys(rig.strategy.seen[since:]))
+
+
+def new_process(rig: Rig, session: date) -> None:
+    """The after-close run is a process of its own, with its clock at the open again."""
+    rig.clock = ReplayClock(CAL.session_open(session))
+    rig.venue = SnapshotVenue(ACCOUNT, rig.clock)
+    rig.lifecycle = LifecyclePass(rig.ledger, rig.clock, CAL, rig.settlements, dividends=rig.dividends)
+
+
+def morning_marker(session: date):
+    return f"eod:eod-morning:{ACCOUNT}:{session.isoformat()}"
+
+
+def test_an_entry_on_the_morning_snapshot_fills_on_the_mornings_quotes(rig) -> None:
+    morning_rig(rig, morning_quotes={P270: ("8.00", "8.40")})
+    rig.strategy.by_time[morning_time(S2)] = [csp(target=None, limit="8.00")]
+    result = run_morning(rig, S2)
+    assert rig.held(P270) == -1
+    [fill] = [f for f in rig.state.fills if f.order_id == "csp:entry"]
+    assert fill.filled_at == morning_time(S2) and fill.price <= D("8.40")
+    [account] = result.accounts
+    assert account.snapshots_processed == 1 and account.fills_recorded == 1
+    marker = rig.ledger.event_by_command(morning_marker(S2)).payload
+    assert marker.job == "eod-morning" and marker.at_close == morning_time(S2) + timedelta(minutes=5)
+
+
+def test_the_morning_pass_stops_at_through(rig) -> None:
+    morning_rig(rig)
+    rig.strategy.by_time[snap_time(S2)] = [csp(target=None)]
+    before = len(rig.strategy.seen)
+    run_morning(rig, S2)
+    assert seen(rig, before) == [morning_time(S2)] and rig.held(P270) == 0
+
+
+def test_the_after_close_run_does_not_match_the_morning_snapshot_again(rig) -> None:
+    morning_rig(rig)
+    rig.strategy.by_time[morning_time(S2)] = [csp(target=None)]
+    run_morning(rig, S2)
+    before = len(rig.strategy.seen)
+    new_process(rig, S2)
+    result = rig.run(S2)
+    assert seen(rig, before) == [snap_time(S2)]  # the 15:45 one only
+    assert rig.held(P270) == -1
+    [account] = result.accounts
+    assert account.snapshots_processed == 1
+    # The close still sees the session's newest quotes of each underlying.
+    [close] = [c for c in rig.strategy.contexts if c.phase == "close" and c.session == S2]
+    assert close.snapshots["COHR"].as_of == snap_time(S2)
+    assert rig.ledger.event_by_command(f"eod:eod:{ACCOUNT}:{S2.isoformat()}") is not None
+
+
+def test_a_morning_snapshot_is_the_newest_quote_when_no_later_one_comes(rig) -> None:
+    other = OptionContract("NVDA", EXPIRY, D("150"), OptionRight.PUT)
+    morning_rig(rig)
+    rig.snapshots[S2] = [chain_at(morning_time(S2)), chain_at(morning_time(S2), {other: ("3.00", "3.20")}, "170", "NVDA"),
+                         chain(S2)]
+    run_morning(rig, S2)
+    new_process(rig, S2)
+    rig.run(S2)
+    [close] = [c for c in rig.strategy.contexts if c.phase == "close" and c.session == S2]
+    assert close.snapshots["NVDA"].as_of == morning_time(S2)
+
+
+def test_without_a_morning_pass_the_after_close_run_matches_every_snapshot(rig) -> None:
+    morning_rig(rig)
+    rig.strategy.by_time[morning_time(S2)] = [csp(target=None)]
+    before = len(rig.strategy.seen)
+    rig.run(S2)
+    assert seen(rig, before) == [morning_time(S2), snap_time(S2)] and rig.held(P270) == -1
+
+
+def test_rerunning_the_morning_pass_appends_nothing(rig) -> None:
+    morning_rig(rig)
+    rig.strategy.by_time[morning_time(S2)] = [csp(target=None)]
+    run_morning(rig, S2)
+    count = len(list(rig.ledger.events(account=ACCOUNT)))
+    new_process(rig, S2)
+    result = run_morning(rig, S2)
+    assert len(list(rig.ledger.events(account=ACCOUNT))) == count
+    assert result.accounts[0].snapshots_processed == 0
+
+
+def test_the_morning_pass_after_the_sessions_close_run_does_nothing(rig) -> None:
+    morning_rig(rig)
+    rig.run(S2)
+    count = len(list(rig.ledger.events(account=ACCOUNT)))
+    new_process(rig, S2)
+    result = run_morning(rig, S2)
+    assert len(list(rig.ledger.events(account=ACCOUNT))) == count
+    assert rig.ledger.event_by_command(morning_marker(S2)) is None and result.accounts[0].snapshots_processed == 0
+
+
+def test_the_morning_pass_needs_the_previous_session_complete(rig) -> None:
+    morning_rig(rig)
+    rig.snapshots[S3] = [chain_at(morning_time(S3))]
+    with pytest.raises(EodRunnerError, match="no eod marker"):
+        run_morning(rig, S3)
+
+
+def test_a_session_begun_in_the_morning_still_needs_its_after_close_run(rig) -> None:
+    rig.strategy = Timed()
+    rig.snapshots[S1] = [chain_at(morning_time(S1)), chain(S1)]
+    run_morning(rig, S1)  # the account's first ever pass
+    new_process(rig, S2)
+    with pytest.raises(EodRunnerError, match="no eod marker"):
+        rig.run(S2)
+
+
+def test_a_held_underlying_with_no_morning_snapshot_does_not_refuse_the_pass(rig) -> None:
+    rig.strategy = Timed()
+    rig.strategy.by_time[snap_time(S1)] = [csp(target=None)]
+    rig.run(S1)
+    assert rig.held(P270) == -1
+    other = OptionContract("NVDA", EXPIRY, D("150"), OptionRight.PUT)
+    # At 09:50 the store holds only what has been pulled so far: no COHR.
+    rig.snapshots[S2] = [chain_at(morning_time(S2), {other: ("3.00", "3.20")}, "170", "NVDA")]
+    run_morning(rig, S2)
+    assert rig.ledger.event_by_command(morning_marker(S2)) is not None
+
+
+@pytest.mark.parametrize(
+    "through",
+    [
+        CAL.session_open(S2) - timedelta(minutes=1),
+        CAL.session_close(S2),
+        datetime(2026, 9, 28, 14, 0),  # naive
+    ],
+)
+def test_a_morning_pass_that_does_not_end_inside_the_session_refuses(rig, through) -> None:
+    morning_rig(rig)
+    with pytest.raises(EodRunnerError, match="through|inside the session"):
+        run_morning(rig, S2, through)
+

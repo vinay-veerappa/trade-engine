@@ -43,6 +43,16 @@ Options accounts (O4) are those whose venue matches chain snapshots
 Equity accounts finish at the close before any of that, so their marks keep the close's
 stamp.
 
+The morning pass (``run_morning(session, through)``) runs an options account's part of
+the session up to ``through``, while the market is open: the session's snapshots taken so
+far are matched and the strategy acts on them, exactly as the after-close run would have.
+An entry the strategy makes on a morning snapshot is decided and filled on that
+morning's quotes, not the evening's. The pass claims its own marker
+(``eod:<job>-morning:<account>:<session>``, ``at_close`` = ``through``), and the
+after-close run of the session then skips every snapshot at or before it, taking each
+only as the newest quote of its underlying. Nothing is settled, marked or entered from
+signals in the morning: that is still the after-close run's.
+
 The runner owns orchestration only. Expiry/assignment semantics stay with O2, EOD exit
 rules belong to strategy plugins (I13) and reach the venue only through the OMS, and
 market data comes from injected providers (I5: no default source).
@@ -88,6 +98,7 @@ MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
 _MARK_COMMAND = "eod:mark:{account}:{session}:{symbol}"
 _RUN_COMMAND = "eod:{job}:{account}:{session}"
+MORNING_SUFFIX = "-morning"
 _TERMINAL = frozenset(
     {
         OrderState.FILLED,
@@ -262,7 +273,12 @@ class EodRunner:
         }
         options = [account_id for account_id in pending if self._is_options(account_id)]
         snapshots = self._session_snapshots(session, options)
-        self._replay_session(session, replays, tallies, snapshots, options)
+        mornings = {
+            account_id: through
+            for account_id in options
+            if (through := self._morning_through(account_id, session)) is not None
+        }
+        self._replay_session(session, replays, tallies, snapshots, options, mornings)
 
         # The session is over before anything is marked or entered: a DAY entry for D+1
         # submitted while the clock still read 15:59 would belong to *this* session and
@@ -290,6 +306,83 @@ class EodRunner:
             session=session,
             accounts=tuple(results[account_id] for account_id in sorted(self._config.brokers)),
         )
+
+    def run_morning(self, session: date, through: datetime) -> EodRunResult:
+        """Run options accounts' snapshots of ``session`` up to ``through`` (see above).
+
+        Only options accounts take part; an account whose morning or after-close run of
+        the session is already recorded is left alone (I3). The previous session must be
+        complete, as for ``run``. A held underlying with no morning snapshot is not
+        refused: nothing is marked in the morning, and its orders work at a later one.
+        """
+        if not isinstance(session, date) or isinstance(session, datetime):
+            raise EodRunnerError(f"session must be a date, got {type(session).__name__}")
+        if not self._calendar.is_session(session):
+            raise EodRunnerError(
+                f"{session.isoformat()} is not a trading session of "
+                f"{self._calendar.exchange} (I5)"
+            )
+        if not isinstance(through, datetime) or through.tzinfo is None or through.utcoffset() is None:
+            raise EodRunnerError(f"through must be a timezone-aware datetime, got {through!r} (I7)")
+        session_open = self._calendar.session_open(session)
+        session_close = self._calendar.session_close(session)
+        if not session_open <= through < session_close:
+            raise EodRunnerError(
+                f"The morning pass of {session.isoformat()} must end inside the session "
+                f"({session_open.isoformat()} to {session_close.isoformat()}), got "
+                f"{through.isoformat()}"
+            )
+        self._require_previous_session_complete(session)
+        options = [
+            account_id
+            for account_id in sorted(self._config.brokers)
+            if self._is_options(account_id)
+            and self._ledger.event_by_command(self._run_command(account_id, session)) is None
+            and self._ledger.event_by_command(self._morning_command(account_id, session)) is None
+        ]
+        replays = {account_id: self._prepare_account(account_id) for account_id in options}
+        tallies = {account_id: _Tally(fills_before=self._fill_count(account_id)) for account_id in options}
+        snapshots = [
+            snapshot
+            for snapshot in self._session_snapshots(session, options, covered=False)
+            if snapshot.as_of <= through
+        ]
+        self._replay_session(session, replays, tallies, snapshots, options)
+        self._advance_clock(through)  # the marker's at_close: where the after-close run resumes
+        results: dict[str, AccountRunResult] = {}
+        for account_id in sorted(self._config.brokers):
+            tally = tallies.get(account_id)
+            if tally is None:
+                results[account_id] = AccountRunResult(account_id=account_id)
+                continue
+            self._append_run_marker(
+                account_id, session, 0, job=self._morning_job,
+                command_id=self._morning_command(account_id, session),
+            )
+            results[account_id] = AccountRunResult(
+                account_id=account_id,
+                fills_recorded=self._fill_count(account_id) - tally.fills_before,
+                orders_submitted=tally.orders_submitted,
+                exit_actions=tally.exit_actions,
+                snapshots_processed=tally.snapshots_processed,
+            )
+        self._drain_outbox()
+        return EodRunResult(
+            session=session,
+            accounts=tuple(results[account_id] for account_id in sorted(self._config.brokers)),
+        )
+
+    @property
+    def _morning_job(self) -> str:
+        return self._config.job_name + MORNING_SUFFIX
+
+    def _morning_command(self, account_id: str, session: date) -> str:
+        return _RUN_COMMAND.format(job=self._morning_job, account=account_id, session=session.isoformat())
+
+    def _morning_through(self, account_id: str, session: date) -> datetime | None:
+        """When the session's morning pass stopped for the account, if it ran."""
+        event = self._ledger.event_by_command(self._morning_command(account_id, session))
+        return None if event is None else event.payload.at_close
 
     def _is_options(self, account_id: str) -> bool:
         return callable(getattr(self._config.brokers[account_id], "process_snapshot", None))
@@ -319,10 +412,12 @@ class EodRunner:
 
         Only this job's own markers count: an account the intraday service also runs
         carries that service's markers, and its first after-close run must not be
-        refused for lacking a previous session it never had (I3).
+        refused for lacking a previous session it never had (I3). A morning pass is this
+        job's own: the session it began still needs its after-close run.
         """
+        jobs = (self._config.job_name, self._morning_job)
         for event in self._ledger.events(account=account_id):
-            if event.kind is EventKind.EOD_RUN and event.payload.job == self._config.job_name:
+            if event.kind is EventKind.EOD_RUN and event.payload.job in jobs:
                 return True
         return False
 
@@ -345,6 +440,7 @@ class EodRunner:
         tallies: Mapping[str, "_Tally"],
         snapshots: Sequence[ChainSnapshot] = (),
         options: Sequence[str] = (),
+        mornings: Mapping[str, datetime] | None = None,
     ) -> None:
         """Feed every account's bars on one timeline, minute by minute.
 
@@ -353,8 +449,11 @@ class EodRunner:
         after a 15:00 exit in the first, stamped 15:59 (I7). Each bar goes to every
         account holding its instrument, and each account reconciles immediately. A chain
         snapshot takes its place at its own ``as_of``, ahead of the bar that opens at the
-        same instant, and goes to every options account.
+        same instant, and goes to every options account. A snapshot an account's morning
+        pass already matched (``mornings``: when that pass stopped) is not matched again:
+        it only stands as the newest quote of its underlying.
         """
+        mornings = mornings or {}
         holders: dict[Instrument, list[str]] = {}
         for account_id, instruments in replays.items():
             for instrument in instruments:
@@ -381,6 +480,9 @@ class EodRunner:
             self._advance_clock(timestamp)
             if kind == 0:
                 for account_id in options:
+                    if account_id in mornings and item.as_of <= mornings[account_id]:
+                        tallies[account_id].snapshots[item.underlying] = item
+                        continue
                     self._options_at_snapshot(account_id, session, item, tallies[account_id])
                 continue
             bar = item
@@ -637,7 +739,13 @@ class EodRunner:
             )
 
     def _append_run_marker(
-        self, account_id: str, session: date, bars_processed: int
+        self,
+        account_id: str,
+        session: date,
+        bars_processed: int,
+        *,
+        job: str | None = None,
+        command_id: str | None = None,
     ) -> None:
         now = self._clock.now_utc()
         self._ledger.append(
@@ -646,13 +754,13 @@ class EodRunner:
                 kind=EventKind.EOD_RUN,
                 payload=EodRun(
                     session=session,
-                    job=self._config.job_name,
+                    job=job or self._config.job_name,
                     account_id=account_id,
                     bars_processed=bars_processed,
                     at_close=now,
                 ),
                 ts_utc=now,
-                command_id=self._run_command(account_id, session),
+                command_id=command_id or self._run_command(account_id, session),
             )
         )
 
@@ -899,12 +1007,14 @@ class EodRunner:
             self._option_managers[account_id] = manager
         return manager
 
-    def _session_snapshots(self, session: date, options: Sequence[str]) -> list[ChainSnapshot]:
+    def _session_snapshots(
+        self, session: date, options: Sequence[str], *, covered: bool = True
+    ) -> list[ChainSnapshot]:
         """The session's chain snapshots, checked before anything is replayed (I5).
 
-        Each must lie inside the session. Every underlying an options account holds an
-        option on or has an order working on needs one: without it nothing could fill
-        or be marked, and a guess is not a mark.
+        Each must lie inside the session. With ``covered``, every underlying an options
+        account holds an option on or has an order working on needs one: without it
+        nothing could fill or be marked, and a guess is not a mark.
         """
         if not options:
             return []
@@ -927,7 +1037,7 @@ class EodRunner:
                     f"the {session.isoformat()} session (I7)"
                 )
         have = {snapshot.underlying for snapshot in snapshots}
-        for account_id in options:
+        for account_id in options if covered else ():
             missing = sorted(self._option_underlyings(self._ledger.state(account_id)) - have)
             if missing:
                 raise ReplayDataError(

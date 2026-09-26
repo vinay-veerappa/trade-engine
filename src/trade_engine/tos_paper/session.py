@@ -6,7 +6,9 @@ ledger, a connected :class:`TosPaperBroker` and an injected clock (I7):
 - :func:`pending_orders` — the strategy orders of the mirrored accounts' EOD batch for
   a session (the D+1 entries the runner submitted after the close) that this venue has
   neither queued nor refused yet. :func:`working_orders` is the same without the batch
-  window (the intraday service's per-tick view).
+  window (the intraday service's per-tick view). :func:`morning_orders` is the batch of
+  a session's morning pass (``EodRunner.run_morning``): the entries it made on the
+  morning's snapshots, which the sim has usually filled already.
 - :func:`run_mirror` — collect fills → append ``MirrorFill``s (and Order Book closes) →
   reconcile against the fold → append ``VenueReconcile`` → if not halted,
   ``mirror_batch`` (holdings = ``MirrorState.exposure()``: the mirror book plus every
@@ -54,6 +56,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 
 from trade_engine.domain.orders import Order, OrderState
+from trade_engine.eod.runner import MORNING_SUFFIX
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.ledger.codec import encode_payload
@@ -73,6 +76,8 @@ from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker, VenueUn
 
 # The sim still works these: a mirrored order must be live in the book of record.
 _WORKING = frozenset({OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED})
+# A morning entry the sim filled at once is still mirrored; one it refused or dropped is not.
+_ENDED_UNFILLED = frozenset({OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED})
 _KIND = {
     MirrorQueued: EventKind.MIRROR_QUEUED,
     MirrorRefused: EventKind.MIRROR_REFUSED,
@@ -146,24 +151,61 @@ def pending_orders(
     session (its batch may be incomplete), or markers of two jobs and no ``job`` (I5).
     """
     close = calendar.session_close(session)
+    return _batch(
+        ledger, binding, session, job, morning=False,
+        wanted=lambda created, current: created.created_at >= close and current.state in _WORKING,
+    )
+
+
+def morning_orders(
+    ledger: Ledger,
+    binding: MirrorBinding,
+    session: date,
+    *,
+    calendar,
+    job: str | None = None,
+) -> tuple[Order, ...]:
+    """The batch of ``session``'s morning pass still to mirror, not yet handled.
+
+    An entry is in it when it was created in the session and before the account's
+    morning marker (``eod:<job>-morning:...``), and the sim did not refuse, cancel or
+    expire it unfilled: a morning entry fills in the sim at the snapshot it was decided
+    on, and the venue is sent the same order. ``job`` names the EOD job, as for
+    :func:`pending_orders`. Refuses when a mirrored account has no morning marker for the
+    session (the pass may not have run, or not finished), or two jobs' and no ``job`` (I5).
+    """
+    session_open = calendar.session_open(session)
+    return _batch(
+        ledger, binding, session, None if job is None else job + MORNING_SUFFIX, morning=True,
+        wanted=lambda created, current: created.created_at >= session_open
+        and current.state not in _ENDED_UNFILLED,
+    )
+
+
+def _batch(ledger: Ledger, binding: MirrorBinding, session: date, job: str | None, *, morning: bool, wanted) -> tuple[Order, ...]:
+    """The mirrored accounts' entries created up to their marker for ``session`` that
+    ``wanted(created, current)`` keeps and this venue has not handled."""
+    what = "morning pass" if morning else "EOD run"
     mirror = mirror_of(ledger, binding.venue_account)
     found: list[Order] = []
     for account in binding.mirrored_accounts:
         markers = [
             event
             for event in ledger.events_of_kind(EventKind.EOD_RUN, account=account)
-            if event.payload.session == session and (job is None or event.payload.job == job)
+            if event.payload.session == session
+            and event.payload.job.endswith(MORNING_SUFFIX) is morning
+            and (job is None or event.payload.job == job)
         ]
         if not markers:
             raise MirrorSessionError(
-                f"'{account}' has no EOD run for {session.isoformat()}"
+                f"'{account}' has no {what} for {session.isoformat()}"
                 f"{'' if job is None else f' (job {job})'}; refusing to mirror a batch that "
                 "may be incomplete (I5)"
             )
         jobs = sorted({event.payload.job for event in markers})
         if len(jobs) > 1:
             raise MirrorSessionError(
-                f"'{account}' has EOD runs of {jobs} for {session.isoformat()}; name the job (I5)"
+                f"'{account}' has {what}s of {jobs} for {session.isoformat()}; name the job (I5)"
             )
         marker = markers[0]
         state = ledger.state(account)
@@ -174,9 +216,8 @@ def pending_orders(
                 current = state.orders.get(created.order_id)
                 if (
                     created.parent_order_id is None
-                    and created.created_at >= close
                     and current is not None
-                    and current.state in _WORKING
+                    and wanted(created, current)
                     and not mirror.handled(created.order_id)
                 ):
                     found.append(current)
@@ -454,6 +495,7 @@ __all__ = [
     "cancel_ticket",
     "collect_only",
     "mirror_of",
+    "morning_orders",
     "pending_orders",
     "run_mirror",
     "working_orders",
