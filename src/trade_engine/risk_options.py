@@ -103,7 +103,8 @@ class EntryQuoteRules:
     - ``short_bid_return``: (low, high) for each short put's bid / strike.
     - ``min_short_implied_vol``: each short put's implied vol at least this, in the units
       the chain quotes it in (Schwab: percent).
-    - ``min_open_interest``: each leg's open interest at least this.
+    - ``min_open_interest``: each short put's open interest at least this (the scan
+      measures the contract it sells; a vertical's wing is judged by the friction).
     - ``max_leg_spread_frac``: each leg's (ask - bid) / mid at most this.
     - ``min_underlying_price``: the underlying at least this.
     - For a bull put vertical, on credit = short bid - long ask: ``min_credit_width_frac``
@@ -583,11 +584,11 @@ class OptionRiskEngine:
                 f">= {gates.min_short_implied_vol}", "Each short put's implied vol is at the scan's floor or above",
             )
         if gates.min_open_interest is not None:
-            interest = [(c.occ.strip(), q.open_interest) for c, q in quotes.items()]
+            interest = [(o, q.open_interest) for o, _, q in short]
             check(
                 "open_interest", all(i is not None and i >= gates.min_open_interest for _, i in interest),
                 each(interest), f">= {gates.min_open_interest}",
-                "Each leg's open interest is at the scan's floor or above",
+                "Each short put's open interest is at the scan's floor or above",
             )
         if gates.max_leg_spread_frac is not None:
             spreads = [(c.occ.strip(), q.spread / q.mid if q.mid > 0 else None) for c, q in quotes.items()]

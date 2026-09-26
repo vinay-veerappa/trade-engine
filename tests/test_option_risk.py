@@ -552,7 +552,6 @@ def test_a_put_whose_morning_quotes_fail_a_gate_is_refused(ledger, price, change
         (dict(P40=dict(bid="1.00", ask="1.30")), "credit_width"),  # credit 0.60: 12% of the width
         (dict(P40=dict(bid="1.00", ask="1.30")), "credit_return"),  # 0.60 / 4.40 = 13.6%
         (dict(P45=dict(bid="1.90", ask="2.20"), P40=dict(bid="0.60", ask="0.90")), "friction"),  # 0.60 / 1.00
-        (dict(P40=dict(oi=40)), "open_interest"),  # the long leg's too
         (dict(P40=dict(bid="0.50", ask="1.00")), "leg_spread"),
     ],
 )
@@ -645,3 +644,12 @@ def test_entry_quote_rules_that_make_no_sense_refuse(changes, message) -> None:
 def test_entry_quote_must_be_entry_quote_rules() -> None:
     with pytest.raises(OptionRiskConfigurationError, match="entry_quote"):
         rules(entry_quote={"min_open_interest": 100})
+
+
+def test_a_verticals_wing_is_not_held_to_the_open_interest_floor(ledger) -> None:
+    # The scan measures the put it sells; a thin wing shows in the friction instead.
+    verdict = gated(ledger, intent(BULL_PUT, limit=None), morning(P40=dict(oi=40), P45=dict(oi=99)))
+    measured = str(rule(verdict, "entry_quote.open_interest").measured_value)
+    assert "99" in measured and "40" not in measured
+    assert not rule(verdict, "entry_quote.open_interest").passed
+    assert gated(ledger, intent(BULL_PUT, limit=None), morning(P40=dict(oi=40))).accepted
