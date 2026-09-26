@@ -55,6 +55,7 @@ class EventKind(StrEnum):
     CASH_FLOW = "CashFlow"
     MARK = "Mark"
     VENUE_RECONCILE = "VenueReconcile"
+    VENUE_HALT_CLEARED = "VenueHaltCleared"
     EOD_RUN = "EodRun"
     MIRROR_QUEUED = "MirrorQueued"
     MIRROR_REFUSED = "MirrorRefused"
@@ -234,6 +235,30 @@ class VenueReconcile:
             raise EventPayloadError(
                 "VenueReconcile that is not reconciled must name the drifting instruments (I11)"
             )
+
+
+@dataclass(frozen=True)
+class VenueHaltCleared:
+    """An operator's recorded decision to lift a venue's halt (§4.5).
+
+    A drifting reconcile halts its venue until this is written, never by itself. It rests
+    on a clean reconcile of the venue (``reconcile_seq``, the event's ledger seq), taken
+    after the drift, and names why the operator lifts the halt (I11).
+    """
+
+    venue: str
+    at: datetime
+    reason: str
+    reconcile_seq: int
+
+    def __post_init__(self) -> None:
+        if not self.venue:
+            raise EventPayloadError("VenueHaltCleared.venue must be non-empty")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise EventPayloadError("VenueHaltCleared.reason must be non-empty (I11)")
+        if not isinstance(self.reconcile_seq, int) or isinstance(self.reconcile_seq, bool) or self.reconcile_seq < 1:
+            raise EventPayloadError(f"VenueHaltCleared.reconcile_seq must be a ledger seq, got {self.reconcile_seq!r}")
+        _require_utc(self.at, "VenueHaltCleared.at")
 
 
 @dataclass(frozen=True)
@@ -553,6 +578,7 @@ PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.CASH_FLOW: CashFlow,
     EventKind.MARK: Mark,
     EventKind.VENUE_RECONCILE: VenueReconcile,
+    EventKind.VENUE_HALT_CLEARED: VenueHaltCleared,
     EventKind.EOD_RUN: EodRun,
     EventKind.MIRROR_QUEUED: MirrorQueued,
     EventKind.MIRROR_REFUSED: MirrorRefused,

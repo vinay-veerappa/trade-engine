@@ -60,6 +60,7 @@ from trade_engine.ledger.events import (
     OrdersCreated,
     RiskControlChange,
     UnhandledEventError,
+    VenueHaltCleared,
     VenueReconcile,
 )
 from trade_engine.ledger import mirror as _mirror
@@ -762,6 +763,16 @@ def _on_venue_reconcile(state: AccountState, event: Event) -> AccountState:
     )
 
 
+def _on_venue_halt_cleared(state: AccountState, event: Event) -> AccountState:
+    cleared: VenueHaltCleared = event.payload
+    if cleared.venue not in state.halted_venues:
+        raise LedgerFoldError(
+            f"VenueHaltCleared for {cleared.venue}, which '{state.account_id}' has not halted (I5)"
+        )
+    remaining = state.halted_venues - {cleared.venue}
+    return _replace(state, halted_venues=remaining, venue_halted=bool(remaining))
+
+
 def _on_signal_seen(state: AccountState, event: Event) -> AccountState:
     return _replace(state, signals_seen=state.signals_seen + 1)
 
@@ -821,6 +832,7 @@ HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.CASH_FLOW: _on_cash_flow,
     EventKind.MARK: _on_mark,
     EventKind.VENUE_RECONCILE: _on_venue_reconcile,
+    EventKind.VENUE_HALT_CLEARED: _on_venue_halt_cleared,
     EventKind.EOD_RUN: _on_eod_run,
     EventKind.EXPIRY: _lifecycle_handler(EventKind.EXPIRY),
     EventKind.EXERCISE: _lifecycle_handler(EventKind.EXERCISE),

@@ -21,6 +21,8 @@ ledger, a connected :class:`TosPaperBroker` and an injected clock (I7):
 - :func:`cancel_ticket` — cancel one resting ticket by its proven venue Order ID and
   record it (``MirrorAck`` with ``book_status`` CANCELLED), so the cancel survives a
   restart even after the CANCELED row leaves the Order Book.
+- :func:`clear_halt` — the operator lifts a venue's halt, with the reason, once the
+  venue's newest reconcile is clean (``VenueHaltCleared``). A halt never lifts itself.
 
 **Entries only.** The batches here are the sim's entries; its exits and profit targets
 (orders with a parent order) are never sent as themselves. At an in-session pass,
@@ -66,6 +68,7 @@ from trade_engine.ledger.events import (
     MirrorFill,
     MirrorQueued,
     MirrorRefused,
+    VenueHaltCleared,
     VenueReconcile,
     mirror_account,
 )
@@ -489,10 +492,49 @@ def _with(report: MirrorRunReport, **changes) -> MirrorRunReport:
     return replace(report, **changes)
 
 
+def clear_halt(ledger: Ledger, venue: str, *, reason: str, clock: Clock) -> tuple[str, ...]:
+    """Lift ``venue``'s halt on the operator's word (§4.5): the ledger accounts cleared.
+
+    Refuses (``MirrorSessionError``) a venue no account has halted, and one whose newest
+    reconcile is not clean: a halt lifts only on a reconcile taken after its drift that
+    matched the venue (run ``collect_only`` first). ``reason`` is recorded (I11). Clearing
+    again on the same clean reconcile writes nothing (I3).
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise MirrorSessionError("a halt is lifted only with the operator's reason (I11)")
+    holders = sorted(account for account in ledger.accounts() if venue in ledger.state(account).halted_venues)
+    if not holders:
+        raise MirrorSessionError(f"venue {venue} is not halted")
+    reconciles = [
+        event for event in ledger.events_of_kind(EventKind.VENUE_RECONCILE) if event.payload.venue == venue
+    ]
+    newest = max(reconciles, key=lambda event: event.seq)  # a halt comes from a reconcile
+    if not newest.payload.reconciled:
+        raise MirrorSessionError(
+            f"venue {venue}'s newest reconcile ({newest.payload.as_of.isoformat()}) still drifts: "
+            f"{list(newest.payload.drift)} ({newest.payload.note}); fix it and collect again first"
+        )
+    now = clock.now_utc()
+    ledger.extend(
+        [
+            Event(
+                account=account,
+                kind=EventKind.VENUE_HALT_CLEARED,
+                payload=VenueHaltCleared(venue=venue, at=now, reason=reason.strip(), reconcile_seq=newest.seq),
+                ts_utc=now,
+                command_id=f"halt-cleared:{venue}:{account}:{newest.seq}",
+            )
+            for account in holders
+        ]
+    )
+    return tuple(holders)
+
+
 __all__ = [
     "MirrorRunReport",
     "MirrorSessionError",
     "cancel_ticket",
+    "clear_halt",
     "collect_only",
     "mirror_of",
     "morning_orders",
