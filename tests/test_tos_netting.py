@@ -220,10 +220,131 @@ def test_equities_are_not_mirrored() -> None:
     assert len(batch.venue_orders) == 1
 
 
-def test_combo_orders_refuse_as_unsupported() -> None:
-    spread = Combo((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190, 1, Side.BUY)))
-    batch = _net([_order("sp", "OPT_PUT_SPREAD", Side.SELL, instrument=spread, limit="1.00")])
-    assert "UnsupportedCapability" in _reason(batch, "sp") and "multi-leg" in _reason(batch, "sp")
+# -- verticals: one combo ticket each, never netted, screened per leg ------------------
+
+SPREAD = Combo((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190, 1, Side.BUY)))  # a put credit spread
+P210 = OptionContract(underlying="AAPL", expiry=date(2026, 10, 16), strike=Decimal("210"), right="P")
+C200 = OptionContract(underlying="AAPL", expiry=date(2026, 10, 16), strike=Decimal("200"), right="C")
+P190_NOV = OptionContract(underlying="AAPL", expiry=date(2026, 11, 20), strike=Decimal("190"), right="P")
+MSFT_P190 = OptionContract(underlying="MSFT", expiry=date(2026, 10, 16), strike=Decimal("190"), right="P")
+P190_MINI = OptionContract(
+    underlying="AAPL", expiry=date(2026, 10, 16), strike=Decimal("190"), right="P", multiplier=10
+)
+
+
+def _spread(oid: str, account: str = "OPT_PUT_SPREAD", qty: str = "1", *, side=Side.SELL, combo=SPREAD, **kw):
+    kw.setdefault("limit", "1.00")
+    return _order(oid, account, side, qty, instrument=combo, **kw)
+
+
+def _allocated(batch) -> list[str]:
+    return [a.strategy_order_id for t in batch.venue_orders for a in t.allocations]
+
+
+def test_a_vertical_is_mirrored_as_one_combo_ticket() -> None:
+    batch = _net([_spread("sp", qty="2")])
+    assert batch.refused == ()
+    (ticket,) = batch.venue_orders
+    assert ticket.instrument == SPREAD and ticket.side is Side.SELL and ticket.quantity == Decimal("2")
+    assert ticket.limit_price == Decimal("1.00") and ticket.order_type is OrderType.LIMIT
+    assert [(a.strategy_order_id, a.quantity) for a in ticket.allocations] == [("sp", Decimal("2"))]
+
+
+def test_two_identical_verticals_are_never_netted() -> None:
+    batch = _net([_spread("sp-1"), _spread("sp-2")])
+    assert batch.refused == () and len(batch.venue_orders) == 2
+    assert [[a.strategy_order_id for a in t.allocations] for t in batch.venue_orders] == [["sp-1"], ["sp-2"]]
+    assert batch.venue_orders[0].venue_order_id != batch.venue_orders[1].venue_order_id
+
+
+def test_a_vertical_and_a_single_on_one_contract_are_not_netted_together() -> None:
+    batch = _net([_order("csp", "OPT_CSP", Side.SELL), _spread("sp")])
+    assert batch.refused == () and len(batch.venue_orders) == 2
+    assert {type(t.instrument) for t in batch.venue_orders} == {OptionContract, Combo}
+
+
+def test_a_vertical_leg_opposing_a_first_in_single_is_refused() -> None:
+    # The CSP buys P200 first; the spread would sell P200: its short leg conflicts.
+    batch = _net([_order("csp", "OPT_CSP", Side.BUY), _spread("sp")])
+    assert "conflict" in _reason(batch, "sp") and P200.symbol in _reason(batch, "sp")
+    assert _allocated(batch) == ["csp"]
+
+
+def test_a_single_opposing_a_first_in_vertical_leg_is_refused() -> None:
+    # The spread buys P190 first; a CSP sale of P190 opposes that leg.
+    batch = _net([_spread("sp"), _order("csp", "OPT_CSP", Side.SELL, instrument=P190)])
+    assert "conflict" in _reason(batch, "csp") and P190.symbol in _reason(batch, "csp")
+    assert _allocated(batch) == ["sp"]
+
+
+def test_a_vertical_whose_long_leg_opposes_holdings_is_refused() -> None:
+    batch = _net([_spread("sp")], holdings={("OPT_CSP", P190): Decimal("-1")})
+    assert "opposite side of OPT_CSP" in _reason(batch, "sp")
+
+
+def test_a_vertical_on_the_same_side_as_holdings_is_not_a_conflict() -> None:
+    batch = _net([_spread("sp")], holdings={("OPT_CSP", P200): Decimal("-1")})
+    assert batch.refused == () and len(batch.venue_orders) == 1
+
+
+def test_a_refused_vertical_does_not_claim_its_first_leg() -> None:
+    # sp's short P200 leg passes, its P190 leg conflicts with holdings; the later
+    # single BUY of P200 must not be refused against the refused spread's leg.
+    batch = _net(
+        [_spread("sp"), _order("csp", "OPT_CSP", Side.BUY)],
+        holdings={("OPT_CSP", P190): Decimal("-1")},
+    )
+    assert "conflict" in _reason(batch, "sp")
+    assert _allocated(batch) == ["csp"]
+
+
+def test_a_refused_vertical_does_not_move_the_book_for_later_orders() -> None:
+    # sp is refused on its P190 leg; had its P200 leg (-1) been booked, the later
+    # OPT_CSP BUY of P200 against OPT_PUT_SPREAD's holding would read as mixed signs.
+    batch = _net(
+        [_spread("sp"), _order("buy", "OPT_PUT_SPREAD", Side.BUY)],
+        holdings={("OPT_CSP", P190): Decimal("-1"), ("OPT_PUT_SPREAD", P200): Decimal("1")},
+    )
+    assert "conflict" in _reason(batch, "sp") and _allocated(batch) == ["buy"]
+
+
+@pytest.mark.parametrize(
+    "legs,why",
+    [
+        ((ComboLeg(P200, 1, Side.SELL),), "not a 2-leg"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190, 1, Side.BUY), ComboLeg(P210, 1, Side.BUY)), "not a 2-leg"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(Equity("AAPL"), 1, Side.BUY)), "not a 2-leg"),
+        ((ComboLeg(Equity("AAPL"), 1, Side.BUY), ComboLeg(P200, 1, Side.SELL)), "not a 2-leg"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(MSFT_P190, 1, Side.BUY)), "two underlyings"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190_NOV, 1, Side.BUY)), "two expiries"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(C200, 1, Side.BUY)), "call leg and a put leg"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190_MINI, 1, Side.BUY)), "two multipliers"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(P200, 1, Side.BUY)), "one strike"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190, 1, Side.SELL)), "one side"),
+        ((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190, 2, Side.BUY)), "ratio spread"),
+    ],
+)
+def test_any_other_multi_leg_order_is_refused_with_its_reason(legs, why) -> None:
+    batch = _net([_spread("bad", combo=Combo(legs)), _order("ok", "OPT_CSP", Side.SELL, instrument=P210)])
+    reason = _reason(batch, "bad")
+    assert "UnsupportedCapability" in reason and "multi-leg" in reason and why in reason
+    assert _allocated(batch) == ["ok"]
+
+
+def test_a_2x2_vertical_is_still_a_vertical() -> None:
+    combo = Combo((ComboLeg(P200, 2, Side.SELL), ComboLeg(P190, 2, Side.BUY)))
+    batch = _net([_spread("sp", combo=combo)])
+    assert batch.refused == () and batch.venue_orders[0].instrument == combo
+
+
+def test_a_market_vertical_is_refused() -> None:
+    batch = _net([_spread("sp", order_type=OrderType.MARKET, limit=None)])
+    assert "one net LIMIT price only" in _reason(batch, "sp")
+
+
+def test_a_vertical_with_a_bad_tif_or_fractional_units_is_refused() -> None:
+    batch = _net([_spread("opg", tif=TimeInForce.OPG), _spread("frac", qty="1.5")])
+    assert "TIF" in _reason(batch, "opg") and "whole number" in _reason(batch, "frac")
 
 
 @pytest.mark.parametrize(
@@ -339,3 +460,12 @@ def test_any_content_change_gives_a_new_key(change) -> None:
     }[change])
     assert ticket_key(**base) != ticket_key(**changed)
     assert ticket_key(**base) == ticket_key(**{**base, "order_ids": ["b", "a"]})
+
+
+def test_a_conflict_names_the_first_in_order_not_a_later_one() -> None:
+    batch = _net([
+        _order("first", "OPT_CSP", Side.SELL),
+        _order("second", "OPT_PUT_SPREAD", Side.SELL),
+        _order("late", "OPT_CSP", Side.BUY),
+    ])
+    assert "first-in SELL first" in _reason(batch, "late")

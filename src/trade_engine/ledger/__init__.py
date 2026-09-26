@@ -19,12 +19,18 @@ from trade_engine.ledger.events import (
     EventPayloadError,
     OptionLifecycle,
     Mark,
+    MirrorAck,
+    MirrorAllocation,
+    MirrorFill,
+    MirrorQueued,
+    MirrorRefused,
     OrderUpdated,
     OrderStateChange,
     OrdersCreated,
     RiskControlChange,
     UnhandledEventError,
     VenueReconcile,
+    mirror_account,
 )
 from trade_engine.ledger.lock import LedgerLockError, SingleInstanceLock
 from trade_engine.ledger.state import (
@@ -38,8 +44,10 @@ from trade_engine.ledger.state import (
     fold,
     fold_account,
     halted_venues,
+    mirror_state,
     register_handler,
 )
+from trade_engine.ledger.mirror import MirrorState, MirrorTicketState
 from trade_engine.ledger.outbox import DrainResult, OutboxItem, OutboxStatus
 from trade_engine.ledger.store import Ledger, fold_events
 
@@ -61,6 +69,13 @@ __all__ = [
     "LedgerLockError",
     "OptionLifecycle",
     "Mark",
+    "MirrorAck",
+    "MirrorAllocation",
+    "MirrorFill",
+    "MirrorQueued",
+    "MirrorRefused",
+    "MirrorState",
+    "MirrorTicketState",
     "OrderUpdated",
     "OrderStateChange",
     "OutboxItem",
@@ -82,6 +97,8 @@ __all__ = [
     "fold",
     "fold_account",
     "halted_venues",
+    "mirror_account",
+    "mirror_state",
     "fold_events",
     "register_handler",
 ]

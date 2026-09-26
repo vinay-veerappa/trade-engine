@@ -6,7 +6,12 @@
   that venue (the ledger fold latches it, sticky across replay).
 - :func:`confirm_ticket` decides what one sent ticket's read-back proves. Only a
   matching Order Book row or a position that moved by exactly the ticket proves the
-  ticket reached the venue; otherwise it stays PENDING (I5).
+  ticket reached the venue; otherwise it stays PENDING (I5). A vertical is proven leg by
+  leg (one Order Book row per leg, or every leg's position moved).
+
+What the mirror *expects* comes from the ledger fold (``ledger.mirror``): the mirror book
+of proven venue fills plus the live remainder of every open ticket, so a DAY ticket that
+expired unfilled, or one whose fill is recorded, never shows as drift.
 """
 
 from __future__ import annotations
@@ -15,13 +20,14 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 
-from trade_engine.domain.instruments import Instrument, Side
+from trade_engine.domain.instruments import Combo, Instrument, Side
 from trade_engine.domain.orders import OrderState, OrderType
 from trade_engine.interfaces.broker import VenueOrder, VenuePosition
 from trade_engine.ledger.events import VenueReconcile
 from trade_engine.tos_paper.normalize import WorkingOrder
 
 ZERO = Decimal("0")
+_LIVE_STATES = frozenset({OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED})
 UNREADABLE = "<venue unreadable>"
 
 
@@ -93,6 +99,8 @@ def confirm_ticket(
     ``claimed`` holds indexes of ``working`` rows already matched to earlier tickets of
     this batch, so two identical tickets cannot both claim one row.
     """
+    if isinstance(ticket.instrument, Combo):
+        return _confirm_combo(ticket, before, positions, working, claimed)
     limit = ticket.limit_price if ticket.order_type is OrderType.LIMIT else None
     for index, row in enumerate(working):
         if index in claimed:
@@ -115,4 +123,62 @@ def confirm_ticket(
     moved = position_book(positions).get(ticket.instrument, ZERO) - before.get(ticket.instrument, ZERO)
     if moved == _signed(ticket.side, ticket.quantity):
         return "ACCEPTED", f"filled (position moved {moved})"
+    return "PENDING", "not visible on the order book or in positions yet"
+
+
+def ticket_contracts(ticket: VenueOrder, units: Decimal | None = None) -> dict[Instrument, Decimal]:
+    """Signed contracts ``units`` of a ticket (default: all of it) put on the venue, per contract."""
+    units = ticket.quantity if units is None else units
+    if isinstance(ticket.instrument, Combo):
+        return {leg.contract: _signed(leg.side, units * leg.ratio) for leg in ticket.instrument.legs}
+    return {ticket.instrument: _signed(ticket.side, units)}
+
+
+def _confirm_combo(
+    ticket: VenueOrder,
+    before: Mapping[Instrument, Decimal],
+    positions: Sequence[VenuePosition],
+    working: Sequence[WorkingOrder],
+    claimed: set[int],
+) -> tuple[str, str]:
+    """A vertical is proven leg by leg: a matching row for every leg, or every leg moved.
+
+    Each leg's row is the leg's contract, side and contracts with the order's net limit.
+    The legs of one order share its state: any unknown leg is PENDING, any leg the book
+    shows ended unfilled REJECTS the ticket, otherwise it is on the book (ACCEPTED).
+    """
+    rows: list[int] = []
+    for leg in ticket.instrument.legs:
+        match = next(
+            (
+                index
+                for index, row in enumerate(working)
+                if index not in claimed
+                and index not in rows
+                and row.instrument == leg.contract
+                and row.side is leg.side
+                and row.quantity == ticket.quantity * leg.ratio
+                and row.order_type is ticket.order_type
+                and row.limit_price == ticket.limit_price
+            ),
+            None,
+        )
+        if match is None:
+            break
+        rows.append(match)
+    else:
+        claimed.update(rows)
+        states = [working[index].state for index in rows]
+        if OrderState.PENDING_UNKNOWN in states:
+            return "PENDING", "a leg's order book row is in an unknown state"
+        ended = [s for s in states if s is not OrderState.FILLED and s not in _LIVE_STATES]
+        if ended:
+            return "REJECTED", f"venue order book shows {ended[0].value}"
+        return "ACCEPTED", f"on the order book, both legs ({', '.join(s.value for s in states)})"
+    held = position_book(positions)
+    if all(
+        held.get(contract, ZERO) - before.get(contract, ZERO) == moved
+        for contract, moved in ticket_contracts(ticket).items()
+    ):
+        return "ACCEPTED", "filled (every leg's position moved)"
     return "PENDING", "not visible on the order book or in positions yet"

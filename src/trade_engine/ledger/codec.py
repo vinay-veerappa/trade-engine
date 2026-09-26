@@ -40,6 +40,11 @@ from trade_engine.ledger.events import (
     EventKind,
     OptionLifecycle,
     Mark,
+    MirrorAck,
+    MirrorAllocation,
+    MirrorFill,
+    MirrorQueued,
+    MirrorRefused,
     OrderUpdated,
     OrderStateChange,
     OrdersCreated,
@@ -83,6 +88,11 @@ _TAG_TO_TYPE: dict[str, type] = {
     "EodRun": EodRun,
     "OptionLifecycle": OptionLifecycle,
     "CorporateAction": CorporateAction,
+    "MirrorAllocation": MirrorAllocation,
+    "MirrorQueued": MirrorQueued,
+    "MirrorRefused": MirrorRefused,
+    "MirrorAck": MirrorAck,
+    "MirrorFill": MirrorFill,
 }
 _TYPE_TO_TAG: dict[type, str] = {v: k for k, v in _TAG_TO_TYPE.items()}
 
