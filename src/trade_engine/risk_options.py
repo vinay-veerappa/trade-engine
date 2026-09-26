@@ -37,6 +37,11 @@ Rules (a rule configured as None does not apply to the account, and says so):
 - ``earnings``: with ``no_earnings_before_expiry``, no earnings date on or before a
   short leg expires. Earnings risk is short premium's, so a long option (a PMCC's LEAPS)
   passes. A date the source cannot give refuses.
+- ``entry_quote.*``: an entry that opens a short put (a cash-secured put, a bull put
+  spread) is re-checked on the quotes it is decided on against the gates of the scan that
+  chose it (``EntryQuoteRules``). Entered the next morning, a gap or an overnight repricing
+  that would have kept the scan from picking the contract refuses the entry. A quote,
+  greek or open interest the snapshot does not carry refuses it too (I5).
 - ``duplicate_entry`` (C4) and ``covered_calls`` (C3): the OMS guards, measured here too,
   so a strategy that proposes one is refused and recorded rather than failing the run.
 - ``duplicate_protection`` and ``persistent_kill_switch``: as for equity entries.
@@ -51,7 +56,7 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from trade_engine.domain.instruments import Equity, OptionContract, OptionRight, Side
+from trade_engine.domain.instruments import Combo, Equity, OptionContract, OptionRight, Side
 from trade_engine.domain.option_orders import OptionIntent, is_structure, legs_of
 from trade_engine.domain.portfolio import Position
 from trade_engine.domain.risk import RiskRuleResult, RiskVerdict
@@ -87,6 +92,66 @@ def _fraction(value: Decimal | None, name: str) -> None:
 
 
 @dataclass(frozen=True)
+class EntryQuoteRules:
+    """What a short put entry's quotes must still show when it is entered.
+
+    Every bound is optional; one left None is not checked. Each is measured on the
+    snapshot the entry is decided on:
+
+    - ``short_put_abs_delta``: (low, high) for each short put's |delta|.
+    - ``min_short_bid``: each short put's bid must be above it.
+    - ``short_bid_return``: (low, high) for each short put's bid / strike.
+    - ``min_short_implied_vol``: each short put's implied vol at least this, in the units
+      the chain quotes it in (Schwab: percent).
+    - ``min_open_interest``: each leg's open interest at least this.
+    - ``max_leg_spread_frac``: each leg's (ask - bid) / mid at most this.
+    - ``min_underlying_price``: the underlying at least this.
+    - For a bull put vertical, on credit = short bid - long ask: ``min_credit_width_frac``
+      (credit / width), ``min_credit_return`` (credit / (width - credit)) and
+      ``max_friction_frac`` ((short spread + long spread) / credit).
+    """
+
+    short_put_abs_delta: tuple[Decimal, Decimal] | None = None
+    min_short_bid: Decimal | None = None
+    short_bid_return: tuple[Decimal, Decimal] | None = None
+    min_short_implied_vol: Decimal | None = None
+    min_open_interest: int | None = None
+    max_leg_spread_frac: Decimal | None = None
+    min_underlying_price: Decimal | None = None
+    min_credit_width_frac: Decimal | None = None
+    min_credit_return: Decimal | None = None
+    max_friction_frac: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("short_put_abs_delta", "short_bid_return"):
+            bounds = getattr(self, name)
+            if bounds is None:
+                continue
+            if (
+                not isinstance(bounds, tuple)
+                or len(bounds) != 2
+                or not all(isinstance(v, Decimal) and v.is_finite() and v >= 0 for v in bounds)
+                or bounds[0] > bounds[1]
+            ):
+                raise OptionRiskConfigurationError(f"{name} must be a (low, high) pair of Decimals, got {bounds!r}")
+        for name in (
+            "min_short_bid",
+            "min_short_implied_vol",
+            "max_leg_spread_frac",
+            "min_underlying_price",
+            "min_credit_width_frac",
+            "min_credit_return",
+            "max_friction_frac",
+        ):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, Decimal) or not value.is_finite() or value < 0):
+                raise OptionRiskConfigurationError(f"{name} must be a non-negative Decimal, got {value!r}")
+        interest = self.min_open_interest
+        if interest is not None and (not isinstance(interest, int) or isinstance(interest, bool) or interest < 0):
+            raise OptionRiskConfigurationError(f"min_open_interest must be a non-negative int, got {interest!r}")
+
+
+@dataclass(frozen=True)
 class OptionRiskRules:
     max_margin_frac: Decimal
     allowed_regimes: frozenset[str]
@@ -98,9 +163,12 @@ class OptionRiskRules:
     max_debit_per_structure_frac: Decimal | None = None
     max_total_debit_frac: Decimal | None = None
     max_share_notional_frac: Decimal | None = None
+    entry_quote: EntryQuoteRules | None = None
 
     def __post_init__(self) -> None:
         _fraction(self.max_margin_frac, "max_margin_frac")
+        if self.entry_quote is not None and not isinstance(self.entry_quote, EntryQuoteRules):
+            raise OptionRiskConfigurationError(f"entry_quote must be EntryQuoteRules, got {type(self.entry_quote).__name__}")
         for name in (
             "max_name_margin_frac",
             "max_name_collateral_frac",
@@ -381,6 +449,12 @@ class OptionRiskEngine:
                 "Earnings fall before the structure expires, or the date is unknown",
             )
 
+        # the quotes the entry is made on, against the gates of the scan that chose it
+        if rules.entry_quote is None:
+            not_configured("entry_quote")
+        else:
+            results.extend(self._entry_quote(intent, context, rules.entry_quote))
+
         # the OMS guards, recorded (C3, C4)
         if is_structure(intent.instrument):
             wanted = {leg.contract for leg in legs_of(intent.instrument, intent.side)}
@@ -435,6 +509,134 @@ class OptionRiskEngine:
         record("persistent_kill_switch", not kill, kill, False, "Kill switch is off", "Kill switch is engaged")
         refusals = tuple(result.reason for result in results if not result.passed)
         return RiskVerdict(order_intent_id=intent.intent_id, evaluations=tuple(results), refusal_reasons=refusals)
+
+    # -- the entry's quotes ---------------------------------------------------------------
+
+    def _entry_quote(self, intent: OptionIntent, context: Any, gates: EntryQuoteRules) -> list[RiskRuleResult]:
+        """One result per configured gate, measured on the snapshot the entry is priced on."""
+        legs = legs_of(intent.instrument, intent.side)
+        shorts = [leg for leg in legs if leg.side is Side.SELL and isinstance(leg.contract, OptionContract)]
+        if not shorts or any(leg.contract.right is not OptionRight.PUT for leg in shorts):
+            return [RiskRuleResult("entry_quote", True, "n/a", "n/a", "The entry opens no short put")]
+        underlying = underlying_of(intent.instrument)
+        snapshot = self._snapshot(context, underlying)
+        if snapshot is None:
+            return [
+                RiskRuleResult(
+                    "entry_quote", False, "UNKNOWN", f"a {underlying} snapshot",
+                    f"No {underlying} snapshot to check the entry's quotes on (I5)",
+                )
+            ]
+        quotes = {leg.contract: snapshot.get(leg.contract) for leg in legs}
+        missing = sorted(c.occ.strip() for c, q in quotes.items() if q is None)
+        if missing:
+            return [
+                RiskRuleResult(
+                    "entry_quote", False, f"no quote for {', '.join(missing)}", "every leg quoted",
+                    f"The {underlying} snapshot does not quote every leg (I5)",
+                )
+            ]
+        out: list[RiskRuleResult] = []
+
+        def check(name: str, passed: bool, measured: object, threshold: object, what: str) -> None:
+            out.append(
+                RiskRuleResult(f"entry_quote.{name}", passed, measured, threshold, what if passed else f"Not so: {what}")
+            )
+
+        def each(values: list[tuple[str, object]]) -> str:
+            return ", ".join(f"{occ} {'UNKNOWN' if value is None else value}" for occ, value in values)
+
+        def ratio(value: Decimal | None) -> Decimal | None:
+            return None if value is None else value.quantize(Decimal("0.0001"))
+
+        if gates.min_underlying_price is not None:
+            price = snapshot.underlying_price
+            check(
+                "underlying_price", price >= gates.min_underlying_price, price, f">= {gates.min_underlying_price}",
+                f"{underlying} trades at {gates.min_underlying_price} or above",
+            )
+        short = [(leg.contract.occ.strip(), leg.contract, quotes[leg.contract]) for leg in shorts]
+        if gates.short_put_abs_delta is not None:
+            low, high = gates.short_put_abs_delta
+            deltas = [(o, None if q.greeks is None else abs(Decimal(str(q.greeks.delta)))) for o, _, q in short]
+            check(
+                "delta", all(d is not None and low <= d <= high for _, d in deltas), each(deltas), f"{low}..{high}",
+                "Each short put's |delta| is inside the scan's range",
+            )
+        if gates.min_short_bid is not None:
+            check(
+                "bid", all(q.bid > gates.min_short_bid for _, _, q in short), each([(o, q.bid) for o, _, q in short]),
+                f"> {gates.min_short_bid}", "Each short put bids above the scan's floor",
+            )
+        if gates.short_bid_return is not None:
+            low, high = gates.short_bid_return
+            returns = [(o, q.bid / c.strike if c.strike > 0 else None) for o, c, q in short]
+            check(
+                "bid_return", all(r is not None and low <= r <= high for _, r in returns),
+                each([(o, ratio(r)) for o, r in returns]), f"{low}..{high}",
+                "Each short put's bid / strike is inside the scan's range",
+            )
+        if gates.min_short_implied_vol is not None:
+            vols = [(o, q.implied_vol) for o, _, q in short]
+            check(
+                "implied_vol", all(v is not None and v >= gates.min_short_implied_vol for _, v in vols), each(vols),
+                f">= {gates.min_short_implied_vol}", "Each short put's implied vol is at the scan's floor or above",
+            )
+        if gates.min_open_interest is not None:
+            interest = [(c.occ.strip(), q.open_interest) for c, q in quotes.items()]
+            check(
+                "open_interest", all(i is not None and i >= gates.min_open_interest for _, i in interest),
+                each(interest), f">= {gates.min_open_interest}",
+                "Each leg's open interest is at the scan's floor or above",
+            )
+        if gates.max_leg_spread_frac is not None:
+            spreads = [(c.occ.strip(), q.spread / q.mid if q.mid > 0 else None) for c, q in quotes.items()]
+            check(
+                "leg_spread", all(f is not None and f <= gates.max_leg_spread_frac for _, f in spreads),
+                each([(o, ratio(f)) for o, f in spreads]), f"<= {gates.max_leg_spread_frac}",
+                "Each leg's bid/ask spread is within the scan's limit",
+            )
+        vertical = (gates.min_credit_width_frac, gates.min_credit_return, gates.max_friction_frac)
+        if isinstance(intent.instrument, Combo) and any(v is not None for v in vertical):
+            longs = [leg for leg in legs if leg.side is Side.BUY]
+            if (
+                len(shorts) != 1
+                or len(longs) != 1
+                or longs[0].contract.right is not OptionRight.PUT
+                or longs[0].contract.expiry != shorts[0].contract.expiry
+                or longs[0].contract.strike >= shorts[0].contract.strike
+            ):
+                out.append(
+                    RiskRuleResult(
+                        "entry_quote.vertical", False, "not a bull put vertical", "one short put over one long put",
+                        "The credit gates measure a bull put vertical only",
+                    )
+                )
+                return out
+            short_quote, long_quote = quotes[shorts[0].contract], quotes[longs[0].contract]
+            width = shorts[0].contract.strike - longs[0].contract.strike
+            credit = short_quote.bid - long_quote.ask
+            if gates.min_credit_width_frac is not None:
+                frac = credit / width
+                check(
+                    "credit_width", frac >= gates.min_credit_width_frac, ratio(frac), f">= {gates.min_credit_width_frac}",
+                    "The credit is a large enough part of the width",
+                )
+            if gates.min_credit_return is not None:
+                ret = credit / (width - credit) if ZERO < credit < width else None
+                check(
+                    "credit_return", ret is not None and ret >= gates.min_credit_return,
+                    "UNKNOWN" if ret is None else ratio(ret), f">= {gates.min_credit_return}",
+                    "The credit returns enough on the width at risk",
+                )
+            if gates.max_friction_frac is not None:
+                friction = (short_quote.spread + long_quote.spread) / credit if credit > 0 else None
+                check(
+                    "friction", friction is not None and friction <= gates.max_friction_frac,
+                    "UNKNOWN" if friction is None else ratio(friction), f"<= {gates.max_friction_frac}",
+                    "The legs' spreads cost little enough of the credit",
+                )
+        return out
 
     # -- measurements ---------------------------------------------------------------------
 

@@ -457,3 +457,191 @@ def test_every_rule_is_recorded_even_when_one_refuses(ledger) -> None:
 def test_rules_that_make_no_sense_refuse(changes, message) -> None:
     with pytest.raises(OptionRiskConfigurationError, match=message):
         rules(**changes)
+
+
+# -- entry_quote: the quotes an entry is made on still pass the scan's gates -------------------
+
+from trade_engine.interfaces.market_data import Greeks  # noqa: E402
+from trade_engine.risk_options import EntryQuoteRules  # noqa: E402
+
+GATES = EntryQuoteRules(
+    short_put_abs_delta=(D("0.10"), D("0.30")),
+    min_short_bid=D("0.05"),
+    short_bid_return=(D("0.02"), D("0.05")),
+    min_short_implied_vol=D("70"),
+    min_open_interest=100,
+    max_leg_spread_frac=D("0.50"),
+    min_underlying_price=D("8"),
+    min_credit_width_frac=D("0.15"),
+    min_credit_return=D("0.15"),
+    max_friction_frac=D("0.45"),
+)
+GATE_NAMES = {"underlying_price", "delta", "bid", "bid_return", "implied_vol", "open_interest", "leg_spread"}
+VERTICAL_NAMES = {"credit_width", "credit_return", "friction"}
+
+
+def quoted(contract, bid: str, ask: str, *, delta: float | None, iv: str | None = "75", oi: int | None = 500) -> OptionQuote:
+    greeks = None if delta is None else Greeks(delta, 0.01, -0.02, 0.05, -0.01, "vendor")
+    return OptionQuote(contract, D(bid), D(ask), D(10), D(10), SNAP, implied_vol=None if iv is None else D(iv),
+                       greeks=greeks, open_interest=oi)
+
+
+def morning(price: str = "50", **changes) -> ChainSnapshot:
+    # 45 put: bid/strike 0.0422, spread 10% of mid, |delta| 0.25. The 45/40 vertical: credit
+    # 1.90 - 0.90 = 1.00, 20% of the width, 1.00 / 4.00 = 25% on risk, friction 0.40 / 1.00.
+    rows = {
+        "P45": dict(contract=P45, bid="1.90", ask="2.10", delta=-0.25),
+        "P40": dict(contract=P40, bid="0.70", ask="0.90", delta=-0.12),
+        "C55": dict(contract=C55, bid="1.00", ask="1.20", delta=0.30),
+    }
+    for name, change in changes.items():
+        if change is None:
+            rows.pop(name)
+        else:
+            rows[name] = {**rows[name], **change}
+    return ChainSnapshot("XYZ", SNAP, D(price), tuple(quoted(**row) for row in rows.values()), None, None, "test")
+
+
+def gated(ledger, the_intent, snapshot, gates=GATES):
+    return evaluate(ledger, rules(entry_quote=gates), the_intent, Book().context(snapshot))
+
+
+def gate_names(verdict) -> set[str]:
+    return {r.rule_name.removeprefix("entry_quote.") for r in verdict.evaluations if r.rule_name.startswith("entry_quote")}
+
+
+def test_a_put_whose_morning_quotes_still_pass_the_scan_is_entered(ledger) -> None:
+    verdict = gated(ledger, intent(limit=None), morning())
+    assert gate_names(verdict) == GATE_NAMES  # the credit gates do not measure a single put
+    assert verdict.accepted, verdict.refusal_reasons
+
+
+def test_a_vertical_whose_morning_quotes_still_pass_the_scan_is_entered(ledger) -> None:
+    verdict = gated(ledger, intent(BULL_PUT, limit=None), morning())
+    assert gate_names(verdict) == GATE_NAMES | VERTICAL_NAMES
+    assert verdict.accepted, verdict.refusal_reasons
+    assert rule(verdict, "entry_quote.credit_width").measured_value == D("0.2000")
+    assert rule(verdict, "entry_quote.friction").measured_value == D("0.4000")
+
+
+@pytest.mark.parametrize(
+    ("price", "changes", "gate"),
+    [
+        ("7.50", {}, "underlying_price"),  # the stock gapped under the scan's price floor
+        ("50", dict(P45=dict(delta=-0.42)), "delta"),  # gapped down: the put is now too close
+        ("50", dict(P45=dict(delta=-0.08)), "delta"),  # rallied away: too far out to pay
+        ("50", dict(P45=dict(bid="0.05", ask="0.06")), "bid"),  # (and 0.05 / 45 is under 2%)
+        ("50", dict(P45=dict(bid="0.80", ask="0.90")), "bid_return"),  # 0.80 / 45 < 2%
+        ("50", dict(P45=dict(bid="2.40", ask="2.50")), "bid_return"),  # 2.40 / 45 > 5%: priced for trouble
+        ("50", dict(P45=dict(iv="61.5")), "implied_vol"),  # the vol the scan sold is gone
+        ("50", dict(P45=dict(oi=99)), "open_interest"),
+        ("50", dict(P45=dict(bid="1.40", ask="2.60")), "leg_spread"),  # 1.20 on a 2.00 mid
+    ],
+)
+def test_a_put_whose_morning_quotes_fail_a_gate_is_refused(ledger, price, changes, gate) -> None:
+    verdict = gated(ledger, intent(limit=None), morning(price, **changes))
+    failed = {r.rule_name for r in verdict.evaluations if not r.passed}
+    assert f"entry_quote.{gate}" in failed
+    also = {"entry_quote.bid_return"} if gate == "bid" else set()
+    assert {name for name in failed if name.startswith("entry_quote")} == {f"entry_quote.{gate}"} | also, failed
+
+
+@pytest.mark.parametrize(
+    ("changes", "gate"),
+    [
+        (dict(P40=dict(bid="1.00", ask="1.30")), "credit_width"),  # credit 0.60: 12% of the width
+        (dict(P40=dict(bid="1.00", ask="1.30")), "credit_return"),  # 0.60 / 4.40 = 13.6%
+        (dict(P45=dict(bid="1.90", ask="2.20"), P40=dict(bid="0.60", ask="0.90")), "friction"),  # 0.60 / 1.00
+        (dict(P40=dict(oi=40)), "open_interest"),  # the long leg's too
+        (dict(P40=dict(bid="0.50", ask="1.00")), "leg_spread"),
+    ],
+)
+def test_a_vertical_whose_morning_quotes_fail_a_gate_is_refused(ledger, changes, gate) -> None:
+    verdict = gated(ledger, intent(BULL_PUT, limit=None), morning(**changes))
+    assert not rule(verdict, f"entry_quote.{gate}").passed and not verdict.accepted
+
+
+def test_a_vertical_at_the_gates_edges_is_entered(ledger) -> None:
+    # credit 1.90 - 1.15 = 0.75: 15% of the width; 0.75 / 4.25 = 17.6%; friction 0.30 / 0.75 = 40%.
+    snapshot = morning(P40=dict(bid="1.05", ask="1.15"))
+    verdict = gated(ledger, intent(BULL_PUT, limit=None), snapshot)
+    assert verdict.accepted, verdict.refusal_reasons
+
+
+@pytest.mark.parametrize(
+    ("changes", "gate"),
+    [
+        (dict(P45=dict(delta=None)), "delta"),
+        (dict(P45=dict(iv=None)), "implied_vol"),
+        (dict(P45=dict(oi=None)), "open_interest"),
+    ],
+)
+def test_a_quote_without_what_a_gate_measures_refuses(ledger, changes, gate) -> None:
+    verdict = gated(ledger, intent(limit=None), morning(**changes))
+    result = rule(verdict, f"entry_quote.{gate}")
+    assert not result.passed and "UNKNOWN" in str(result.measured_value)
+
+
+def test_a_leg_the_snapshot_does_not_quote_refuses(ledger) -> None:
+    verdict = gated(ledger, intent(BULL_PUT, limit="1.00"), morning(P40=None))
+    result = rule(verdict, "entry_quote")
+    assert not result.passed and "XYZ" in str(result.measured_value)
+
+
+def test_an_entry_with_no_snapshot_to_check_refuses(ledger) -> None:
+    verdict = evaluate(ledger, rules(entry_quote=GATES), intent(), Book().context())
+    assert not rule(verdict, "entry_quote").passed and rule(verdict, "entry_quote").measured_value == "UNKNOWN"
+
+
+def test_a_gate_left_unset_is_not_measured(ledger) -> None:
+    # The IV floor off: the vol collapse no longer refuses; the gates set still measure.
+    verdict = gated(ledger, intent(limit=None), morning(P45=dict(iv="40")),
+                    EntryQuoteRules(short_put_abs_delta=(D("0.10"), D("0.30")), min_open_interest=100))
+    assert gate_names(verdict) == {"delta", "open_interest"} and verdict.accepted
+
+
+def test_an_entry_that_opens_no_short_put_is_not_measured(ledger) -> None:
+    book = Book().trade(XYZ, Side.BUY, "100", "50")
+    verdict = evaluate(ledger, rules(entry_quote=GATES), intent(C55, limit="1.10"), book.context(morning(C55=dict(oi=1))))
+    assert rule(verdict, "entry_quote").passed and rule(verdict, "entry_quote").measured_value == "n/a"
+
+
+def test_accounts_without_entry_quote_rules_say_so(ledger) -> None:
+    verdict = evaluate(ledger, rules(), intent(limit=None), Book().context(morning(P45=dict(delta=-0.9))))
+    assert rule(verdict, "entry_quote").measured_value == "n/a" and verdict.accepted
+
+
+def test_the_credit_gates_refuse_a_combo_that_is_not_a_bull_put_vertical(ledger) -> None:
+    wide_short = Combo((ComboLeg(P40, 1, Side.SELL), ComboLeg(P45, 1, Side.BUY)))  # long over short
+    verdict = gated(ledger, intent(wide_short, limit="1.10"), morning())
+    assert not rule(verdict, "entry_quote.vertical").passed
+
+
+def test_an_entry_quote_verdict_can_be_stored_in_the_ledger(ledger) -> None:
+    from trade_engine.ledger.codec import decode_payload, encode_payload
+
+    for snapshot in (morning(), morning("7", P45=dict(delta=None, iv=None, oi=None)), morning(P40=None)):
+        verdict = gated(ledger, intent(BULL_PUT, limit="1.00"), snapshot)
+        assert decode_payload(encode_payload(verdict)) == verdict
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        (dict(short_put_abs_delta=(D("0.3"), D("0.1"))), "short_put_abs_delta"),
+        (dict(short_bid_return=(D("0.02"),)), "short_bid_return"),
+        (dict(short_put_abs_delta=(0.1, 0.3)), "short_put_abs_delta"),
+        (dict(min_short_bid=D("-1")), "min_short_bid"),
+        (dict(max_friction_frac=0.45), "max_friction_frac"),
+        (dict(min_open_interest=True), "min_open_interest"),
+        (dict(min_open_interest=-1), "min_open_interest"),
+    ],
+)
+def test_entry_quote_rules_that_make_no_sense_refuse(changes, message) -> None:
+    with pytest.raises(OptionRiskConfigurationError, match=message):
+        EntryQuoteRules(**changes)
+
+
+def test_entry_quote_must_be_entry_quote_rules() -> None:
+    with pytest.raises(OptionRiskConfigurationError, match="entry_quote"):
+        rules(entry_quote={"min_open_interest": 100})
