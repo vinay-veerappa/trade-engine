@@ -468,7 +468,7 @@ GATES = EntryQuoteRules(
     short_put_abs_delta=(D("0.10"), D("0.30")),
     min_short_bid=D("0.05"),
     short_bid_return=(D("0.02"), D("0.05")),
-    min_short_implied_vol=D("70"),
+    min_short_implied_vol=D("0.70"),
     min_open_interest=100,
     max_leg_spread_frac=D("0.50"),
     min_underlying_price=D("8"),
@@ -480,7 +480,7 @@ GATE_NAMES = {"underlying_price", "delta", "bid", "bid_return", "implied_vol", "
 VERTICAL_NAMES = {"credit_width", "credit_return", "friction"}
 
 
-def quoted(contract, bid: str, ask: str, *, delta: float | None, iv: str | None = "75", oi: int | None = 500) -> OptionQuote:
+def quoted(contract, bid: str, ask: str, *, delta: float | None, iv: str | None = "0.75", oi: int | None = 500) -> OptionQuote:
     greeks = None if delta is None else Greeks(delta, 0.01, -0.02, 0.05, -0.01, "vendor")
     return OptionQuote(contract, D(bid), D(ask), D(10), D(10), SNAP, implied_vol=None if iv is None else D(iv),
                        greeks=greeks, open_interest=oi)
@@ -533,7 +533,7 @@ def test_a_vertical_whose_morning_quotes_still_pass_the_scan_is_entered(ledger) 
         ("50", dict(P45=dict(bid="0.05", ask="0.06")), "bid"),  # (and 0.05 / 45 is under 2%)
         ("50", dict(P45=dict(bid="0.80", ask="0.90")), "bid_return"),  # 0.80 / 45 < 2%
         ("50", dict(P45=dict(bid="2.40", ask="2.50")), "bid_return"),  # 2.40 / 45 > 5%: priced for trouble
-        ("50", dict(P45=dict(iv="61.5")), "implied_vol"),  # the vol the scan sold is gone
+        ("50", dict(P45=dict(iv="0.615")), "implied_vol"),  # the vol the scan sold is gone
         ("50", dict(P45=dict(oi=99)), "open_interest"),
         ("50", dict(P45=dict(bid="1.40", ask="2.60")), "leg_spread"),  # 1.20 on a 2.00 mid
     ],
@@ -594,7 +594,7 @@ def test_an_entry_with_no_snapshot_to_check_refuses(ledger) -> None:
 
 def test_a_gate_left_unset_is_not_measured(ledger) -> None:
     # The IV floor off: the vol collapse no longer refuses; the gates set still measure.
-    verdict = gated(ledger, intent(limit=None), morning(P45=dict(iv="40")),
+    verdict = gated(ledger, intent(limit=None), morning(P45=dict(iv="0.40")),
                     EntryQuoteRules(short_put_abs_delta=(D("0.10"), D("0.30")), min_open_interest=100))
     assert gate_names(verdict) == {"delta", "open_interest"} and verdict.accepted
 

@@ -102,7 +102,7 @@ class EntryQuoteRules:
     - ``min_short_bid``: each short put's bid must be above it.
     - ``short_bid_return``: (low, high) for each short put's bid / strike.
     - ``min_short_implied_vol``: each short put's implied vol at least this, in the units
-      the chain quotes it in (Schwab: percent).
+      the snapshot stores it in: a fraction (0.70 is 70%; the hub source divides Schwab's percent by 100).
     - ``min_open_interest``: each short put's open interest at least this (the scan
       measures the contract it sells; a vertical's wing is judged by the friction).
     - ``max_leg_spread_frac``: each leg's (ask - bid) / mid at most this.
