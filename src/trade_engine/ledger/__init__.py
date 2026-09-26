@@ -29,6 +29,7 @@ from trade_engine.ledger.events import (
     OrdersCreated,
     RiskControlChange,
     UnhandledEventError,
+    VenueHaltCleared,
     VenueReconcile,
     mirror_account,
 )
@@ -87,6 +88,7 @@ __all__ = [
     "SingleInstanceLock",
     "UnhandledEventError",
     "EmulatedOrderState",
+    "VenueHaltCleared",
     "VenueReconcile",
     "EodRun",
     "apply_fill",

@@ -48,6 +48,7 @@ from trade_engine.ledger.events import (
     OrderUpdated,
     OrderStateChange,
     OrdersCreated,
+    VenueHaltCleared,
     VenueReconcile,
 )
 
@@ -85,6 +86,7 @@ _TAG_TO_TYPE: dict[str, type] = {
     "CashFlow": CashFlow,
     "Mark": Mark,
     "VenueReconcile": VenueReconcile,
+    "VenueHaltCleared": VenueHaltCleared,
     "EodRun": EodRun,
     "OptionLifecycle": OptionLifecycle,
     "CorporateAction": CorporateAction,
