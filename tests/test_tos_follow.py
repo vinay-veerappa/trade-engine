@@ -207,3 +207,45 @@ def test_an_unfilled_venue_entry_is_cancelled_when_the_sim_closes(books) -> None
 
 def test_pass_names_are_the_et_minute() -> None:
     assert pass_name(MIDDAY.now) == "follow-1235"
+
+
+# -- the venue's price grid (express) ------------------------------------------------------
+
+
+def _nickel(order: Order):
+    """SPX's grid in miniature: a limit off the nickel rounds against us; 9.99 cannot go."""
+    from dataclasses import replace
+    from decimal import ROUND_CEILING, ROUND_FLOOR
+
+    if order.limit_price == D("9.99"):
+        return "no grid for 9.99"
+    rounding = ROUND_CEILING if order.side is Side.BUY else ROUND_FLOOR
+    return replace(order, limit_price=(order.limit_price / D("0.05")).quantize(D(1), rounding=rounding) * D("0.05"))
+
+
+def test_express_sends_each_order_on_the_venues_grid(books) -> None:
+    sim, split, _ = books
+    entry = _order("sp-1", "OPT_PUT_SPREAD", instrument=SPREAD, qty="2", limit="1.07", created=MORNING.now)
+    _book(sim, entry, fill="1.07")
+    venue = Venue()
+    broker, _ = _broker(venue, clock=MORNING)
+    follow_cycle(split, broker, S, session_open=OPEN, price=_price("1.40"), clock=MORNING, express=_nickel)
+    assert [t.limit_price for t in venue.placed] == [D("1.05")]  # a credit rounds down
+
+
+def test_an_order_express_refuses_is_recorded_and_its_resting_ticket_kept(books) -> None:
+    sim, split, own = books
+    _book(sim, _entry(), fill="1.05")
+    _book(sim, _child("sp-1:target", order_type=OrderType.LIMIT, limit="0.50", tif=TimeInForce.GTC))
+    venue = Venue()
+    _cycle(split, venue)
+    venue.fill(next(iter(venue.orders)), 2, "1.05")
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=1)))
+    rested = venue.placed[-1]
+    _book(sim, _child("sp-1:close:1", at=MIDDAY.now), fill="1.50", at=MIDDAY.now)
+    broker, _ = _broker(venue, clock=MIDDAY)
+    report = follow_cycle(split, broker, S, session_open=OPEN, price=_price("9.99"), clock=MIDDAY, express=_nickel)
+    assert venue.placed[-1] is rested  # nothing new sent
+    target_oid = next(k for k, o in venue.orders.items() if o["ticket"] is rested)
+    assert venue.orders[target_oid]["status"] == "WORKING"  # the target it would replace still rests
+    assert any("no grid" in r.reason for r in report.refused)

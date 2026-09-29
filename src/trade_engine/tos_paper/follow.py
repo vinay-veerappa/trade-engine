@@ -38,7 +38,7 @@ from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.ledger.events import MirrorRefused
 from trade_engine.ledger.state import AccountState
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
-from trade_engine.tos_paper.exits import FOLLOW_PREFIX, Price, _units, run_pass_mirror
+from trade_engine.tos_paper.exits import FOLLOW_PREFIX, Express, Price, _units, run_pass_mirror
 from trade_engine.tos_paper.session import _ENDED_UNFILLED, MirrorRunReport, _append, mirror_of
 
 ET = ZoneInfo("America/New_York")
@@ -156,6 +156,7 @@ def follow_cycle(
     price: Price,
     clock: Clock,
     max_age: timedelta = MAX_AGE,
+    express: Express | None = None,
 ) -> MirrorRunReport:
     """One follow pass at the venue (see the module doc). Idempotent within a minute (I3)."""
     now = clock.now_utc()
@@ -178,6 +179,7 @@ def follow_cycle(
         name=pass_name(now),
         price=price,
         clock=clock,
+        express=express,
     )
 
 

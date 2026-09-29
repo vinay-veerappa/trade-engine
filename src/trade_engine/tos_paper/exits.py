@@ -71,6 +71,9 @@ _WORKING = frozenset({OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PART
 
 # A contract, or a vertical (a Combo, priced net per spread).
 Price = Callable[[Instrument, Side], "Decimal | None"]
+# The order as the venue can take it (a limit on the venue's own tick, rounded against us),
+# or the reason it cannot: the venue's price grid is the host's to know.
+Express = Callable[[Order], "Order | str"]
 FOLLOW_PREFIX = "follow-"
 
 
@@ -365,16 +368,37 @@ def run_pass_mirror(
     name: str,
     price: Price,
     clock: Clock,
+    express: Express | None = None,
 ) -> MirrorRunReport:
     """One pass at the venue: collect, cancel what the exits replace, then send the
-    pass's ``entries`` and exits in one batch (``run_mirror``). Idempotent (I3)."""
+    pass's ``entries`` and exits in one batch (``run_mirror``). Idempotent (I3).
+
+    ``express``, when given, turns each order into the one the venue can take; an order it
+    cannot is refused with its reason, and a resting ticket that only it replaced is kept."""
     venue = broker.venue
     collected = collect_only(ledger, broker, clock=clock)
     plan = plan_exits(ledger, broker.binding, session, name=name, price=price, at=clock.now_utc())
     refused = list(plan.refused)
+    sending = [*entries, *plan.orders]
+    cancels = list(plan.cancel)
+    if express is not None:
+        expressed: list[Order] = []
+        for order in sending:
+            out = express(order)
+            if isinstance(out, str):
+                refused.append((order.order_id, order.account_id, out))
+            else:
+                expressed.append(out)
+        sending = expressed
+        dropped = {oid for oid, _, _ in refused}
+        cancels = [
+            key for key in cancels
+            if not (waiting := [oid for ticket, oid in plan.waits if ticket == key])
+            or any(oid not in dropped for oid in waiting)
+        ]
     if not collected.halted:
         accounts = {order.order_id: order.account_id for order in plan.orders}
-        for key in plan.cancel:
+        for key in cancels:
             ack = cancel_ticket(ledger, broker, key, clock=clock)
             if ack.status != "ACCEPTED":
                 refused += [
@@ -397,7 +421,7 @@ def run_pass_mirror(
         ],
     )
     # A close refused above is handled now: run_mirror skips it.
-    report = run_mirror(ledger, broker, [*entries, *plan.orders], clock=clock)
+    report = run_mirror(ledger, broker, sending, clock=clock)
     return _with(
         report,
         fills=collected.fills + report.fills,
@@ -408,6 +432,6 @@ def run_pass_mirror(
 
 
 __all__ = [
-    "FOLLOW_PREFIX", "ExitPlan", "ExitPlanError", "Price", "close_id", "plan_exits", "run_pass_mirror",
+    "FOLLOW_PREFIX", "ExitPlan", "ExitPlanError", "Express", "Price", "close_id", "plan_exits", "run_pass_mirror",
     "target_id",
 ]
