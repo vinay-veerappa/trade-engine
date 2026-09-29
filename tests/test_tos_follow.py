@@ -143,9 +143,11 @@ def test_a_refused_entry_is_recorded_once_and_never_sent(books) -> None:
     _book(sim, _entry())
     venue = Venue()
     late = Clock(MORNING.now + timedelta(minutes=10))
-    _cycle(split, venue, clock=late)
-    _cycle(split, venue, clock=late)
+    first = _cycle(split, venue, clock=late)
+    again = _cycle(split, venue, clock=late)
     assert venue.placed == [] and mirror_of(split, VENUE).handled("sp-1")
+    # the caller sees the refusal once, so the operator's log shows it once
+    assert [r.strategy_order_id for r in first.refused] == ["sp-1"] and again.refused == ()
     assert len(own.events_of_kind(EventKind.MIRROR_REFUSED)) == 1
 
 

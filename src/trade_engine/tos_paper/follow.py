@@ -39,7 +39,7 @@ from trade_engine.ledger.events import MirrorRefused
 from trade_engine.ledger.state import AccountState
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
 from trade_engine.tos_paper.exits import FOLLOW_PREFIX, Express, Price, _units, run_pass_mirror
-from trade_engine.tos_paper.session import _ENDED_UNFILLED, MirrorRunReport, _append, mirror_of
+from trade_engine.tos_paper.session import _ENDED_UNFILLED, MirrorRunReport, _append, _with, mirror_of
 
 ET = ZoneInfo("America/New_York")
 MAX_AGE = timedelta(minutes=5)
@@ -161,7 +161,7 @@ def follow_cycle(
     """One follow pass at the venue (see the module doc). Idempotent within a minute (I3)."""
     now = clock.now_utc()
     entries, refused = follow_entries(ledger, broker.binding, session_open=session_open, now=now, max_age=max_age)
-    _append(
+    written = _append(
         ledger,  # type: ignore[arg-type]
         broker.venue,
         clock,
@@ -171,7 +171,7 @@ def follow_cycle(
             for oid, account, reason in refused
         ],
     )
-    return run_pass_mirror(
+    report = run_pass_mirror(
         ledger,  # type: ignore[arg-type]
         broker,
         list(entries),
@@ -181,6 +181,9 @@ def follow_cycle(
         clock=clock,
         express=express,
     )
+    # The entries refused here are the report's too: a refusal the caller never sees is
+    # one the operator's log never shows (measured 2026-09-29, the first live cycle).
+    return _with(report, refused=tuple(written) + report.refused)
 
 
 __all__ = ["MAX_AGE", "SplitLedger", "SplitLedgerError", "follow_cycle", "follow_entries", "pass_name"]
