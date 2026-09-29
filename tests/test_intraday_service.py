@@ -298,6 +298,24 @@ def test_a_snapshot_stamped_after_now_is_refused(rig) -> None:
     assert rig.strategy.contexts == [] and "after now" in rig.heartbeat_json()["note"]
 
 
+def test_a_snapshot_stamped_while_it_was_pulled_is_not_from_the_future(rig) -> None:
+    """A live pull takes time and stamps the chain when it returns, after the tick read the
+    clock. That is the clock moving, not a clock fault: the tick judges the snapshot against
+    the clock as it stands once the pull is back (2026-09-29: every tick refused by 0.7s)."""
+    rig.strategy.at_or_after[at_et(SESSION, 9, 40)] = [spread("o-1")]
+    pulled = snap(SESSION, 9, 40, underlying_quoted=at_et(SESSION, 9, 39, 59))
+
+    def slow_pull(underlying: str, now: datetime) -> ChainSnapshot:
+        rig.clock.advance_to(pulled.as_of)  # the hub answered; the chain is stamped now
+        return pulled
+
+    rig.service(snapshot_source=slow_pull).run(
+        SESSION, start_at=at_et(SESSION, 9, 39, 59), stop_at=at_et(SESSION, 9, 40, 30)
+    )
+    assert rig.strategy.contexts and rig.strategy.contexts[0].now == pulled.as_of
+    assert "after now" not in rig.heartbeat_json()["note"]
+
+
 def test_a_stale_held_leg_flattens_and_refuses_until_it_is_quoted_again(rig) -> None:
     """The chain and the underlying are live, but the held long put has not been quoted
     since 09:40: the account cannot be priced, so it flattens and refuses (I5)."""
