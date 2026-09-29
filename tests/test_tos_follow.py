@@ -249,3 +249,63 @@ def test_an_order_express_refuses_is_recorded_and_its_resting_ticket_kept(books)
     target_oid = next(k for k, o in venue.orders.items() if o["ticket"] is rested)
     assert venue.orders[target_oid]["status"] == "WORKING"  # the target it would replace still rests
     assert any("no grid" in r.reason for r in report.refused)
+
+
+# -- a resting ticket the sim no longer works (review 2026-09-29) --------------------------
+
+
+def test_a_second_entry_the_sim_ends_unfilled_is_cancelled_while_the_first_is_held(books) -> None:
+    sim, split, _ = books
+    _book(sim, _entry(), fill="1.05")
+    venue = Venue()
+    _cycle(split, venue)
+    venue.fill(next(iter(venue.orders)), 2, "1.05")
+    _book(sim, _entry("sp-2"))  # the same vertical again, still working
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=1)))
+    second = next(k for k, o in venue.orders.items() if o["status"] == "WORKING")
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=2)))
+    assert venue.orders[second]["status"] == "WORKING"  # the sim still works it
+    _cancel(sim, "sp-2")
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=3)))
+    assert venue.orders[second]["status"] == "CANCELED"
+    assert venue.orders[next(iter(venue.orders))]["status"] == "FILLED"
+
+
+def test_an_entry_the_sim_filled_keeps_resting_while_the_venue_has_not(books) -> None:
+    sim, split, _ = books
+    _book(sim, _entry(), fill="1.05")
+    venue = Venue()
+    _cycle(split, venue)
+    [oid] = list(venue.orders)
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=1)))
+    assert venue.orders[oid]["status"] == "WORKING"
+
+
+def test_a_target_the_sim_cancels_is_cancelled_at_the_venue(books) -> None:
+    sim, split, _ = books
+    _book(sim, _entry(), fill="1.05")
+    _book(sim, _child("sp-1:target", order_type=OrderType.LIMIT, limit="0.50", tif=TimeInForce.GTC))
+    venue = Venue()
+    _cycle(split, venue)
+    venue.fill(next(iter(venue.orders)), 2, "1.05")
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=1)))
+    target = next(k for k, o in venue.orders.items() if o["ticket"] is venue.placed[-1])
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=2)))
+    assert venue.orders[target]["status"] == "WORKING"  # the sim still works it
+    _cancel(sim, "sp-1:target")
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=3)))
+    assert venue.orders[target]["status"] == "CANCELED" and len(venue.placed) == 2
+
+
+def test_a_stale_ticket_whose_cancel_fails_is_recorded(books) -> None:
+    sim, split, own = books
+    _book(sim, _entry(), fill="1.05")
+    venue = Venue()
+    _cycle(split, venue)
+    venue.fill(next(iter(venue.orders)), 2, "1.05")
+    _book(sim, _entry("sp-2"))
+    _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=1)))
+    _cancel(sim, "sp-2")
+    venue.cancel_order = lambda order_id: {"status": "UNKNOWN", "order_id": order_id}
+    report = _cycle(split, venue, clock=Clock(MORNING.now + timedelta(minutes=2)))
+    assert any("was not cancelled" in r.reason and "next pass" in r.reason for r in report.refused)

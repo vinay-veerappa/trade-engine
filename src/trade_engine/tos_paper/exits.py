@@ -104,6 +104,19 @@ def _refusal_id(account: str, contract: Instrument, session: date) -> str:
     return f"exit:{account}:{contract.symbol}:{session.isoformat()}"
 
 
+def _sim_orders(state, ticket: MirrorTicketState, session: date) -> list[Order]:
+    """The sim orders a venue ticket was sent for: an entry by its own id, a rested target
+    by the id ``target_id`` gave it. A close the follower priced itself has none."""
+    suffix = f"@{session.isoformat()}"
+    found = []
+    for allocation in ticket.queued.allocations:
+        oid = allocation.strategy_order_id
+        order = state.orders.get(oid) or (state.orders.get(oid[: -len(suffix)]) if oid.endswith(suffix) else None)
+        if order is not None:
+            found.append(order)
+    return found
+
+
 def _open_on(mirror: MirrorState, account: str, contract: OptionContract) -> list[MirrorTicketState]:
     return [
         ticket
@@ -322,15 +335,23 @@ def _plan_verticals(ledger, binding, mirror, session, name, price, at, cancel, o
             # The sim holds none: an entry still resting at the venue would open what the
             # sim no longer has, unless the sim is still working that entry itself.
             for ticket in resting:
-                works = any(
-                    (o := state.orders.get(a.strategy_order_id)) is not None and o.state in _WORKING
-                    for a in ticket.queued.allocations
-                )
+                works = any(o.state in _WORKING for o in _sim_orders(state, ticket, session))
                 if ticket.queued.instrument == opening and not works:
                     cancel.append(ticket.key)
             continue
+        # The sim still holds some: a ticket resting for a sim order the sim no longer
+        # works goes -- an entry the sim ended unfilled, a target the sim cancelled. An
+        # entry the sim filled keeps resting; the venue's fill is still to come.
+        for ticket in resting:
+            sims = _sim_orders(state, ticket, session)
+            if not sims or any(o.state in _WORKING for o in sims):
+                continue  # a close of this follower's own, or a sim order still worked
+            filled = any(state.filled_quantity.get(o.order_id, ZERO) > 0 for o in sims)
+            if ticket.queued.instrument == opening and filled:
+                continue
+            cancel.append(ticket.key)
         if venue <= 0 or any(t.queued.instrument == closing_combo for t in resting):
-            continue  # nothing held at the venue, or a target (or close) already rests
+            continue  # nothing held at the venue, or a target (or close) rests or is going
         room = venue
         for target in sorted(state.orders.values(), key=lambda o: o.order_id):
             if room <= 0:
@@ -401,13 +422,20 @@ def run_pass_mirror(
         for key in cancels:
             ack = cancel_ticket(ledger, broker, key, clock=clock)
             if ack.status != "ACCEPTED":
+                waiting = [oid for ticket, oid in plan.waits if ticket == key]
                 refused += [
                     (oid, accounts[oid],
                      f"the resting ticket {key} was not cancelled ({ack.message or ack.status}); "
                      "nothing is sent over it")
-                    for ticket, oid in plan.waits
-                    if ticket == key
+                    for oid in waiting
                 ]
+                if not waiting:  # a stale entry or target: nothing waits on it, but it still rests
+                    ticket = mirror_of(ledger, venue).tickets[key]
+                    refused.append((
+                        f"cancel:{key}@{session.isoformat()}", ticket.queued.allocations[0].strategy_account,
+                        f"the resting ticket {key} was not cancelled ({ack.message or ack.status}); "
+                        "it is tried again next pass",
+                    ))
     # A halted venue refuses the exits in run_mirror, each with the reason (I11).
     now = clock.now_utc()
     written = _append(
