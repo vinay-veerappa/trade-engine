@@ -256,6 +256,10 @@ class IntradayService:
         now = self._clock.now_utc()
         try:
             snapshot = self._config.snapshot_source(self._config.underlying, now)
+            # A live pull takes time and the chain is stamped when it returns, after the
+            # clock read above. Judge it, and time the rest of the tick, on the clock as it
+            # stands now; a chain stamped past THIS reading is still a clock fault (I5).
+            now = self._clock.now_utc()
             view = self._fresh_view(snapshot, now)
         except (StaleDataError, ValueError) as err:
             self._go_flat_and_refuse(session, state, str(err))
