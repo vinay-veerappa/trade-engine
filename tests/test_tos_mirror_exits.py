@@ -457,3 +457,111 @@ def test_another_accounts_resting_ticket_is_not_this_accounts(ledger) -> None:
     plan = _plan(ledger)
     assert plan.cancel == () and plan.refused == ()
     assert [o.order_id for o in plan.orders] == [close_id("OPT_CSP", P200, S, "midday")]
+
+
+# -- a vertical is followed as one structure (T2 follow, owner 2026-09-29) -------------------
+
+CLOSING = Combo(tuple(type(leg)(leg.contract, leg.ratio, Side.BUY if leg.side is Side.SELL else Side.SELL)
+                      for leg in SPREAD.legs))
+
+
+def _spread(qty: str = "2", oid: str = "sp-1") -> Order:
+    return _order(oid, "OPT_PUT_SPREAD", instrument=SPREAD, qty=qty, limit="1.05", created=MORNING.now)
+
+
+def _held_spread(ledger, qty: str = "2") -> tuple[Order, Venue]:
+    entry = _spread(qty)
+    _book(ledger, entry, fill="1.05")
+    venue = _held_at_venue(ledger, entry)
+    _collect(ledger, venue)
+    return entry, venue
+
+
+def _sim_close(ledger, entry: Order, qty: str, n: int = 1) -> Order:
+    close = Order(order_id=f"{entry.order_id}:close:{n}", account_id=entry.account_id, instrument=CLOSING,
+                  order_type=OrderType.MARKET, side=Side.BUY, quantity=D(qty), command_id=f"c{n}",
+                  created_at=MIDDAY.now, parent_order_id=entry.order_id)
+    _book(ledger, close, fill="1.50", at=MIDDAY.now)
+    return close
+
+
+def test_the_sims_closed_vertical_is_closed_at_the_venue_as_one_debit_combo(ledger) -> None:
+    entry, venue = _held_spread(ledger)
+    _sim_close(ledger, entry, "2")
+    price = _price("1.40")
+    plan = _plan(ledger, name="follow-1235", price=price)
+    assert plan.refused == ()
+    [order] = plan.orders
+    assert (order.instrument, order.side, order.quantity, order.limit_price, order.tif) == (
+        CLOSING, Side.BUY, D(2), D("1.40"), TimeInForce.DAY)
+    assert order.order_id == close_id("OPT_PUT_SPREAD", CLOSING, S, "follow-1235")
+    assert price.seen == [(CLOSING, Side.BUY)]  # priced as the vertical, never leg by leg
+
+
+def test_a_partly_closed_vertical_closes_only_the_difference(ledger) -> None:
+    entry, venue = _held_spread(ledger)
+    _sim_close(ledger, entry, "1")
+    [order] = _plan(ledger).orders
+    assert order.quantity == D(1)
+
+
+def test_the_venue_close_is_sent_as_a_debit_ticket_and_squares_the_book(ledger) -> None:
+    entry, venue = _held_spread(ledger)
+    _sim_close(ledger, entry, "2")
+    report = _pass(ledger, venue, name="follow-1235", price=_price("1.40"))
+    [ticket] = [t for t in venue.placed if getattr(t, "price_effect", None) == "DEBIT"]
+    assert (ticket.quantity, ticket.limit_price) == (2, D("1.40"))
+    assert [(leg.side, leg.ratio) for leg in ticket.legs] == [("BUY", 1), ("SELL", 1)]
+    oid = next(k for k, o in venue.orders.items() if o["ticket"] is ticket)
+    venue.fill(oid, 2, "1.40")
+    _collect(ledger, venue)
+    book = {k: v for k, v in _mirror(ledger).book.items() if v}
+    assert book == {}
+    assert report is not None
+    assert _plan(ledger, name="follow-1236").orders == ()  # squared: nothing more to close
+
+
+def test_a_vertical_close_with_no_price_is_refused_not_sent(ledger) -> None:
+    entry, venue = _held_spread(ledger)
+    _sim_close(ledger, entry, "2")
+    plan = _plan(ledger, price=_price(None))
+    assert plan.orders == () and "no price" in plan.refused[0][2]
+
+
+def test_the_sims_combo_target_rests_at_the_venue_as_a_day_combo(ledger) -> None:
+    entry, venue = _held_spread(ledger)
+    target = Order(order_id="sp-1:target", account_id="OPT_PUT_SPREAD", instrument=CLOSING,
+                   order_type=OrderType.LIMIT, side=Side.BUY, quantity=D(2), command_id="t",
+                   created_at=MORNING.now, limit_price=D("0.50"), tif=TimeInForce.GTC, parent_order_id="sp-1")
+    _book(ledger, target)
+    [order] = _plan(ledger).orders
+    assert (order.order_id, order.instrument, order.limit_price, order.tif, order.quantity) == (
+        target_id(target, S), CLOSING, D("0.50"), TimeInForce.DAY, D(2))
+
+
+def test_a_held_vertical_with_no_sim_target_sends_nothing(ledger) -> None:
+    _held_spread(ledger)
+    plan = _plan(ledger)
+    assert plan.orders == () and plan.refused == () and plan.cancel == ()
+
+
+def test_an_entry_the_sim_cancelled_is_cancelled_at_the_venue(ledger) -> None:
+    entry = _spread()
+    _book(ledger, entry)
+    venue = _held_at_venue(ledger, entry, fill=False)
+    _collect(ledger, venue)
+    assert _plan(ledger).cancel == ()  # the sim still works it: it rests
+    ledger.append(Event(account="OPT_PUT_SPREAD", kind=EventKind.ORDER_UPDATED,
+                        payload=OrderUpdated(order=ledger.state("OPT_PUT_SPREAD").orders["sp-1"]
+                                             .transition_to(OrderState.CANCELLED), reason="sim cancel"),
+                        ts_utc=MIDDAY.now, command_id="cancel:sp-1"))
+    plan = _plan(ledger)
+    assert len(plan.cancel) == 1 and plan.orders == ()
+
+
+def test_a_follow_pass_name_is_accepted_and_a_bare_prefix_is_not(ledger) -> None:
+    _plan(ledger, name="follow-1001")
+    with pytest.raises(ExitPlanError, match="follow-"):
+        _plan(ledger, name="follow-")
+    with pytest.raises(ExitPlanError):
+        _plan(ledger, name="lunch")
