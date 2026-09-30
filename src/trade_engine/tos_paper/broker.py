@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
@@ -62,10 +62,12 @@ from trade_engine.tos_paper.transport import (
     OrderCanceller,
     OrderFillReader,
     TosOrderTransport,
+    TransportUnavailable,
     ticket_for,
 )
 
 ZERO = Decimal("0")
+PREFLIGHT_MAX_AGE = timedelta(seconds=30)  # the write-ahead between a preflight and its drain takes milliseconds
 
 
 class TosPaperBrokerError(RuntimeError):
@@ -173,6 +175,9 @@ class TosPaperBroker(BrokerAdapter):
         # excludes recorded fills); with no proven id a cancel refuses.
         self._sent: dict[str, tuple[VenueOrder, str, Decimal]] = {}
         self._proven: dict[str, tuple[str, OrderState]] = {}  # this drain's proven ids
+        # (when, positions) ``preflight`` read, for the next drain's "before": used once, and only
+        # while fresh (PREFLIGHT_MAX_AGE), so a write-ahead that failed cannot leave one for later.
+        self._preflight_book: tuple[datetime, dict[Instrument, Decimal]] | None = None
         self._cancelled: set[str] = set()  # ticket keys a cancel proved (idempotent)
         self.capabilities = Capabilities(
             supported_order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}),
@@ -362,6 +367,8 @@ class TosPaperBroker(BrokerAdapter):
         contracts = [c for t in tracked for c in fold_contracts(t.queued, t.queued.quantity)]
         try:
             rows = [norm.normalize_order_fill(row) for row in self.transport.read_order_fills()]
+        except TransportUnavailable:
+            raise  # could not ask: nothing learned, nothing halted; the session defers
         except Exception as exc:  # noqa: BLE001 — a failed read is a refusal, not a crash
             raise self._unreadable(unreadable(self.venue, now, contracts, f"fill read-back failed: {exc}"))
         by_id: dict[str, norm.OrderFill] = {}
@@ -452,6 +459,24 @@ class TosPaperBroker(BrokerAdapter):
 
     # -- the slow path (host-driven, off the sim critical path) --------------
 
+    def preflight(self) -> None:
+        """Read the venue's positions now, before anything is recorded, for the next drain.
+
+        The session calls this BEFORE its write-ahead: a venue that cannot be asked
+        (:class:`TransportUnavailable`) raises here, while nothing is queued in the ledger, so the
+        run defers whole and loses nothing. The drain then sends from this read instead of
+        reading again, so no read sits between the write-ahead and the send. Any other read
+        failure is left to the drain, which judges it exactly as it always has (refused, halted).
+        """
+        self._require_connected("preflight")
+        self._preflight_book = None
+        try:
+            self._preflight_book = (self._clock.now_utc(), position_book(self._read_positions()))
+        except TransportUnavailable:
+            raise
+        except Exception:  # noqa: BLE001 — not the absence of an answer: the drain judges the read
+            self._preflight_book = None
+
     def drain(self) -> DrainReport:
         """Send queued tickets one at a time, each read back, then reconcile.
 
@@ -460,14 +485,16 @@ class TosPaperBroker(BrokerAdapter):
         batch ends with a VenueReconcile the host appends to the ledger.
         """
         self._require_connected("drain")
+        taken, self._preflight_book = self._preflight_book, None  # one drain's, never a later one's
         if not self._queue:
             return DrainReport(acks=(), reconcile=None)
         tickets, self._queue = self._queue, []
         self._proven = {}
         contracts = [c for t in tickets for c in ticket_contracts(t)]
         acks: list[VenueAck] = []
+        fresh = taken is not None and self._clock.now_utc() - taken[0] <= PREFLIGHT_MAX_AGE
         try:
-            before = position_book(self._read_positions())
+            before = taken[1] if fresh else position_book(self._read_positions())
         except Exception as exc:  # noqa: BLE001 — a failed read is a refusal, not a crash
             for ticket in tickets:
                 acks.append(self._ack(ticket, "REJECTED", f"cannot read the venue before sending: {exc}"))
@@ -507,13 +534,20 @@ class TosPaperBroker(BrokerAdapter):
             self._halted = True
         return DrainReport(acks=tuple(acks), reconcile=event, proven=dict(self._proven))
 
-    def reconcile_now(self) -> VenueReconcile:
-        """Compare the venue with the mirror book; drift (or an unreadable venue) halts."""
+    def reconcile_now(self, *, defer_unavailable: bool = False) -> VenueReconcile:
+        """Compare the venue with the mirror book; drift (or an unreadable venue) halts.
+
+        With ``defer_unavailable`` a venue that could not be asked (:class:`TransportUnavailable`)
+        raises instead of halting: the collect, which sends nothing, defers. The drain's own
+        closing reconcile comes AFTER sends, where an unanswered read must stay unproven (I5).
+        """
         now = self._clock.now_utc()
         try:
             positions = self._read_positions()
             working = self._read_working()
         except Exception as exc:  # noqa: BLE001
+            if defer_unavailable and isinstance(exc, TransportUnavailable):
+                raise
             event = unreadable(self.venue, now, list(self._expected), str(exc))
         else:
             event = reconcile(self.venue, now, self._expected, positions, working)

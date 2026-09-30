@@ -398,6 +398,10 @@ def run_pass_mirror(
     cannot is refused with its reason, and a resting ticket that only it replaced is kept."""
     venue = broker.venue
     collected = collect_only(ledger, broker, clock=clock)
+    if collected.deferred is not None:
+        # The venue could not be asked: no cancel, no refusal, no send goes out over an unread venue.
+        # Nothing was recorded, so the whole pass is the next run's to do (I3 keeps it once).
+        return collected
     plan = plan_exits(ledger, broker.binding, session, name=name, price=price, at=clock.now_utc())
     refused = list(plan.refused)
     sending = [*entries, *plan.orders]

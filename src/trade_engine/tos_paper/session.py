@@ -76,6 +76,7 @@ from trade_engine.interfaces.broker import VenueAck
 from trade_engine.ledger.mirror import MirrorState, MirrorTicketState, ticket_contracts
 from trade_engine.ledger.state import LedgerFoldError, halted_venues, mirror_state
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker, VenueUnreadable
+from trade_engine.tos_paper.transport import TransportUnavailable
 
 # The sim still works these: a mirrored order must be live in the book of record.
 _WORKING = frozenset({OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED})
@@ -107,6 +108,9 @@ class MirrorRunReport:
     acks: tuple[MirrorAck, ...] = ()
     drain_reconcile: VenueReconcile | None = None
     halted: bool = False
+    # Why the venue could not be asked (TransportUnavailable): set means nothing past what is listed
+    # above was recorded or sent, nothing was halted, and the orders stay pending for the next run (I11).
+    deferred: str | None = None
 
 
 def mirror_of(ledger: Ledger, venue: str) -> MirrorState:
@@ -264,6 +268,8 @@ def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock) -> MirrorRunR
     venue = broker.venue
     try:
         collection = broker.collect_fills(mirror_of(ledger, venue))
+    except TransportUnavailable as exc:  # could not ask: record and halt nothing, ask again next run
+        return MirrorRunReport(venue=venue, halted=broker.halted, deferred=_deferred_why("collecting fills", exc))
     except VenueUnreadable as refused:
         written = _reconcile(ledger, broker, clock, refused.reconcile, "collect")
         return MirrorRunReport(venue=venue, reconcile=written, halted=True)
@@ -297,8 +303,22 @@ def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock) -> MirrorRunR
     closes = tuple(p for p in written if isinstance(p, MirrorAck))
     _halt_unproven(ledger, broker, clock, "collect")
     broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
-    check = _reconcile(ledger, broker, clock, broker.reconcile_now(), "collect")
+    try:
+        now_state = broker.reconcile_now(defer_unavailable=True)
+    except TransportUnavailable as exc:  # the fills above are recorded; only the closing reconcile waits
+        return MirrorRunReport(venue=venue, fills=fills, closes=closes, halted=broker.halted,
+                               deferred=_deferred_why(
+                                   "reconciling", exc,
+                                   recorded="the fills and closes listed are recorded, only the closing reconcile was not made"))
+    check = _reconcile(ledger, broker, clock, now_state, "collect")
     return MirrorRunReport(venue=venue, fills=fills, closes=closes, reconcile=check, halted=broker.halted)
+
+
+def _deferred_why(doing: str, exc: BaseException, *, recorded: str = "") -> str:
+    """The reason a run was deferred, in the words the operator reads (I11). ``recorded`` says what
+    the run had already written, when it is not nothing: the report never claims a clean slate it lacks."""
+    kept = f"{recorded}; " if recorded else "nothing was sent or recorded; "
+    return f"the venue could not be asked while {doing} ({exc}); {kept}the next run asks again"
 
 
 def _unproven(mirror: MirrorState) -> tuple[MirrorTicketState, ...]:
@@ -380,6 +400,8 @@ def run_mirror(
     """
     venue = broker.venue
     collected = _collect(ledger, broker, clock)
+    if collected.deferred is not None:  # the venue could not be asked: send nothing over an unread venue
+        return collected
     mirror = mirror_of(ledger, venue)
     seen: set[str] = set()
     todo: list[Order] = []
@@ -391,6 +413,14 @@ def run_mirror(
     if not todo:
         return collected
     now = clock.now_utc()
+    if not broker.halted:
+        # Read the venue BEFORE the write-ahead: a venue that cannot be asked defers the whole batch
+        # while nothing is recorded, so no order is lost to a read that blinked. The drain sends
+        # from this read. (A halted broker refuses each order below, with its reason.)
+        try:
+            broker.preflight()
+        except TransportUnavailable as exc:
+            return _with(collected, deferred=_deferred_why(f"reading before sending {len(todo)} order(s)", exc))
     # A halted broker refuses the whole batch here, each order with the reason (I11).
     batch = broker.mirror_batch(todo, holdings=mirror.exposure())
     accounts = {order.order_id: order.account_id for order in todo}
