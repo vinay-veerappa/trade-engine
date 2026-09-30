@@ -42,6 +42,17 @@ class TransportReplay(Exception):
     """
 
 
+class TransportUnavailable(Exception):
+    """Raised by a host transport **read** (or connect) that could not ask the venue at all.
+
+    Nothing was sent and nothing was learned: not a refusal (no ticket was turned down), not a
+    drift (no venue row contradicted the mirror), not a halt (no state is unproven that was not
+    already). The mirror defers: it records nothing, sends nothing, and the next run asks
+    again. Only the *absence* of an answer is this; a row that came back and cannot be read is
+    an ordinary failure and halts the venue (I5).
+    """
+
+
 @dataclass(frozen=True)
 class MirrorTicket:
     """One single-leg option ticket, as the venue driver renders and echoes it."""
