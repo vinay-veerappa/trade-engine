@@ -38,6 +38,7 @@ from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.ledger.events import MirrorRefused
 from trade_engine.ledger.state import AccountState
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
+from trade_engine.tos_paper.cover import cover_reason
 from trade_engine.tos_paper.exits import FOLLOW_PREFIX, Express, Price, _units, run_pass_mirror
 from trade_engine.tos_paper.session import _ENDED_UNFILLED, MirrorRunReport, _append, _with, mirror_of
 
@@ -180,6 +181,7 @@ def follow_cycle(
         price=price,
         clock=clock,
         express=express,
+        may_wait=True,
     )
     # The entries refused here are the report's too: a refusal the caller never sees is
     # one the operator's log never shows (measured 2026-09-29, the first live cycle).

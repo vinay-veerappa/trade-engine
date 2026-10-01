@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from trade_engine.domain.instruments import Combo, ComboLeg, Instrument, OptionContract, Side
+from trade_engine.domain.instruments import Combo, ComboLeg, Equity, Instrument, OptionContract, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.eod.runner import PASSES
 from trade_engine.interfaces.clock import Clock
@@ -156,7 +156,7 @@ def plan_exits(
     waits: list[tuple[str, str]] = []
     in_vertical = _plan_verticals(ledger, binding, mirror, session, name, price, at, cancel, orders, refused, waits)
     for (account, contract), venue_held in sorted(mirror.book.items(), key=lambda item: (item[0][0], item[0][1].symbol)):
-        if account not in binding.mirrored_accounts or not isinstance(contract, OptionContract):
+        if account not in binding.mirrored_accounts or not isinstance(contract, (OptionContract, Equity)):
             continue
         if (account, contract) in in_vertical:
             continue  # followed as its vertical, above
@@ -390,6 +390,7 @@ def run_pass_mirror(
     price: Price,
     clock: Clock,
     express: Express | None = None,
+    may_wait: bool = False,
 ) -> MirrorRunReport:
     """One pass at the venue: collect, cancel what the exits replace, then send the
     pass's ``entries`` and exits in one batch (``run_mirror``). Idempotent (I3).
@@ -453,7 +454,7 @@ def run_pass_mirror(
         ],
     )
     # A close refused above is handled now: run_mirror skips it.
-    report = run_mirror(ledger, broker, sending, clock=clock)
+    report = run_mirror(ledger, broker, sending, clock=clock, may_wait=may_wait)
     return _with(
         report,
         fills=collected.fills + report.fills,
