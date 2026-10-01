@@ -84,6 +84,22 @@ class MirrorTicket:
 
 
 @dataclass(frozen=True)
+class MirrorStockTicket:
+    """One order for shares of stock (no OCC symbol), as the venue driver renders and echoes it.
+
+    Whole shares, MKT or LMT, DAY or GTC: the same limits as :class:`MirrorTicket`. S1a: the fields
+    only, validation arrives with the acceptance tests in tests/test_tos_stock.py.
+    """
+
+    symbol: str                        # an equity symbol, e.g. 'AAPL' (never an OCC string)
+    side: Literal["BUY", "SELL"]
+    quantity: int                      # shares
+    order_type: Literal["MKT", "LMT"]
+    limit_price: Decimal | None
+    tif: Literal["DAY", "GTC"]
+
+
+@dataclass(frozen=True)
 class MirrorComboLeg:
     """One leg of a vertical ticket, traded as written (its own side)."""
 
