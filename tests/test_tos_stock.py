@@ -9,6 +9,7 @@ test (§0.2).
 """
 
 import sys
+from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -77,27 +78,31 @@ def _ticket(**changes) -> MirrorStockTicket:
     return MirrorStockTicket(**fields)
 
 
-def test_a_stock_ticket_is_whole_shares_with_a_price_when_limit() -> None:
-    assert _ticket().quantity == 100
-    assert _ticket(order_type="MKT", limit_price=None, side="SELL", tif="GTC").order_type == "MKT"
+def test_a_valid_stock_ticket_constructs_and_cannot_be_edited_afterwards() -> None:
+    """The non-firing control for the guards below: a good ticket is accepted, MKT and LMT, and is frozen."""
+    assert _ticket().quantity == 100 and _ticket().limit_price == Decimal("150.25")
+    market = _ticket(order_type="MKT", limit_price=None, side="SELL", tif="GTC")
+    assert (market.order_type, market.limit_price, market.side, market.tif) == ("MKT", None, "SELL", "GTC")
+    with pytest.raises(FrozenInstanceError):
+        market.quantity = 1  # type: ignore[misc]
 
 
 @pytest.mark.parametrize(
     "changes,match",
     [
-        (dict(symbol="AAPL  261016C00210000"), "symbol"),
-        (dict(symbol=""), "symbol"),
-        (dict(symbol="aapl"), "symbol"),
-        (dict(side="HOLD"), "side"),
-        (dict(quantity=0), "positive int"),
-        (dict(quantity=-100), "positive int"),
-        (dict(quantity=True), "positive int"),
-        (dict(quantity=1.5), "positive int"),
-        (dict(order_type="STP"), "MKT or LMT"),
-        (dict(limit_price=None), "positive limit_price"),
-        (dict(limit_price=Decimal("0")), "positive limit_price"),
-        (dict(order_type="MKT"), "cannot carry a limit_price"),
-        (dict(tif="IOC"), "DAY or GTC"),
+        (dict(symbol="AAPL  261016C00210000"), "stock ticket symbol must be an upper-case equity symbol"),
+        (dict(symbol=""), "stock ticket symbol must be an upper-case equity symbol"),
+        (dict(symbol="aapl"), "stock ticket symbol must be an upper-case equity symbol"),
+        (dict(side="HOLD"), "ticket side must be BUY or SELL"),
+        (dict(quantity=0), "ticket quantity must be a positive int"),
+        (dict(quantity=-100), "ticket quantity must be a positive int"),
+        (dict(quantity=True), "ticket quantity must be a positive int"),
+        (dict(quantity=1.5), "ticket quantity must be a positive int"),
+        (dict(order_type="STP"), "ticket order_type must be MKT or LMT"),
+        (dict(limit_price=None), "an LMT ticket needs a positive limit_price"),
+        (dict(limit_price=Decimal("0")), "an LMT ticket needs a positive limit_price"),
+        (dict(order_type="MKT"), "a MKT ticket cannot carry a limit_price"),
+        (dict(tif="IOC"), "ticket tif must be DAY or GTC"),
     ],
 )
 def test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction(changes, match) -> None:
@@ -154,6 +159,14 @@ def test_a_stock_position_row_is_a_signed_share_count() -> None:
     assert short.instrument == AAPL and short.quantity == Decimal("-100")
 
 
+def test_a_zero_average_price_and_a_zero_quantity_are_legal_stock_rows() -> None:
+    """The reconcile reads shares, never their price; a closed row (0 shares) is not an error."""
+    assert norm.normalize_position(_pos(avg_price="0"), T).avg_price == Decimal("0")
+    closed = norm.normalize_position(_pos(quantity="0"), T)
+    assert closed.quantity == Decimal("0")
+    assert reconcile(PM_A, T, {}, [closed], []).reconciled
+
+
 def test_an_option_position_row_is_unchanged_and_needs_no_marker() -> None:
     row = norm.normalize_position({"symbol": C210.to_occ(), "quantity": "-1", "avg_price": "2.10"}, T)
     assert row.instrument == C210 and row.quantity == Decimal("-1")
@@ -163,15 +176,14 @@ def test_an_option_position_row_is_unchanged_and_needs_no_marker() -> None:
     "raw,match",
     [
         ({"symbol": "AAPL", "quantity": "100", "avg_price": "150.25"}, "not a mirrored option symbol"),  # no marker, no OCC
-        (_pos(symbol=C210.to_occ()), "stock"),  # marked stock but names an option
-        (_pos(kind="bond"), "kind"),
-        (_pos(kind=None), "kind"),
-        (_pos(quantity="0.5"), "whole"),
+        (_pos(symbol=C210.to_occ()), "not a mirrored stock symbol"),  # marked stock but names an option
+        (_pos(kind="bond"), "neither 'stock' nor 'option'"),
+        (_pos(kind=None), "neither 'stock' nor 'option'"),
+        (_pos(quantity="0.5"), "not a whole number of shares"),
         (_pos(quantity="x"), "not a number"),
-        (_pos(avg_price=None), "avg_price"),
-        (_pos(avg_price="0"), "avg_price"),
-        (_pos(avg_price="-1"), "avg_price"),
-        (_pos(symbol=""), "stock"),
+        (_pos(avg_price=None), "avg_price must be a decimal string"),
+        (_pos(avg_price="-1"), "stock avg_price must not be negative"),
+        (_pos(symbol=""), "not a mirrored stock symbol"),
     ],
 )
 def test_a_stock_row_that_cannot_be_read_without_guessing_raises(raw, match) -> None:
@@ -196,11 +208,11 @@ def test_a_stock_working_order_row_reads_back_as_an_equity_order() -> None:
 @pytest.mark.parametrize(
     "changes,match",
     [
-        (dict(kind=None), "kind"),
-        (dict(symbol="AAPL  261016C00210000"), "stock"),
-        (dict(quantity="0.5", filled="0"), "whole"),
-        (dict(filled="0.5"), "whole"),
-        (dict(side="HOLD"), "side"),
+        (dict(kind=None), "neither 'stock' nor 'option'"),
+        (dict(symbol="AAPL  261016C00210000"), "not a mirrored stock symbol"),
+        (dict(quantity="0.5", filled="0"), "stock quantity 0.5 is not a whole number of shares"),
+        (dict(filled="0.5"), "stock filled 0.5 is not a whole number of shares"),
+        (dict(side="HOLD"), "working order side"),
     ],
 )
 def test_a_stock_working_row_that_cannot_be_read_raises(changes, match) -> None:
@@ -292,6 +304,12 @@ def test_two_accounts_buying_the_same_shares_at_one_limit_net_into_one_ticket() 
 def test_shares_and_a_call_on_the_same_name_are_two_tickets_not_one_conflict() -> None:
     batch = _net([_order("sh"), _order("call", side=Side.SELL, qty="1", instrument=C210, limit="2.00")])
     assert batch.refused == () and {vo.instrument for vo in batch.venue_orders} == {AAPL, C210}
+
+
+def test_a_gtc_share_order_keeps_its_tif_and_never_nets_with_a_day_one() -> None:
+    batch = _net([_order("day", tif=TimeInForce.DAY), _order("gtc", "OPT_CSP", tif=TimeInForce.GTC)])
+    assert {(vo.tif, vo.quantity) for vo in batch.venue_orders} == {
+        (TimeInForce.DAY, Decimal("100")), (TimeInForce.GTC, Decimal("100"))}
 
 
 def test_an_account_the_venue_does_not_mirror_never_gets_shares() -> None:
@@ -403,6 +421,14 @@ def test_shares_and_an_option_on_one_name_reconcile_separately() -> None:
     assert not off.reconciled and off.drift == (C210.symbol,)  # the shares are fine; only the call is off
 
 
+def test_a_resting_share_order_is_expected_and_an_unreadable_status_is_drift() -> None:
+    resting = norm.normalize_working_order(_row())
+    assert reconcile(PM_A, T, {AAPL: Decimal("100")}, [], [resting]).reconciled
+    assert not reconcile(PM_A, T, {}, [], [resting]).reconciled  # a resting order nobody expected
+    unknown = norm.normalize_working_order(_row(status="WEIRD"))
+    assert reconcile(PM_A, T, {AAPL: Decimal("100")}, [], [unknown]).drift == ("AAPL",)
+
+
 def test_confirm_ticket_proves_a_stock_ticket_by_its_book_row_or_its_position() -> None:
     order = _venue_order()
     row = norm.normalize_working_order(_row())
@@ -431,3 +457,26 @@ def test_run_mirror_books_a_stock_fill_into_the_mirror_book(ledger) -> None:
     assert mirror.book == {("OPT_COVERED_CALL", AAPL): Decimal("100")}
     assert mirror.expected() == {AAPL: Decimal("100")}
     assert _kinds(ledger).index("MirrorQueued") < _kinds(ledger).index("MirrorAck")
+
+
+def test_a_partial_stock_fill_books_the_shares_filled_and_still_expects_the_rest(ledger) -> None:
+    order = _order()
+    _submit(ledger, order)
+    broker, venue = _broker(clock=MORNING)
+    run_mirror(ledger, broker, [order], clock=MORNING)
+    (oid,) = venue.orders
+    venue.fill(oid, 40, "150.25")
+    report = run_mirror(ledger, broker, [order], clock=MORNING)
+    assert not report.halted and report.reconcile.reconciled
+    mirror = mirror_of(ledger, PM_A)
+    assert mirror.book == {("OPT_COVERED_CALL", AAPL): Decimal("40")}
+    assert mirror.expected() == {AAPL: Decimal("100")}  # 40 held + the 60 still resting
+
+
+def test_running_the_same_stock_order_twice_sends_it_once(ledger) -> None:
+    order = _order()
+    _submit(ledger, order)
+    broker, venue = _broker(clock=MORNING)
+    run_mirror(ledger, broker, [order], clock=MORNING)
+    again = run_mirror(ledger, broker, [order], clock=MORNING)
+    assert len(venue.placed) == 1 and again.queued == () and not again.halted
