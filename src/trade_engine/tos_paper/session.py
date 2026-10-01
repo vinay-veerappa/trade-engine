@@ -402,6 +402,11 @@ def run_mirror(
 
     Orders this venue already queued or refused are skipped; a repeated order id keeps
     its first occurrence. The broker must be connected.
+
+    A call that the mirror book does not prove covered (or the shares / long call a resting short
+    call rests on) is not sent: with ``may_wait`` it is held, recorded nowhere and listed in the
+    report's ``waiting``; without it, it is refused at once with the cover that is missing (I11), so
+    a caller that never learned about waiting can never send a naked call. See ``tos_paper.cover``.
     """
     venue = broker.venue
     collected = _collect(ledger, broker, clock)
@@ -409,15 +414,30 @@ def run_mirror(
         return collected
     mirror = mirror_of(ledger, venue)
     seen: set[str] = set()
-    todo: list[Order] = []
+    candidates: list[Order] = []
     for order in orders:
         if order.order_id in seen or mirror.handled(order.order_id):
             continue
         seen.add(order.order_id)
-        todo.append(order)
-    if not todo:
+        candidates.append(order)
+    if not candidates:
         return collected
     now = clock.now_utc()
+    accounts = {order.order_id: order.account_id for order in candidates}
+    todo: list[Order] = []  # what may go now; each earlier one counts as resting for the next (cover_reason)
+    waiting: list[tuple[str, str]] = []
+    cover_refused: list[tuple[str, str]] = []
+    for order in candidates:
+        reason = cover_reason(mirror, order, todo)
+        if reason is None:
+            todo.append(order)
+        elif may_wait:
+            waiting.append((order.order_id, reason))
+        else:
+            cover_refused.append((order.order_id, reason))
+    if not todo:  # the cover rule held back or refused every order: nothing to send, so nothing to drain
+        written = _append(ledger, venue, clock, [_refusal(venue, accounts, o, r, now) for o, r in cover_refused])
+        return _with(collected, refused=tuple(written), waiting=tuple(waiting))
     if not broker.halted:
         # Read the venue BEFORE the write-ahead: a venue that cannot be asked defers the whole batch
         # while nothing is recorded, so no order is lost to a read that blinked. The drain sends
@@ -425,23 +445,15 @@ def run_mirror(
         try:
             broker.preflight()
         except TransportUnavailable as exc:
-            return _with(collected, deferred=_deferred_why(f"reading before sending {len(todo)} order(s)", exc))
+            return _with(
+                collected, deferred=_deferred_why(f"reading before sending {len(todo)} order(s)", exc),
+                waiting=tuple(waiting),
+            )
     # A halted broker refuses the whole batch here, each order with the reason (I11).
     batch = broker.mirror_batch(todo, holdings=mirror.exposure())
-    accounts = {order.order_id: order.account_id for order in todo}
     queued_keys = {ticket.venue_order_id for ticket in broker.queued}
     items: list[tuple[object, str]] = [
-        (
-            MirrorRefused(
-                venue=venue,
-                strategy_order_id=order_id,
-                strategy_account=accounts[order_id],
-                reason=reason,
-                at=now,
-            ),
-            f"refused:{order_id}",
-        )
-        for order_id, reason in batch.refused
+        _refusal(venue, accounts, order_id, reason, now) for order_id, reason in [*cover_refused, *batch.refused]
     ]
     for ticket in batch.venue_orders:
         if ticket.venue_order_id not in queued_keys:
@@ -503,6 +515,15 @@ def run_mirror(
         acks=tuple(acked),
         drain_reconcile=drained,
         halted=broker.halted,
+        waiting=tuple(waiting),
+    )
+
+
+def _refusal(venue: str, accounts: dict[str, str], order_id: str, reason: str, at) -> tuple[object, str]:
+    """The ledger item that records ``order_id`` as refused by this venue, with its reason (I11)."""
+    return (
+        MirrorRefused(venue=venue, strategy_order_id=order_id, strategy_account=accounts[order_id], reason=reason, at=at),
+        f"refused:{order_id}",
     )
 
 

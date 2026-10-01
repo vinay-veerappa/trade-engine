@@ -123,9 +123,14 @@ def follow_entries(
                 continue
             age = now - order.created_at
             if age > max_age:
+                # An entry the session has held for its cover is not a late copy: say what never came.
+                missing = cover_reason(mirror, order)
                 refused.append((order.order_id, account,
                                 f"the follower first saw this entry {int(age.total_seconds())}s after the sim made it "
-                                f"(more than {int(max_age.total_seconds())}s); a late copy is not the sim's trade"))
+                                f"(more than {int(max_age.total_seconds())}s); a late copy is not the sim's trade"
+                                if missing is None else
+                                f"{missing}; the cover did not arrive within {int(max_age.total_seconds())}s "
+                                "of the sim's entry"))
             elif order.state is OrderState.FILLED and _flat(state, order):
                 refused.append((order.order_id, account,
                                 "the sim opened and closed this entry before the follower saw it; "
