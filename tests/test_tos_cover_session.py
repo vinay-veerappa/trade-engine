@@ -26,6 +26,7 @@ from test_tos_mirror import P200, Clock, _kinds, ledger  # noqa: F401  (ledger i
 from test_tos_mirror_exits import MORNING as DAY
 from test_tos_mirror_exits import OPEN, S, _book, _price
 from test_tos_stock import AAPL, C210, MIRRORED, PM_A, StockVenue, _binding, _broker
+from test_tos_unavailable import Flaky
 
 from trade_engine.domain.instruments import OptionContract, Side
 from trade_engine.domain.orders import Order, OrderType, TimeInForce
@@ -143,6 +144,26 @@ def test_a_call_that_cannot_go_does_not_stop_the_orders_beside_it(ledger, may_wa
     assert [q.instrument for q in report.queued] == [P200] and len(venue.placed) == 1
     assert [w[0] for w in report.waiting] == (["cc-call"] if may_wait else [])
     assert [r.strategy_order_id for r in report.refused] == ([] if may_wait else ["cc-call"])
+
+
+class FlakyStock(Flaky, StockVenue):
+    """A venue that drops after the collect's one positions read, and marks its stock rows."""
+
+
+def test_a_deferred_run_still_lists_the_orders_the_cover_rule_held_back(ledger) -> None:
+    put = _o("csp-1", Side.SELL, "1", P200, "2.00", account="OPT_CSP")
+    call = _call()
+    _book(ledger, put, fill=None)
+    _book(ledger, call, fill=None)
+    venue = FlakyStock()
+    broker, _ = _broker(venue, clock=DAY)
+    venue.positions_allowed = 1  # the collect's reconcile reads positions once; the preflight is the read that fails
+    report = run_mirror(ledger, broker, [put, call], clock=DAY, may_wait=True)
+    assert report.deferred is not None and "dropped the session" in report.deferred
+    assert [w[0] for w in report.waiting] == ["cc-call"]  # still the caller's to present again
+    assert venue.placed == [] and report.queued == () and report.refused == () and not report.halted
+    assert set(_kinds(ledger)) == {"VenueReconcile"}  # the collect's proven read, and not one Queued/Ack/Refused
+    assert not mirror_of(ledger, PM_A).handled("cc-call") and not mirror_of(ledger, PM_A).handled("csp-1")
 
 
 def test_a_put_and_a_bought_call_are_never_gated(ledger) -> None:
