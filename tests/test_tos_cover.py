@@ -52,6 +52,7 @@ D = Decimal
         (_call("200", OCT), _call("210", NOV), False),  # the long expires first
         (_call("200", DEC, und="MSFT"), _call("210", OCT), False),  # another underlying
         (_call("200", DEC, right="P"), _call("210", OCT), False),   # a put covers no call
+        (_call("200", DEC), _call("210", OCT, right="P"), False),   # and a call covers no put
         (_call("200", DEC, multiplier=10), _call("210", OCT), False),  # a mini is not a lot of 100
     ],
 )
@@ -308,3 +309,60 @@ def test_short_shares_alone_invent_no_uncovered_call_and_selling_short_never_wai
     assert uncovered({AAPL: D(-100)}) == {}  # a negative lot count must floor at zero, never add cover or demand
     assert cover_reason(_state(), _order(AAPL, Side.SELL, "100")) is None
     assert cover_reason(_state({(CC, AAPL): -100}), _order(AAPL, Side.SELL, "100")) is None
+
+
+# -- review gaps (the loop's panel named them; each is pinned here rather than argued) --------------------------
+
+
+def test_shares_go_to_the_larger_multiplier_first_which_leaves_the_most_uncovered() -> None:
+    mini = _call("215", multiplier=50)
+    # 100 shares: a lot for the 100-multiplier call leaves none for the two 50s (the pessimistic split)
+    assert uncovered({AAPL: D(100), C210: D(-1), mini: D(-2)}) == {"AAPL": D(2)}
+
+
+def test_the_reason_states_the_counts_it_computed() -> None:
+    held = _state({(CC, AAPL): 100, (CC, C210): -1})
+    assert cover_reason(held, _order(C210, Side.SELL)) == (
+        f"selling 1 {C210.symbol} would leave 1 short AAPL call(s) uncovered (0 now); the mirror book proves "
+        "100 share(s) and 0 long call(s) held (proven venue fills only; shares from an assignment are not booked)"
+    )
+    credit = _state({(PMCC, _call("215", DEC)): 1})
+    assert cover_reason(credit, _order(C210, Side.SELL, account=PMCC)) == (
+        f"selling 1 {C210.symbol} would leave 1 short AAPL call(s) uncovered (0 now); the mirror book proves "
+        "0 share(s) and 1 long call(s) held (proven venue fills only; shares from an assignment are not booked)"
+    )
+
+
+def test_an_accepted_put_sell_and_an_accepted_vertical_spend_no_cover() -> None:
+    state = _state({(CC, AAPL): 100})
+    put = _order(_call("200", right="P"), Side.SELL, oid="so-p")
+    vertical = _order(Combo((ComboLeg(C210, 1, Side.SELL), ComboLeg(_call("215"), 1, Side.BUY))), Side.SELL, oid="so-v")
+    assert cover_reason(state, _order(C210, Side.SELL, oid="so-2"), accepted=[put, vertical]) is None
+
+
+def test_a_resting_vertical_counts_only_its_sold_leg_as_leaving() -> None:
+    vertical = Combo((ComboLeg(C210, 1, Side.SELL), ComboLeg(_call("215"), 1, Side.BUY)))
+    assert holdings(_state({}, [_ticket(vertical, Side.SELL, "1")])) == {C210: D(-1)}
+
+
+def test_a_closed_out_book_holds_nothing_at_all() -> None:
+    state = _state({(CC, AAPL): 100}, [_ticket(AAPL, Side.SELL, "100")])
+    assert holdings(state) == {}  # 100 held and 100 leaving nets to nothing, not to a zero row
+
+
+def test_a_short_call_already_uncovered_does_not_block_selling_what_is_not_held_but_one_more_does() -> None:
+    state = _state({(CC, C210): -1})  # one uncovered from the start
+    assert cover_reason(state, _order(AAPL, Side.SELL, "100")) is None  # short shares add no uncovered call
+    assert cover_reason(state, _order(C210, Side.SELL, oid="so-2")) is not None  # a second one does
+    leaving = _state({(CC, AAPL): 100, (CC, C210): -2})  # 100 shares cover one of the two
+    assert cover_reason(leaving, _order(AAPL, Side.SELL, "100")) is not None  # the last lot goes: two are bare
+
+
+def test_the_reason_never_reports_short_shares_or_another_names_calls_as_held() -> None:
+    other = _call("100", und="MSFT")
+    state = _state({(CC, AAPL): -100, (CC, other): 3})
+    assert cover_reason(state, _order(C210, Side.SELL)) == (
+        f"selling 1 {C210.symbol} would leave 1 short AAPL call(s) uncovered (0 now); the mirror book proves "
+        "0 share(s) and 0 long call(s) held (proven venue fills only; shares from an assignment are not booked)"
+    )
+
