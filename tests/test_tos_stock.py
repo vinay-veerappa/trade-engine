@@ -325,7 +325,7 @@ def test_opposite_sides_on_the_same_shares_still_conflict() -> None:
 @pytest.mark.parametrize(
     "kwargs,match",
     [
-        (dict(qty="1.5"), "whole number"),
+        (dict(qty="1.5"), "whole number of shares"),
         (dict(tif=TimeInForce.GTD), "TIF"),
     ],
 )
