@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import pytest
 
-from trade_engine.domain.instruments import Equity, OptionContract, Side
+from trade_engine.domain.instruments import OptionContract, Side
 from trade_engine.domain.orders import Order, OrderType, TimeInForce
 from trade_engine.interfaces.broker import (
     BrokerAdapter,
@@ -501,7 +501,13 @@ def test_a_halt_between_queue_and_drain_sends_nothing() -> None:
 
 def test_an_inexpressible_queued_ticket_is_rejected_not_raised() -> None:
     broker, venue = _connected()
-    broker._queue.append(_venue_order(instrument=Equity("AAPL")))
+    broker._queue.append(
+        VenueOrder(
+            venue_order_id="tos:gtd", instrument=P200, order_type=OrderType.LIMIT, side=Side.SELL,
+            quantity=Decimal("1"), submitted_at=T, tif=TimeInForce.GTD, limit_price=Decimal("1.00"),
+            allocations=(VenueOrderAllocation("so-1", "OPT_CSP", Decimal("1")),),
+        )
+    )
     report = broker.drain()
     assert report.acks[0].status == "REJECTED" and "UnsupportedCapability" in report.acks[0].message
     assert venue.placed == []
@@ -523,8 +529,6 @@ def test_submit_is_pending_until_read_back() -> None:
 
 def test_submit_refuses_what_the_venue_cannot_express() -> None:
     broker, venue = _connected()
-    with pytest.raises(UnsupportedCapability, match="single option contracts"):
-        broker.submit(_venue_order(instrument=Equity("SPY")))
     stop = VenueOrder(
         venue_order_id="tos:stop", instrument=P200, order_type=OrderType.STOP, side=Side.SELL,
         quantity=Decimal("1"), submitted_at=T, stop_price=Decimal("1.00"),

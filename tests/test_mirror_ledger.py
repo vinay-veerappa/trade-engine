@@ -110,10 +110,10 @@ def test_mirror_events_must_be_filed_under_their_venue_account() -> None:
         _event(_fill(), account=mirror_account("D-00000002"))
 
 
-def test_a_queued_ticket_takes_a_single_option_or_a_vertical() -> None:
+def test_a_queued_ticket_takes_a_single_option_a_vertical_or_shares() -> None:
     assert _queued(instrument=SPREAD, qty="2").quantity == Decimal("2")
-    with pytest.raises(EventPayloadError, match="option contract or a vertical"):
-        _queued(instrument=Equity("AAPL"))
+    assert _queued(instrument=Equity("AAPL"), qty="100").quantity == Decimal("100")
+    # an instrument that is none of these is refused in tests/test_tos_stock.py
 
 
 @pytest.mark.parametrize(

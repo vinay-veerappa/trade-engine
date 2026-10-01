@@ -211,15 +211,6 @@ def test_unmirrored_account_is_refused_so_csp_never_reaches_the_ira() -> None:
     assert [a.strategy_order_id for a in batch.venue_orders[0].allocations] == ["pcs-1"]
 
 
-def test_equities_are_not_mirrored() -> None:
-    batch = _net([
-        _order("eq", "OPT_CSP", Side.BUY, "100", instrument=Equity("AAPL")),
-        _order("opt", "OPT_CSP", Side.SELL),
-    ])
-    assert "equities are not mirrored" in _reason(batch, "eq")
-    assert len(batch.venue_orders) == 1
-
-
 # -- verticals: one combo ticket each, never netted, screened per leg ------------------
 
 SPREAD = Combo((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190, 1, Side.BUY)))  # a put credit spread
