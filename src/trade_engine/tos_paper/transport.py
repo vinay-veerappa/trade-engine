@@ -20,7 +20,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal, Protocol, runtime_checkable
 
-from trade_engine.domain.instruments import Combo, OptionContract, Side
+from trade_engine.domain.instruments import Combo, Equity, OptionContract, Side
 from trade_engine.domain.orders import OrderType, TimeInForce
 from trade_engine.interfaces.broker import UnsupportedCapability, VenueOrder
 from trade_engine.tos_paper.netting import vertical_reason
@@ -98,6 +98,31 @@ class MirrorStockTicket:
     limit_price: Decimal | None
     tif: Literal["DAY", "GTC"]
 
+    def __post_init__(self) -> None:
+        try:
+            parsed = Equity(self.symbol)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"stock ticket symbol must be an upper-case equity symbol, got {self.symbol!r}"
+            ) from exc
+        if parsed.symbol != self.symbol:
+            raise ValueError(
+                f"stock ticket symbol must be an upper-case equity symbol, got {self.symbol!r}"
+            )
+        if self.side not in ("BUY", "SELL"):
+            raise ValueError(f"ticket side must be BUY or SELL, got {self.side!r}")
+        if not isinstance(self.quantity, int) or isinstance(self.quantity, bool) or self.quantity <= 0:
+            raise ValueError(f"ticket quantity must be a positive int, got {self.quantity!r}")
+        if self.order_type not in ("MKT", "LMT"):
+            raise ValueError(f"ticket order_type must be MKT or LMT, got {self.order_type!r}")
+        if self.order_type == "LMT":
+            if self.limit_price is None or self.limit_price <= 0:
+                raise ValueError("an LMT ticket needs a positive limit_price (I5)")
+        elif self.limit_price is not None:
+            raise ValueError("a MKT ticket cannot carry a limit_price")
+        if self.tif not in ("DAY", "GTC"):
+            raise ValueError(f"ticket tif must be DAY or GTC, got {self.tif!r}")
+
 
 @dataclass(frozen=True)
 class MirrorComboLeg:
@@ -154,13 +179,30 @@ _TICKET_TYPES = {OrderType.MARKET: "MKT", OrderType.LIMIT: "LMT"}
 _TICKET_TIFS = {TimeInForce.DAY: "DAY", TimeInForce.GTC: "GTC"}
 
 
-def ticket_for(order: VenueOrder) -> MirrorTicket | MirrorComboTicket:
+def ticket_for(order: VenueOrder) -> MirrorTicket | MirrorComboTicket | MirrorStockTicket:
     """The ticket for one venue order, or UnsupportedCapability — never an approximation."""
     if isinstance(order.instrument, Combo):
         return _combo_ticket(order)
+    if isinstance(order.instrument, Equity):
+        if order.order_type not in _TICKET_TYPES:
+            raise UnsupportedCapability(f"order type {order.order_type.value}: MARKET/LIMIT only")
+        if order.tif not in _TICKET_TIFS:
+            raise UnsupportedCapability(f"TIF {order.tif.value}: DAY/GTC only")
+        if order.quantity != order.quantity.to_integral_value():
+            raise UnsupportedCapability(
+                f"quantity {order.quantity} is not a whole number of shares (I5)"
+            )
+        return MirrorStockTicket(
+            symbol=order.instrument.symbol,
+            side=order.side.value,
+            quantity=int(order.quantity),
+            order_type=_TICKET_TYPES[order.order_type],
+            limit_price=order.limit_price if order.order_type is OrderType.LIMIT else None,
+            tif=_TICKET_TIFS[order.tif],
+        )
     if not isinstance(order.instrument, OptionContract):
         raise UnsupportedCapability(
-            f"{order.instrument!r}: only single option contracts and verticals are mirrored (§4.7)"
+            f"{order.instrument!r}: only single option contracts, shares and verticals are mirrored (§4.7)"
         )
     if order.order_type not in _TICKET_TYPES:
         raise UnsupportedCapability(f"order type {order.order_type.value}: MARKET/LIMIT only")

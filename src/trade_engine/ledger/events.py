@@ -18,7 +18,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from trade_engine.domain.instruments import Combo, Instrument, OptionContract, Side
+from trade_engine.domain.instruments import Combo, Equity, Instrument, OptionContract, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.risk import RiskControlChange, RiskVerdict
@@ -407,9 +407,10 @@ class MirrorAllocation:
 class MirrorQueued:
     """A venue ticket queued for sending: written ahead of the send (I2, I3).
 
-    ``instrument`` is one option contract, or a 2-leg vertical ``Combo`` whose legs trade
-    as written; for a combo ``side`` is the price effect (SELL collects a net credit,
-    BUY pays a net debit) and ``quantity`` counts spread units.
+    ``instrument`` is one option contract, a 2-leg vertical ``Combo`` or shares of an
+    ``Equity`` (quantity then counts shares); for a combo ``side`` is the price effect
+    (SELL collects a net credit, BUY pays a net debit) and ``quantity`` counts spread
+    units.
     """
 
     venue: str
@@ -430,9 +431,9 @@ class MirrorQueued:
             raise EventPayloadError("MirrorQueued.ticket_key must be non-empty (I3)")
         if isinstance(self.instrument, Combo):
             _require_vertical(self.instrument, "MirrorQueued.instrument")
-        elif not isinstance(self.instrument, OptionContract):
+        elif not isinstance(self.instrument, (OptionContract, Equity)):
             raise EventPayloadError(
-                f"MirrorQueued.instrument must be an option contract or a vertical, got {self.instrument!r} (I6)"
+                f"MirrorQueued.instrument must be an option contract, a vertical or an equity, got {self.instrument!r} (I6)"
             )
         if not isinstance(self.side, Side):
             raise EventPayloadError(f"MirrorQueued.side must be a Side, got {self.side!r}")
