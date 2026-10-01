@@ -76,6 +76,7 @@ from trade_engine.interfaces.broker import VenueAck
 from trade_engine.ledger.mirror import MirrorState, MirrorTicketState, ticket_contracts
 from trade_engine.ledger.state import LedgerFoldError, halted_venues, mirror_state
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker, VenueUnreadable
+from trade_engine.tos_paper.cover import cover_reason
 from trade_engine.tos_paper.transport import TransportUnavailable
 
 # The sim still works these: a mirrored order must be live in the book of record.
@@ -111,6 +112,9 @@ class MirrorRunReport:
     # Why the venue could not be asked (TransportUnavailable): set means nothing past what is listed
     # above was recorded or sent, nothing was halted, and the orders stay pending for the next run (I11).
     deferred: str | None = None
+    # Orders the cover rule held back this run (``may_wait``): (order id, why). Nothing about them was
+    # recorded or sent; the caller presents them again next run, and the venue never saw one (I3).
+    waiting: tuple[tuple[str, str], ...] = ()
 
 
 def mirror_of(ledger: Ledger, venue: str) -> MirrorState:
@@ -392,6 +396,7 @@ def run_mirror(
     orders: Sequence[Order],
     *,
     clock: Clock,
+    may_wait: bool = False,
 ) -> MirrorRunReport:
     """One mirror session for ``orders`` (usually :func:`pending_orders`). Idempotent (I3).
 
