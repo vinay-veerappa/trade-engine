@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from trade_engine.domain.instruments import OptionContract, Side
+from trade_engine.domain.instruments import Equity, Instrument, OptionContract, Side
 from trade_engine.domain.orders import OrderState, OrderType
 from trade_engine.interfaces.broker import VenueAck, VenuePosition
 from trade_engine.tos_paper.transport import TransportRefused, TransportReplay
@@ -167,6 +167,21 @@ def _contract(raw: Mapping[str, object]) -> OptionContract:
         raise NormalizeError(f"not a mirrored option symbol: {symbol!r}") from exc
 
 
+def _instrument(raw: Mapping[str, object]) -> Instrument:
+    if "kind" in raw:
+        kind = raw["kind"]
+        if kind == "stock":
+            symbol = raw.get("symbol")
+            try:
+                return Equity(symbol)
+            except (ValueError, TypeError) as exc:
+                raise NormalizeError(f"not a mirrored stock symbol: {symbol!r}") from exc
+        if kind == "option":
+            return _contract(raw)
+        raise NormalizeError(f"row kind {kind!r} is neither 'stock' nor 'option'")
+    return _contract(raw)
+
+
 def normalize_working_order(raw: Mapping[str, object]) -> WorkingOrder:
     """One Order Book row → WorkingOrder. An unknown status is PENDING_UNKNOWN."""
     side_text = str(raw.get("side", "")).strip().upper()
@@ -179,11 +194,17 @@ def normalize_working_order(raw: Mapping[str, object]) -> WorkingOrder:
     filled = _decimal(raw.get("filled", "0"), "filled")
     if quantity <= 0 or filled < 0 or filled > quantity:
         raise NormalizeError(f"working order quantity {quantity} / filled {filled}")
+    instrument = _instrument(raw)
+    if isinstance(instrument, Equity):
+        if quantity != quantity.to_integral_value():
+            raise NormalizeError(f"stock quantity {quantity} is not a whole number of shares")
+        if filled != filled.to_integral_value():
+            raise NormalizeError(f"stock filled {filled} is not a whole number of shares")
     limit_raw = raw.get("limit_price")
     limit = None if limit_raw in (None, "") else _decimal(limit_raw, "limit_price")
     status = str(raw.get("status", "")).strip().upper()
     return WorkingOrder(
-        instrument=_contract(raw),
+        instrument=instrument,
         side=Side(side_text),
         quantity=quantity,
         filled=filled,
@@ -232,9 +253,17 @@ def normalize_order_fill(raw: Mapping[str, object]) -> OrderFill:
 
 def normalize_position(raw: Mapping[str, object], as_of: datetime) -> VenuePosition:
     """One Position row → VenuePosition (signed quantity)."""
+    instrument = _instrument(raw)
+    quantity = _decimal(raw.get("quantity"), "quantity")
+    avg_price = _decimal(raw.get("avg_price"), "avg_price")
+    if isinstance(instrument, Equity):
+        if quantity != quantity.to_integral_value():
+            raise NormalizeError(f"stock quantity {quantity} is not a whole number of shares")
+        if avg_price < 0:
+            raise NormalizeError(f"stock avg_price must not be negative, got {avg_price}")
     return VenuePosition(
-        instrument=_contract(raw),
-        quantity=_decimal(raw.get("quantity"), "quantity"),
-        avg_price=_decimal(raw.get("avg_price"), "avg_price"),
+        instrument=instrument,
+        quantity=quantity,
+        avg_price=avg_price,
         as_of=as_of,
     )

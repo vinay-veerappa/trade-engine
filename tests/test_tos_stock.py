@@ -292,7 +292,7 @@ def test_a_mirrored_account_may_buy_shares() -> None:
     assert batch.refused == ()
     (ticket,) = batch.venue_orders
     assert ticket.instrument == AAPL and ticket.side is Side.BUY and ticket.quantity == Decimal("100")
-    assert ticket.limit_price == Decimal("150.25") and ticket.allocations[0].strategy_account == "OPT_COVERED_CALL"
+    assert ticket.limit_price == Decimal("150.25") and ticket.allocations[0].account_id == "OPT_COVERED_CALL"
 
 
 def test_two_accounts_buying_the_same_shares_at_one_limit_net_into_one_ticket() -> None:

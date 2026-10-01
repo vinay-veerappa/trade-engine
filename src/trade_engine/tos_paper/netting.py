@@ -7,10 +7,12 @@ rules, in order, for each strategy order of a batch (first-in = list order):
 1. The order's virtual account must be one this venue account mirrors — a CSP order can
    never reach the IRA (§4.7).
 2. Single option contracts are mirrored, and 2-leg verticals (same underlying, expiry,
-   right and multiplier, two strikes, one leg bought and one sold, equal ratios).
-   Equities are not (§4.7); any other combo is refused (UnsupportedCapability).
+   right and multiplier, two strikes, one leg bought and one sold, equal ratios), and
+   shares of an equity (a covered call's 100 shares, the shares an assignment leaves).
+   An equity is never a leg of a combo; any other combo is refused (UnsupportedCapability).
 3. MARKET and LIMIT only (a vertical: LIMIT only, one net price), DAY or GTC only,
-   whole-contract quantities only; anything else is refused, never approximated (I5).
+   whole-contract (shares: whole-share) quantities only; anything else is refused,
+   never approximated (I5).
 4. Conflicts are across virtual accounts on the same contract, leg by leg for a
    vertical: once a first-in order sets the contract's side for the batch, a later
    order on the opposite side is refused. An order that would leave one virtual account
@@ -124,21 +126,21 @@ def _screen(order: Order, mirrored: frozenset[str]) -> str | None:
             f"account {order.account_id} is not mirrored on this venue "
             f"(mirrors {sorted(mirrored)}); refused at the venue only (§4.7)"
         )
-    if isinstance(order.instrument, Equity):
-        return f"{order.instrument.symbol}: equities are not mirrored (§4.7)"
     if isinstance(order.instrument, Combo):
         reason = vertical_reason(order.instrument)
         if reason is not None:
             return f"UnsupportedCapability: multi-leg combo: {reason}"
         if order.order_type is not OrderType.LIMIT:
             return "UnsupportedCapability: a vertical is mirrored with one net LIMIT price only"
-    elif not isinstance(order.instrument, OptionContract):
-        return f"UnsupportedCapability: instrument {order.instrument!r} is not a mirrored option"
+    elif not isinstance(order.instrument, (OptionContract, Equity)):
+        return f"UnsupportedCapability: instrument {order.instrument!r} is not a mirrored option or share"
     if order.order_type not in MIRRORED_ORDER_TYPES:
         return f"UnsupportedCapability: order type {order.order_type.value} (MARKET/LIMIT only)"
     if order.tif not in MIRRORED_TIFS:
         return f"UnsupportedCapability: TIF {order.tif.value} (DAY/GTC only)"
     if order.quantity != order.quantity.to_integral_value():
+        if isinstance(order.instrument, Equity):
+            return f"quantity {order.quantity} is not a whole number of shares; refusing to round (I5)"
         return f"quantity {order.quantity} is not a whole number of contracts; refusing to round (I5)"
     # A LIMIT's price is positive by Order's own validation; tickets pass it through
     # unchanged (never averaged), so no ticket can carry a price <= 0.
