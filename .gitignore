@@ -69,3 +69,4 @@ debug_tmp/
 
 # Rust build output
 crates/target/
+crates/te_wasm/pkg/

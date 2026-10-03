@@ -1,0 +1,18 @@
+[package]
+name = "te_wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Trade engine wasm bindings for sim book and browser replay (P6)."
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+te_core = { path = "../te_core" }
+wasm-bindgen = "=0.2.127"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
