@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use te_core::calendar as cal;
 use te_core::greeks as gk;
 
+mod flow;
 mod oms;
 mod sim;
 
