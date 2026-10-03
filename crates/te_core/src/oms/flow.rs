@@ -465,13 +465,32 @@ pub fn create_bracket<H: Host>(_h: &H, _intent: &Intent, _quantity: &PyDec) -> R
 /// `submit`. `_ensure_stored` first (validate the quantity, persist a standalone order
 /// or refuse a changed one), then a child is held (a recorded refusal) until its parent
 /// has a fill; then emulate (`_start_emulation`) or send natively (`_submit_native`).
-pub fn submit<H: Host>(_h: &H, _order: &Order) -> R<Order> {
-    unported("submit")
+pub fn submit<H: Host>(h: &H, order: &Order) -> R<Order> {
+    ensure_stored(h, order)?;
+    let ctx = context(h, &order.order_id)?;
+    let current = ctx.order;
+    if let Some(parent_id) = &current.parent_order_id {
+        let parent_ctx = context(h, parent_id)?;
+        let filled = h.account_state(&current.account_id)?
+            .filled_quantity
+            .get(&parent_ctx.order.order_id)
+            .cloned()
+            .unwrap_or_else(zero);
+        if plan::child_hold(&filled)? {
+            return planned_refusal(h, &current, Refusal::Child(&parent_ctx.order.order_id), None);
+        }
+    }
+    let caps = capabilities(h)?;
+    if plan::emulates(current.order_type, &caps.types, caps.native_stops) {
+        return start_emulation(h, &current);
+    }
+    submit_native(h, &current)
 }
 
 /// `submit_trailing`: refuse a non-TRAIL order (`trailing_check`), then `submit`.
-pub fn submit_trailing<H: Host>(_h: &H, _order: &Order) -> R<Order> {
-    unported("submit_trailing")
+pub fn submit_trailing<H: Host>(h: &H, order: &Order) -> R<Order> {
+    plan::trailing_check(order.order_type, "submit_trailing", "", &[])?;
+    submit(h, order)
 }
 
 /// `update_trailing`: the order, `trailing_check` against the venue's types (a native
@@ -588,8 +607,60 @@ pub fn ingest_venue_fills<H: Host>(_h: &H, _order: &Order, _found: &VenueOrderSt
 /// BEFORE the network call (durable-before-network); building the venue order and
 /// `broker.submit` share one guard, and a failure of either is
 /// BrokerOutcomeUnknownError from the original exception. Then `_record_submit_ack`.
-pub fn submit_native<H: Host>(_h: &H, _order: &Order) -> R<Order> {
-    unported("submit_native")
+pub fn submit_native<H: Host>(h: &H, order: &Order) -> R<Order> {
+    use crate::ledger::model::OrderUpdated;
+    if order.state != OrderState::New {
+        return Ok(order.clone());
+    }
+    if !supports_native_type(h, order.order_type)? {
+        planned_refusal(h, order, Refusal::Native, None)?;
+    }
+    require_tif(h, order, None)?;
+    let submitted = {
+        let mut o = order.clone();
+        o.state = OrderState::Submitted;
+        o
+    };
+    append(
+        h,
+        &submitted.account_id,
+        EventKind::OrderUpdated,
+        Obj::OrderUpdated(OrderUpdated {
+            order: submitted.clone(),
+            reason: "Order submission requested".into(),
+            venue_order_id: None,
+        }),
+        &format!("{}:submit", order.command_id),
+    )?;
+    mark_pending(
+        h,
+        &submitted,
+        "Submit outcome is pending until the venue responds",
+        &format!("{}:submit-pending", order.command_id),
+    )?;
+    let broker_msg = format!(
+        "Submit outcome for order '{}' is unknown; it will not be resent",
+        order.order_id
+    );
+    let ack = match venue_order(h, order, None) {
+        Ok((_, venue)) => match h.submit(&venue) {
+            Ok(Net::Ok(ack)) => ack,
+            Ok(Net::Failed) => return err("broker_unknown", broker_msg),
+            // a BaseException from the broker (not an Exception) propagates as is
+            Err(e) => return Err(e),
+        },
+        Err(e) => {
+            h.cause(e);
+            return err("broker_unknown", broker_msg);
+        }
+    };
+    record_submit_ack(
+        h,
+        order,
+        &ack,
+        &format!("{}:submit-result", order.command_id),
+    )?;
+    get_order(h, &order.order_id)
 }
 
 /// `_start_emulation`. `start_emulation` plans it (a pending order refuses; STOP_LIMIT
@@ -616,8 +687,15 @@ pub fn submit_emulated<H: Host>(
 
 /// `_record_submit_ack`: `submit_ack` names the event and reason; an unrecognized
 /// status refuses before anything is recorded.
-pub fn record_submit_ack<H: Host>(_h: &H, _order: &Order, _ack: &VenueAck, _command: &str) -> R<()> {
-    unported("record_submit_ack")
+pub fn record_submit_ack<H: Host>(h: &H, order: &Order, ack: &VenueAck, command: &str) -> R<()> {
+    let (kind, reason) = plan::submit_ack(&ack.status, ack.message.as_deref().unwrap_or(""))?;
+    let payload = Obj::StateChange(OrderStateChange {
+        order_id: order.order_id.clone(),
+        reason: Some(reason),
+        venue_order_id: Some(ack.venue_order_id.clone()),
+    });
+    append(h, &order.account_id, kind, payload, command)?;
+    Ok(())
 }
 
 /// `_synchronize_bracket`. Protection sizing before target budgets: the stop is resized
@@ -669,15 +747,43 @@ pub fn restore_working_state<H: Host>(
 
 /// `_mark_pending`: the current order; already PENDING_UNKNOWN records nothing;
 /// otherwise ORDER_PENDING with the context's venue id.
-pub fn mark_pending<H: Host>(_h: &H, _order: &Order, _reason: &str, _command: &str) -> R<()> {
-    unported("mark_pending")
+pub fn mark_pending<H: Host>(h: &H, order: &Order, reason: &str, command: &str) -> R<()> {
+    let current = get_order(h, &order.order_id)?;
+    if plan::pending_state(current.state) {
+        return Ok(());
+    }
+    let ctx = context(h, &current.order_id)?;
+    let payload = Obj::StateChange(OrderStateChange {
+        order_id: current.order_id.clone(),
+        reason: Some(reason.to_string()),
+        venue_order_id: ctx.venue_order_id,
+    });
+    append(h, &current.account_id, EventKind::OrderPending, payload, command)?;
+    Ok(())
 }
 
 /// `_ensure_stored`. Validate the quantity; an unknown order is persisted as a
 /// standalone ORDERS_CREATED under its own command id; a stored one must match its
 /// planned order (`stored`).
-pub fn ensure_stored<H: Host>(_h: &H, _order: &Order) -> R<()> {
-    unported("ensure_stored")
+pub fn ensure_stored<H: Host>(h: &H, order: &Order) -> R<()> {
+    use crate::ledger::model::OrdersCreated;
+    plan::validate_quantity(&order.instrument, &order.quantity)?;
+    match get_order(h, &order.order_id) {
+        Err(e) if e.kind == "key" => {
+            let payload = Obj::OrdersCreated(OrdersCreated {
+                orders: vec![order.clone()],
+                fingerprint: plan::fingerprint_order(order)?,
+                reason: "Standalone strategy order created".into(),
+            });
+            append(h, &order.account_id, EventKind::OrdersCreated, payload, &order.command_id)?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+        Ok(_) => {
+            let created = planned_order(h, &order.order_id)?;
+            plan::stored(&created, order)
+        }
+    }
 }
 
 /// `_has_unresolved_replace`: an ORDER_PENDING replace request whose `:accepted` and
