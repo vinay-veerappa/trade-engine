@@ -1,16 +1,22 @@
-"""Deterministic equities paper venue driven by one-minute bars."""
+"""Deterministic equities paper venue driven by one-minute bars.
+
+Every rule (order validation, the restore checks, expiry, the bar-sequence rule, every
+fill price and the position average) lives in Rust: ``te_core::sim::broker``
+(docs/RUST_PORT.md P3a). This adapter is the BrokerAdapter plumbing only: it reads the
+clock where the rules ask for it, passes plain values in, and builds the carriers from
+what comes back. A timestamp comes back as the ``isoformat()`` text it went in as, and
+is handed back as the caller's own object.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal
-from typing import Literal
-from zoneinfo import ZoneInfo
+from typing import Any
 
-from trade_engine.calendar.sessions import ExchangeCalendar
-from trade_engine.domain.instruments import Equity, Instrument, Side
+from trade_engine.domain.instruments import Instrument
 from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
 from trade_engine.interfaces.broker import (
     BrokerAdapter,
@@ -27,10 +33,8 @@ from trade_engine.interfaces.broker import (
 )
 from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import Bar
-
-ZERO = Decimal("0")
-BPS = Decimal("10000")
-NEW_YORK = ZoneInfo("America/New_York")
+from trade_engine.ledger import codec
+from trade_engine.sim import _rs
 
 
 class SimBrokerError(RuntimeError):
@@ -45,14 +49,55 @@ class UnknownVenueOrderError(SimBrokerError):
     """Raised when an operation references an order not held by this simulator."""
 
 
-@dataclass
-class _WorkingOrder:
-    order: VenueOrder
-    state: OrderState
-    filled_quantity: Decimal
-    updated_at: datetime
-    # A STOP_LIMIT whose stop has traded works as a limit from then on, across bars.
-    triggered: bool = False
+_rs.register("sim", SimBrokerError)
+_rs.register("missing_bar", MissingBarError)
+_rs.register("unknown_order", UnknownVenueOrderError)
+
+_TIMES_HELD = 4096
+
+
+class _Carriers:
+    """The objects the host handed in, by the plain values that crossed for them."""
+
+    def __init__(self) -> None:
+        self._times: dict[str, datetime] = {}
+        self._texts: dict[Instrument, str] = {}
+        self._by_key: dict[str, Instrument] = {}
+
+    def iso(self, value: datetime) -> str:
+        text = value.isoformat()
+        if text not in self._times:
+            if len(self._times) >= _TIMES_HELD:
+                del self._times[next(iter(self._times))]
+            self._times[text] = value
+        return text
+
+    def dt(self, text: str) -> datetime:
+        held = self._times.get(text)
+        return held if held is not None else datetime.fromisoformat(text)
+
+    def text(self, instrument: Instrument) -> str:
+        try:
+            held = self._texts.get(instrument)
+        except TypeError:
+            held = None
+        if held is not None:
+            return held
+        text = codec.text(codec._encode(instrument))
+        key = _rs.call(_rs.rs.sim_instrument_key, text)
+        self._by_key.setdefault(key, instrument)
+        try:
+            self._texts[instrument] = text
+        except TypeError:
+            pass
+        return text
+
+    def instrument(self, key: str) -> Instrument:
+        return self._by_key[key]
+
+
+def _opt(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
 
 
 class SimBroker(BrokerAdapter):
@@ -76,29 +121,91 @@ class SimBroker(BrokerAdapter):
         clock: Clock,
         slippage_bps: Decimal,
     ) -> None:
-        if not account_id:
-            raise ValueError("account_id must be non-empty")
-        if not isinstance(slippage_bps, Decimal) or not slippage_bps.is_finite():
-            raise ValueError("slippage_bps must be a finite Decimal")
-        if slippage_bps < ZERO:
-            raise ValueError("slippage_bps must be non-negative")
+        is_decimal = isinstance(slippage_bps, Decimal)
+        self._book = _rs.call(
+            _rs.rs.SimBook, account_id, is_decimal, str(slippage_bps) if is_decimal else "0"
+        )
         self.account_id = account_id
         self._clock = clock
-        self._slippage_bps = slippage_bps
-        self._calendar = ExchangeCalendar()
-        self._connected = False
-        self._orders: dict[str, _WorkingOrder] = {}
+        self._carriers = _Carriers()
+        self._orders: dict[str, VenueOrder] = {}
         self._fills: list[VenueFill] = []
-        self._fill_counts: dict[str, int] = {}
-        self._last_bars: dict[Instrument, Bar] = {}
-        self._positions: dict[Instrument, tuple[Decimal, Decimal, datetime]] = {}
+
+    # --- the plumbing ------------------------------------------------------------------
+
+    def _now(self) -> str:
+        return self._carriers.iso(self._clock.now_utc())
+
+    def _call(
+        self,
+        method: str,
+        *args: Any,
+        restored: list[VenueFill] | None = None,
+        hold: Iterable[VenueOrder] = (),
+    ) -> Any:
+        try:
+            return _rs.call(getattr(self._book, method), *args)
+        finally:
+            for order in hold:
+                self._hold(order)
+            self._sync_fills(restored)
+
+    def _sync_fills(self, restored: list[VenueFill] | None) -> None:
+        while len(self._fills) < self._book.fill_count():
+            fill_id, order_id, quantity, price, filled_at, _, src = self._book.fill(len(self._fills))
+            if src is not None:
+                assert restored is not None
+                self._fills.append(restored[src])
+                continue
+            order = self._orders[order_id]
+            self._fills.append(
+                VenueFill(
+                    venue_fill_id=fill_id,
+                    venue_order_id=order_id,
+                    instrument=order.instrument,
+                    quantity=Decimal(quantity),
+                    price=Decimal(price),
+                    filled_at=self._carriers.dt(filled_at),
+                    side=order.side,
+                )
+            )
+
+    def _order(self, order: VenueOrder) -> tuple[Any, ...]:
+        return (
+            order.venue_order_id,
+            self._carriers.text(order.instrument),
+            order.order_type.value,
+            order.side.value,
+            str(order.quantity),
+            self._carriers.iso(order.submitted_at),
+            order.tif.value,
+            (_opt(order.limit_price), _opt(order.stop_price), _opt(order.trail_amount)),
+            [(a.strategy_order_id, a.account_id, str(a.quantity)) for a in order.allocations],
+            order.parent_order_id,
+            order.oco_group,
+        )
+
+    def _hold(self, order: VenueOrder) -> None:
+        if order.venue_order_id not in self._orders and self._book.has(order.venue_order_id):
+            self._orders[order.venue_order_id] = order
+
+    def _ack(self, ack: tuple[str, str, str, str | None]) -> VenueAck:
+        venue_order_id, status, timestamp, message = ack
+        return VenueAck(
+            venue_order_id=venue_order_id,
+            status=status,  # type: ignore[arg-type]
+            timestamp=self._carriers.dt(timestamp),
+            message=message,
+        )
+
+    # --- BrokerAdapter -----------------------------------------------------------------
 
     def connect(self) -> VenueIdentity:
-        self._connected = True
+        connected_at = self._call("connect", self._now)
         return VenueIdentity(
             account_id=self.account_id,
             env=self.env,
-            connected_at=self._now(),
+            connected_at=self._carriers.dt(connected_at),
             broker_name=self.name,
         )
 
@@ -116,159 +223,56 @@ class SimBroker(BrokerAdapter):
         the host folds it and hands the simulator what a real venue would still hold.
         Anything inconsistent refuses rather than being patched up (I5).
         """
-        if self._orders or self._fills or self._last_bars or self._positions:
-            raise SimBrokerError("restore() requires an empty SimBroker")
+        carriers = self._carriers
         restored = sorted(orders, key=lambda item: item[0].parent_order_id is not None)
-        allowed = {
-            OrderState.ACCEPTED,
-            OrderState.PARTIALLY_FILLED,
-            OrderState.FILLED,
-            OrderState.CANCELLED,
-            OrderState.EXPIRED,
-            OrderState.REJECTED,
-        }
-        for order, state in restored:
-            if state not in allowed:
-                raise SimBrokerError(
-                    f"Cannot restore '{order.venue_order_id}' in state {state.value}"
+        held = list(fills)
+        self._call(
+            "restore",
+            [(self._order(order), state.value) for order, state in restored],
+            [
+                (
+                    fill.venue_fill_id,
+                    fill.venue_order_id,
+                    carriers.text(fill.instrument),
+                    str(fill.quantity),
+                    str(fill.price),
+                    carriers.iso(fill.filled_at),
+                    fill.side.value,
                 )
-            if order.venue_order_id in self._orders:
-                raise SimBrokerError(f"Order '{order.venue_order_id}' restored twice")
-            self._validate_venue_order(order)
-            if (
-                order.order_type is OrderType.STOP_LIMIT
-                and state is OrderState.ACCEPTED
-                and not self._has_expired(order, self._now())
-                and self._now() > self._first_eligible_bar(order.submitted_at)
-            ):
-                # Bars an earlier process simulated may have triggered it; that state is
-                # not in the ledger, so restoring it untriggered would be a guess (I5).
-                raise SimBrokerError(
-                    f"Cannot restore stop-limit '{order.venue_order_id}': bars since its "
-                    "submission may have triggered it"
+                for fill in held
+            ],
+            [
+                (
+                    carriers.text(position.instrument),
+                    str(position.quantity),
+                    str(position.avg_price),
+                    carriers.iso(position.as_of),
                 )
-            self._orders[order.venue_order_id] = _WorkingOrder(
-                order=order, state=state, filled_quantity=ZERO, updated_at=order.submitted_at
-            )
-        for fill in sorted(fills, key=lambda item: (item.filled_at, item.venue_fill_id)):
-            working = self._orders.get(fill.venue_order_id)
-            if working is None:
-                raise SimBrokerError(
-                    f"Fill '{fill.venue_fill_id}' references unrestored order "
-                    f"'{fill.venue_order_id}'"
-                )
-            prefix, separator, number = fill.venue_fill_id.rpartition(":fill:")
-            if prefix != fill.venue_order_id or not separator or not number.isdecimal():
-                # A new fill id must never collide with a recorded one, so every restored
-                # id must follow the simulator's own numbering.
-                raise SimBrokerError(
-                    f"Fill id '{fill.venue_fill_id}' is not a SimBroker fill id"
-                )
-            if fill.instrument != working.order.instrument or fill.side is not working.order.side:
-                raise SimBrokerError(
-                    f"Fill '{fill.venue_fill_id}' does not match order '{fill.venue_order_id}'"
-                )
-            self._fill_counts[fill.venue_order_id] = max(
-                self._fill_counts.get(fill.venue_order_id, 0), int(number)
-            )
-            working.filled_quantity += fill.quantity
-            working.updated_at = max(working.updated_at, fill.filled_at)
-            # A fill proves a stop-limit triggered. One without fills restores untriggered,
-            # which the check above allows only before any bar could have triggered it.
-            working.triggered = True
-            self._fills.append(fill)
-        for venue_order_id, working in self._orders.items():
-            filled = working.filled_quantity
-            quantity = working.order.quantity
-            consistent = {
-                OrderState.ACCEPTED: filled == ZERO,
-                OrderState.PARTIALLY_FILLED: ZERO < filled < quantity,
-                OrderState.FILLED: filled == quantity,
-            }.get(working.state, filled <= quantity)
-            if not consistent:
-                raise SimBrokerError(
-                    f"Order '{venue_order_id}' is {working.state.value} with {filled} of "
-                    f"{quantity} filled"
-                )
-        for position in positions:
-            if position.instrument in self._positions:
-                raise SimBrokerError(f"Position {position.instrument.symbol} restored twice")
-            if position.quantity != ZERO:
-                self._positions[position.instrument] = (
-                    position.quantity,
-                    position.avg_price,
-                    position.as_of,
-                )
+                for position in positions
+            ],
+            self._now,
+            restored=held,
+            hold=[order for order, _ in restored],
+        )
 
     def submit(self, order: VenueOrder) -> VenueAck:
-        self._require_connected()
-        self._expire_due()
-        self._validate_venue_order(order)
-        existing = self._orders.get(order.venue_order_id)
-        if existing is not None:
-            if existing.order != order:
-                raise SimBrokerError(
-                    f"venue_order_id '{order.venue_order_id}' was reused with different terms"
-                )
-            if existing.state is OrderState.CANCELLED:
-                return self._ack(order.venue_order_id, "REJECTED", "Order is already cancelled")
-            if existing.state is OrderState.REJECTED:
-                return self._ack(order.venue_order_id, "REJECTED", "Order was rejected")
-            return self._ack(order.venue_order_id, "ACCEPTED")
-        now = self._now()
-        late_reason = self._late_exit_reason(order)
-        working = _WorkingOrder(
-            order=order,
-            state=OrderState.ACCEPTED if late_reason is None else OrderState.REJECTED,
-            filled_quantity=ZERO,
-            updated_at=now,
-        )
-        self._orders[order.venue_order_id] = working
-        if late_reason is not None:
-            return self._ack(order.venue_order_id, "REJECTED", late_reason)
-        self._fill_stop_inside_entry_bar(order.venue_order_id, working)
-        return self._ack(order.venue_order_id, "ACCEPTED")
+        return self._ack(self._call("submit", self._order(order), self._now, hold=(order,)))
 
     def cancel(self, venue_order_id: str) -> VenueAck:
-        self._expire_due()
-        working = self._require_order(venue_order_id)
-        if working.state is OrderState.CANCELLED:
-            return self._ack(venue_order_id, "ACCEPTED")
-        if working.state in (OrderState.FILLED, OrderState.EXPIRED, OrderState.REJECTED):
-            return self._ack(venue_order_id, "REJECTED", f"Order is {working.state.value}")
-        working.state = OrderState.CANCELLED
-        working.updated_at = self._event_time()
-        return self._ack(venue_order_id, "ACCEPTED")
+        return self._ack(self._call("cancel", venue_order_id, self._now))
 
     def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
-        self._expire_due()
-        working = self._require_order(venue_order_id)
-        if working.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
-            return self._ack(
-                venue_order_id, "REJECTED", f"Order is {working.state.value}"
-            )
-        quantity = (
-            working.order.quantity
-            if changes.new_quantity is None
-            else changes.new_quantity
+        new_quantity = changes.new_quantity
+        outcome, value = self._call(
+            "replace_begin", venue_order_id, _opt(new_quantity), self._now
         )
-        if not quantity.is_finite() or quantity < working.filled_quantity:
-            return self._ack(
-                venue_order_id,
-                "REJECTED",
-                "Replacement quantity must be finite and at least the filled quantity",
-            )
-        if quantity <= ZERO:
-            return self._ack(venue_order_id, "REJECTED", "Replacement quantity must be positive")
+        if outcome == "ack":
+            return self._ack(value)
+        current = self._orders[venue_order_id]
+        quantity = current.quantity if new_quantity is None else new_quantity
         try:
-            allocations = working.order.allocations
-            if changes.new_quantity is not None:
-                if len(allocations) != 1:
-                    return self._ack(
-                        venue_order_id,
-                        "REJECTED",
-                        "SimBroker requires one-to-one order allocations",
-                    )
+            allocations = current.allocations
+            if new_quantity is not None:
                 allocation = allocations[0]
                 allocations = (
                     VenueOrderAllocation(
@@ -277,589 +281,66 @@ class SimBroker(BrokerAdapter):
                         quantity=quantity,
                     ),
                 )
-            working.order = replace(
-                working.order,
+            updated = replace(
+                current,
                 quantity=quantity,
                 limit_price=(
-                    working.order.limit_price
-                    if changes.new_limit_price is None
-                    else changes.new_limit_price
+                    current.limit_price if changes.new_limit_price is None else changes.new_limit_price
                 ),
                 stop_price=(
-                    working.order.stop_price
-                    if changes.new_stop_price is None
-                    else changes.new_stop_price
+                    current.stop_price if changes.new_stop_price is None else changes.new_stop_price
                 ),
                 allocations=allocations,
             )
         except ValueError as error:
-            return self._ack(venue_order_id, "REJECTED", str(error))
-        if working.filled_quantity == quantity:
-            working.state = OrderState.FILLED
-        working.updated_at = self._event_time()
-        return self._ack(venue_order_id, "ACCEPTED")
+            return self._ack(self._call("replace_reject", venue_order_id, str(error), self._now))
+        self._orders[venue_order_id] = updated
+        return self._ack(self._call("replace_commit", venue_order_id, self._order(updated), self._now))
 
     def orders(self, since: datetime) -> list[VenueOrderState]:
-        self._validate_timestamp(since, "since")
-        self._expire_due()
+        rows = self._call("orders", since.isoformat(), self._now)
         return [
             VenueOrderState(
                 venue_order_id=venue_order_id,
-                state=working.state,
-                filled_quantity=working.filled_quantity,
-                remaining_quantity=working.order.quantity - working.filled_quantity,
-                updated_at=working.updated_at,
+                state=OrderState(state),
+                filled_quantity=Decimal(filled),
+                remaining_quantity=Decimal(remaining),
+                updated_at=self._carriers.dt(updated_at),
             )
-            for venue_order_id, working in sorted(self._orders.items())
-            if working.updated_at >= since
+            for venue_order_id, state, filled, remaining, updated_at in rows
         ]
 
     def fills(self, since: datetime) -> list[VenueFill]:
-        self._validate_timestamp(since, "since")
-        self._expire_due()
-        return [fill for fill in self._fills if fill.filled_at >= since]
+        return [self._fills[i] for i in self._call("fills", since.isoformat(), self._now)]
 
     def positions(self) -> list[VenuePosition]:
-        self._expire_due()
         return [
             VenuePosition(
-                instrument=instrument,
-                quantity=quantity,
-                avg_price=average_price,
-                as_of=updated_at,
+                instrument=self._carriers.instrument(key),
+                quantity=Decimal(quantity),
+                avg_price=Decimal(average),
+                as_of=self._carriers.dt(as_of),
             )
-            for instrument, (quantity, average_price, updated_at) in sorted(
-                self._positions.items(), key=lambda item: item[0].symbol
-            )
-            if quantity != ZERO
+            for key, quantity, average, as_of in self._call("positions", self._now)
         ]
 
     def cash_events(self, since: datetime) -> list[VenueCashEvent]:
-        self._validate_timestamp(since, "since")
+        self._call("cash_events", since.isoformat())
         return []
 
     def process_bar(self, bar: Bar | None) -> tuple[VenueFill, ...]:
         """Match working orders against a one-minute bar stamped at its open."""
-        self._require_connected()
-        if bar is None:
-            raise MissingBarError("Cannot simulate fills without an observed bar")
-        if not isinstance(bar.instrument, Equity):
-            raise ValueError("SimBroker supports equities only")
-        if bar.timestamp.second or bar.timestamp.microsecond:
-            raise ValueError("SimBroker requires minute-aligned bar timestamps")
-        previous = self._last_bars.get(bar.instrument)
-        if previous is not None and bar.timestamp == previous.timestamp:
-            if bar != previous:
-                raise ValueError("Conflicting bars share the same instrument and timestamp")
-            return ()
-        self._check_bar_sequence(bar)
-
-        for working in self._orders.values():
-            if (
-                working.order.instrument == bar.instrument
-                and working.state in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED)
-            ):
-                self._expire_order(working, bar)
-        if not self._is_regular_session_bar(bar):
-            # Extended-hours bars keep the sequence contiguous but never trigger fills.
-            self._last_bars[bar.instrument] = bar
-            return ()
-
-        active = [
-            (venue_id, working)
-            for venue_id, working in self._orders.items()
-            if working.order.instrument == bar.instrument
-            and working.state in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED)
-            and working.filled_quantity < working.order.quantity
-        ]
-        candidates: list[tuple[str, _WorkingOrder, Decimal]] = []
-        for venue_id, working in active:
-            price = self._execution_price(working, bar)
-            if price is not None:
-                candidates.append((venue_id, working, price))
-
-        by_group: dict[str, list[tuple[str, _WorkingOrder, Decimal]]] = {}
-        standalone: list[tuple[str, _WorkingOrder, Decimal]] = []
-        for candidate in candidates:
-            group = candidate[1].order.oco_group
-            if group is None:
-                standalone.append(candidate)
-            else:
-                by_group.setdefault(group, []).append(candidate)
-
-        fills: list[VenueFill] = []
-        for candidate in standalone:
-            fill = self._fill(candidate[0], candidate[1], candidate[2], bar.timestamp)
-            if fill is not None:
-                fills.append(fill)
-        for group in sorted(by_group):
-            choices = sorted(by_group[group], key=self._oco_priority)
-            stop = next(
-                (candidate for candidate in choices if candidate[1].order.order_type is OrderType.STOP),
-                None,
+        carriers = self._carriers
+        crossing = None
+        if bar is not None:
+            crossing = (
+                carriers.text(bar.instrument),
+                carriers.iso(bar.timestamp),
+                str(bar.open),
+                str(bar.high),
+                str(bar.low),
+                str(bar.close),
+                str(bar.volume),
+                carriers.iso(bar.as_of),
             )
-            selected = (stop,) if stop is not None else tuple(choices)
-            for venue_id, working, price in selected:
-                fill = self._fill(venue_id, working, price, bar.timestamp)
-                if fill is not None:
-                    fills.append(fill)
-
-        self._last_bars[bar.instrument] = bar
-        return tuple(fills)
-
-    def _execution_price(self, working: _WorkingOrder, bar: Bar) -> Decimal | None:
-        order = working.order
-        if bar.timestamp <= order.submitted_at:
-            return None
-        if order.tif is TimeInForce.OPG:
-            if (
-                bar.timestamp != self._opg_session_open(order.submitted_at)
-                or order.order_type is not OrderType.MARKET
-            ):
-                return None
-            base = bar.open
-        elif order.order_type is OrderType.MARKET:
-            base = bar.open
-        elif order.order_type is OrderType.LIMIT:
-            limit_price = order.limit_price
-            if limit_price is None:
-                raise SimBrokerError("Accepted limit order has no limit price")
-            if order.side is Side.BUY:
-                if bar.low > limit_price:
-                    return None
-                base = min(bar.open, limit_price)
-            else:
-                if bar.high < limit_price:
-                    return None
-                base = max(bar.open, limit_price)
-        elif order.order_type is OrderType.STOP:
-            stop_price = order.stop_price
-            if stop_price is None:
-                raise SimBrokerError("Accepted stop order has no stop price")
-            if order.side is Side.BUY:
-                if bar.high < stop_price:
-                    return None
-                base = max(bar.open, stop_price)
-            else:
-                if bar.low > stop_price:
-                    return None
-                base = min(bar.open, stop_price)
-        elif order.order_type is OrderType.STOP_LIMIT:
-            stop_limit_base = self._stop_limit_base(working, bar)
-            if stop_limit_base is None:
-                return None
-            base = stop_limit_base
-        else:
-            raise SimBrokerError(
-                f"Unsupported accepted order type {order.order_type.value}"
-            )
-        slipped = self._slipped(base, order.side)
-        if (
-            order.order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT)
-            and order.limit_price is not None
-        ):
-            if order.side is Side.BUY:
-                return min(slipped, order.limit_price)
-            return max(slipped, order.limit_price)
-        return slipped
-
-    def _stop_limit_base(self, working: _WorkingOrder, bar: Bar) -> Decimal | None:
-        """Trigger a stop-limit on its stop, then work it as a limit at its limit price.
-
-        A bar opening at or through the stop triggers at the open, so the whole bar can
-        reach the limit: it fills at the open when that is within the limit (a gap over
-        the trigger but not the limit), else at the limit if the range comes back to it.
-        A stop first reached inside the bar fills at the stop, the price it triggered at;
-        with a limit short of the stop the bar does not reveal whether price came back to
-        it after the trigger, so it waits for a later bar. A triggered order stays
-        triggered for the rest of its life.
-        """
-        order = working.order
-        stop_price = order.stop_price
-        limit_price = order.limit_price
-        if stop_price is None or limit_price is None:
-            raise SimBrokerError("Accepted stop-limit order has no stop or limit price")
-        if order.side is Side.BUY:
-            if not working.triggered:
-                if bar.high < stop_price:
-                    return None
-                working.triggered = True
-                if bar.open < stop_price:
-                    return None if stop_price > limit_price else stop_price
-            if bar.low > limit_price:
-                return None
-            return min(bar.open, limit_price)
-        if not working.triggered:
-            if bar.low > stop_price:
-                return None
-            working.triggered = True
-            if bar.open > stop_price:
-                return None if stop_price < limit_price else stop_price
-        if bar.high < limit_price:
-            return None
-        return max(bar.open, limit_price)
-
-    def _slipped(self, base: Decimal, side: Side) -> Decimal:
-        return base * (
-            Decimal("1") + self._slippage_bps / BPS
-            if side is Side.BUY
-            else Decimal("1") - self._slippage_bps / BPS
-        )
-
-    def _late_exit_reason(self, order: VenueOrder) -> str | None:
-        """Refuse an exit that arrives after bars following its entry fill were simulated.
-
-        Those bars are gone, so the exit cannot be matched against them; accepting it
-        would silently skip any stop or target they reached (I5). The caller must
-        reconcile after every bar.
-        """
-        if order.parent_order_id is None or order.order_type is OrderType.MARKET:
-            # A market close is a new decision, not a stop or target that should already
-            # have been working; there is no trigger in the skipped bars for it to miss.
-            return None
-        entry_fills = [
-            fill.filled_at for fill in self._fills if fill.venue_order_id == order.parent_order_id
-        ]
-        latest_bar = self._last_bars.get(order.instrument)
-        if not entry_fills or latest_bar is None or latest_bar.timestamp <= max(entry_fills):
-            return None
-        return (
-            f"Exit arrived after bars following entry '{order.parent_order_id}' filled at "
-            f"{max(entry_fills).isoformat()} were simulated (latest bar "
-            f"{latest_bar.timestamp.isoformat()}); reconcile after every bar"
-        )
-
-    def _fill_stop_inside_entry_bar(self, venue_order_id: str, working: _WorkingOrder) -> None:
-        """Fill a protective stop against the bar that filled its entry, when touched.
-
-        The OMS submits children only after it sees the entry fill, so they arrive after that
-        bar has been processed. A one-minute bar does not reveal whether its low (for a long)
-        came after the entry, so a touched stop is assumed hit: the same pessimism as
-        stop-before-target. Targets are not filled this way; the bar may have reached them
-        before the entry.
-        """
-        order = working.order
-        if order.parent_order_id is None or order.order_type is not OrderType.STOP:
-            return
-        entry_bar = self._last_bars.get(order.instrument)
-        if entry_bar is None or not self._is_regular_session_bar(entry_bar):
-            return
-        entry_fills = [
-            fill
-            for fill in self._fills
-            if fill.venue_order_id == order.parent_order_id
-            and fill.filled_at == entry_bar.timestamp
-        ]
-        stop_price = order.stop_price
-        if not entry_fills or stop_price is None:
-            return
-        entry_price = entry_fills[-1].price
-        if order.side is Side.SELL:
-            if entry_bar.low > stop_price:
-                return
-            # An entry already below the stop exits at the entry price, not the stop.
-            base = min(stop_price, entry_price)
-        else:
-            if entry_bar.high < stop_price:
-                return
-            base = max(stop_price, entry_price)
-        self._fill(venue_order_id, working, self._slipped(base, order.side), entry_bar.timestamp)
-
-    def _fill(
-        self,
-        venue_order_id: str,
-        working: _WorkingOrder,
-        price: Decimal,
-        filled_at: datetime,
-    ) -> VenueFill | None:
-        if working.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
-            return None
-        quantity = working.order.quantity - working.filled_quantity
-        if working.order.parent_order_id is not None:
-            # Until the OMS reconciles, an exit may close only its own bracket's open
-            # quantity, never another bracket's shares in the same symbol.
-            quantity = min(quantity, self._bracket_open_quantity(working.order.parent_order_id))
-            position_quantity = self._positions.get(
-                working.order.instrument, (ZERO, ZERO, filled_at)
-            )[0]
-            closes_position = (
-                position_quantity > ZERO and working.order.side is Side.SELL
-            ) or (
-                position_quantity < ZERO and working.order.side is Side.BUY
-            )
-            available = abs(position_quantity) if closes_position else ZERO
-            quantity = min(quantity, available)
-            if quantity == ZERO:
-                return None
-        fill_number = self._fill_counts.get(venue_order_id, 0) + 1
-        self._fill_counts[venue_order_id] = fill_number
-        fill = VenueFill(
-            venue_fill_id=f"{venue_order_id}:fill:{fill_number}",
-            venue_order_id=venue_order_id,
-            instrument=working.order.instrument,
-            quantity=quantity,
-            price=price,
-            filled_at=filled_at,
-            side=working.order.side,
-        )
-        self._fills.append(fill)
-        working.filled_quantity += quantity
-        working.state = (
-            OrderState.FILLED
-            if working.filled_quantity == working.order.quantity
-            else OrderState.PARTIALLY_FILLED
-        )
-        working.updated_at = filled_at
-        self._update_position(fill)
-        return fill
-
-    def _bracket_open_quantity(self, parent_order_id: str) -> Decimal:
-        parent = self._require_order(parent_order_id)
-        exited = sum(
-            (
-                working.filled_quantity
-                for working in self._orders.values()
-                if working.order.parent_order_id == parent_order_id
-            ),
-            ZERO,
-        )
-        return max(parent.filled_quantity - exited, ZERO)
-
-    def _update_position(self, fill: VenueFill) -> None:
-        quantity, average_price, _ = self._positions.get(
-            fill.instrument, (ZERO, ZERO, fill.filled_at)
-        )
-        change = fill.quantity if fill.side is Side.BUY else -fill.quantity
-        updated_quantity = quantity + change
-        if quantity == ZERO or (quantity > ZERO) == (change > ZERO):
-            basis_quantity = abs(quantity) + abs(change)
-            updated_average = (
-                (abs(quantity) * average_price + abs(change) * fill.price) / basis_quantity
-            )
-        elif updated_quantity == ZERO:
-            updated_average = ZERO
-        elif (updated_quantity > ZERO) != (quantity > ZERO):
-            updated_average = fill.price
-        else:
-            updated_average = average_price
-        self._positions[fill.instrument] = (
-            updated_quantity,
-            updated_average,
-            fill.filled_at,
-        )
-
-    def _expire_order(self, working: _WorkingOrder, bar: Bar) -> None:
-        if self._has_expired(working.order, bar.timestamp):
-            working.state = OrderState.EXPIRED
-            working.updated_at = bar.timestamp
-
-    def _expire_due(self) -> None:
-        """Expire working DAY/OPG orders whose time in force has ended by the clock.
-
-        A venue expires a DAY order at the close whether or not another bar arrives, and
-        the EOD runner's closing sweep feeds none. The order is stamped with the instant
-        it expired (the session close, or the OPG open), not the time it was observed.
-
-        Only bars prove an order did not fill: one whose instrument was not simulated
-        through its last chance (the session's final regular bar, or the opening bar)
-        stays working rather than being declared unfilled (I5).
-        """
-        now = self._now()
-        for working in self._orders.values():
-            if working.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
-                continue
-            if not self._has_expired(working.order, now):
-                continue
-            instant = self._expiry_instant(working.order)
-            if instant is None:
-                raise SimBrokerError("Expired order has no expiry instant")
-            last_chance = (
-                instant
-                if working.order.tif is TimeInForce.OPG
-                else instant - timedelta(minutes=1)
-            )
-            latest_bar = self._last_bars.get(working.order.instrument)
-            if latest_bar is None or latest_bar.timestamp < last_chance:
-                continue
-            working.state = OrderState.EXPIRED
-            working.updated_at = instant
-
-    def _has_expired(self, order: VenueOrder, at: datetime) -> bool:
-        if at <= order.submitted_at:
-            return False
-        instant = self._expiry_instant(order)
-        if instant is None:
-            return False
-        if order.tif is TimeInForce.OPG:
-            # The opening auction is the order's only chance; it lapses once it has passed.
-            return at > instant
-        return at >= instant
-
-    def _expiry_instant(self, order: VenueOrder) -> datetime | None:
-        if order.tif is TimeInForce.DAY:
-            # An order entered after the close (the 17:45 EOD job) works the next session.
-            return self._calendar.session_close(self._day_session(order.submitted_at))
-        if order.tif is TimeInForce.OPG:
-            return self._opg_session_open(order.submitted_at)
-        return None
-
-    def _day_session(self, submitted_at: datetime) -> date:
-        submitted_date = submitted_at.astimezone(NEW_YORK).date()
-        if self._calendar.is_session(submitted_date):
-            if submitted_at < self._calendar.session_close(submitted_date):
-                return submitted_date
-            return self._calendar.next_session(submitted_date)
-        return self._calendar.roll_to_session(submitted_date, "next")
-
-    def _first_eligible_bar(self, submitted_at: datetime) -> datetime:
-        """The first regular bar that can match an order: bars at or before submission cannot."""
-        session_open = self._calendar.session_open(self._day_session(submitted_at))
-        if submitted_at < session_open:
-            return session_open
-        return submitted_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
-
-    def _opg_session_open(self, submitted_at: datetime) -> datetime:
-        submitted_date = submitted_at.astimezone(NEW_YORK).date()
-        if self._calendar.is_session(submitted_date):
-            session_open = self._calendar.session_open(submitted_date)
-            if submitted_at < session_open:
-                return session_open
-            session_date = self._calendar.next_session(submitted_date)
-        else:
-            session_date = self._calendar.roll_to_session(submitted_date, "next")
-        return self._calendar.session_open(session_date)
-
-    def _is_regular_session_bar(self, bar: Bar) -> bool:
-        bar_date = bar.timestamp.astimezone(NEW_YORK).date()
-        return (
-            self._calendar.session_open(bar_date)
-            <= bar.timestamp
-            < self._calendar.session_close(bar_date)
-        )
-
-    @staticmethod
-    def _oco_priority(
-        candidate: tuple[str, _WorkingOrder, Decimal],
-    ) -> tuple[bool, bool, int, str]:
-        venue_id, working, _ = candidate
-        if working.order.order_type is OrderType.STOP:
-            return False, False, 0, venue_id
-        strategy_order_id = working.order.allocations[0].strategy_order_id
-        prefix, separator, suffix = strategy_order_id.rpartition(":target:")
-        if separator and prefix and suffix.isdecimal():
-            return True, False, int(suffix), strategy_order_id
-        return True, True, 0, venue_id
-
-    def _check_bar_sequence(self, bar: Bar) -> None:
-        previous = self._last_bars.get(bar.instrument)
-        bar_date = bar.timestamp.astimezone(NEW_YORK).date()
-        if not self._calendar.is_session(bar_date):
-            raise MissingBarError(
-                f"Bar for {bar.instrument.symbol} is on non-session date {bar_date}"
-            )
-        session_open = self._calendar.session_open(bar_date)
-        if previous is None:
-            if bar.timestamp != session_open:
-                raise MissingBarError(
-                    f"Missing session opening one-minute bar for {bar.instrument.symbol} "
-                    f"at {session_open.isoformat()}"
-                )
-            return
-        if bar.timestamp == previous.timestamp:
-            return
-        if bar.timestamp < previous.timestamp:
-            raise ValueError(
-                f"Out-of-order bar for {bar.instrument.symbol}: "
-                f"{bar.timestamp.isoformat()} follows {previous.timestamp.isoformat()}"
-            )
-        previous_date = previous.timestamp.astimezone(NEW_YORK).date()
-        if bar_date == previous_date:
-            if bar.timestamp - previous.timestamp != timedelta(minutes=1):
-                raise MissingBarError(
-                    f"Missing one-minute bar for {bar.instrument.symbol} between "
-                    f"{previous.timestamp.isoformat()} and {bar.timestamp.isoformat()}"
-                )
-            return
-        last_regular_bar = self._calendar.session_close(previous_date) - timedelta(minutes=1)
-        if previous.timestamp < last_regular_bar:
-            raise MissingBarError(
-                f"Missing closing one-minute bars for {bar.instrument.symbol}: session "
-                f"{previous_date} ended at {previous.timestamp.isoformat()}, expected "
-                f"{last_regular_bar.isoformat()}"
-            )
-        next_session = self._calendar.next_session(previous_date)
-        if bar_date != next_session:
-            raise MissingBarError(
-                f"Missing session bars for {bar.instrument.symbol}: expected "
-                f"{next_session}, received {bar_date}"
-            )
-        if bar.timestamp != session_open:
-            raise MissingBarError(
-                f"Missing session opening one-minute bar for {bar.instrument.symbol} "
-                f"at {session_open.isoformat()}"
-            )
-
-    def _validate_venue_order(self, order: VenueOrder) -> None:
-        if not isinstance(order.instrument, Equity):
-            raise ValueError("SimBroker accepts equity orders only")
-        if order.order_type not in self.capabilities.supported_order_types:
-            raise ValueError(f"Unsupported order type {order.order_type.value}")
-        if order.tif not in self.capabilities.supported_tifs:
-            raise ValueError(f"Unsupported time in force {order.tif.value}")
-        if order.tif is TimeInForce.OPG and order.order_type is not OrderType.MARKET:
-            raise ValueError("OPG is supported only for market-on-open orders")
-        if any(allocation.account_id != self.account_id for allocation in order.allocations):
-            raise ValueError("Venue order allocation account does not match SimBroker account")
-        if len(order.allocations) != 1:
-            raise ValueError("SimBroker requires one-to-one strategy-order allocations")
-        if order.parent_order_id is not None:
-            parent = self._orders.get(order.parent_order_id)
-            if parent is None:
-                raise ValueError(
-                    f"Parent order '{order.parent_order_id}' is not held by this SimBroker"
-                )
-            if parent.order.instrument != order.instrument or parent.order.side is order.side:
-                raise ValueError(
-                    f"Exit '{order.venue_order_id}' must close parent "
-                    f"'{order.parent_order_id}' in the same instrument"
-                )
-
-    def _require_connected(self) -> None:
-        if not self._connected:
-            raise SimBrokerError("Call connect() before using SimBroker")
-
-    def _require_order(self, venue_order_id: str) -> _WorkingOrder:
-        try:
-            return self._orders[venue_order_id]
-        except KeyError as error:
-            raise UnknownVenueOrderError(
-                f"Unknown SimBroker order '{venue_order_id}'"
-            ) from error
-
-    def _ack(
-        self,
-        venue_order_id: str,
-        status: Literal["ACCEPTED", "REJECTED"],
-        message: str | None = None,
-    ) -> VenueAck:
-        return VenueAck(
-            venue_order_id=venue_order_id,
-            status=status,
-            timestamp=self._event_time(),
-            message=message,
-        )
-
-    def _now(self) -> datetime:
-        now = self._clock.now_utc()
-        self._validate_timestamp(now, "clock.now_utc()")
-        return now
-
-    def _event_time(self) -> datetime:
-        now = self._now()
-        latest_bar = max((bar.timestamp for bar in self._last_bars.values()), default=now)
-        return max(now, latest_bar)
-
-    @staticmethod
-    def _validate_timestamp(value: datetime, name: str) -> None:
-        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
-            raise ValueError(f"{name} must be timezone-aware")
+        return tuple(self._fills[i] for i in self._call("process_bar", crossing))

@@ -1,10 +1,19 @@
-"""Persistent-state-friendly trailing-stop price-path evaluation."""
+"""Persistent-state-friendly trailing-stop price-path evaluation.
+
+The rule lives in Rust (``te_core::sim::trailing``, docs/RUST_PORT.md P3a); this class
+holds the persisted state and hands it across.
+"""
 
 from __future__ import annotations
 
 from decimal import Decimal
 
 from trade_engine.domain.instruments import Side
+from trade_engine.sim import _rs
+
+
+def _opt(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
 
 
 class TrailingStopEmulator:
@@ -19,8 +28,7 @@ class TrailingStopEmulator:
         stop_price: Decimal | None = None,
         triggered: bool = False,
     ) -> None:
-        if trail_amount <= 0:
-            raise ValueError("trail_amount must be positive")
+        _rs.call(_rs.rs.trail_check_amount, str(trail_amount))
         self._side = side
         self._trail_amount = trail_amount
         self._extreme = extreme
@@ -41,19 +49,28 @@ class TrailingStopEmulator:
 
     def update(self, price: Decimal) -> bool:
         """Advance one observed price and report a stop trigger."""
-        if not price.is_finite() or price <= 0:
-            raise ValueError(f"price must be finite and positive, got {price}")
-        if self._triggered:
-            return True
+        result, (extreme, stop_price, triggered), refused = _rs.call(
+            _rs.rs.trail_update,
+            self._side.value,
+            str(self._trail_amount),
+            (_opt(self._extreme), _opt(self._stop_price), bool(self._triggered)),
+            str(price),
+        )
+        # The state may move before a refusal (the SELL stop is set, then checked).
+        self._extreme = self._keep(self._extreme, extreme, price)
+        self._stop_price = self._keep(self._stop_price, stop_price, None)
+        self._triggered = triggered
+        if refused is not None:
+            raise _rs.refusal(*refused)
+        return bool(result)
 
-        if self._side is Side.SELL:
-            self._extreme = price if self._extreme is None else max(self._extreme, price)
-            self._stop_price = self._extreme - self._trail_amount
-            if self._stop_price <= 0:
-                raise ValueError("trail amount produces a non-positive protective stop")
-            self._triggered = price <= self._stop_price
-        else:
-            self._extreme = price if self._extreme is None else min(self._extreme, price)
-            self._stop_price = self._extreme + self._trail_amount
-            self._triggered = price >= self._stop_price
-        return self._triggered
+    @staticmethod
+    def _keep(old: Decimal | None, new: str | None, price: Decimal | None) -> Decimal | None:
+        """The held object when Rust kept the value, else the new value."""
+        if new is None:
+            return None
+        if old is not None and str(old) == new:
+            return old
+        if price is not None and str(price) == new:
+            return price
+        return Decimal(new)

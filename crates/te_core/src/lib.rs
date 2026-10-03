@@ -4,6 +4,9 @@
 pub mod calendar;
 pub mod greeks;
 pub mod ledger;
+pub mod oms;
 pub mod margin;
 pub mod options;
 pub mod risk;
+pub mod risk_options;
+pub mod sim;

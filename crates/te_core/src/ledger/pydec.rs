@@ -589,6 +589,69 @@ impl PyDec {
         Ok(if self.neg { -m } else { m })
     }
 
+    /// `d.quantize(Decimal(f"1E{exp}"))` under the default context (half-even): a result
+    /// over 28 digits, or an infinite operand, raises `InvalidOperation`.
+    pub fn quantize(&self, exp: i64) -> DecResult<PyDec> {
+        match self.kind {
+            DKind::Inf => return Err(DecErr::InvalidOperation),
+            DKind::QNan | DKind::SNan => return Err(DecErr::Unsupported("quantize of a NaN")),
+            DKind::Finite => {}
+        }
+        if !(ETINY..=EMAX).contains(&exp) {
+            return Err(DecErr::InvalidOperation);
+        }
+        if self.coef.is_zero() {
+            return PyDec { kind: DKind::Finite, neg: self.neg, coef: BigUint::zero(), exp }.fix();
+        }
+        let adjusted = self.exp + ndigits(&self.coef) as i64 - 1;
+        if adjusted > EMAX || adjusted - exp + 1 > PREC as i64 {
+            return Err(DecErr::InvalidOperation);
+        }
+        let coef = if self.exp >= exp {
+            &self.coef * pow10((self.exp - exp) as usize)
+        } else {
+            let drop = (exp - self.exp) as usize;
+            if drop > 4_000_000 {
+                return Err(DecErr::Unsupported("quantize of a tiny exponent"));
+            }
+            shift_round(&self.coef, drop, self.neg, Round::HalfEven)
+        };
+        if ndigits(&coef) > PREC || (!coef.is_zero() && exp + ndigits(&coef) as i64 - 1 > EMAX) {
+            return Err(DecErr::InvalidOperation);
+        }
+        Ok(PyDec { kind: DKind::Finite, neg: self.neg, coef, exp })
+    }
+
+    /// `format(d, "f")`: plain digits, never an exponent (a zero with a positive exponent
+    /// prints as `0`).
+    pub fn format_f(&self) -> String {
+        let sign = if self.neg { "-" } else { "" };
+        match self.kind {
+            DKind::Inf => return format!("{sign}Infinity"),
+            DKind::QNan | DKind::SNan => return self.to_py_string(),
+            DKind::Finite => {}
+        }
+        let (coef, exp) = if self.coef.is_zero() && self.exp > 0 {
+            ("0".to_string(), 0)
+        } else {
+            (self.coef.to_str_radix(10), self.exp)
+        };
+        let n = coef.len() as i64;
+        let dot = exp + n;
+        let (int, frac) = if dot <= 0 {
+            ("0".to_string(), format!("{}{}", "0".repeat((-dot) as usize), coef))
+        } else if dot >= n {
+            (format!("{}{}", coef, "0".repeat((dot - n) as usize)), String::new())
+        } else {
+            (coef[..dot as usize].to_string(), coef[dot as usize..].to_string())
+        };
+        if frac.is_empty() {
+            format!("{sign}{int}")
+        } else {
+            format!("{sign}{int}.{frac}")
+        }
+    }
+
     /// The value as an `i128` when it is an integer of that size (an int field).
     pub fn to_i128_exact(&self) -> Option<i128> {
         if !self.is_integral().ok()? || !self.is_finite() {
@@ -650,6 +713,28 @@ mod tests {
         assert_eq!(s(d("12345678901234567890123456789").abs()), "1.234567890123456789012345679E+28");
         assert_eq!(s(d("0.00").neg()), "0.00");
         assert_eq!(s(d("1.5").neg()), "-1.5");
+    }
+
+    #[test]
+    fn quantize_and_format_match_python() {
+        let q = |x: &str| d(x).quantize(-4).map(|v| v.to_py_string());
+        assert_eq!(q("1.00005").unwrap(), "1.0000");
+        assert_eq!(q("2.00015").unwrap(), "2.0002");
+        assert_eq!(q("-0").unwrap(), "-0.0000");
+        assert_eq!(q("1E+3").unwrap(), "1000.0000");
+        assert_eq!(q("Infinity"), Err(DecErr::InvalidOperation));
+        assert_eq!(q("1E+30"), Err(DecErr::InvalidOperation));
+        let f = |x: &str| d(x).format_f();
+        assert_eq!(f("0E+3"), "0");
+        assert_eq!(f("-0"), "-0");
+        assert_eq!(f("0E-5"), "0.00000");
+        assert_eq!(f("1E+2"), "100");
+        assert_eq!(f("-1.20"), "-1.20");
+        assert_eq!(f("1.23E-7"), "0.000000123");
+        assert_eq!(f("-0E+2"), "-0");
+        assert_eq!(f("12.5E+1"), "125");
+        assert_eq!(f("NaN"), "NaN");
+        assert_eq!(f("-Infinity"), "-Infinity");
     }
 
     #[test]
