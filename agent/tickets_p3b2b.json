@@ -71,6 +71,334 @@
           "kind": "decl",
           "op": "readonly",
           "note": "a typed decision the flow calls"
+        },
+        {
+          "id": "api-imports",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "use crate::ledger::model::{",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Net",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub enum Net<T> {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Capabilities {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Context {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Allocation",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Allocation {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrder",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrder {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueAck",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueAck {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderChanges",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct OrderChanges {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrderState",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrderState {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueFill",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueFill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Bracket",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Bracket {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Intent",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Intent {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Host",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub trait Host {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-unported",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "fn unported<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-utc_now",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn utc_now<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-append",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn append<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn context<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-get_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn get_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn capabilities<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_quantity",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_quantity<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-refuse",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn refuse<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_refusal",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_refusal<H: Host, T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_terms",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_terms<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-trigger_order_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn trigger_order_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-supports_native_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn supports_native_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-require_tif",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn require_tif<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-stored_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn stored_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-bracket_from_orders",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn bracket_from_orders<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-LErr",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct LErr {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-err",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub fn err<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Order",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Order {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Fill",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Fill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderStateChange",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderStateChange {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrdersCreated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrdersCreated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderUpdated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderUpdated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Obj",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub enum Obj {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Event",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Event {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Refusal",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub enum Refusal<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Prior",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub struct Prior<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
         }
       ],
       "expect_green": [
@@ -136,6 +464,334 @@
           "kind": "decl",
           "op": "readonly",
           "note": "a typed decision the flow calls"
+        },
+        {
+          "id": "api-imports",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "use crate::ledger::model::{",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Net",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub enum Net<T> {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Capabilities {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Context {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Allocation",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Allocation {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrder",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrder {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueAck",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueAck {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderChanges",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct OrderChanges {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrderState",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrderState {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueFill",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueFill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Bracket",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Bracket {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Intent",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Intent {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Host",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub trait Host {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-unported",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "fn unported<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-utc_now",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn utc_now<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-append",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn append<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn context<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-get_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn get_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn capabilities<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_quantity",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_quantity<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-refuse",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn refuse<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_refusal",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_refusal<H: Host, T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_terms",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_terms<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-trigger_order_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn trigger_order_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-supports_native_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn supports_native_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-require_tif",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn require_tif<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-stored_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn stored_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-bracket_from_orders",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn bracket_from_orders<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-LErr",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct LErr {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-err",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub fn err<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Order",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Order {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Fill",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Fill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderStateChange",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderStateChange {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrdersCreated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrdersCreated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderUpdated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderUpdated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Obj",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub enum Obj {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Event",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Event {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Refusal",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub enum Refusal<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Prior",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub struct Prior<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
         }
       ],
       "expect_green": [
@@ -252,6 +908,334 @@
           "kind": "decl",
           "op": "readonly",
           "note": "a typed decision the flow calls"
+        },
+        {
+          "id": "api-imports",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "use crate::ledger::model::{",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Net",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub enum Net<T> {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Capabilities {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Context {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Allocation",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Allocation {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrder",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrder {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueAck",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueAck {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderChanges",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct OrderChanges {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrderState",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrderState {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueFill",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueFill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Bracket",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Bracket {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Intent",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Intent {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Host",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub trait Host {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-unported",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "fn unported<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-utc_now",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn utc_now<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-append",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn append<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn context<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-get_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn get_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn capabilities<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_quantity",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_quantity<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-refuse",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn refuse<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_refusal",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_refusal<H: Host, T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_terms",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_terms<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-trigger_order_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn trigger_order_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-supports_native_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn supports_native_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-require_tif",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn require_tif<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-stored_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn stored_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-bracket_from_orders",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn bracket_from_orders<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-LErr",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct LErr {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-err",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub fn err<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Order",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Order {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Fill",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Fill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderStateChange",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderStateChange {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrdersCreated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrdersCreated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderUpdated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderUpdated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Obj",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub enum Obj {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Event",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Event {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Refusal",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub enum Refusal<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Prior",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub struct Prior<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
         }
       ],
       "expect_green": [
@@ -360,6 +1344,334 @@
           "kind": "decl",
           "op": "readonly",
           "note": "TrailingStopEmulator's rule"
+        },
+        {
+          "id": "api-imports",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "use crate::ledger::model::{",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Net",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub enum Net<T> {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Capabilities {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Context {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Allocation",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Allocation {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrder",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrder {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueAck",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueAck {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderChanges",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct OrderChanges {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrderState",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrderState {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueFill",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueFill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Bracket",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Bracket {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Intent",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Intent {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Host",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub trait Host {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-unported",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "fn unported<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-utc_now",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn utc_now<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-append",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn append<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn context<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-get_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn get_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn capabilities<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_quantity",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_quantity<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-refuse",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn refuse<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_refusal",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_refusal<H: Host, T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_terms",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_terms<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-trigger_order_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn trigger_order_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-supports_native_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn supports_native_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-require_tif",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn require_tif<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-stored_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn stored_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-bracket_from_orders",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn bracket_from_orders<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-LErr",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct LErr {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-err",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub fn err<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Order",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Order {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Fill",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Fill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderStateChange",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderStateChange {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrdersCreated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrdersCreated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderUpdated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderUpdated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Obj",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub enum Obj {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Event",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Event {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Refusal",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub enum Refusal<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Prior",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub struct Prior<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
         }
       ],
       "expect_green": [
@@ -416,6 +1728,334 @@
           "kind": "decl",
           "op": "readonly",
           "note": "a typed decision the flow calls"
+        },
+        {
+          "id": "api-imports",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "use crate::ledger::model::{",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Net",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub enum Net<T> {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Capabilities {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Context {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Allocation",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Allocation {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrder",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrder {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueAck",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueAck {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderChanges",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct OrderChanges {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrderState",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrderState {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueFill",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueFill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Bracket",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Bracket {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Intent",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Intent {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Host",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub trait Host {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-unported",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "fn unported<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-utc_now",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn utc_now<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-append",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn append<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn context<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-get_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn get_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn capabilities<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_quantity",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_quantity<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-refuse",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn refuse<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_refusal",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_refusal<H: Host, T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_terms",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_terms<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-trigger_order_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn trigger_order_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-supports_native_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn supports_native_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-require_tif",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn require_tif<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-stored_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn stored_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-bracket_from_orders",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn bracket_from_orders<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-LErr",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct LErr {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-err",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub fn err<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Order",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Order {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Fill",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Fill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderStateChange",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderStateChange {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrdersCreated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrdersCreated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderUpdated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderUpdated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Obj",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub enum Obj {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Event",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Event {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Refusal",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub enum Refusal<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Prior",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub struct Prior<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
         }
       ],
       "expect_green": [
@@ -524,6 +2164,334 @@
           "kind": "decl",
           "op": "readonly",
           "note": "a typed decision the flow calls"
+        },
+        {
+          "id": "api-imports",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "use crate::ledger::model::{",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Net",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub enum Net<T> {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Capabilities {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Context {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Allocation",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Allocation {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrder",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrder {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueAck",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueAck {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderChanges",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct OrderChanges {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueOrderState",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueOrderState {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-VenueFill",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct VenueFill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Bracket",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Bracket {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Intent",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub struct Intent {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Host",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub trait Host {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-unported",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "fn unported<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-utc_now",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn utc_now<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-append",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn append<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-context",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn context<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-get_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn get_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-capabilities",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn capabilities<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_quantity",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_quantity<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-refuse",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn refuse<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-planned_refusal",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn planned_refusal<H: Host, T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_terms",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_terms<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-venue_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn venue_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-trigger_order_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn trigger_order_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-supports_native_type",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn supports_native_type<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-require_tif",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn require_tif<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-stored_order",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn stored_order<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-bracket_from_orders",
+          "file": "crates/te_core/src/oms/flow.rs",
+          "anchor": "pub fn bracket_from_orders<H: Host>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-LErr",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct LErr {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-err",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub fn err<T>(",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Order",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Order {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Fill",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Fill {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderStateChange",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderStateChange {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrdersCreated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrdersCreated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-OrderUpdated",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct OrderUpdated {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Obj",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub enum Obj {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Event",
+          "file": "crates/te_core/src/ledger/model.rs",
+          "anchor": "pub struct Event {",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Refusal",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub enum Refusal<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
+        },
+        {
+          "id": "api-Prior",
+          "file": "crates/te_core/src/oms/manager.rs",
+          "anchor": "pub struct Prior<",
+          "kind": "decl",
+          "op": "readonly",
+          "note": "the real API: call it exactly as declared here, never guess a name, variant, field or arity"
         }
       ],
       "expect_green": [
