@@ -193,6 +193,46 @@ fn register_margin(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 // --- end margin -----------------------------------------------------------------------
 
+#[pyfunction]
+fn risk_rules_from_mapping(doc: &str) -> String {
+    te_core::risk::json_rules_from_mapping(doc)
+}
+
+#[pyfunction]
+fn risk_validate_rules(doc: &str) -> String {
+    te_core::risk::json_validate_rules(doc)
+}
+
+#[pyfunction]
+fn risk_validate_rails(doc: &str) -> String {
+    te_core::risk::json_validate_rails(doc)
+}
+
+#[pyfunction]
+fn risk_validate_hours(doc: &str) -> String {
+    te_core::risk::json_validate_hours(doc)
+}
+
+#[pyfunction]
+fn risk_validate_context(doc: &str) -> String {
+    te_core::risk::json_validate_context(doc)
+}
+
+#[pyfunction]
+fn risk_hours_is_open(doc: &str) -> String {
+    te_core::risk::json_hours_is_open(doc)
+}
+
+#[pyfunction]
+fn risk_drawdown_controls(doc: &str) -> String {
+    te_core::risk::json_drawdown_controls(doc)
+}
+
+#[pyfunction]
+fn risk_evaluate(doc: &str) -> String {
+    te_core::risk::json_evaluate(doc)
+}
+
 #[pymodule]
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -211,5 +251,13 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(greeks_implied_vol, m)?)?;
     m.add_function(wrap_pyfunction!(greeks_greeks, m)?)?;
     register_margin(m)?;
+    m.add_function(wrap_pyfunction!(risk_rules_from_mapping, m)?)?;
+    m.add_function(wrap_pyfunction!(risk_validate_rules, m)?)?;
+    m.add_function(wrap_pyfunction!(risk_validate_rails, m)?)?;
+    m.add_function(wrap_pyfunction!(risk_validate_hours, m)?)?;
+    m.add_function(wrap_pyfunction!(risk_validate_context, m)?)?;
+    m.add_function(wrap_pyfunction!(risk_hours_is_open, m)?)?;
+    m.add_function(wrap_pyfunction!(risk_drawdown_controls, m)?)?;
+    m.add_function(wrap_pyfunction!(risk_evaluate, m)?)?;
     Ok(())
 }
