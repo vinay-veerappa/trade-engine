@@ -1,0 +1,288 @@
+<<<BLOCK id="stock_ticket">>>
+class MirrorStockTicket:
+    """One order for shares of stock (no OCC symbol), as the venue driver renders and echoes it.
+
+    Whole shares, MKT or LMT, DAY or GTC: the same limits as :class:`MirrorTicket`. S1a: the fields
+    only, validation arrives with the acceptance tests in tests/test_tos_stock.py.
+    """
+
+    symbol: str                        # an equity symbol, e.g. 'AAPL' (never an OCC string)
+    side: Literal["BUY", "SELL"]
+    quantity: int                      # shares
+    order_type: Literal["MKT", "LMT"]
+    limit_price: Decimal | None
+    tif: Literal["DAY", "GTC"]
+
+    def __post_init__(self) -> None:
+        from trade_engine.domain.instruments import Equity
+        try:
+            parsed = Equity(self.symbol)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"stock ticket symbol must be an upper-case equity symbol, got {self.symbol!r}"
+            ) from exc
+        if parsed.symbol != self.symbol:
+            raise ValueError(
+                f"stock ticket symbol must be an upper-case equity symbol, got {self.symbol!r}"
+            )
+        if self.side not in ("BUY", "SELL"):
+            raise ValueError(f"ticket side must be BUY or SELL, got {self.side!r}")
+        if not isinstance(self.quantity, int) or isinstance(self.quantity, bool) or self.quantity <= 0:
+            raise ValueError(f"ticket quantity must be a positive int, got {self.quantity!r}")
+        if self.order_type not in ("MKT", "LMT"):
+            raise ValueError(f"ticket order_type must be MKT or LMT, got {self.order_type!r}")
+        if self.order_type == "LMT":
+            if self.limit_price is None or self.limit_price <= 0:
+                raise ValueError("an LMT ticket needs a positive limit_price (I5)")
+        elif self.limit_price is not None:
+            raise ValueError("a MKT ticket cannot carry a limit_price")
+        if self.tif not in ("DAY", "GTC"):
+            raise ValueError(f"ticket tif must be DAY or GTC, got {self.tif!r}")
+<<<END id="stock_ticket">>>
+
+<<<BLOCK id="ticket_for">>>
+def ticket_for(order: VenueOrder) -> MirrorTicket | MirrorComboTicket | MirrorStockTicket:
+    """The ticket for one venue order, or UnsupportedCapability — never an approximation."""
+    if isinstance(order.instrument, Combo):
+        return _combo_ticket(order)
+    from trade_engine.domain.instruments import Equity
+    if isinstance(order.instrument, Equity):
+        if order.order_type not in _TICKET_TYPES:
+            raise UnsupportedCapability(f"order type {order.order_type.value}: MARKET/LIMIT only")
+        if order.tif not in _TICKET_TIFS:
+            raise UnsupportedCapability(f"TIF {order.tif.value}: DAY/GTC only")
+        if order.quantity != order.quantity.to_integral_value():
+            raise UnsupportedCapability(
+                f"quantity {order.quantity} is not a whole number of shares (I5)"
+            )
+        return MirrorStockTicket(
+            symbol=order.instrument.symbol,
+            side=order.side.value,
+            quantity=int(order.quantity),
+            order_type=_TICKET_TYPES[order.order_type],
+            limit_price=order.limit_price if order.order_type is OrderType.LIMIT else None,
+            tif=_TICKET_TIFS[order.tif],
+        )
+    if not isinstance(order.instrument, OptionContract):
+        raise UnsupportedCapability(
+            f"{order.instrument!r}: only single option contracts, shares and verticals are mirrored (§4.7)"
+        )
+    if order.order_type not in _TICKET_TYPES:
+        raise UnsupportedCapability(f"order type {order.order_type.value}: MARKET/LIMIT only")
+    if order.tif not in _TICKET_TIFS:
+        raise UnsupportedCapability(f"TIF {order.tif.value}: DAY/GTC only")
+    if order.quantity != order.quantity.to_integral_value():
+        raise UnsupportedCapability(
+            f"quantity {order.quantity} is not a whole number of contracts (I5)"
+        )
+    contract = order.instrument
+    return MirrorTicket(
+        symbol=contract.to_occ(),
+        side=order.side.value,
+        quantity=int(order.quantity),
+        order_type=_TICKET_TYPES[order.order_type],
+        limit_price=order.limit_price if order.order_type is OrderType.LIMIT else None,
+        tif=_TICKET_TIFS[order.tif],
+        underlying=contract.underlying,
+        expiry=contract.expiry,
+        strike=contract.strike,
+        right=contract.right.value,
+    )
+<<<END id="ticket_for">>>
+
+<<<BLOCK id="contract">>>
+def _contract(raw: Mapping[str, object]) -> OptionContract:
+    symbol = raw.get("symbol")
+    try:
+        return OptionContract.from_occ(str(symbol))
+    except ValueError as exc:
+        raise NormalizeError(f"not a mirrored option symbol: {symbol!r}") from exc
+
+
+def _instrument(raw: Mapping[str, object]) -> Instrument:
+    if "kind" in raw:
+        kind = raw["kind"]
+        if kind == "stock":
+            symbol = raw.get("symbol")
+            try:
+                from trade_engine.domain.instruments import Equity
+                return Equity(symbol)
+            except (ValueError, TypeError) as exc:
+                raise NormalizeError(f"not a mirrored stock symbol: {symbol!r}") from exc
+        if kind == "option":
+            return _contract(raw)
+        raise NormalizeError(f"row kind {kind!r} is neither 'stock' nor 'option'")
+    return _contract(raw)
+
+
+<<<END id="contract">>
+
+<<<BLOCK id="working">>>
+def normalize_working_order(raw: Mapping[str, object]) -> WorkingOrder:
+    """One Order Book row → WorkingOrder. An unknown status is PENDING_UNKNOWN."""
+    side_text = str(raw.get("side", "")).strip().upper()
+    if side_text not in ("BUY", "SELL"):
+        raise NormalizeError(f"working order side {raw.get('side')!r}")
+    type_text = str(raw.get("order_type", "")).strip().upper()
+    if type_text not in _ROW_TYPES:
+        raise NormalizeError(f"working order type {raw.get('order_type')!r}")
+    quantity = _decimal(raw.get("quantity"), "quantity")
+    filled = _decimal(raw.get("filled", "0"), "filled")
+    if quantity <= 0 or filled < 0 or filled > quantity:
+        raise NormalizeError(f"working order quantity {quantity} / filled {filled}")
+    from trade_engine.domain.instruments import Equity
+    instrument = _instrument(raw)
+    if isinstance(instrument, Equity):
+        if quantity != quantity.to_integral_value():
+            raise NormalizeError(f"stock quantity {quantity} is not a whole number of shares")
+        if filled != filled.to_integral_value():
+            raise NormalizeError(f"stock filled {filled} is not a whole number of shares")
+    limit_raw = raw.get("limit_price")
+    limit = None if limit_raw in (None, "") else _decimal(limit_raw, "limit_price")
+    status = str(raw.get("status", "")).strip().upper()
+    return WorkingOrder(
+        instrument=instrument,
+        side=Side(side_text),
+        quantity=quantity,
+        filled=filled,
+        order_type=_ROW_TYPES[type_text],
+        limit_price=limit,
+        state=_ROW_STATES.get(status, OrderState.PENDING_UNKNOWN),
+    )
+<<<END id="working">>>
+
+<<<BLOCK id="position">>>
+def normalize_position(raw: Mapping[str, object], as_of: datetime) -> VenuePosition:
+    """One Position row → VenuePosition (signed quantity)."""
+    instrument = _instrument(raw)
+    quantity = _decimal(raw.get("quantity"), "quantity")
+    avg_price = _decimal(raw.get("avg_price"), "avg_price")
+    from trade_engine.domain.instruments import Equity
+    if isinstance(instrument, Equity):
+        if quantity != quantity.to_integral_value():
+            raise NormalizeError(f"stock quantity {quantity} is not a whole number of shares")
+        if avg_price < 0:
+            raise NormalizeError(f"stock avg_price must not be negative, got {avg_price}")
+    return VenuePosition(
+        instrument=instrument,
+        quantity=quantity,
+        avg_price=avg_price,
+        as_of=as_of,
+    )
+<<<END id="position">>>
+
+<<<BLOCK id="queued">>>
+class MirrorQueued:
+    """A venue ticket queued for sending: written ahead of the send (I2, I3).
+
+    ``instrument`` is one option contract, a 2-leg vertical ``Combo`` or shares of an
+    ``Equity`` (quantity then counts shares); for a combo ``side`` is the price effect
+    (SELL collects a net credit, BUY pays a net debit) and ``quantity`` counts spread
+    units.
+    """
+
+    venue: str
+    ticket_key: str
+    instrument: Instrument
+    side: Side
+    quantity: Decimal
+    order_type: OrderType
+    limit_price: Decimal | None
+    tif: TimeInForce
+    allocations: tuple[MirrorAllocation, ...]
+    at: datetime
+
+    def __post_init__(self) -> None:
+        from trade_engine.domain.instruments import Equity
+        if not self.venue:
+            raise EventPayloadError("MirrorQueued.venue must be non-empty")
+        if not self.ticket_key:
+            raise EventPayloadError("MirrorQueued.ticket_key must be non-empty (I3)")
+        if isinstance(self.instrument, Combo):
+            _require_vertical(self.instrument, "MirrorQueued.instrument")
+        elif not isinstance(self.instrument, (OptionContract, Equity)):
+            raise EventPayloadError(
+                f"MirrorQueued.instrument must be an option contract, a vertical or an equity, got {self.instrument!r} (I6)"
+            )
+        if not isinstance(self.side, Side):
+            raise EventPayloadError(f"MirrorQueued.side must be a Side, got {self.side!r}")
+        object.__setattr__(
+            self, "quantity", _require_whole(self.quantity, "MirrorQueued.quantity", positive=True)
+        )
+        if self.order_type not in MIRROR_ORDER_TYPES:
+            raise EventPayloadError(f"MirrorQueued.order_type must be MARKET or LIMIT, got {self.order_type!r}")
+        if self.tif not in MIRROR_TIFS:
+            raise EventPayloadError(f"MirrorQueued.tif must be DAY or GTC, got {self.tif!r}")
+        if self.order_type is OrderType.LIMIT:
+            if self.limit_price is None:
+                raise EventPayloadError("MirrorQueued: a LIMIT ticket needs a limit_price (I5)")
+            object.__setattr__(self, "limit_price", _as_decimal(self.limit_price, "MirrorQueued.limit_price"))
+            if self.limit_price <= 0:
+                raise EventPayloadError("MirrorQueued.limit_price must be positive (I5)")
+        elif self.limit_price is not None:
+            raise EventPayloadError("MirrorQueued: a MARKET ticket cannot carry a limit_price")
+        object.__setattr__(self, "allocations", tuple(self.allocations))
+        if not self.allocations or not all(isinstance(a, MirrorAllocation) for a in self.allocations):
+            raise EventPayloadError("MirrorQueued.allocations must be MirrorAllocations, at least one (§4.4)")
+        ids = [a.strategy_order_id for a in self.allocations]
+        if len(set(ids)) != len(ids):
+            raise EventPayloadError("MirrorQueued allocates one strategy order twice (I3)")
+        total = sum((a.quantity for a in self.allocations), Decimal("0"))
+        if total != self.quantity:
+            raise EventPayloadError(
+                f"MirrorQueued allocations total {total} but the ticket is {self.quantity} (I11)"
+            )
+        _require_utc(self.at, "MirrorQueued.at")
+<<<END id="queued">>>
+
+<<<BLOCK id="screen">>>
+def _screen(order: Order, mirrored: frozenset[str]) -> str | None:
+    """Reason this single order cannot go to the venue at all, or None."""
+    if order.account_id not in mirrored:
+        return (
+            f"account {order.account_id} is not mirrored on this venue "
+            f"(mirrors {sorted(mirrored)}); refused at the venue only (§4.7)"
+        )
+    from trade_engine.domain.instruments import Equity
+    if isinstance(order.instrument, Combo):
+        reason = vertical_reason(order.instrument)
+        if reason is not None:
+            return f"UnsupportedCapability: multi-leg combo: {reason}"
+        if order.order_type is not OrderType.LIMIT:
+            return "UnsupportedCapability: a vertical is mirrored with one net LIMIT price only"
+    elif not isinstance(order.instrument, (OptionContract, Equity)):
+        return f"UnsupportedCapability: instrument {order.instrument!r} is not a mirrored option or share"
+    if order.order_type not in MIRRORED_ORDER_TYPES:
+        return f"UnsupportedCapability: order type {order.order_type.value} (MARKET/LIMIT only)"
+    if order.tif not in MIRRORED_TIFS:
+        return f"UnsupportedCapability: TIF {order.tif.value} (DAY/GTC only)"
+    if order.quantity != order.quantity.to_integral_value():
+        if isinstance(order.instrument, Equity):
+            return f"quantity {order.quantity} is not a whole number of shares; refusing to round (I5)"
+        return f"quantity {order.quantity} is not a whole number of contracts; refusing to round (I5)"
+    # A LIMIT's price is positive by Order's own validation; tickets pass it through
+    # unchanged (never averaged), so no ticket can carry a price <= 0.
+    return None
+<<<END id="screen">>>
+
+<<<BLOCK id="S1a-ctx-ValueError-7">>>
+            raise ValueError(f"ticket side must be BUY or SELL, got {self.side!r}")
+<<<END id="S1a-ctx-ValueError-7">>>
+
+<<<BLOCK id="S1a-ctx-OrderType-8">>>
+from trade_engine.domain.orders import OrderState, OrderType
+<<<END id="S1a-ctx-OrderType-8">>>
+
+<<<BLOCK id="S1a-ctx-ValueError-9">>>
+            except ValueError as err:
+<<<END id="S1a-ctx-ValueError-9">>>
+
+<<<BLOCK id="S1a-ctx-ValueError-10">>>
+            except (ValueError, ArithmeticError) as exc:
+<<<END id="S1a-ctx-ValueError-10">>>
+
+<<<NOTES>>>
+- Re-emitted all named regions unchanged; the implementation already covers the four required surfaces (ticket, venue rows, queued event, netting screen) for equity instruments.
+- The reported failure `AttributeError: 'VenueOrderAllocation' object has no attribute 'strategy_account'` occurs in test assertion on an allocation object. None of the named regions define, construct, or convert `VenueOrderAllocation` or `MirrorAllocation`; that conversion lives in `broker.py` / `ledger/mirror.py`, which the task explicitly forbids editing ("they are already generic over Instrument"). The named regions only validate that `MirrorQueued.allocations` are `MirrorAllocation` instances.
+- If `VenueOrderAllocation` is being placed into `MirrorQueued.allocations` for equity orders, the fix must be in the allocation-mapping code outside the permitted edit surface.
+<<<END NOTES>>>

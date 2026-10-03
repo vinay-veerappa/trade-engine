@@ -1,0 +1,313 @@
+{
+  "ticket": "S1a",
+  "rounds": [
+    {
+      "round": 1,
+      "stage": "test",
+      "ok": false,
+      "summary": "1 acceptance test(s) still failing; 1532 passed, 1 failed, 54 expected failure(s) now green",
+      "detail": "STILL FAILING (this ticket exists to make these pass):\n  - test_a_mirrored_account_may_buy_shares",
+      "cost_usd": 0.0,
+      "secs": 0.0,
+      "impl_input_tokens": 0,
+      "impl_output_tokens": 0,
+      "reviewer_input_tokens": 0,
+      "reviewer_output_tokens": 0,
+      "arbiter_input_tokens": 0,
+      "arbiter_output_tokens": 0,
+      "gate_ladder": []
+    },
+    {
+      "round": 2,
+      "stage": "test",
+      "ok": false,
+      "summary": "1 acceptance test(s) still failing; 1532 passed, 1 failed, 54 expected failure(s) now green",
+      "detail": "STILL FAILING (this ticket exists to make these pass):\n  - test_a_mirrored_account_may_buy_shares",
+      "cost_usd": 0.0,
+      "secs": 0.0,
+      "impl_input_tokens": 0,
+      "impl_output_tokens": 0,
+      "reviewer_input_tokens": 0,
+      "reviewer_output_tokens": 0,
+      "arbiter_input_tokens": 0,
+      "arbiter_output_tokens": 0,
+      "gate_ladder": []
+    },
+    {
+      "round": 3,
+      "stage": "test",
+      "ok": false,
+      "summary": "1 acceptance test(s) still failing; 1532 passed, 1 failed, 54 expected failure(s) now green\n\nWARNING: rounds 1, 2 and 3 produced the IDENTICAL failing test set (1 tests). The fix may be outside the regions this ticket grants. Region files: src/trade_engine/ledger/events.py, src/trade_engine/tos_paper/netting.py, src/trade_engine/tos_paper/normalize.py, src/trade_engine/tos_paper/transport.py. Failing tests: test_a_mirrored_account_may_buy_shares. Consider adding the caller or related files as regions.",
+      "detail": "STILL FAILING (this ticket exists to make these pass):\n  - test_a_mirrored_account_may_buy_shares",
+      "cost_usd": 0.0,
+      "secs": 0.0,
+      "impl_input_tokens": 0,
+      "impl_output_tokens": 0,
+      "reviewer_input_tokens": 0,
+      "reviewer_output_tokens": 0,
+      "arbiter_input_tokens": 0,
+      "arbiter_output_tokens": 0,
+      "gate_ladder": []
+    },
+    {
+      "round": 4,
+      "stage": "test",
+      "ok": false,
+      "summary": "1 acceptance test(s) still failing; 1532 passed, 1 failed, 54 expected failure(s) now green\n\nWARNING: rounds 2, 3 and 4 produced the IDENTICAL failing test set (1 tests). The fix may be outside the regions this ticket grants. Region files: src/trade_engine/ledger/events.py, src/trade_engine/tos_paper/netting.py, src/trade_engine/tos_paper/normalize.py, src/trade_engine/tos_paper/transport.py. Failing tests: test_a_mirrored_account_may_buy_shares. Consider adding the caller or related files as regions.",
+      "detail": "STILL FAILING (this ticket exists to make these pass):\n  - test_a_mirrored_account_may_buy_shares",
+      "cost_usd": 0.0,
+      "secs": 0.0,
+      "impl_input_tokens": 0,
+      "impl_output_tokens": 0,
+      "reviewer_input_tokens": 0,
+      "reviewer_output_tokens": 0,
+      "arbiter_input_tokens": 0,
+      "arbiter_output_tokens": 0,
+      "gate_ladder": []
+    }
+  ],
+  "applied": false,
+  "applied_approved": false,
+  "applied_unapproved": false,
+  "cost_usd": 0.0,
+  "agent_loop_path": "C:\\Users\\vinay\\agent-loop\\src\\agent_loop",
+  "agent_loop_version": "0.6.7",
+  "agent_loop_describe": "v0.6.7-89-gb8915ca",
+  "agent_loop_sha": "b8915ca",
+  "baseline": [
+    "tests/test_mirror_ledger.py::test_a_queued_ticket_takes_a_single_option_a_vertical_or_shares",
+    "tests/test_tos_stock.py::test_a_filled_stock_order_is_proven_by_the_position_that_moved",
+    "tests/test_tos_stock.py::test_a_gtc_share_order_keeps_its_tif_and_never_nets_with_a_day_one",
+    "tests/test_tos_stock.py::test_a_mirrored_account_may_buy_shares",
+    "tests/test_tos_stock.py::test_a_partial_stock_fill_books_the_shares_filled_and_still_expects_the_rest",
+    "tests/test_tos_stock.py::test_a_queued_stock_ticket_is_a_legal_event_and_survives_the_codec",
+    "tests/test_tos_stock.py::test_a_queued_ticket_still_refuses_what_is_neither_option_nor_stock",
+    "tests/test_tos_stock.py::test_a_resting_share_order_is_expected_and_an_unreadable_status_is_drift",
+    "tests/test_tos_stock.py::test_a_short_share_row_is_read_not_hidden",
+    "tests/test_tos_stock.py::test_a_stock_order_is_sent_as_a_stock_ticket_and_read_back_off_the_book",
+    "tests/test_tos_stock.py::test_a_stock_order_the_screen_cannot_express_is_refused_with_its_reason[kwargs0-whole",
+    "tests/test_tos_stock.py::test_a_stock_order_the_screen_cannot_express_is_refused_with_its_reason[kwargs1-TIF]",
+    "tests/test_tos_stock.py::test_a_stock_order_the_venue_cannot_express_is_unsupported_never_approximated[order0-whole",
+    "tests/test_tos_stock.py::test_a_stock_order_the_venue_cannot_express_is_unsupported_never_approximated[order1-TIF]",
+    "tests/test_tos_stock.py::test_a_stock_order_the_venue_cannot_express_is_unsupported_never_approximated[order2-order",
+    "tests/test_tos_stock.py::test_a_stock_position_row_is_a_signed_share_count",
+    "tests/test_tos_stock.py::test_a_stock_row_that_cannot_be_read_without_guessing_raises[raw1-not",
+    "tests/test_tos_stock.py::test_a_stock_row_that_cannot_be_read_without_guessing_raises[raw2-neither",
+    "tests/test_tos_stock.py::test_a_stock_row_that_cannot_be_read_without_guessing_raises[raw3-neither",
+    "tests/test_tos_stock.py::test_a_stock_row_that_cannot_be_read_without_guessing_raises[raw4-not",
+    "tests/test_tos_stock.py::test_a_stock_row_that_cannot_be_read_without_guessing_raises[raw5-not",
+    "tests/test_tos_stock.py::test_a_stock_row_that_cannot_be_read_without_guessing_raises[raw6-avg_price",
+    "tests/test_tos_stock.py::test_a_stock_row_that_cannot_be_read_without_guessing_raises[raw7-stock",
+    "tests/test_tos_stock.py::test_a_stock_row_that_cannot_be_read_without_guessing_raises[raw8-not",
+    "tests/test_tos_stock.py::test_a_stock_stop_is_refused_never_approximated",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes0-stock",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes1-stock",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes10-an",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes11-a",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes12-ticket",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes2-stock",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes3-ticket",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes4-ticket",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes5-ticket",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes6-ticket",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes7-ticket",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes8-ticket",
+    "tests/test_tos_stock.py::test_a_stock_ticket_the_venue_could_misread_is_refused_at_construction[changes9-an",
+    "tests/test_tos_stock.py::test_a_stock_working_order_row_reads_back_as_an_equity_order",
+    "tests/test_tos_stock.py::test_a_stock_working_row_that_cannot_be_read_raises[changes0-neither",
+    "tests/test_tos_stock.py::test_a_stock_working_row_that_cannot_be_read_raises[changes1-not",
+    "tests/test_tos_stock.py::test_a_stock_working_row_that_cannot_be_read_raises[changes2-stock",
+    "tests/test_tos_stock.py::test_a_stock_working_row_that_cannot_be_read_raises[changes3-stock",
+    "tests/test_tos_stock.py::test_a_zero_average_price_and_a_zero_quantity_are_legal_stock_rows",
+    "tests/test_tos_stock.py::test_an_equity_order_becomes_a_stock_ticket_exactly",
+    "tests/test_tos_stock.py::test_confirm_ticket_proves_a_stock_ticket_by_its_book_row_or_its_position",
+    "tests/test_tos_stock.py::test_opposite_sides_on_the_same_shares_still_conflict",
+    "tests/test_tos_stock.py::test_run_mirror_books_a_stock_fill_into_the_mirror_book",
+    "tests/test_tos_stock.py::test_running_the_same_stock_order_twice_sends_it_once",
+    "tests/test_tos_stock.py::test_shares_and_a_call_on_the_same_name_are_two_tickets_not_one_conflict",
+    "tests/test_tos_stock.py::test_shares_and_an_option_on_one_name_reconcile_separately",
+    "tests/test_tos_stock.py::test_shares_nobody_expected_are_drift_and_halt_the_venue",
+    "tests/test_tos_stock.py::test_submit_sends_a_stock_order_pending_until_read_back",
+    "tests/test_tos_stock.py::test_the_mirror_book_holds_shares_beside_options_on_one_underlying",
+    "tests/test_tos_stock.py::test_two_accounts_buying_the_same_shares_at_one_limit_net_into_one_ticket"
+  ],
+  "guessed_symbols": [
+    {
+      "symbol": "Equity",
+      "file": "src/trade_engine/tos_paper/transport.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorQueued",
+      "file": "src/trade_engine/tos_paper/transport.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "NormalizeError",
+      "file": "src/trade_engine/tos_paper/transport.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "OptionContracts",
+      "file": "src/trade_engine/tos_paper/transport.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "TypeError",
+      "file": "src/trade_engine/tos_paper/transport.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "ValueError",
+      "file": "src/trade_engine/tos_paper/transport.py",
+      "status": "guessed"
+    },
+    {
+      "symbol": "WorkingOrder",
+      "file": "src/trade_engine/tos_paper/transport.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "Equity",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorComboTicket",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorQueued",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorStockTicket",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorTicket",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "OptionContracts",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "OrderType",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "guessed"
+    },
+    {
+      "symbol": "TypeError",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "UnsupportedCapability",
+      "file": "src/trade_engine/tos_paper/normalize.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "Equity",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorComboTicket",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorStockTicket",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorTicket",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "NormalizeError",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "OptionContracts",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "TypeError",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "UnsupportedCapability",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "ValueError",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "guessed"
+    },
+    {
+      "symbol": "WorkingOrder",
+      "file": "src/trade_engine/ledger/events.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorComboTicket",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorQueued",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorStockTicket",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "MirrorTicket",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "NormalizeError",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "OptionContracts",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "TypeError",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "refused"
+    },
+    {
+      "symbol": "ValueError",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "guessed"
+    },
+    {
+      "symbol": "WorkingOrder",
+      "file": "src/trade_engine/tos_paper/netting.py",
+      "status": "refused"
+    }
+  ],
+  "final_verdict": "ARBITER_NEVER_RAN",
+  "exported_round": null
+}
