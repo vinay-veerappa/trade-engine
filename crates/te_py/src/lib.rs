@@ -384,6 +384,44 @@ fn risk_evaluate(doc: &str) -> String {
     te_core::risk::json_evaluate(doc)
 }
 
+// --- ledger shadow (P2a) ------------------------------------------------------------
+// Test-only entry points: a refusal crosses as ValueError(kind, message).
+
+fn refuse_ledger(e: te_core::ledger::model::LErr) -> PyErr {
+    PyValueError::new_err((e.kind.to_string(), e.msg))
+}
+
+#[pyfunction]
+fn ledger_reencode(data: &[u8]) -> PyResult<Vec<u8>> {
+    te_core::ledger::codec::reencode(data).map_err(refuse_ledger)
+}
+
+fn decode_all(events: &[Vec<u8>]) -> Result<Vec<te_core::ledger::model::Event>, te_core::ledger::model::LErr> {
+    events.iter().map(|b| te_core::ledger::codec::event_from_bytes(b)).collect()
+}
+
+/// Fold encoded events for one account; canonical state JSON bytes.
+#[pyfunction]
+fn ledger_fold(events: Vec<Vec<u8>>, account: &str) -> PyResult<Vec<u8>> {
+    let run = || -> te_core::ledger::model::R<String> {
+        let evs = decode_all(&events)?;
+        let st = te_core::ledger::fold::fold_account(&evs, account)?;
+        Ok(te_core::ledger::json::dumps(&te_core::ledger::canon::canon_account(&st)?))
+    };
+    run().map(String::into_bytes).map_err(refuse_ledger)
+}
+
+/// Fold every account: `{"m":[[account,state],...]}` canonical JSON bytes.
+#[pyfunction]
+fn ledger_fold_all(events: Vec<Vec<u8>>) -> PyResult<Vec<u8>> {
+    let run = || -> te_core::ledger::model::R<String> {
+        let evs = decode_all(&events)?;
+        let st = te_core::ledger::fold::fold(&evs)?;
+        Ok(te_core::ledger::json::dumps(&te_core::ledger::canon::canon_states(&st)?))
+    };
+    run().map(String::into_bytes).map_err(refuse_ledger)
+}
+
 #[pymodule]
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -402,6 +440,9 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(greeks_implied_vol, m)?)?;
     m.add_function(wrap_pyfunction!(greeks_greeks, m)?)?;
     register_margin(m)?;
+    m.add_function(wrap_pyfunction!(ledger_reencode, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_fold, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_fold_all, m)?)?;
     register_options(m)?;
     m.add_function(wrap_pyfunction!(risk_rules_from_mapping, m)?)?;
     m.add_function(wrap_pyfunction!(risk_validate_rules, m)?)?;
