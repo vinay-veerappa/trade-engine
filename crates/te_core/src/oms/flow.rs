@@ -523,15 +523,36 @@ pub fn cancel_emulated_siblings<H: Host>(_h: &H, _order: &Order, _command: &str)
 /// `record_fill`. `fill_match` (account and venue env), validate the quantity, append
 /// the FILL under `fill:{fill_id}`, then `_synchronize_bracket`: fills are recorded
 /// before any protection is resized.
-pub fn record_fill<H: Host>(_h: &H, _fill: &Fill) -> R<Order> {
-    unported("record_fill")
+pub fn record_fill<H: Host>(h: &H, fill: &Fill) -> R<Order> {
+    let ctx = context(h, &fill.order_id)?;
+    let order = ctx.order;
+    plan::fill_match(&fill.fill_id, &order.order_id, &order.account_id, &fill.account_id, &h.env()?, &fill.venue_env)?;
+    plan::validate_quantity(&order.instrument, &fill.quantity)?;
+    let payload = Obj::Fill(fill.clone());
+    append(h, &order.account_id, EventKind::Fill, payload, &format!("fill:{}", fill.fill_id))?;
+    synchronize_bracket(h, &order, &fill.fill_id)?;
+    get_order(h, &order.order_id)
 }
 
 /// `cancel`. A protective stop with open quantity is a recorded refusal (under the
 /// caller's command id); then `_cancel_order`; then a parentless order synchronizes
 /// its bracket.
-pub fn cancel<H: Host>(_h: &H, _order_id: &str, _command: &str) -> R<Order> {
-    unported("cancel")
+pub fn cancel<H: Host>(h: &H, order_id: &str, command: &str) -> R<Order> {
+    let order = get_order(h, order_id)?;
+    if plan::protective_child(order.parent_order_id.as_deref(), order.order_type) {
+        let state = h.account_state(&order.account_id)?;
+        if let Some(ref parent_id) = order.parent_order_id {
+            let entry = get_order(h, parent_id)?;
+            if plan::cancel_protective(&state, &entry, &order)? {
+                planned_refusal(h, &order, Refusal::Protective, Some(command))?;
+            }
+        }
+    }
+    let result = cancel_order(h, &order, command, "Cancelled by OMS command", false)?;
+    if order.parent_order_id.is_none() {
+        synchronize_bracket(h, &order, command)?;
+    }
+    Ok(result)
 }
 
 /// `move_stop`: `_open_bracket_stop`, then `move_stop` (stops only tighten; an
@@ -810,25 +831,164 @@ pub fn record_submit_ack<H: Host>(h: &H, order: &Order, ack: &VenueAck, command:
 /// to the open quantity BEFORE the target budgets are computed, so a budget refusal
 /// cannot move ahead of that durable operation. A flat bracket cancels every exit;
 /// a stop fill then cancels the targets and closers.
-pub fn synchronize_bracket<H: Host>(_h: &H, _changed: &Order, _cause: &str) -> R<()> {
-    unported("synchronize_bracket")
+pub fn synchronize_bracket<H: Host>(h: &H, changed: &Order, cause: &str) -> R<()> {
+    let entry = if let Some(ref parent_id) = changed.parent_order_id {
+        get_order(h, parent_id)?
+    } else {
+        changed.clone()
+    };
+    let state = h.account_state(&entry.account_id)?;
+    let plan = match plan::sync(&state, &entry)? {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let stop = state.orders.get(&plan.stop).ok_or_else(|| LErr {
+        kind: "key",
+        msg: format!("Unknown order_id '{}'", plan.stop),
+    })?;
+    let targets: Vec<&Order> = plan
+        .targets
+        .iter()
+        .map(|id| {
+            state.orders.get(id).ok_or_else(|| LErr {
+                kind: "key",
+                msg: format!("Unknown order_id '{id}'"),
+            })
+        })
+        .collect::<R<_>>()?;
+    let closers: Vec<&Order> = plan
+        .closers
+        .iter()
+        .map(|id| {
+            state.orders.get(id).ok_or_else(|| LErr {
+                kind: "key",
+                msg: format!("Unknown order_id '{id}'"),
+            })
+        })
+        .collect::<R<_>>()?;
+    if plan::sync_mode(&plan.entry_filled, &plan.open)? {
+        ensure_child_quantity(
+            h,
+            stop,
+            &plan.open,
+            &format!("{cause}:{stop_id}:protective-stop", stop_id = stop.order_id),
+        )?;
+        if plan::sync_targets(&plan.stop_filled, plan.entry_terminal)? {
+            let weights: Vec<PyDec> = targets
+                .iter()
+                .map(|t| planned_quantity(h, &t.order_id))
+                .collect::<R<_>>()?;
+            let allocated_weights = plan::target_weights(&weights, &planned_quantity(h, &entry.order_id)?)?;
+            let target_budgets = plan::allocate_quantity(&plan.entry_filled, &allocated_weights, &entry.instrument)?
+                .into_iter()
+                .take(targets.len())
+                .collect::<Vec<_>>();
+            for (target, budget) in targets.iter().zip(target_budgets.iter()) {
+                if target.state == OrderState::New {
+                    if !plan::is_positive(budget)? {
+                        cancel_order(
+                            h,
+                            target,
+                            &format!("{cause}:{target_id}:zero-budget", target_id = target.order_id),
+                            "Target has no allocation for the filled entry quantity",
+                            false,
+                        )?;
+                    } else {
+                        ensure_child_quantity(
+                            h,
+                            target,
+                            budget,
+                            &format!("{cause}:{target_id}:target-size", target_id = target.order_id),
+                        )?;
+                    }
+                }
+            }
+        }
+    } else {
+        let mut exits: Vec<&Order> = Vec::new();
+        exits.push(stop);
+        exits.extend(&targets);
+        exits.extend(&closers);
+        cancel_exits(h, &exits.iter().map(|&o| o.clone()).collect::<Vec<_>>(), &format!("{cause}:{entry_id}:flat", entry_id = entry.order_id))?;
+    }
+    if plan::is_positive(&plan.stop_filled)? {
+        let mut to_cancel: Vec<&Order> = Vec::new();
+        to_cancel.extend(&targets);
+        to_cancel.extend(&closers);
+        cancel_exits(h, &to_cancel.iter().map(|&o| o.clone()).collect::<Vec<_>>(), &format!("{cause}:{stop_id}:stop-fill", stop_id = stop.order_id))?;
+    }
+    Ok(())
 }
 
 /// `_ensure_child_quantity`: `child_quantity` plans return, submit, a local resize
 /// (ORDER_UPDATED under `:local-size`, then `_submit_child`) or a venue `replace`.
-pub fn ensure_child_quantity<H: Host>(_h: &H, _child: &Order, _quantity: &PyDec, _command: &str) -> R<()> {
-    unported("ensure_child_quantity")
+pub fn ensure_child_quantity<H: Host>(h: &H, child: &Order, quantity: &PyDec, command: &str) -> R<()> {
+    use crate::ledger::model::OrderUpdated;
+    let ctx = context(h, &child.order_id)?;
+    let current = ctx.order;
+    match plan::child_quantity(&current, &ctx.filled, quantity)? {
+        (plan::ChildPlan::Return, _) => Ok(()),
+        (plan::ChildPlan::Submit, _) => submit_child(h, &current),
+        (plan::ChildPlan::Local, Some(total_quantity)) => {
+            let updated = Order {
+                quantity: total_quantity.clone(),
+                ..current.clone()
+            };
+            let payload = Obj::OrderUpdated(OrderUpdated {
+                order: updated,
+                reason: "Sized to confirmed parent fills".to_string(),
+                venue_order_id: None,
+            });
+            append(h, &current.account_id, EventKind::OrderUpdated, payload, &format!("{command}:local-size"))?;
+            let re_read = get_order(h, &current.order_id)?;
+            submit_child(h, &re_read)?;
+            Ok(())
+        }
+        (plan::ChildPlan::Replace, Some(total_quantity)) => {
+            replace(
+                h,
+                &current.order_id,
+                &OrderChanges {
+                    new_quantity: Some(total_quantity.clone()),
+                    new_limit_price: None,
+                    new_stop_price: None,
+                },
+                command,
+            )?;
+            Ok(())
+        }
+        _ => unreachable!("child_quantity sizes Local and Replace"),
+    }
 }
 
 /// `_submit_child`: a NEW child is submitted; a rejected protective stop then refuses.
-pub fn submit_child<H: Host>(_h: &H, _child: &Order) -> R<()> {
-    unported("submit_child")
+pub fn submit_child<H: Host>(h: &H, child: &Order) -> R<()> {
+    let current = get_order(h, &child.order_id)?;
+    if current.state == OrderState::New {
+        let submitted = submit(h, &current)?;
+        plan::stop_rejected(child.order_type, submitted.state, &child.order_id)?;
+    }
+    Ok(())
 }
 
 /// `_cancel_exits` (and `_cancel_targets`): each exit re-read, terminal ones skipped,
 /// cancelled as an OCO sibling, then `oco_check`, in order.
-pub fn cancel_exits<H: Host>(_h: &H, _exits: &[Order], _command: &str) -> R<()> {
-    unported("cancel_exits")
+pub fn cancel_exits<H: Host>(h: &H, exits: &[Order], command: &str) -> R<()> {
+    for sibling in exits {
+        let current = get_order(h, &sibling.order_id)?;
+        if plan::terminal(current.state) {
+            continue;
+        }
+        let cancelled = cancel_order(
+            h,
+            &current,
+            &format!("{command}:cancel:{current_order_id}", current_order_id = current.order_id),
+            &format!("Exit sibling cancelled after bracket resolution ({command})"),
+            true,
+        )?;
+        plan::oco_check(cancelled.state, &current.order_id)?;
+    }
+    Ok(())
 }
 
 /// `_cancel_order`. `cancel_mode`: terminal returns; NEW cancels locally; otherwise the
@@ -837,8 +997,62 @@ pub fn cancel_exits<H: Host>(_h: &H, _exits: &[Order], _command: &str) -> R<()> 
 /// OCO sibling) or BrokerOutcomeUnknownError, from the original exception. The ack:
 /// accepted records ORDER_CANCELLED; rejected records ORDER_REFUSED then refuses;
 /// pending records ORDER_PENDING then refuses an OCO sibling.
-pub fn cancel_order<H: Host>(_h: &H, _order: &Order, _command: &str, _reason: &str, _oco: bool) -> R<Order> {
-    unported("cancel_order")
+pub fn cancel_order<H: Host>(h: &H, order: &Order, command: &str, reason: &str, oco: bool) -> R<Order> {
+    let ctx = context(h, &order.order_id)?;
+    let current = ctx.order;
+    let action = plan::cancel_mode(current.state, &current.order_id, oco)?;
+    match action {
+        plan::CancelMode::Return => return Ok(current),
+        plan::CancelMode::Local => {
+            let payload = Obj::StateChange(OrderStateChange {
+                order_id: current.order_id.clone(),
+                reason: Some(reason.to_string()),
+                venue_order_id: None,
+            });
+            append(h, &current.account_id, EventKind::OrderCancelled, payload, &format!("{command}:local"))?;
+            return get_order(h, &current.order_id);
+        }
+        plan::CancelMode::Venue => {}
+    }
+    let venue_id = ctx.venue_order_id.as_deref();
+    let venue_id_str = plan::confirmed_id(venue_id, &current.order_id, plan::IdMode::Cancel)?;
+    mark_pending(h, &current, &format!("Cancel pending: {reason}"), &format!("{command}:pending"))?;
+    let ack = match h.cancel(&venue_id_str) {
+        Ok(Net::Ok(a)) => a,
+        Ok(Net::Failed) => {
+            let msg = format!("Cancel outcome for '{}' is unknown", current.order_id);
+            return err(if oco { "oco_unknown" } else { "broker_unknown" }, msg);
+        }
+        Err(e) => return Err(e),
+    };
+    let plan = plan::cancel_ack(&ack.status, reason, ack.message.as_deref().unwrap_or(""), &current.order_id, oco)?;
+    match plan.action {
+        plan::Ack::Accepted => {
+            let payload = Obj::StateChange(OrderStateChange {
+                order_id: current.order_id.clone(),
+                reason: Some(reason.to_string()),
+                venue_order_id: Some(ack.venue_order_id.clone()),
+            });
+            append(h, &current.account_id, EventKind::OrderCancelled, payload, &format!("{command}:accepted"))?;
+            get_order(h, &current.order_id)
+        }
+        plan::Ack::Rejected => {
+            refuse(h, &current, &plan.reason, &format!("{command}:refused"))?;
+            Err(plan.refusal.expect("cancel_ack: REJECTED carries its refusal"))
+        }
+        plan::Ack::Pending => {
+            let payload = Obj::StateChange(OrderStateChange {
+                order_id: current.order_id.clone(),
+                reason: Some(plan.reason.clone()),
+                venue_order_id: Some(ack.venue_order_id.clone()),
+            });
+            append(h, &current.account_id, EventKind::OrderPending, payload, &format!("{command}:venue-pending"))?;
+            if let Some(refused) = plan.refusal {
+                return Err(refused);
+            }
+            get_order(h, &current.order_id)
+        }
+    }
 }
 
 /// `_restore_working_state`: ORDER_UPDATED with the previous state and the venue id.
