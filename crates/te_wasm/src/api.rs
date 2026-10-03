@@ -95,7 +95,8 @@ pub fn instrument_from_value(v: &serde_json::Value) -> ApiResult<Instrument> {
         serde_json::Value::String(s) => parse_instrument(s),
         serde_json::Value::Object(map) => {
             if map.contains_key("dc") {
-                let text = serde_json::to_string(v).map_err(|e| ApiError::new("value", e.to_string()))?;
+                let text =
+                    serde_json::to_string(v).map_err(|e| ApiError::new("value", e.to_string()))?;
                 parse_instrument(&text)
             } else if let Some(sym) = map.get("symbol").and_then(|s| s.as_str()) {
                 Ok(Instrument::Equity(sym.to_string()))
@@ -169,7 +170,9 @@ pub fn parse_vorder_value(v: &serde_json::Value) -> ApiResult<VOrder> {
 
             let mut allocs = Vec::new();
             if let Some(alloc_val) = map.get("allocs").or_else(|| map.get("allocations")) {
-                let arr = alloc_val.as_array().ok_or_else(|| ApiError::new("value", "allocations must be an array"))?;
+                let arr = alloc_val
+                    .as_array()
+                    .ok_or_else(|| ApiError::new("value", "allocations must be an array"))?;
                 for it in arr {
                     match it {
                         serde_json::Value::Object(am) => {
@@ -195,9 +198,15 @@ pub fn parse_vorder_value(v: &serde_json::Value) -> ApiResult<VOrder> {
                             });
                         }
                         serde_json::Value::Array(triple) if triple.len() == 3 => {
-                            let soid = triple[0].as_str().ok_or_else(|| ApiError::new("value", "bad alloc soid"))?;
-                            let account = triple[1].as_str().ok_or_else(|| ApiError::new("value", "bad alloc account"))?;
-                            let q = triple[2].as_str().ok_or_else(|| ApiError::new("value", "bad alloc qty"))?;
+                            let soid = triple[0]
+                                .as_str()
+                                .ok_or_else(|| ApiError::new("value", "bad alloc soid"))?;
+                            let account = triple[1]
+                                .as_str()
+                                .ok_or_else(|| ApiError::new("value", "bad alloc account"))?;
+                            let q = triple[2]
+                                .as_str()
+                                .ok_or_else(|| ApiError::new("value", "bad alloc qty"))?;
                             allocs.push(Alloc {
                                 soid: soid.to_string(),
                                 account: account.to_string(),
@@ -237,16 +246,36 @@ pub fn parse_vorder_value(v: &serde_json::Value) -> ApiResult<VOrder> {
             })
         }
         serde_json::Value::Array(arr) if arr.len() == 11 => {
-            let id = arr[0].as_str().ok_or_else(|| ApiError::new("value", "bad order id"))?;
+            let id = arr[0]
+                .as_str()
+                .ok_or_else(|| ApiError::new("value", "bad order id"))?;
             let instr = instrument_from_value(&arr[1])?;
-            let otype = parse_order_type(arr[2].as_str().ok_or_else(|| ApiError::new("value", "bad otype"))?)?;
-            let side = parse_side(arr[3].as_str().ok_or_else(|| ApiError::new("value", "bad side"))?)?;
-            let quantity = parse_dec(arr[4].as_str().ok_or_else(|| ApiError::new("value", "bad quantity"))?)?;
+            let otype = parse_order_type(
+                arr[2]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad otype"))?,
+            )?;
+            let side = parse_side(
+                arr[3]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad side"))?,
+            )?;
+            let quantity = parse_dec(
+                arr[4]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad quantity"))?,
+            )?;
             let submitted_at = parse_ts(
-                arr[5].as_str().ok_or_else(|| ApiError::new("value", "bad submitted_at"))?,
+                arr[5]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad submitted_at"))?,
                 "submitted_at",
             )?;
-            let tif = parse_tif(arr[6].as_str().ok_or_else(|| ApiError::new("value", "bad tif"))?)?;
+            let tif = parse_tif(
+                arr[6]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad tif"))?,
+            )?;
 
             let (limit, stop, trail) = match &arr[7] {
                 serde_json::Value::Array(tri) if tri.len() == 3 => {
@@ -275,9 +304,15 @@ pub fn parse_vorder_value(v: &serde_json::Value) -> ApiResult<VOrder> {
                 for item in items {
                     match item {
                         serde_json::Value::Array(triple) if triple.len() == 3 => {
-                            let soid = triple[0].as_str().ok_or_else(|| ApiError::new("value", "bad soid"))?;
-                            let account = triple[1].as_str().ok_or_else(|| ApiError::new("value", "bad account"))?;
-                            let q = triple[2].as_str().ok_or_else(|| ApiError::new("value", "bad qty"))?;
+                            let soid = triple[0]
+                                .as_str()
+                                .ok_or_else(|| ApiError::new("value", "bad soid"))?;
+                            let account = triple[1]
+                                .as_str()
+                                .ok_or_else(|| ApiError::new("value", "bad account"))?;
+                            let q = triple[2]
+                                .as_str()
+                                .ok_or_else(|| ApiError::new("value", "bad qty"))?;
                             allocs.push(Alloc {
                                 soid: soid.to_string(),
                                 account: account.to_string(),
@@ -343,12 +378,30 @@ pub fn parse_bar_value(v: &serde_json::Value) -> ApiResult<sb::Bar> {
                 .and_then(|x| x.as_str())
                 .ok_or_else(|| ApiError::new("value", "missing or non-string bar timestamp"))?;
             let ts = parse_ts(ts_str, "Bar timestamp")?;
-            let o = map.get("open").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "missing bar open"))?;
-            let h = map.get("high").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "missing bar high"))?;
-            let l = map.get("low").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "missing bar low"))?;
-            let c = map.get("close").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "missing bar close"))?;
-            let vol = map.get("volume").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "missing bar volume"))?;
-            let as_of_str = map.get("as_of").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "missing bar as_of"))?;
+            let o = map
+                .get("open")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| ApiError::new("value", "missing bar open"))?;
+            let h = map
+                .get("high")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| ApiError::new("value", "missing bar high"))?;
+            let l = map
+                .get("low")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| ApiError::new("value", "missing bar low"))?;
+            let c = map
+                .get("close")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| ApiError::new("value", "missing bar close"))?;
+            let vol = map
+                .get("volume")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| ApiError::new("value", "missing bar volume"))?;
+            let as_of_str = map
+                .get("as_of")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| ApiError::new("value", "missing bar as_of"))?;
             let as_of = parse_ts(as_of_str, "Bar as_of")?;
 
             Ok(sb::Bar {
@@ -365,16 +418,40 @@ pub fn parse_bar_value(v: &serde_json::Value) -> ApiResult<sb::Bar> {
         serde_json::Value::Array(arr) if arr.len() == 8 => {
             let instr = instrument_from_value(&arr[0])?;
             let ts = parse_ts(
-                arr[1].as_str().ok_or_else(|| ApiError::new("value", "bad bar ts"))?,
+                arr[1]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad bar ts"))?,
                 "Bar timestamp",
             )?;
-            let open = parse_dec(arr[2].as_str().ok_or_else(|| ApiError::new("value", "bad open"))?)?;
-            let high = parse_dec(arr[3].as_str().ok_or_else(|| ApiError::new("value", "bad high"))?)?;
-            let low = parse_dec(arr[4].as_str().ok_or_else(|| ApiError::new("value", "bad low"))?)?;
-            let close = parse_dec(arr[5].as_str().ok_or_else(|| ApiError::new("value", "bad close"))?)?;
-            let volume = parse_dec(arr[6].as_str().ok_or_else(|| ApiError::new("value", "bad volume"))?)?;
+            let open = parse_dec(
+                arr[2]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad open"))?,
+            )?;
+            let high = parse_dec(
+                arr[3]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad high"))?,
+            )?;
+            let low = parse_dec(
+                arr[4]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad low"))?,
+            )?;
+            let close = parse_dec(
+                arr[5]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad close"))?,
+            )?;
+            let volume = parse_dec(
+                arr[6]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad volume"))?,
+            )?;
             let as_of = parse_ts(
-                arr[7].as_str().ok_or_else(|| ApiError::new("value", "bad as_of"))?,
+                arr[7]
+                    .as_str()
+                    .ok_or_else(|| ApiError::new("value", "bad as_of"))?,
                 "Bar as_of",
             )?;
             Ok(sb::Bar {
@@ -507,18 +584,24 @@ impl SimBookApi {
         let pv: serde_json::Value = serde_json::from_str(positions_json)
             .map_err(|e| ApiError::new("value", format!("malformed positions JSON: {e}")))?;
 
-        let o_arr = ov.as_array().ok_or_else(|| ApiError::new("value", "orders must be an array"))?;
+        let o_arr = ov
+            .as_array()
+            .ok_or_else(|| ApiError::new("value", "orders must be an array"))?;
         let mut orders = Vec::new();
         for item in o_arr {
             match item {
                 serde_json::Value::Array(pair) if pair.len() == 2 => {
                     let order = parse_vorder_value(&pair[0])?;
-                    let state_str = pair[1].as_str().ok_or_else(|| ApiError::new("value", "bad state"))?;
+                    let state_str = pair[1]
+                        .as_str()
+                        .ok_or_else(|| ApiError::new("value", "bad state"))?;
                     let state = parse_order_state(state_str)?;
                     orders.push((order, state));
                 }
                 serde_json::Value::Object(m) => {
-                    let order_val = m.get("order").ok_or_else(|| ApiError::new("value", "missing order"))?;
+                    let order_val = m
+                        .get("order")
+                        .ok_or_else(|| ApiError::new("value", "missing order"))?;
                     let order = parse_vorder_value(order_val)?;
                     let state_str = m
                         .get("state")
@@ -531,21 +614,41 @@ impl SimBookApi {
             }
         }
 
-        let f_arr = fv.as_array().ok_or_else(|| ApiError::new("value", "fills must be an array"))?;
+        let f_arr = fv
+            .as_array()
+            .ok_or_else(|| ApiError::new("value", "fills must be an array"))?;
         let mut fills = Vec::new();
         for (i, item) in f_arr.iter().enumerate() {
             match item {
                 serde_json::Value::Array(arr) if arr.len() == 7 => {
-                    let fid = arr[0].as_str().ok_or_else(|| ApiError::new("value", "bad fill_id"))?;
-                    let oid = arr[1].as_str().ok_or_else(|| ApiError::new("value", "bad order_id"))?;
+                    let fid = arr[0]
+                        .as_str()
+                        .ok_or_else(|| ApiError::new("value", "bad fill_id"))?;
+                    let oid = arr[1]
+                        .as_str()
+                        .ok_or_else(|| ApiError::new("value", "bad order_id"))?;
                     let instr = instrument_from_value(&arr[2])?;
-                    let q = parse_dec(arr[3].as_str().ok_or_else(|| ApiError::new("value", "bad fill qty"))?)?;
-                    let p = parse_dec(arr[4].as_str().ok_or_else(|| ApiError::new("value", "bad fill price"))?)?;
+                    let q = parse_dec(
+                        arr[3]
+                            .as_str()
+                            .ok_or_else(|| ApiError::new("value", "bad fill qty"))?,
+                    )?;
+                    let p = parse_dec(
+                        arr[4]
+                            .as_str()
+                            .ok_or_else(|| ApiError::new("value", "bad fill price"))?,
+                    )?;
                     let at = parse_ts(
-                        arr[5].as_str().ok_or_else(|| ApiError::new("value", "bad filled_at"))?,
+                        arr[5]
+                            .as_str()
+                            .ok_or_else(|| ApiError::new("value", "bad filled_at"))?,
                         "filled_at",
                     )?;
-                    let sd = parse_side(arr[6].as_str().ok_or_else(|| ApiError::new("value", "bad fill side"))?)?;
+                    let sd = parse_side(
+                        arr[6]
+                            .as_str()
+                            .ok_or_else(|| ApiError::new("value", "bad fill side"))?,
+                    )?;
                     fills.push(VFill {
                         fill_id: fid.to_string(),
                         order_id: oid.to_string(),
@@ -558,14 +661,36 @@ impl SimBookApi {
                     });
                 }
                 serde_json::Value::Object(m) => {
-                    let fid = m.get("fill_id").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad fill_id"))?;
-                    let oid = m.get("order_id").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad order_id"))?;
-                    let instr_val = m.get("instr").or_else(|| m.get("instrument")).ok_or_else(|| ApiError::new("value", "missing fill instr"))?;
+                    let fid = m
+                        .get("fill_id")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad fill_id"))?;
+                    let oid = m
+                        .get("order_id")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad order_id"))?;
+                    let instr_val = m
+                        .get("instr")
+                        .or_else(|| m.get("instrument"))
+                        .ok_or_else(|| ApiError::new("value", "missing fill instr"))?;
                     let instr = instrument_from_value(instr_val)?;
-                    let q_str = m.get("quantity").or_else(|| m.get("qty")).and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad fill qty"))?;
-                    let p_str = m.get("price").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad fill price"))?;
-                    let at_str = m.get("filled_at").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad filled_at"))?;
-                    let sd_str = m.get("side").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad fill side"))?;
+                    let q_str = m
+                        .get("quantity")
+                        .or_else(|| m.get("qty"))
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad fill qty"))?;
+                    let p_str = m
+                        .get("price")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad fill price"))?;
+                    let at_str = m
+                        .get("filled_at")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad filled_at"))?;
+                    let sd_str = m
+                        .get("side")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad fill side"))?;
                     fills.push(VFill {
                         fill_id: fid.to_string(),
                         order_id: oid.to_string(),
@@ -581,26 +706,57 @@ impl SimBookApi {
             }
         }
 
-        let p_arr = pv.as_array().ok_or_else(|| ApiError::new("value", "positions must be an array"))?;
+        let p_arr = pv
+            .as_array()
+            .ok_or_else(|| ApiError::new("value", "positions must be an array"))?;
         let mut positions = Vec::new();
         for item in p_arr {
             match item {
                 serde_json::Value::Array(arr) if arr.len() == 4 => {
                     let instr = instrument_from_value(&arr[0])?;
-                    let q = parse_dec(arr[1].as_str().ok_or_else(|| ApiError::new("value", "bad pos qty"))?)?;
-                    let avg = parse_dec(arr[2].as_str().ok_or_else(|| ApiError::new("value", "bad pos avg"))?)?;
+                    let q = parse_dec(
+                        arr[1]
+                            .as_str()
+                            .ok_or_else(|| ApiError::new("value", "bad pos qty"))?,
+                    )?;
+                    let avg = parse_dec(
+                        arr[2]
+                            .as_str()
+                            .ok_or_else(|| ApiError::new("value", "bad pos avg"))?,
+                    )?;
                     let as_of = parse_ts(
-                        arr[3].as_str().ok_or_else(|| ApiError::new("value", "bad pos as_of"))?,
+                        arr[3]
+                            .as_str()
+                            .ok_or_else(|| ApiError::new("value", "bad pos as_of"))?,
                         "as_of",
                     )?;
-                    positions.push(Pos { instr, qty: q, avg, as_of });
+                    positions.push(Pos {
+                        instr,
+                        qty: q,
+                        avg,
+                        as_of,
+                    });
                 }
                 serde_json::Value::Object(m) => {
-                    let instr_val = m.get("instr").or_else(|| m.get("instrument")).ok_or_else(|| ApiError::new("value", "missing pos instr"))?;
+                    let instr_val = m
+                        .get("instr")
+                        .or_else(|| m.get("instrument"))
+                        .ok_or_else(|| ApiError::new("value", "missing pos instr"))?;
                     let instr = instrument_from_value(instr_val)?;
-                    let q_str = m.get("quantity").or_else(|| m.get("qty")).and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad pos qty"))?;
-                    let avg_str = m.get("avg_price").or_else(|| m.get("avg")).and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad pos avg"))?;
-                    let as_of_str = m.get("as_of").and_then(|x| x.as_str()).ok_or_else(|| ApiError::new("value", "bad pos as_of"))?;
+                    let q_str = m
+                        .get("quantity")
+                        .or_else(|| m.get("qty"))
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad pos qty"))?;
+                    let avg_str = m
+                        .get("avg_price")
+                        .or_else(|| m.get("avg"))
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad pos avg"))?;
+                    let as_of_str = m
+                        .get("as_of")
+                        .and_then(|x| x.as_str())
+                        .ok_or_else(|| ApiError::new("value", "bad pos as_of"))?;
                     positions.push(Pos {
                         instr,
                         qty: parse_dec(q_str)?,
@@ -668,11 +824,18 @@ impl SimBookApi {
     }
 
     pub fn replace_reject(&mut self, id: &str, msg: &str, now_iso: &str) -> ApiResult<String> {
-        let ack = with_clock(now_iso, |c| self.book.replace_reject(id, msg.to_string(), c))?;
+        let ack = with_clock(now_iso, |c| {
+            self.book.replace_reject(id, msg.to_string(), c)
+        })?;
         Ok(serialize_ack(&ack))
     }
 
-    pub fn replace_commit(&mut self, id: &str, order_json: &str, now_iso: &str) -> ApiResult<String> {
+    pub fn replace_commit(
+        &mut self,
+        id: &str,
+        order_json: &str,
+        now_iso: &str,
+    ) -> ApiResult<String> {
         let order = parse_vorder_json(order_json)?;
         let book = &mut self.book;
         let ack = with_clock(now_iso, |c| book.replace_commit(id, order, c))?;
@@ -757,7 +920,10 @@ impl SimBookApi {
 
     pub fn fill(&self, i: usize) -> ApiResult<String> {
         if i >= self.book.fills.len() {
-            return fail("value", format!("fill index {i} out of range 0..{}", self.book.fills.len()));
+            return fail(
+                "value",
+                format!("fill index {i} out of range 0..{}", self.book.fills.len()),
+            );
         }
         let f = &self.book.fills[i];
         let sym = f.instr.symbol().unwrap_or_else(|_| "UNKNOWN".to_string());

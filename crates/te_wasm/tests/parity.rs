@@ -90,11 +90,11 @@ struct WalkContext<'a> {
 impl<'a> WalkContext<'a> {
     fn new(rng: &'a mut Rng, tally: &'a mut Tally, seed: usize) -> Option<Self> {
         let days = [
-            NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),  // regular session
+            NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(), // regular session
             NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(), // regular summer
             NaiveDate::from_ymd_opt(2026, 11, 27).unwrap(), // early close (day after Thanksgiving)
             NaiveDate::from_ymd_opt(2026, 12, 24).unwrap(), // early close (Christmas Eve)
-            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),  // day after New Year
+            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(), // day after New Year
         ];
         let day = *rng.choice(&days);
         let open_ts = session_open(day).unwrap();
@@ -142,7 +142,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.msg, ae.msg);
                 None
             }
-            (d, a) => panic!("Mismatch on construction: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on construction: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
     }
 
@@ -162,7 +166,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.kind, ae.kind);
                 assert_eq!(de.msg, ae.msg);
             }
-            (d, a) => panic!("Mismatch on connect: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on connect: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
     }
 
@@ -181,7 +189,11 @@ impl<'a> WalkContext<'a> {
         self.order_counter += 1;
         let id = format!("ord_{}", self.order_counter);
 
-        let sym = if self.rng.gen_bool(0.6) { "AAPL" } else { "MSFT" };
+        let sym = if self.rng.gen_bool(0.6) {
+            "AAPL"
+        } else {
+            "MSFT"
+        };
         let instr = Instrument::Equity(sym.to_string());
         let price_cents = self.prices[sym];
 
@@ -191,7 +203,11 @@ impl<'a> WalkContext<'a> {
             OrderType::Stop,
             OrderType::StopLimit,
         ]);
-        let side = if self.rng.gen_bool(0.5) { Side::Buy } else { Side::Sell };
+        let side = if self.rng.gen_bool(0.5) {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         let tif = *self.rng.choice(&[Tif::Day, Tif::Gtc, Tif::Opg]);
 
         let qty_int = self.rng.gen_range(1, 100);
@@ -204,17 +220,29 @@ impl<'a> WalkContext<'a> {
         match otype {
             OrderType::Limit => {
                 let offset = self.rng.gen_range(1, 200) as i64;
-                let p = if side == Side::Buy { price_cents - offset } else { price_cents + offset };
+                let p = if side == Side::Buy {
+                    price_cents - offset
+                } else {
+                    price_cents + offset
+                };
                 limit = Some(dec(&cents(p.max(100))));
             }
             OrderType::Stop => {
                 let offset = self.rng.gen_range(1, 200) as i64;
-                let p = if side == Side::Buy { price_cents + offset } else { price_cents - offset };
+                let p = if side == Side::Buy {
+                    price_cents + offset
+                } else {
+                    price_cents - offset
+                };
                 stop = Some(dec(&cents(p.max(100))));
             }
             OrderType::StopLimit => {
                 let offset = self.rng.gen_range(1, 200) as i64;
-                let sp = if side == Side::Buy { price_cents + offset } else { price_cents - offset };
+                let sp = if side == Side::Buy {
+                    price_cents + offset
+                } else {
+                    price_cents - offset
+                };
                 let lp = if side == Side::Buy { sp + 50 } else { sp - 50 };
                 stop = Some(dec(&cents(sp.max(100))));
                 limit = Some(dec(&cents(lp.max(100))));
@@ -236,7 +264,11 @@ impl<'a> WalkContext<'a> {
             self.tally.submits += 1;
         }
 
-        let alloc_account = if self.rng.gen_bool(0.98) { "ACC" } else { "WRONG_ACC" };
+        let alloc_account = if self.rng.gen_bool(0.98) {
+            "ACC"
+        } else {
+            "WRONG_ACC"
+        };
         let order = VOrder {
             id: id.clone(),
             instr,
@@ -277,7 +309,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.kind, ae.kind);
                 assert_eq!(de.msg, ae.msg);
             }
-            (d, a) => panic!("Mismatch on submit: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on submit: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
     }
 
@@ -285,7 +321,11 @@ impl<'a> WalkContext<'a> {
         self.tally.steps += 1;
         self.tally.bars += 1;
 
-        let sym = if self.rng.gen_bool(0.5) { "AAPL" } else { "MSFT" };
+        let sym = if self.rng.gen_bool(0.5) {
+            "AAPL"
+        } else {
+            "MSFT"
+        };
         let instr = Instrument::Equity(sym.to_string());
         let p = self.prices[sym];
 
@@ -378,7 +418,11 @@ impl<'a> WalkContext<'a> {
                         assert_eq!(de.kind, ae.kind);
                         assert_eq!(de.msg, ae.msg);
                     }
-                    (d, a) => panic!("Expected refusal on None bar: direct={:?}, api={:?}", d.err(), a.err()),
+                    (d, a) => panic!(
+                        "Expected refusal on None bar: direct={:?}, api={:?}",
+                        d.err(),
+                        a.err()
+                    ),
                 }
             }
             1 => {
@@ -404,7 +448,11 @@ impl<'a> WalkContext<'a> {
                         assert_eq!(de.kind, ae.kind);
                         assert_eq!(de.msg, ae.msg);
                     }
-                    (d, a) => panic!("Expected refusal on non-minute bar: direct={:?}, api={:?}", d.err(), a.err()),
+                    (d, a) => panic!(
+                        "Expected refusal on non-minute bar: direct={:?}, api={:?}",
+                        d.err(),
+                        a.err()
+                    ),
                 }
             }
             2 => {
@@ -430,7 +478,11 @@ impl<'a> WalkContext<'a> {
                         assert_eq!(de.kind, ae.kind);
                         assert_eq!(de.msg, ae.msg);
                     }
-                    (d, a) => panic!("Expected refusal on non-session bar: direct={:?}, api={:?}", d.err(), a.err()),
+                    (d, a) => panic!(
+                        "Expected refusal on non-session bar: direct={:?}, api={:?}",
+                        d.err(),
+                        a.err()
+                    ),
                 }
             }
             3 => {
@@ -456,7 +508,11 @@ impl<'a> WalkContext<'a> {
                             assert_eq!(de.kind, ae.kind);
                             assert_eq!(de.msg, ae.msg);
                         }
-                        (d, a) => panic!("Expected refusal on out-of-order bar: direct={:?}, api={:?}", d.err(), a.err()),
+                        (d, a) => panic!(
+                            "Expected refusal on out-of-order bar: direct={:?}, api={:?}",
+                            d.err(),
+                            a.err()
+                        ),
                     }
                 }
             }
@@ -487,7 +543,11 @@ impl<'a> WalkContext<'a> {
                         assert_eq!(de.kind, ae.kind);
                         assert_eq!(de.msg, ae.msg);
                     }
-                    (d, a) => panic!("Expected refusal on non-equity bar: direct={:?}, api={:?}", d.err(), a.err()),
+                    (d, a) => panic!(
+                        "Expected refusal on non-equity bar: direct={:?}, api={:?}",
+                        d.err(),
+                        a.err()
+                    ),
                 }
             }
         }
@@ -517,7 +577,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.kind, ae.kind);
                 assert_eq!(de.msg, ae.msg);
             }
-            (d, a) => panic!("Mismatch on cancel: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on cancel: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
     }
 
@@ -544,7 +608,9 @@ impl<'a> WalkContext<'a> {
         let direct_begin = self.direct.replace_begin(&id, new_qty_val.clone(), &mut c);
 
         let new_qty_str = new_qty_val.as_ref().map(|d| d.to_py_string());
-        let api_begin = self.api.replace_begin(&id, new_qty_str.as_deref(), &now_iso);
+        let api_begin = self
+            .api
+            .replace_begin(&id, new_qty_str.as_deref(), &now_iso);
 
         match (direct_begin, api_begin) {
             (Ok(Begin::Done(da)), Ok(aj)) => {
@@ -572,7 +638,11 @@ impl<'a> WalkContext<'a> {
                             assert_eq!(de.kind, ae.kind);
                             assert_eq!(de.msg, ae.msg);
                         }
-                        (d, a) => panic!("Mismatch on replace_reject: direct={:?}, api={:?}", d.err(), a.err()),
+                        (d, a) => panic!(
+                            "Mismatch on replace_reject: direct={:?}, api={:?}",
+                            d.err(),
+                            a.err()
+                        ),
                     }
                 } else if let Some(mut updated) = self.all_orders.get(&id).cloned() {
                     updated.quantity = dq;
@@ -590,7 +660,11 @@ impl<'a> WalkContext<'a> {
                             assert_eq!(de.kind, ae.kind);
                             assert_eq!(de.msg, ae.msg);
                         }
-                        (d, a) => panic!("Mismatch on replace_commit: direct={:?}, api={:?}", d.err(), a.err()),
+                        (d, a) => panic!(
+                            "Mismatch on replace_commit: direct={:?}, api={:?}",
+                            d.err(),
+                            a.err()
+                        ),
                     }
                 }
             }
@@ -599,7 +673,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.kind, ae.kind);
                 assert_eq!(de.msg, ae.msg);
             }
-            (d, a) => panic!("Mismatch on replace_begin: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on replace_begin: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
     }
 
@@ -634,7 +712,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.kind, ae.kind);
                 assert_eq!(de.msg, ae.msg);
             }
-            (d, a) => panic!("Mismatch on orders_since: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on orders_since: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
 
         // 2. fills_since
@@ -651,7 +733,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.kind, ae.kind);
                 assert_eq!(de.msg, ae.msg);
             }
-            (d, a) => panic!("Mismatch on fills_since: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on fills_since: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
 
         // 3. positions
@@ -674,7 +760,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.kind, ae.kind);
                 assert_eq!(de.msg, ae.msg);
             }
-            (d, a) => panic!("Mismatch on positions: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on positions: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
 
         // 4. has and fill_count and fill
@@ -726,7 +816,11 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(de.msg, ae.msg);
             }
             (Ok(_), Ok(_)) => panic!("Expected bad json to fail: {bad_json}"),
-            (d, a) => panic!("Mismatch on malformed json: direct={:?}, api={:?}", d.err(), a.err()),
+            (d, a) => panic!(
+                "Mismatch on malformed json: direct={:?}, api={:?}",
+                d.err(),
+                a.err()
+            ),
         }
     }
 }
@@ -783,20 +877,25 @@ fn test_restore_parity() {
         &mut c1,
     );
 
-    let orders_json = serde_json::to_string(&serde_json::json!([
-        [serde_json::from_str::<serde_json::Value>(&vorder_to_json(&order)).unwrap(), "PARTIALLY_FILLED"]
-    ]))
+    let orders_json = serde_json::to_string(&serde_json::json!([[
+        serde_json::from_str::<serde_json::Value>(&vorder_to_json(&order)).unwrap(),
+        "PARTIALLY_FILLED"
+    ]]))
     .unwrap();
 
-    let fills_json = serde_json::to_string(&serde_json::json!([
-        ["v1:fill:1", "v1", "AAPL", "50", "149.50", now_iso, "BUY"]
-    ]))
+    let fills_json = serde_json::to_string(&serde_json::json!([[
+        "v1:fill:1",
+        "v1",
+        "AAPL",
+        "50",
+        "149.50",
+        now_iso,
+        "BUY"
+    ]]))
     .unwrap();
 
-    let positions_json = serde_json::to_string(&serde_json::json!([
-        ["AAPL", "50", "149.50", now_iso]
-    ]))
-    .unwrap();
+    let positions_json =
+        serde_json::to_string(&serde_json::json!([["AAPL", "50", "149.50", now_iso]])).unwrap();
 
     let api_res = api_book.restore(&orders_json, &fills_json, &positions_json, now_iso);
 
@@ -810,10 +909,7 @@ fn test_restore_parity() {
 
     assert_eq!(direct_fail.unwrap_err().kind, "sim");
     assert_eq!(api_fail.unwrap_err().kind, "sim");
-    assert_eq!(
-        direct_book.state_of("v1").is_some(),
-        api_book.has("v1")
-    );
+    assert_eq!(direct_book.state_of("v1").is_some(), api_book.has("v1"));
 }
 
 fn test_trailing_parity() {
@@ -859,7 +955,9 @@ fn test_trailing_parity() {
         );
         assert_eq!(
             t.stop_price.as_ref().map(|d| d.to_py_string()),
-            api_out["state"]["stop_price"].as_str().map(|s| s.to_string())
+            api_out["state"]["stop_price"]
+                .as_str()
+                .map(|s| s.to_string())
         );
 
         state_json = serde_json::to_string(&api_out["state"]).unwrap();
@@ -933,7 +1031,11 @@ fn test_sim_book_parity_walks() {
         tally.refusals_matched,
     );
 
-    assert!(tally.steps >= 10000, "Expected at least 10,000 compared steps, got {}", tally.steps);
+    assert!(
+        tally.steps >= 10000,
+        "Expected at least 10,000 compared steps, got {}",
+        tally.steps
+    );
     assert!(tally.submits > 0);
     assert!(tally.brackets > 0);
     assert!(tally.cancels > 0);
@@ -966,7 +1068,10 @@ fn test_smoke_golden_session() {
         "oco": null,
     });
     let entry_ack_json = api
-        .submit(&serde_json::to_string(&entry_order).unwrap(), "2026-03-02T14:29:30+00:00")
+        .submit(
+            &serde_json::to_string(&entry_order).unwrap(),
+            "2026-03-02T14:29:30+00:00",
+        )
         .unwrap();
     let entry_ack: serde_json::Value = serde_json::from_str(&entry_ack_json).unwrap();
 
@@ -1004,7 +1109,10 @@ fn test_smoke_golden_session() {
         "oco": "entry_1:oco",
     });
     let target_ack_json = api
-        .submit(&serde_json::to_string(&target_order).unwrap(), "2026-03-02T14:30:30+00:00")
+        .submit(
+            &serde_json::to_string(&target_order).unwrap(),
+            "2026-03-02T14:30:30+00:00",
+        )
         .unwrap();
     let target_ack: serde_json::Value = serde_json::from_str(&target_ack_json).unwrap();
 
@@ -1025,7 +1133,10 @@ fn test_smoke_golden_session() {
         "oco": "entry_1:oco",
     });
     let stop_ack_json = api
-        .submit(&serde_json::to_string(&stop_order).unwrap(), "2026-03-02T14:30:30+00:00")
+        .submit(
+            &serde_json::to_string(&stop_order).unwrap(),
+            "2026-03-02T14:30:30+00:00",
+        )
         .unwrap();
     let stop_ack: serde_json::Value = serde_json::from_str(&stop_ack_json).unwrap();
 

@@ -21,7 +21,11 @@ pub struct SimBook {
 #[wasm_bindgen]
 impl SimBook {
     #[wasm_bindgen(constructor)]
-    pub fn new(account_id: &str, is_decimal: bool, slippage_bps: &str) -> Result<SimBook, wasm_bindgen::JsError> {
+    pub fn new(
+        account_id: &str,
+        is_decimal: bool,
+        slippage_bps: &str,
+    ) -> Result<SimBook, wasm_bindgen::JsError> {
         SimBookApi::new(account_id, is_decimal, slippage_bps)
             .map(|inner| SimBook { inner })
             .map_err(to_js_error)
@@ -43,7 +47,11 @@ impl SimBook {
             .map_err(to_js_error)
     }
 
-    pub fn submit(&mut self, order_json: &str, now_iso: &str) -> Result<String, wasm_bindgen::JsError> {
+    pub fn submit(
+        &mut self,
+        order_json: &str,
+        now_iso: &str,
+    ) -> Result<String, wasm_bindgen::JsError> {
         self.inner.submit(order_json, now_iso).map_err(to_js_error)
     }
 
@@ -62,15 +70,33 @@ impl SimBook {
             .map_err(to_js_error)
     }
 
-    pub fn replace_reject(&mut self, id: &str, msg: &str, now_iso: &str) -> Result<String, wasm_bindgen::JsError> {
-        self.inner.replace_reject(id, msg, now_iso).map_err(to_js_error)
+    pub fn replace_reject(
+        &mut self,
+        id: &str,
+        msg: &str,
+        now_iso: &str,
+    ) -> Result<String, wasm_bindgen::JsError> {
+        self.inner
+            .replace_reject(id, msg, now_iso)
+            .map_err(to_js_error)
     }
 
-    pub fn replace_commit(&mut self, id: &str, order_json: &str, now_iso: &str) -> Result<String, wasm_bindgen::JsError> {
-        self.inner.replace_commit(id, order_json, now_iso).map_err(to_js_error)
+    pub fn replace_commit(
+        &mut self,
+        id: &str,
+        order_json: &str,
+        now_iso: &str,
+    ) -> Result<String, wasm_bindgen::JsError> {
+        self.inner
+            .replace_commit(id, order_json, now_iso)
+            .map_err(to_js_error)
     }
 
-    pub fn orders_since(&mut self, since: &str, now_iso: &str) -> Result<String, wasm_bindgen::JsError> {
+    pub fn orders_since(
+        &mut self,
+        since: &str,
+        now_iso: &str,
+    ) -> Result<String, wasm_bindgen::JsError> {
         self.inner.orders_since(since, now_iso).map_err(to_js_error)
     }
 
@@ -78,7 +104,11 @@ impl SimBook {
         self.inner.orders(since, now_iso).map_err(to_js_error)
     }
 
-    pub fn fills_since(&mut self, since: &str, now_iso: &str) -> Result<String, wasm_bindgen::JsError> {
+    pub fn fills_since(
+        &mut self,
+        since: &str,
+        now_iso: &str,
+    ) -> Result<String, wasm_bindgen::JsError> {
         self.inner.fills_since(since, now_iso).map_err(to_js_error)
     }
 
@@ -90,8 +120,13 @@ impl SimBook {
         self.inner.positions(now_iso).map_err(to_js_error)
     }
 
-    pub fn process_bar(&mut self, bar_json: Option<String>) -> Result<String, wasm_bindgen::JsError> {
-        self.inner.process_bar(bar_json.as_deref()).map_err(to_js_error)
+    pub fn process_bar(
+        &mut self,
+        bar_json: Option<String>,
+    ) -> Result<String, wasm_bindgen::JsError> {
+        self.inner
+            .process_bar(bar_json.as_deref())
+            .map_err(to_js_error)
     }
 
     pub fn on_bar(&mut self, bar_json: Option<String>) -> Result<String, wasm_bindgen::JsError> {
