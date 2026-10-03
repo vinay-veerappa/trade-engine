@@ -1225,3 +1225,17 @@ fn test_smoke_golden_session() {
         );
     }
 }
+
+#[test]
+fn test_refusal_error_kinds() {
+    let err = api::parse_dec("abc").unwrap_err();
+    assert_eq!(err.kind, "value");
+    assert_eq!(err.msg, "not a Decimal: \"abc\"");
+
+    let mut book = api::SimBookApi::new("ACC", true, "0").unwrap();
+    let bad_order = "{\"id\": \"v1\", \"instr\": \"AAPL\", \"otype\": \"MARKET\", \"side\": \"BUY\", \"quantity\": \"not_dec\", \"submitted_at\": \"2026-03-02T14:30:00+00:00\", \"tif\": \"DAY\"}";
+    let submit_err = book
+        .submit(bad_order, "2026-03-02T14:30:00+00:00")
+        .unwrap_err();
+    assert_eq!(submit_err.kind, "value");
+}
