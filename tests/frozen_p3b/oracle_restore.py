@@ -1,3 +1,5 @@
+# FROZEN ORACLE, DO NOT EDIT. Verbatim from commit 7a8a62b: src/trade_engine/oms/restore.py (the pre-port
+# Python, P3b-1). Byte-identical below this header: it imports only production modules P3b-1 leaves in Python (oms.manager).
 """Restore an in-memory venue's book from the ledger fold (I2, shared by both runners).
 
 A new process starts with an empty venue while the ledger holds every working order,
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from trade_engine.domain.orders import OrderState
@@ -34,9 +37,8 @@ from trade_engine.interfaces.broker import (
     VenueOrderAllocation,
     VenuePosition,
 )
-from trade_engine.ledger import EventKind, codec
+from trade_engine.ledger import EventKind
 from trade_engine.ledger.state import AccountState
-from trade_engine.sim import _rs
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 # States in which the ledger says the venue holds the order.
@@ -54,9 +56,6 @@ class RestoreError(RuntimeError):
     """The ledger cannot rebuild the venue's book (I5)."""
 
 
-_rs.register("restore", RestoreError)
-
-
 @dataclass
 class PendingResolution:
     """What ``pending="resolve"`` did with the ledger's PENDING_UNKNOWN orders."""
@@ -65,17 +64,20 @@ class PendingResolution:
     unresolved: dict[str, str] = field(default_factory=dict)  # order id -> why not
 
 
-def _pending_events(ledger: Any, account_id: str) -> list[tuple[str, str | None, str]]:
-    return [
-        (event.payload.order_id, event.command_id, str(event.payload.reason))
-        for event in ledger.events(account=account_id)
-        if event.kind is EventKind.ORDER_PENDING
-    ]
-
-
 def pending_request(ledger: Any, account_id: str, order_id: str) -> str:
     """Which request left ``order_id`` pending: ``submit``, ``cancel`` or ``unknown``."""
-    return _rs.rs.oms_pending_request(_pending_events(ledger, account_id), order_id)
+    last = None
+    for event in ledger.events(account=account_id):
+        if event.kind is EventKind.ORDER_PENDING and event.payload.order_id == order_id:
+            last = event
+    if last is None:
+        return "unknown"
+    command = last.command_id or ""
+    if command.endswith(":submit-pending"):
+        return "submit"
+    if command.endswith(":pending") and str(last.payload.reason).startswith("Cancel pending"):
+        return "cancel"
+    return "unknown"
 
 
 def restorable(
@@ -87,59 +89,62 @@ def restorable(
     resolution: PendingResolution | None = None,
 ) -> tuple[list[tuple[VenueOrder, Any]], list[VenueFill]]:
     """Working orders plus their brackets: a child's cap needs its parent's fills
-    and its siblings' exits. NEW orders were never sent, so they stay out.
-
-    Which orders, fills and refusals is Rust's (``te_core::oms::restore``, P3b-1); the
-    ledger reads it needs come back through two callbacks, in the order it makes them,
-    and this builds the venue carriers from the state's own objects.
-    """
-    if not isinstance(pending, str):
+    and its siblings' exits. NEW orders were never sent, so they stay out."""
+    if pending not in ("refuse", "resolve"):
         raise ValueError(f"pending must be 'refuse' or 'resolve', got {pending!r}")
-    events: list[tuple[str, str | None, str]] = []
-    if (
-        pending == "resolve"
-        and resolution is not None
-        and any(order.state is OrderState.PENDING_UNKNOWN for order in state.orders.values())
-    ):
-        events = _pending_events(ledger, account_id)
-
-    def note(resolved: list[str], unresolved: list[tuple[str, str]]) -> None:
-        assert resolution is not None
-        resolution.resolved.extend(resolved)
-        resolution.unresolved.update(unresolved)
-
-    # The submission event is read for its timestamp too, so keep the one the check found.
-    found: dict[str, Any] = {}
-
-    def has_submission(command: str) -> bool:
-        event = ledger.event_by_command(command)
-        if event is not None:
-            found[command] = event
-        return event is not None
-
-    plan_orders, plan_fills = _rs.call(
-        _rs.rs.oms_restorable,
-        codec.text(codec.canon(state)),
-        account_id,
-        pending,
-        resolution is not None,
-        [] if resolution is None else list(resolution.unresolved),
-        events,
-        note,
-        has_submission,
-    )
+    if pending == "resolve" and resolution is None:
+        raise ValueError("pending='resolve' needs a PendingResolution to report into")
+    wanted: set[str] = set()
+    restored_as: dict[str, OrderState] = {}
+    for order in state.orders.values():
+        if order.state not in VENUE_WORKING:
+            continue
+        if order.state is OrderState.PENDING_UNKNOWN:
+            if pending == "refuse":
+                raise RestoreError(
+                    f"Order '{order.order_id}' for '{account_id}' is PENDING_UNKNOWN; the "
+                    f"simulated venue's answer is gone, reconcile it before replay (I5)"
+                )
+            request = pending_request(ledger, account_id, order.order_id)
+            if request == "submit":
+                restored_as[order.order_id] = OrderState.ACCEPTED
+            elif request == "cancel":
+                restored_as[order.order_id] = OrderState.CANCELLED
+            else:
+                resolution.unresolved[order.order_id] = (
+                    f"'{order.order_id}' is PENDING_UNKNOWN after a request that cannot be "
+                    f"carried out on a rebuilt venue; it stays unresolved (I5)"
+                )
+                continue
+            resolution.resolved.append(order.order_id)
+        root = order.parent_order_id or order.order_id
+        wanted.add(root)
+        wanted.update(
+            candidate.order_id
+            for candidate in state.orders.values()
+            if candidate.parent_order_id == root and candidate.state is not OrderState.NEW
+        )
     orders: list[tuple[VenueOrder, Any]] = []
-    for order_id, venue_order_id, venue_state in plan_orders:
+    for order_id in sorted(wanted):
         order = state.orders[order_id]
+        if resolution is not None and order_id in resolution.unresolved:
+            continue
+        submission = ledger.event_by_command(f"{order.command_id}:submit")
+        if submission is None:
+            raise RestoreError(
+                f"Order '{order_id}' for '{account_id}' has no submission event; cannot "
+                f"restore when it reached the venue (I5)"
+            )
+        venue_state = restored_as.get(order_id, order.state)
         orders.append(
             (
                 VenueOrder(
-                    venue_order_id=venue_order_id,
+                    venue_order_id=state.venue_order_ids.get(order_id, order_id),
                     instrument=order.instrument,
                     order_type=order.order_type,
                     side=order.side,
                     quantity=order.quantity,
-                    submitted_at=found[f"{order.command_id}:submit"].ts_utc,
+                    submitted_at=submission.ts_utc,
                     tif=order.tif,
                     limit_price=order.limit_price,
                     stop_price=order.stop_price,
@@ -150,35 +155,38 @@ def restorable(
                     parent_order_id=order.parent_order_id,
                     oco_group=order.oco_group,
                 ),
-                OrderState(venue_state),
+                venue_state,
             )
         )
-    fills = []
-    for index, venue_fill_id, venue_order_id in plan_fills:
-        fill = state.fills[index]
-        fills.append(
-            VenueFill(
-                venue_fill_id=venue_fill_id,
-                venue_order_id=venue_order_id,
-                instrument=fill.instrument,
-                quantity=fill.quantity,
-                price=fill.price,
-                filled_at=fill.filled_at,
-                side=fill.side,
-                fee=fill.fee,
-                leg_id=fill.leg_id,
-            )
+    kept = {venue_order.allocations[0].strategy_order_id for venue_order, _ in orders}
+    fills = [
+        VenueFill(
+            venue_fill_id=fill.venue_execution_id or fill.fill_id,
+            venue_order_id=state.venue_order_ids.get(fill.order_id, fill.order_id),
+            instrument=fill.instrument,
+            quantity=fill.quantity,
+            price=fill.price,
+            filled_at=fill.filled_at,
+            side=fill.side,
+            fee=fill.fee,
+            leg_id=fill.leg_id,
         )
+        for fill in state.fills
+        if fill.order_id in kept
+    ]
     return orders, fills
 
 
 def restorable_positions(state: AccountState) -> list[VenuePosition]:
-    held = list(state.positions.items())
     positions = []
-    for index, latest in _rs.call(_rs.rs.oms_restorable_positions, codec.text(codec.canon(state))):
-        instrument, position = held[index]
+    for instrument, position in state.positions.items():
+        if position.quantity == Decimal("0"):
+            continue
         # SimBroker reads only the quantity; as_of dates it by its latest fill.
-        as_of = MIN_TIME if latest is None else state.fills[latest].filled_at
+        as_of = max(
+            (fill.filled_at for fill in state.fills if fill.instrument == instrument),
+            default=MIN_TIME,
+        )
         positions.append(
             VenuePosition(
                 instrument=instrument,

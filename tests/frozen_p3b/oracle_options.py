@@ -1,3 +1,5 @@
+# FROZEN ORACLE, DO NOT EDIT. Verbatim from commit 7a8a62b: src/trade_engine/oms/options.py (the pre-port
+# Python, P3b-1). Byte-identical below this header: it imports only production modules P3b-1 leaves in Python (oms.manager).
 """Options structures through the OMS: open, rest a profit target, close once (O4).
 
 A structure is one entry order over a contract or an options combo. Its children are the
@@ -22,13 +24,20 @@ The guards the old options engine lacked (rules doc §7.1) are structural here:
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
+from types import MappingProxyType
 
 from trade_engine.domain.instruments import (
     Combo,
     ComboLeg,
+    Equity,
     Instrument,
+    OptionContract,
+    OptionRight,
     Side,
 )
 from trade_engine.domain.option_orders import (
@@ -37,10 +46,13 @@ from trade_engine.domain.option_orders import (
     OpenStructure,
     OptionIntent,
     StructureLeg,
+    is_structure,
     legs_of,
     reverse,
 )
+from trade_engine.domain.option_roots import option_style
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
+from trade_engine.domain.portfolio import Position
 from trade_engine.interfaces.broker import BrokerAdapter
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import Event, EventKind, Ledger, OrdersCreated
@@ -50,6 +62,7 @@ from trade_engine.ledger.state import AccountState
 from trade_engine.oms.manager import IdempotencyConflictError, OrderManagementError, OrderManager
 from trade_engine.sim import _rs
 
+ZERO = Decimal("0")
 _TERMINAL = frozenset({OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED})
 
 
@@ -69,20 +82,14 @@ class StructureClosedError(OptionOrderError):
     """C5: nothing of the structure is open, or its close is already working."""
 
 
-# The kinds Rust's refusals carry (te_core::oms), and the exception each one raises.
-_rs.register("option", OptionOrderError)
-_rs.register("duplicate", DuplicateEntryError)
-_rs.register("uncovered", UncoveredCallError)
-_rs.register("closed", StructureClosedError)
-_rs.register("idempotency", IdempotencyConflictError)
-
-
 def _target_id(entry_order_id: str) -> str:
     return f"{entry_order_id}:target"
 
 
-def _tree(value: object) -> str:
-    return codec.text(encode_payload(value))
+def _underlying(instrument: Instrument) -> str:
+    if isinstance(instrument, Equity):
+        return instrument.symbol
+    return option_style(instrument.underlying).underlying
 
 
 def _state_text(state: AccountState) -> str:
@@ -127,6 +134,10 @@ def open_structures(state: AccountState) -> tuple[OpenStructure, ...]:
     return tuple(found)
 
 
+def _working(order: Order) -> bool:
+    return order.state not in _TERMINAL
+
+
 def uncovered_calls(state: AccountState, *, closing_counts: bool) -> dict[str, tuple[Decimal, Decimal]]:
     """Per underlying: (shares the short calls no long call covers deliver, shares free).
 
@@ -158,23 +169,19 @@ class OptionOrderManager:
         fingerprint = self._intent_fingerprint(intent)
         existing = self._ledger.event_by_command(intent.command_id)
         if existing is not None:
-            _rs.call(
-                _rs.rs.oms_replay_conflict,
-                intent.command_id,
-                existing.kind is EventKind.ORDERS_CREATED,
-                existing.account == intent.account_id,
-            )
-            _rs.call(_rs.rs.oms_fingerprint_conflict, intent.command_id, existing.payload.fingerprint, fingerprint)
+            if (
+                existing.kind is not EventKind.ORDERS_CREATED
+                or existing.account != intent.account_id
+                or existing.payload.fingerprint != fingerprint
+            ):
+                raise IdempotencyConflictError(
+                    f"command_id '{intent.command_id}' was already used for a different command"
+                )
             return self._submit(existing.payload.orders[0])  # a replay changes nothing (I3)
         state = self._ledger.state(intent.account_id)
-        _rs.call(
-            _rs.rs.oms_plan_open,
-            _state_text(state),
-            intent.account_id,
-            _tree(intent.instrument),
-            intent.side.value,
-            str(intent.quantity),
-        )
+        if is_structure(intent.instrument):
+            self._refuse_duplicate(state, intent)
+            self._refuse_uncovered(state, intent)
         now = self._now()
         entry = Order(
             order_id=f"{intent.command_id}:entry",
@@ -214,51 +221,106 @@ class OptionOrderManager:
         )
         return self._submit(entry)
 
+    def _refuse_duplicate(self, state: AccountState, intent: OptionIntent) -> None:
+        wanted = {leg.contract for leg in legs_of(intent.instrument, intent.side)}
+        held = {c for c, p in state.positions.items() if isinstance(c, OptionContract) and p.quantity != 0}
+        entering = {
+            leg.contract
+            for order in state.orders.values()
+            if order.parent_order_id is None and _working(order) and is_structure(order.instrument)
+            for leg in legs_of(order.instrument, order.side)
+        }
+        clash = sorted(c.occ.strip() for c in wanted & (held | entering))
+        if clash:
+            raise DuplicateEntryError(
+                f"'{intent.account_id}' already holds or is entering {', '.join(clash)}; a second "
+                f"entry on the same contract is refused (C4)"
+            )
+
+    def _refuse_uncovered(self, state: AccountState, intent: OptionIntent) -> None:
+        added = [
+            leg
+            for leg in legs_of(intent.instrument, intent.side)
+            if leg.side is Side.SELL and leg.contract.right is OptionRight.CALL
+        ]
+        if not added:
+            return
+        # The intent's own long calls cover its short calls (a diagonal entered as one).
+        underlying = _underlying(added[0].contract)
+        simulated = self._with_intent(state, intent)
+        needed, shares = uncovered_calls(simulated, closing_counts=True).get(underlying, (ZERO, ZERO))
+        if needed > shares:
+            raise UncoveredCallError(
+                f"'{intent.account_id}' would be short calls delivering {needed} {underlying} "
+                f"shares with {shares} of its own and no long call behind the rest; an account "
+                f"writes calls only on what it holds (C3, I8)"
+            )
+
+    @staticmethod
+    def _with_intent(state: AccountState, intent: OptionIntent) -> AccountState:
+        """``state`` as if the intent had filled, for the cover check only."""
+        positions = dict(state.positions)
+        for leg in legs_of(intent.instrument, intent.side):
+            change = intent.quantity * leg.ratio * (1 if leg.side is Side.BUY else -1)
+            current = positions.get(leg.contract)
+            quantity = (ZERO if current is None else current.quantity) + change
+            positions[leg.contract] = Position(
+                account_id=state.account_id, instrument=leg.contract, quantity=quantity, avg_cost=ZERO
+            )
+        return replace(state, positions=MappingProxyType(positions))
+
     # -- close --------------------------------------------------------------------------
 
     def close(self, account_id: str, action: CloseStructure) -> Order:
         """Close what is open of a structure; its resting target is cancelled first."""
         existing = self._ledger.event_by_command(action.command_id)
         if existing is not None:
-            _rs.call(
-                _rs.rs.oms_replay_conflict,
-                action.command_id,
-                existing.kind is EventKind.ORDERS_CREATED,
-                existing.account == account_id,
-            )
+            if existing.kind is not EventKind.ORDERS_CREATED or existing.account != account_id:
+                raise IdempotencyConflictError(
+                    f"command_id '{action.command_id}' was already used for a different command"
+                )
             [order] = existing.payload.orders
-            _rs.call(_rs.rs.oms_close_target_conflict, action.command_id, order.parent_order_id, action.entry_order_id)
+            if order.parent_order_id != action.entry_order_id:
+                raise IdempotencyConflictError(
+                    f"command_id '{action.command_id}' closed '{order.parent_order_id}', not "
+                    f"'{action.entry_order_id}'"
+                )
             return self._submit(order)
         state = self._ledger.state(account_id)
-        order_id, mode, leg_indices, side_value, quantity, oco_group, target_id = _rs.call(
-            _rs.rs.oms_plan_close, _state_text(state), account_id, action.entry_order_id
+        structure = next(
+            (s for s in open_structures(state) if s.entry_order_id == action.entry_order_id), None
         )
-        entry = state.orders[action.entry_order_id]
-        held = legs_of(entry.instrument, entry.side)
-        open_legs = [held[i] for i in leg_indices]
-        if mode == "single":
-            instrument: Instrument = open_legs[0].contract
-        else:
-            instrument = reverse(
-                Combo(tuple(ComboLeg(leg.contract, leg.ratio, leg.side) for leg in open_legs)), entry.side
-            )[0]
+        if structure is None:
+            raise StructureClosedError(
+                f"'{action.entry_order_id}' in '{account_id}' has nothing open; it cannot be "
+                f"closed again (C5)"
+            )
+        if structure.closing_order_id is not None:
+            raise StructureClosedError(
+                f"'{action.entry_order_id}' already has close '{structure.closing_order_id}' "
+                f"working; a second close could over-close it (C5)"
+            )
+        instrument, side, quantity = self._closing_terms(structure)
+        number = 1 + sum(
+            1 for order in state.orders.values() if order.order_id.startswith(f"{structure.entry_order_id}:close:")
+        )
         close = Order(
-            order_id=order_id,
+            order_id=f"{structure.entry_order_id}:close:{number}",
             account_id=account_id,
             instrument=instrument,
             order_type=OrderType.MARKET if action.limit_price is None else OrderType.LIMIT,
-            side=Side(side_value),
-            quantity=Decimal(quantity),
+            side=side,
+            quantity=quantity,
             command_id=action.command_id,
             created_at=self._now(),
             limit_price=action.limit_price,
             tif=TimeInForce.DAY,
-            parent_order_id=action.entry_order_id,
-            oco_group=oco_group,
+            parent_order_id=structure.entry_order_id,
+            oco_group=f"{structure.command_id}:exits",
         )
-        if target_id is not None:
+        if structure.target_order_id is not None:
             # Both would buy back the same contracts at the same snapshot.
-            self.orders.cancel(target_id, command_id=f"{action.command_id}:replaces-target")
+            self.orders.cancel(structure.target_order_id, command_id=f"{action.command_id}:replaces-target")
         self._append(
             account_id,
             OrdersCreated(orders=(close,), fingerprint=self._order_fingerprint(close), reason=f"Options close: {action.reason}"),
@@ -266,28 +328,44 @@ class OptionOrderManager:
         )
         return self._submit(close)
 
+    @staticmethod
+    def _closing_terms(structure: OpenStructure) -> tuple[Instrument, Side, Decimal]:
+        """The order that reverses every leg still held, in whole units."""
+        open_legs = [leg for leg in structure.legs if leg.open_quantity > 0]
+        if len(open_legs) == 1:
+            leg = open_legs[0]
+            return leg.contract, Side.BUY if leg.side is Side.SELL else Side.SELL, leg.open_quantity
+        units = structure.units
+        if any(leg.open_quantity != units * leg.ratio for leg in open_legs):
+            raise OptionOrderError(
+                f"'{structure.entry_order_id}' holds its legs out of ratio "
+                f"({[(leg.contract.occ.strip(), leg.open_quantity) for leg in open_legs]}); "
+                f"close them one by one (I5)"
+            )
+        instrument, side = reverse(
+            Combo(tuple(ComboLeg(leg.contract, leg.ratio, leg.side) for leg in open_legs)),
+            structure.side,
+        )
+        return instrument, side, units
+
     def close_holding(self, account_id: str, action: CloseHolding) -> Order:
         """Sell (or cover) shares held outside any structure, at market."""
         existing = self._ledger.event_by_command(action.command_id)
         if existing is not None:
-            _rs.call(
-                _rs.rs.oms_replay_conflict,
-                action.command_id,
-                existing.kind is EventKind.ORDERS_CREATED,
-                existing.account == account_id,
-            )
+            if existing.kind is not EventKind.ORDERS_CREATED or existing.account != account_id:
+                raise IdempotencyConflictError(
+                    f"command_id '{action.command_id}' was already used for a different command"
+                )
             return self._submit(existing.payload.orders[0])
         state = self._ledger.state(account_id)
-        side = Side(
-            _rs.call(
-                _rs.rs.oms_plan_holding,
-                _state_text(state),
-                account_id,
-                _tree(action.instrument),
-                str(action.quantity),
-                action.command_id,
+        position = state.positions.get(action.instrument)
+        held = ZERO if position is None else position.quantity
+        if held == 0 or action.quantity > abs(held):
+            raise OptionOrderError(
+                f"'{account_id}' holds {held} {action.instrument.symbol}; it cannot close "
+                f"{action.quantity} (I8)"
             )
-        )
+        side = Side.SELL if held > 0 else Side.BUY
         order = Order(
             order_id=f"{action.command_id}:holding",
             account_id=account_id,
@@ -299,12 +377,29 @@ class OptionOrderManager:
             created_at=self._now(),
             tif=TimeInForce.DAY,
         )
+        if side is Side.SELL:
+            after = self._with_order(state, order)
+            needed, shares = uncovered_calls(after, closing_counts=False).get(
+                action.instrument.symbol, (ZERO, ZERO)
+            )
+            if needed > shares:
+                raise UncoveredCallError(
+                    f"Selling {action.quantity} {action.instrument.symbol} would leave short calls "
+                    f"in '{account_id}' delivering {needed} shares with {shares} behind them; "
+                    f"close the calls first or with it (C3, I8)"
+                )
         self._append(
             account_id,
             OrdersCreated(orders=(order,), fingerprint=self._order_fingerprint(order), reason=f"Holding close: {action.reason}"),
             action.command_id,
         )
         return self._submit(order)
+
+    @staticmethod
+    def _with_order(state: AccountState, order: Order) -> AccountState:
+        orders = dict(state.orders)
+        orders[order.order_id] = replace(order, state=OrderState.ACCEPTED)
+        return replace(state, orders=MappingProxyType(orders))
 
     # -- keeping children in step ---------------------------------------------------------
 
@@ -319,14 +414,29 @@ class OptionOrderManager:
           contracts it no longer holds.
         """
         state = self._ledger.state(account_id)
-        for child_id, action in _rs.call(_rs.rs.oms_sync_plan, _state_text(state)):
-            current = self.orders.get_order(child_id)
-            if current.state in _TERMINAL:
+        open_by_entry = {s.entry_order_id: s for s in open_structures(state)}
+        for entry in sorted(state.orders.values(), key=lambda order: order.order_id):
+            if entry.parent_order_id is not None or not is_structure(entry.instrument):
                 continue
-            if action in ("structure-done", "leg-settled"):
-                self.orders.cancel(child_id, command_id=f"{cause}:{child_id}:{action}")
-            elif action == "submit-target" and current.state is OrderState.NEW:
-                self._submit(current)
+            children = sorted(
+                (order for order in state.orders.values() if order.parent_order_id == entry.order_id),
+                key=lambda order: order.order_id,
+            )
+            structure = open_by_entry.get(entry.order_id)
+            filled = state.filled_quantity.get(entry.order_id, ZERO)
+            for child in children:
+                current = self.orders.get_order(child.order_id)
+                if current.state in _TERMINAL:
+                    continue
+                is_target = child.order_id == _target_id(entry.order_id)
+                if structure is None and (filled > 0 or entry.state in _TERMINAL):
+                    self.orders.cancel(child.order_id, command_id=f"{cause}:{child.order_id}:structure-done")
+                elif structure is not None and is_target and any(
+                    leg.open_quantity != structure.units * leg.ratio for leg in structure.legs
+                ):
+                    self.orders.cancel(child.order_id, command_id=f"{cause}:{child.order_id}:leg-settled")
+                elif is_target and current.state is OrderState.NEW and entry.state is OrderState.FILLED:
+                    self._submit(current)
 
     # -- plumbing -------------------------------------------------------------------------
 
@@ -354,21 +464,24 @@ class OptionOrderManager:
 
     @staticmethod
     def _intent_fingerprint(intent: OptionIntent) -> str:
-        return _rs.call(
-            _rs.rs.oms_intent_fingerprint,
-            intent.intent_id,
-            intent.account_id,
-            _tree(intent.instrument),
-            intent.side.value,
-            str(intent.quantity),
-            intent.order_type.value,
-            None if intent.limit_price is None else str(intent.limit_price),
-            intent.tif.value,
-            None if intent.profit_target is None else str(intent.profit_target),
-            intent.reason,
-        )
+        payload = {
+            "intent_id": intent.intent_id,
+            "account_id": intent.account_id,
+            "instrument": encode_payload(intent.instrument),
+            "side": intent.side.value,
+            "quantity": str(intent.quantity),
+            "order_type": intent.order_type.value,
+            "limit_price": None if intent.limit_price is None else str(intent.limit_price),
+            "tif": intent.tif.value,
+            "profit_target": None if intent.profit_target is None else str(intent.profit_target),
+            "reason": intent.reason,
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _order_fingerprint(order: Order) -> str:
         # The terms, not the instant: a replay at another clock reading is the same command.
-        return _rs.call(_rs.rs.oms_order_fingerprint, _tree(order))
+        terms = replace(order, created_at=datetime.min.replace(tzinfo=order.created_at.tzinfo))
+        raw = json.dumps(encode_payload(terms), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()

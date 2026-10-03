@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use te_core::calendar as cal;
 use te_core::greeks as gk;
 
+mod oms;
 mod sim;
 
 fn date(iso: &str) -> PyResult<NaiveDate> {
@@ -706,6 +707,7 @@ impl LedgerFold {
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     sim::register(m)?;
+    oms::register(m)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_holiday, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_early_close, m)?)?;
