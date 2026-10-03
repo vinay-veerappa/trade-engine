@@ -111,6 +111,88 @@ fn greeks_greeks(flag: &str, spot: f64, strike: f64, t: f64, rate: f64, q: f64, 
     Ok((g.delta, g.gamma, g.theta, g.vega, g.rho))
 }
 
+// --- margin (P1c) ------------------------------------------------------------------
+// Decimals cross as strings, contracts and positions as JSON (te_core::margin::wire).
+// A refusal is a ValueError whose args are (kind, message): the shim re-raises it as
+// the Python exception type `kind` names ("value", "option", "unresolvable").
+
+use te_core::margin::{wire, MarginError};
+
+fn refuse_margin(e: MarginError) -> PyErr {
+    PyValueError::new_err((e.kind(), e.message().to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (quantity, mark, initial=None, maintenance=None))]
+fn margin_requirement(
+    quantity: &str,
+    mark: &str,
+    initial: Option<&str>,
+    maintenance: Option<&str>,
+) -> PyResult<(String, String, String)> {
+    wire::requirement_str(quantity, mark, initial, maintenance).map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_validate_override(initial: &str, maintenance: &str) -> PyResult<()> {
+    wire::validate_override_str(initial, maintenance).map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_summary(equity: &str, maintenance: &str) -> PyResult<(String, String)> {
+    wire::summary_str(equity, maintenance).map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_naked(request: &str) -> PyResult<String> {
+    wire::naked_str(request).map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_match(request: &str) -> PyResult<String> {
+    wire::match_json(request).map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_strategy(request: &str) -> PyResult<String> {
+    wire::strategy_json(request).map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_book(request: &str) -> PyResult<String> {
+    wire::book_json(request).map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_account(request: &str) -> PyResult<String> {
+    wire::account_json(request).map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_constants() -> PyResult<String> {
+    wire::constants_json().map_err(refuse_margin)
+}
+
+#[pyfunction]
+fn margin_definitions() -> PyResult<String> {
+    wire::definitions_json().map_err(refuse_margin)
+}
+
+fn register_margin(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(margin_requirement, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_validate_override, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_summary, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_naked, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_match, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_strategy, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_book, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_account, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_constants, m)?)?;
+    m.add_function(wrap_pyfunction!(margin_definitions, m)?)?;
+    Ok(())
+}
+// --- end margin -----------------------------------------------------------------------
+
 #[pymodule]
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -128,5 +210,6 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(greeks_price, m)?)?;
     m.add_function(wrap_pyfunction!(greeks_implied_vol, m)?)?;
     m.add_function(wrap_pyfunction!(greeks_greeks, m)?)?;
+    register_margin(m)?;
     Ok(())
 }

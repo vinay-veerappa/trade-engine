@@ -7,3 +7,7 @@ members = ["te_core", "te_py"]
 [workspace.dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+proptest = "1"
