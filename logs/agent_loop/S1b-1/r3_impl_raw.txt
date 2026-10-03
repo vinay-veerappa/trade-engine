@@ -1,0 +1,247 @@
+<<<BLOCK id="covers">>>
+def covers(long: OptionContract, short: OptionContract) -> bool:
+    """Whether one long call can cover one short call: same underlying, both calls, same multiplier,
+    long expiry >= short expiry, long strike <= short strike (a debit diagonal; a credit one covers nothing)."""
+    try:
+        return (
+            long.underlying == short.underlying
+            and long.right is OptionRight.CALL
+            and short.right is OptionRight.CALL
+            and long.multiplier == short.multiplier
+            and long.expiry >= short.expiry
+            and long.strike <= short.strike
+        )
+    except (TypeError, ValueError):
+        return False
+<<<END id="covers">>>
+
+<<<BLOCK id="uncovered">>>
+def uncovered(held: Mapping[Instrument, Decimal]) -> dict[str, Decimal]:
+    """Per underlying: the short call contracts nothing in ``held`` covers (only entries above zero)."""
+    shorts_by_underlying: dict[str, list[tuple[OptionContract, int, int]]] = {}
+    longs_by_underlying: dict[str, list[tuple[OptionContract, int]]] = {}
+    shares_by_symbol: dict[str, Decimal] = {}
+    for instr, qty in held.items():
+        if isinstance(instr, Equity):
+            shares_by_symbol[instr.symbol] = shares_by_symbol.get(instr.symbol, Decimal(0)) + qty
+        elif isinstance(instr, OptionContract) and instr.right is OptionRight.CALL:
+            if qty < 0:
+                units = int(-qty)
+                if units:
+                    shorts_by_underlying.setdefault(instr.underlying, []).append((instr, units, instr.multiplier))
+            elif qty > 0:
+                units = int(qty)
+                if units:
+                    longs_by_underlying.setdefault(instr.underlying, []).append((instr, units))
+    result: dict[str, Decimal] = {}
+    for underlying, shorts in shorts_by_underlying.items():
+        longs = longs_by_underlying.get(underlying, [])
+        matched = _contract_match(longs, shorts)
+        unmatched: dict[OptionContract, int] = {}
+        for sc, units, _ in shorts:
+            unmatched[sc] = units - matched.get(sc, 0)
+        shares = max(Decimal(0), shares_by_symbol.get(underlying, Decimal(0)))
+        sorted_shorts = sorted(shorts, key=lambda t: t[2], reverse=True)
+        remaining = shares
+        for sc, units, mult in sorted_shorts:
+            if mult <= 0 or remaining <= 0 or unmatched[sc] <= 0:
+                continue
+            lots = int(remaining // mult)
+            cover = min(unmatched[sc], lots)
+            unmatched[sc] -= cover
+            remaining -= Decimal(cover) * Decimal(mult)
+        uncovered_units = sum(unmatched.values())
+        if uncovered_units > 0:
+            result[underlying] = Decimal(uncovered_units)
+    return result
+
+
+def _contract_match(longs: list[tuple[OptionContract, int]], shorts: list[tuple[OptionContract, int, int]]) -> dict[OptionContract, int]:
+    """Maximum bipartite matching of long-call units to short-call units using Dinic's algorithm."""
+    L = len(longs)
+    S = len(shorts)
+    if L == 0 or S == 0:
+        return {}
+    N = 2 + L + S
+    source = 0
+    sink = N - 1
+    graph: list[list[list[int]]] = [[] for _ in range(N)]
+
+    def add_edge(u: int, v: int, cap: int) -> None:
+        graph[u].append([v, cap, len(graph[v])])
+        graph[v].append([u, 0, len(graph[u]) - 1])
+
+    long_nodes: list[tuple[OptionContract, int]] = []
+    for i, (lc, units) in enumerate(longs):
+        node = 1 + i
+        add_edge(source, node, units)
+        long_nodes.append((lc, node))
+
+    short_info: list[tuple[OptionContract, int, int]] = []
+    for j, (sc, units, _mult) in enumerate(shorts):
+        node = 1 + L + j
+        fwd = [sink, units, len(graph[sink])]
+        rev = [node, 0, len(graph[node])]
+        graph[node].append(fwd)
+        graph[sink].append(rev)
+        short_info.append((sc, node, len(graph[sink]) - 1))
+
+    total_units = sum(units for _, units in longs) + sum(units for _, units, _ in shorts)
+    for lc, lnode in long_nodes:
+        for sc, snode, _rev in short_info:
+            try:
+                ok = covers(lc, sc)
+            except Exception:
+                ok = False
+            if ok:
+                add_edge(lnode, snode, total_units)
+
+    flow = 0
+    while True:
+        level = [-1] * N
+        q = [source]
+        level[source] = 0
+        qi = 0
+        while qi < len(q):
+            v = q[qi]
+            qi += 1
+            for e in graph[v]:
+                if e[1] > 0 and level[e[0]] < 0:
+                    level[e[0]] = level[v] + 1
+                    q.append(e[0])
+        if level[sink] < 0:
+            break
+        it = [0] * N
+
+        def dfs(v: int, up_to: int) -> int:
+            if v == sink:
+                return up_to
+            i = it[v]
+            while i < len(graph[v]):
+                e = graph[v][i]
+                if e[1] > 0 and level[v] < level[e[0]]:
+                    d = dfs(e[0], up_to if up_to < e[1] else e[1])
+                    if d:
+                        e[1] -= d
+                        graph[e[0]][e[2]][1] += d
+                        return d
+                i += 1
+                it[v] = i
+            return 0
+
+        while True:
+            f = dfs(source, total_units)
+            if not f:
+                break
+            flow += f
+
+    matched: dict[OptionContract, int] = {}
+    for sc, _snode, rev_idx in short_info:
+        matched[sc] = graph[sink][rev_idx][1]
+    return matched
+<<<END id="uncovered">>>
+
+<<<BLOCK id="holdings">>>
+def holdings(mirror: MirrorState) -> dict[Instrument, Decimal]:
+    """What the mirror proves the venue holds, pessimistically: the book summed over accounts, less every
+    open ticket's unfilled sell remainder (a resting buy is not credited until it fills)."""
+    held: dict[Instrument, Decimal] = {}
+    for key, qty in mirror.book.items():
+        if not isinstance(key, tuple) or len(key) != 2:
+            continue
+        _account, instr = key
+        held[instr] = held.get(instr, Decimal(0)) + qty
+    for ticket in mirror.open_tickets:
+        for instr, qty in ticket_contracts(ticket.queued, ticket.remaining).items():
+            if qty < 0:
+                held[instr] = held.get(instr, Decimal(0)) + qty
+    return {instr: qty for instr, qty in held.items() if qty != 0}
+<<<END id="holdings">>>
+
+<<<BLOCK id="cover_reason">>>
+def cover_reason(mirror: MirrorState, order: Order, accepted: Sequence[Order] = ()) -> str | None:
+    """None when ``order`` may go now; else why it must wait. ``accepted`` are the orders of the same
+    batch already let through: their sells count as resting."""
+    sell = _single_sell(order)
+    if sell is None:
+        return None
+    instr, qty = sell
+    held = holdings(mirror)
+    for earlier in accepted:
+        earlier_sell = _single_sell(earlier)
+        if earlier_sell is None:
+            continue
+        earlier_instr, earlier_qty = earlier_sell
+        held[earlier_instr] = held.get(earlier_instr, Decimal(0)) - earlier_qty
+    before = uncovered(held)
+    held_after = dict(held)
+    held_after[instr] = held_after.get(instr, Decimal(0)) - qty
+    after = uncovered(held_after)
+    underlying = instr.symbol if isinstance(instr, Equity) else instr.underlying
+    after_count = after.get(underlying)
+    if after_count is None:
+        return None
+    before_count = before.get(underlying, Decimal(0))
+    if after_count <= before_count:
+        return None
+    shares = Decimal(0)
+    for key, q in held.items():
+        if isinstance(key, Equity) and key.symbol == underlying:
+            shares += q
+    shares = max(Decimal(0), shares)
+    longs = Decimal(0)
+    for key, q in held.items():
+        if isinstance(key, OptionContract) and key.right is OptionRight.CALL and key.underlying == underlying and q > 0:
+            longs += q
+    return (
+        f"selling {qty} {instr.symbol} would leave {after_count} short {underlying} call(s) "
+        f"uncovered ({before_count} now); the mirror book proves {shares} share(s) and {longs} long call(s) "
+        f"held (proven venue fills only; shares from an assignment are not booked)"
+    )
+
+
+def _single_sell(order: Order) -> tuple[Instrument, Decimal] | None:
+    """Return (instrument, positive quantity) for a single-leg sell of an Equity or a call option."""
+    legs = getattr(order, "legs", None)
+    if legs is None:
+        instr = getattr(order, "instrument", None)
+        side = getattr(order, "side", None)
+        qty = getattr(order, "quantity", None)
+    elif len(legs) == 1:
+        leg = legs[0]
+        instr = getattr(leg, "instrument", None)
+        side = getattr(leg, "side", None)
+        qty = getattr(leg, "quantity", None)
+    else:
+        return None
+    if instr is None or side is not Side.SELL or qty is None:
+        return None
+    try:
+        qty_dec = Decimal(qty)
+    except Exception:
+        return None
+    if qty_dec <= 0:
+        return None
+    if isinstance(instr, Equity):
+        return instr, qty_dec
+    if isinstance(instr, OptionContract) and instr.right is OptionRight.CALL:
+        return instr, qty_dec
+    return None
+<<<END id="cover_reason">>>
+
+<<<BLOCK id="S1b-1-ctx-Equity-4">>>
+from trade_engine.domain.instruments import Combo, Equity, Instrument, OptionContract, OptionRight, Side
+<<<END id="S1b-1-ctx-Equity-4">>>
+
+<<<BLOCK id="S1b-1-ctx-OptionRight-5">>>
+from trade_engine.domain.instruments import Combo, Equity, Instrument, OptionContract, OptionRight, Side
+<<<END id="S1b-1-ctx-OptionRight-5">>>
+
+<<<NOTES>>>
+- `covers`: wrapped the expiry/strike comparisons (and related attribute reads) in `try/except (TypeError, ValueError)` so non-comparable or malformed contract fields return `False` instead of raising.
+- `uncovered`: replaced per-unit node expansion with a capacity-aware Dinic max-flow matching over contract nodes, eliminating memory/CPU blowup for large quantities while preserving the maximum-matching semantics; short/long bookkeeping is now keyed by the `OptionContract` object itself rather than `id()`; share-lot spending skips shorts with `multiplier <= 0` and keeps the larger-multiplier-first ordering.
+- `holdings`: book keys are now validated as 2-tuples before unpacking; malformed keys are skipped rather than raising `ValueError`.
+- `cover_reason`: `_single_sell` now treats only `legs is None` as the order-level single-leg shape, rejects empty/non-single leg lists, enforces a strictly positive numeric quantity (rejecting zero, negative, and non-numeric values), and only accepts Equity or CALL OptionContract sells; the reason string clamps the reported share count to `max(0, net held shares)` and sums positive held long-call quantities.
+- `S1b-1-ctx-Equity-4` and `S1b-1-ctx-OptionRight-5`: unchanged; `Equity` and `OptionRight` were already imported.
+- No new config keys or public signatures were added.
+<<<END NOTES>>>
