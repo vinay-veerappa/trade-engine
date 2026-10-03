@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-import re
+import decimal
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-# Root plus optional share-class suffix, ASCII only: AAPL, BRK.B. Rejects /NQ, spaces, OCC strings.
-_EQUITY_SYMBOL = re.compile(r"[A-Z0-9]+(\.[A-Z]{1,2})?")
-_OPTION_ROOT = re.compile(r"[A-Z0-9]{1,6}")
+import trade_engine_rs as _rs
+
+# The validation and OCC symbology rules live in Rust (`te_core::options`,
+# docs/RUST_PORT.md P1e). The classes below are data carriers: they hand `trade_engine_rs`
+# plain values and build the answer. No rule may be written here: that would be a second
+# reader.
 
 
 class OptionRight(StrEnum):
@@ -30,6 +33,52 @@ class Side(StrEnum):
 
 class UnresolvableInstrumentError(Exception):
     """Raised when an instrument string cannot be resolved to a domain object (I6)."""
+
+
+def rs_call(fn, *args):
+    """Call into `trade_engine_rs`, raising the exception type the rule refused with.
+
+    Rust refuses with ``ValueError(kind, message)``; the kind is what callers catch by.
+    """
+    try:
+        return fn(*args)
+    except ValueError as err:
+        if len(err.args) != 2:
+            raise
+        kind, message = err.args
+        if kind == "unresolvable":
+            raise UnresolvableInstrumentError(message) from None
+        if kind == "invalid_operation":
+            raise decimal.InvalidOperation([decimal.InvalidOperation]) from None
+        if kind == "overflow":
+            raise decimal.Overflow([decimal.Overflow]) from None
+        raise ValueError(message) from None
+
+
+def decimal_args(d: Decimal) -> tuple:
+    """A Decimal as Rust takes it: negative, digits, exponent, special code, str()."""
+    sign, digits, exponent = d.as_tuple()
+    special = exponent if isinstance(exponent, str) else ""
+    return (
+        bool(sign),
+        "".join(map(str, digits)) or "0",
+        0 if special else exponent,
+        special,
+        str(d),
+    )
+
+
+def contract_args(c: OptionContract) -> tuple:
+    """An OptionContract as Rust takes it: underlying, expiry y/m/d, right, strike."""
+    return (c.underlying, c.expiry.year, c.expiry.month, c.expiry.day, c.right.value, *decimal_args(c.strike))
+
+
+def money(x: Decimal | int) -> str:
+    """A money value as text for Rust (D6). Decimal and int only, as the pre-port
+    arithmetic accepted without a TypeError."""
+    if isinstance(x, bool) or not isinstance(x, (Decimal, int)):
+        raise TypeError(f"Money must be Decimal or int, got {type(x).__name__}")
+    return str(x)
 
 
 class Instrument:
@@ -51,15 +100,7 @@ class Equity(Instrument):
     _symbol: str
 
     def __init__(self, symbol: str) -> None:
-        if not symbol or not isinstance(symbol, str):
-            raise ValueError("Equity symbol must be non-empty string")
-        sym = symbol.strip().upper()
-        if not sym:
-            raise ValueError("Equity symbol must be non-empty")
-        if len(sym) > 10:
-            raise ValueError(f"Equity symbol exceeds maximum length of 10 characters: '{sym}'")
-        if not _EQUITY_SYMBOL.fullmatch(sym):
-            raise ValueError(f"Equity symbol must be alphanumeric without slashes or spaces, got '{sym}'")
+        sym = rs_call(_rs.option_equity_symbol, symbol if isinstance(symbol, str) else None)
         object.__setattr__(self, "_symbol", sym)
 
     @property
@@ -81,37 +122,23 @@ class OptionContract(Instrument):
     multiplier: int = 100
 
     def __post_init__(self) -> None:
-        und = self.underlying.strip().upper()
-        if not und:
-            raise ValueError("Option underlying must be non-empty")
-        if len(und) > 6:
-            raise ValueError(f"Option underlying must be at most 6 characters, got '{und}' (length {len(und)})")
-        if not _OPTION_ROOT.fullmatch(und):
-            raise ValueError(f"Option underlying must be alphanumeric, got '{und}'")
+        und = rs_call(_rs.option_validate_underlying, self.underlying)
 
         # Ensure strike is Decimal
         if not isinstance(self.strike, Decimal):
             object.__setattr__(self, "strike", Decimal(str(self.strike)))
 
-        if not self.strike.is_finite() or self.strike <= Decimal("0"):
-            raise ValueError(f"Strike must be positive and finite, got {self.strike}")
-
-        if (self.strike * Decimal("1000")) != (self.strike * Decimal("1000")).to_integral_value():
-            raise ValueError(f"Strike cannot have more than 3 decimal places (thousandths), got {self.strike} (I5)")
-
-        strike_millis = int((self.strike * Decimal("1000")).to_integral_value())
-        if strike_millis <= 0 or strike_millis > 99999999:
-            raise ValueError(f"Strike {self.strike} out of bounds for OCC representation")
-
-        if self.multiplier <= 0:
-            raise ValueError(f"Multiplier must be positive, got {self.multiplier}")
+        multiplier = self.multiplier
+        right = rs_call(
+            _rs.option_validate_rest,
+            decimal_args(self.strike),
+            str(int(multiplier)) if isinstance(multiplier, int) else None,
+            str(multiplier),
+            self.right if isinstance(self.right, str) else None,
+            f"{self.right}",
+        )
         if not isinstance(self.right, OptionRight):
-            if isinstance(self.right, str) and self.right.upper() in ("C", "CALL"):
-                object.__setattr__(self, "right", OptionRight.CALL)
-            elif isinstance(self.right, str) and self.right.upper() in ("P", "PUT"):
-                object.__setattr__(self, "right", OptionRight.PUT)
-            else:
-                raise ValueError(f"Invalid option right: {self.right}")
+            object.__setattr__(self, "right", OptionRight(right))
 
         object.__setattr__(self, "underlying", und)
 
@@ -125,19 +152,9 @@ class OptionContract(Instrument):
         return self.to_occ()
 
     def to_occ(self) -> str:
-        """Build standard 21-character OCC symbol:
-
-        - Root symbol (up to 6 chars, right padded with spaces)
-        - Expiration YYMMDD (6 chars)
-        - Type C or P (1 char)
-        - Strike price * 1000 (8 digits, zero-padded)
-        """
-        strike_millis = int((self.strike * Decimal("1000")).to_integral_value())
-        if strike_millis <= 0 or strike_millis > 99999999:
-            raise ValueError(f"Strike {self.strike} out of bounds for OCC representation")
-
-        exp_str = self.expiry.strftime("%y%m%d")
-        return f"{self.underlying:<6}{exp_str}{self.right.value}{strike_millis:08d}"
+        """Build the standard 21-character OCC symbol: root padded to 6, YYMMDD, C or P,
+        strike in thousandths to 8 digits."""
+        return rs_call(_rs.option_to_occ, contract_args(self))
 
     @classmethod
     def from_occ(cls, occ_str: str, multiplier: int = 100) -> OptionContract:
@@ -146,40 +163,14 @@ class OptionContract(Instrument):
         Canonical: 'AAPL  260918C00150000' (21 chars)
         Compact:   'AAPL260918C00150000' (variable root length)
         """
-        if not occ_str or not isinstance(occ_str, str):
-            raise ValueError("OCC symbol must be a non-empty string")
-
-        raw = occ_str.strip()
-        # Regex matching:
-        # Group 1: 1 to 6 characters root ticker
-        # Group 2: 6 digits YYMMDD
-        # Group 3: C or P
-        # Group 4: 8 digits strike
-        pattern = re.compile(r"^([A-Za-z0-9]{1,6})\s*(\d{6})([CPcp])(\d{8})$")
-        match = pattern.match(raw)
-        if not match:
-            raise ValueError(f"Invalid OCC option symbol format: '{occ_str}'")
-
-        root, exp_str, right_char, strike_str = match.groups()
-        root = root.strip().upper()
-        if not root:
-            raise ValueError(f"Empty root symbol in OCC string '{occ_str}'")
-
-        try:
-            exp_date = datetime.strptime(exp_str, "%y%m%d").date()
-        except ValueError as err:
-            raise ValueError(f"Invalid expiration date '{exp_str}' in OCC symbol: {err}") from err
-
-        right = OptionRight.CALL if right_char.upper() == "C" else OptionRight.PUT
-        strike = Decimal(int(strike_str)) / Decimal("1000")
-        if strike <= Decimal("0"):
-            raise ValueError(f"Strike parsed from OCC symbol must be positive, got {strike}")
-
+        root, year, month, day, right, strike = rs_call(
+            _rs.option_parse_occ, occ_str if isinstance(occ_str, str) else None
+        )
         return cls(
             underlying=root,
-            expiry=exp_date,
-            strike=strike,
-            right=right,
+            expiry=date(year, month, day),
+            strike=Decimal(strike),
+            right=OptionRight(right),
             multiplier=multiplier,
         )
 

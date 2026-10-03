@@ -193,6 +193,157 @@ fn register_margin(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 // --- end margin -----------------------------------------------------------------------
 
+// --- option rules (P1e) -------------------------------------------------------------
+// A refusal crosses as ValueError(kind, message); the Python shims map the kind back
+// to the exception type the pre-port code raised.
+
+use te_core::options as opt;
+
+fn refuse_opt(e: opt::OptionError) -> PyErr {
+    PyValueError::new_err((e.kind().to_string(), e.message().to_string()))
+}
+
+/// A Decimal as the shims send it: negative, digits, exponent, special code, str().
+type DecArgs = (bool, String, i64, String, String);
+/// A contract: underlying, year, month, day, right code, then the strike's Decimal.
+type ContractArgs = (String, i32, u32, u32, String, bool, String, i64, String, String);
+
+fn dec_wire(a: DecArgs) -> PyResult<opt::DecWire> {
+    let special = opt::Special::from_code(&a.3)
+        .ok_or_else(|| PyValueError::new_err(("value".to_string(), format!("Unknown Decimal special {:?}", a.3))))?;
+    Ok(opt::DecWire { neg: a.0, digits: a.1, exp: a.2, special, text: a.4 })
+}
+
+fn contract_wire(a: ContractArgs) -> PyResult<opt::ContractWire> {
+    let right = opt::Right::from_code(&a.4)
+        .ok_or_else(|| PyValueError::new_err(("value".to_string(), format!("Invalid option right: {}", a.4))))?;
+    let strike = dec_wire((a.5, a.6, a.7, a.8, a.9))?;
+    Ok(opt::ContractWire { underlying: a.0, year: a.1, month: a.2, day: a.3, right, strike })
+}
+
+#[pyfunction]
+#[pyo3(signature = (symbol))]
+fn option_equity_symbol(symbol: Option<&str>) -> PyResult<String> {
+    opt::equity_symbol(symbol).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_validate_underlying(underlying: &str) -> PyResult<String> {
+    opt::validate_underlying(underlying).map_err(refuse_opt)
+}
+
+/// Strike, multiplier and right, in `__post_init__` order; returns the right's code.
+#[pyfunction]
+#[pyo3(signature = (strike, multiplier, multiplier_text, right, right_text))]
+fn option_validate_rest(
+    strike: DecArgs,
+    multiplier: Option<&str>,
+    multiplier_text: &str,
+    right: Option<&str>,
+    right_text: &str,
+) -> PyResult<&'static str> {
+    let strike = dec_wire(strike)?;
+    opt::validate_rest(&strike, multiplier, multiplier_text, right, right_text).map(opt::Right::code).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_to_occ(c: ContractArgs) -> PyResult<String> {
+    contract_wire(c)?.occ().map_err(refuse_opt)
+}
+
+/// (root, year, month, day, right code, strike text).
+#[pyfunction]
+#[pyo3(signature = (occ))]
+fn option_parse_occ(occ: Option<&str>) -> PyResult<(String, i32, u32, u32, &'static str, String)> {
+    let p = opt::parse_occ(occ).map_err(refuse_opt)?;
+    Ok((p.root, p.year, p.month, p.day, p.right.code(), p.strike_text))
+}
+
+/// (root, underlying, exercise code, settlement code, settle-time code).
+#[pyfunction]
+fn option_style(root: &str) -> PyResult<(String, String, &'static str, &'static str, &'static str)> {
+    let s = opt::option_style(root).map_err(refuse_opt)?;
+    Ok((s.root, s.underlying, s.exercise.code(), s.settlement.code(), s.settle_time.code()))
+}
+
+#[pyfunction]
+fn option_chain_roots(underlying: &str) -> PyResult<Vec<String>> {
+    opt::chain_roots(underlying).map_err(refuse_opt)
+}
+
+/// Seconds since the Unix epoch, UTC.
+#[pyfunction]
+fn option_settlement_instant(c: ContractArgs) -> PyResult<i64> {
+    opt::settlement_instant(&contract_wire(c)?).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_last_trade_date(c: ContractArgs) -> PyResult<String> {
+    opt::last_trade_date(&contract_wire(c)?).map(iso).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_intrinsic(c: ContractArgs, price: &str) -> PyResult<String> {
+    opt::lifecycle::intrinsic(&contract_wire(c)?, price).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_expiry_outcome(c: ContractArgs, held_buy: bool, price: &str) -> PyResult<&'static str> {
+    opt::lifecycle::expiry_outcome(&contract_wire(c)?, held_buy, price).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_is_cash_settled(c: ContractArgs) -> PyResult<bool> {
+    opt::lifecycle::is_cash_settled(&contract_wire(c)?).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_can_exercise_early(c: ContractArgs) -> PyResult<bool> {
+    opt::lifecycle::can_exercise_early(&contract_wire(c)?).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_deliverable(c: ContractArgs) -> PyResult<String> {
+    opt::lifecycle::deliverable(&contract_wire(c)?).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_delivery(c: ContractArgs, held_buy: bool, premium: &str) -> PyResult<(bool, String)> {
+    opt::lifecycle::delivery(&contract_wire(c)?, held_buy, premium).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_exercised_for_dividend(c: ContractArgs, close: &str, bid: &str, dividend: &str) -> PyResult<bool> {
+    opt::lifecycle::exercised_for_dividend(&contract_wire(c)?, close, bid, dividend).map_err(refuse_opt)
+}
+
+#[pyfunction]
+fn option_exercise_threshold() -> &'static str {
+    opt::lifecycle::exercise_threshold()
+}
+
+fn register_options(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(option_equity_symbol, m)?)?;
+    m.add_function(wrap_pyfunction!(option_validate_underlying, m)?)?;
+    m.add_function(wrap_pyfunction!(option_validate_rest, m)?)?;
+    m.add_function(wrap_pyfunction!(option_to_occ, m)?)?;
+    m.add_function(wrap_pyfunction!(option_parse_occ, m)?)?;
+    m.add_function(wrap_pyfunction!(option_style, m)?)?;
+    m.add_function(wrap_pyfunction!(option_chain_roots, m)?)?;
+    m.add_function(wrap_pyfunction!(option_settlement_instant, m)?)?;
+    m.add_function(wrap_pyfunction!(option_last_trade_date, m)?)?;
+    m.add_function(wrap_pyfunction!(option_intrinsic, m)?)?;
+    m.add_function(wrap_pyfunction!(option_expiry_outcome, m)?)?;
+    m.add_function(wrap_pyfunction!(option_is_cash_settled, m)?)?;
+    m.add_function(wrap_pyfunction!(option_can_exercise_early, m)?)?;
+    m.add_function(wrap_pyfunction!(option_deliverable, m)?)?;
+    m.add_function(wrap_pyfunction!(option_delivery, m)?)?;
+    m.add_function(wrap_pyfunction!(option_exercised_for_dividend, m)?)?;
+    m.add_function(wrap_pyfunction!(option_exercise_threshold, m)?)?;
+    Ok(())
+}
+// --- end option rules -----------------------------------------------------------------
+
 #[pyfunction]
 fn risk_rules_from_mapping(doc: &str) -> String {
     te_core::risk::json_rules_from_mapping(doc)
@@ -251,6 +402,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(greeks_implied_vol, m)?)?;
     m.add_function(wrap_pyfunction!(greeks_greeks, m)?)?;
     register_margin(m)?;
+    register_options(m)?;
     m.add_function(wrap_pyfunction!(risk_rules_from_mapping, m)?)?;
     m.add_function(wrap_pyfunction!(risk_validate_rules, m)?)?;
     m.add_function(wrap_pyfunction!(risk_validate_rails, m)?)?;

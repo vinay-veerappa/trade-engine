@@ -4,4 +4,5 @@
 pub mod calendar;
 pub mod greeks;
 pub mod margin;
+pub mod options;
 pub mod risk;
