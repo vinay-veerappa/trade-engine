@@ -2,8 +2,13 @@
 
 Not a test module. `event_zoo()` builds one valid event for every `EventKind`
 (every optional-field variant, all three instrument kinds, Decimal edge cases);
-`py_reencode` / `py_fold` are the oracle the Rust shadow must reproduce, expressed in
+`py_reencode` / `py_fold` are the oracle the Rust port must reproduce, expressed in
 the shape `trade_engine_rs.ledger_*` returns, so a comparison is a plain `==`.
+
+Since P2b the oracle is the FROZEN pre-port Python (`tests/frozen_ledger/`), never the
+production modules, which are now shims over Rust: parity is Rust vs pre-port Python.
+`prod_*` run the production path (codec / fold shims) in the same shape, so the glue
+between Python and Rust is held to the same oracle.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from trade_engine.domain.instruments import (  # noqa: E402
     Combo,
@@ -38,7 +44,7 @@ from trade_engine.domain.portfolio import Fill, Lot, Position  # noqa: E402
 from trade_engine.domain.risk import RiskControlChange, RiskRuleResult, RiskVerdict  # noqa: E402
 from trade_engine.domain.signals import Signal  # noqa: E402
 from trade_engine.interfaces.market_data import CorporateAction  # noqa: E402
-from trade_engine.ledger import codec  # noqa: E402
+from frozen_ledger import codec  # noqa: E402  - the frozen oracle (P2b)
 from trade_engine.ledger.events import (  # noqa: E402
     CashFlow,
     EodRun,
@@ -60,14 +66,7 @@ from trade_engine.ledger.events import (  # noqa: E402
     VenueReconcile,
     mirror_account,
 )
-from trade_engine.ledger.state import (  # noqa: E402
-    AccountState,
-    LedgerDuplicateFillError,
-    LedgerFillMismatchError,
-    LedgerFoldError,
-    UnhandledEventError,
-    fold_account,
-)
+from frozen_ledger.state import AccountState, fold_account  # noqa: E402  - the frozen oracle (P2b)
 
 UTC = timezone.utc
 ET = timezone(timedelta(hours=-4))
@@ -82,30 +81,36 @@ SPREAD = Combo((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190, 1, Side.BUY)))
 
 
 def kind_of(err: BaseException) -> str:
-    """The refusal category: what `rs_call` carries across the boundary."""
+    """The refusal category: what `rs_call` carries across the boundary.
+
+    Matched by class NAME along the MRO: the frozen oracle and the production shims each
+    define their own `LedgerFoldError` / `PayloadCodecError` / ..., and both must classify.
+    """
     table = (
-        (codec.PayloadCodecError, "codec"),
-        (EventPayloadError, "payload"),
-        (LedgerDuplicateFillError, "duplicate_fill"),
-        (LedgerFillMismatchError, "fill_mismatch"),
-        (UnhandledEventError, "unhandled"),
-        (LedgerFoldError, "fold"),
-        (IllegalOrderStateTransitionError, "illegal_transition"),
-        (UnresolvableInstrumentError, "unresolvable"),
-        (json.JSONDecodeError, "json"),
-        (UnicodeDecodeError, "value"),
-        (ValueError, "value"),
-        (KeyError, "key"),
-        (TypeError, "type"),
-        (AttributeError, "attribute"),
-        (decimal.InvalidOperation, "invalid_operation"),
-        (decimal.DivisionByZero, "division_by_zero"),
-        (decimal.Overflow, "overflow"),
-        (OverflowError, "overflow"),
+        ("PayloadCodecError", "codec"),
+        ("EventPayloadError", "payload"),
+        ("LedgerDuplicateFillError", "duplicate_fill"),
+        ("LedgerFillMismatchError", "fill_mismatch"),
+        ("UnhandledEventError", "unhandled"),
+        ("MirrorFoldError", "mirror_fold"),
+        ("LedgerFoldError", "fold"),
+        ("IllegalOrderStateTransitionError", "illegal_transition"),
+        ("UnresolvableInstrumentError", "unresolvable"),
+        ("JSONDecodeError", "json"),
+        ("UnicodeDecodeError", "value"),
+        ("ValueError", "value"),
+        ("KeyError", "key"),
+        ("TypeError", "type"),
+        ("AttributeError", "attribute"),
+        ("InvalidOperation", "invalid_operation"),
+        ("DivisionByZero", "division_by_zero"),
+        ("Overflow", "overflow"),
+        ("OverflowError", "overflow"),
     )
-    for cls, name in table:
-        if isinstance(err, cls):
-            return name
+    names = {c.__name__ for c in type(err).__mro__}
+    for name, kind in table:
+        if name in names:
+            return kind
     return "other:" + type(err).__name__
 
 
@@ -124,16 +129,18 @@ def py_reencode(data: bytes):
 
 # --- canonical state ------------------------------------------------------------------
 
-_STATE_DC = (AccountState, Position)
+_CARRIERS = frozenset({"AccountState", "Position", "MirrorState", "MirrorTicketState"})
 
 
 def canon(value):
-    """Canonical JSON rendering of a fold result (AccountState, MirrorState, ...)."""
+    """Canonical JSON rendering of a fold result (AccountState, MirrorState, ...).
+
+    Carriers are matched by class NAME, so a frozen-oracle state and a production state
+    render identically when (and only when) their contents agree.
+    """
     import dataclasses
 
-    from trade_engine.ledger.mirror import MirrorState, MirrorTicketState
-
-    if isinstance(value, (AccountState, Position, MirrorState, MirrorTicketState)):
+    if dataclasses.is_dataclass(value) and type(value).__name__ in _CARRIERS:
         return {
             "dc": type(value).__name__,
             "f": {f.name: canon(getattr(value, f.name)) for f in dataclasses.fields(value)},
@@ -159,7 +166,7 @@ def py_fold(events: list[Event], account: str):
 
 def py_fold_all(events: list[Event]):
     """('ok', canonical-bytes of {account: state}) or ('err', kind, message) for `fold`."""
-    from trade_engine.ledger.state import fold
+    from frozen_ledger.state import fold
 
     try:
         return ("ok", dumps(canon(fold(events))))
@@ -169,6 +176,40 @@ def py_fold_all(events: list[Event]):
 
 def encoded(events: list[Event]) -> list[bytes]:
     return [dumps(codec.encode_event(e)) for e in events]
+
+
+# --- the production path, in the oracle's shape (P2b) ---------------------------------
+
+
+def prod_reencode(data: bytes):
+    """('ok', bytes) or ('err', kind, message): what the PRODUCTION codec does with `data`."""
+    from trade_engine.ledger import codec as prod_codec
+
+    try:
+        node = json.loads(data.decode("utf-8"))
+        return ("ok", dumps(prod_codec.encode_event(prod_codec.decode_event(node))))
+    except Exception as err:  # noqa: BLE001 - classified, never swallowed
+        return ("err", kind_of(err), str(err))
+
+
+def prod_fold(events: list[Event], account: str):
+    """`py_fold`, through the production `fold_account`."""
+    from trade_engine.ledger.state import fold_account as prod_fold_account
+
+    try:
+        return ("ok", dumps(canon(prod_fold_account(events, account))))
+    except Exception as err:  # noqa: BLE001 - classified, never swallowed
+        return ("err", kind_of(err), str(err))
+
+
+def prod_fold_all(events: list[Event]):
+    """`py_fold_all`, through the production `fold`."""
+    from trade_engine.ledger.state import fold as prod_fold_fn
+
+    try:
+        return ("ok", dumps(canon(prod_fold_fn(events))))
+    except Exception as err:  # noqa: BLE001 - classified, never swallowed
+        return ("err", kind_of(err), str(err))
 
 
 # --- the zoo --------------------------------------------------------------------------

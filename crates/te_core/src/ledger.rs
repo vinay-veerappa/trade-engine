@@ -11,3 +11,4 @@ pub mod ops;
 pub mod mirror;
 pub mod fold;
 pub mod canon;
+pub mod bridge;

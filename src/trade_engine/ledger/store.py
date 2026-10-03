@@ -15,6 +15,11 @@ it. Properties this store is responsible for:
   transaction, before COMMIT. The log is append-only, so an event the fold refuses would
   otherwise make every later fold raise, forever.
 
+Since P2b the fold is held in Rust (``state.IncrementalFold``): each append applies its
+stored row ONCE to the account's Rust state, never a refold. A refusal, or any failure
+before COMMIT, drops the touched accounts, which reload from the committed log on their
+next read.
+
 Snapshots are a cache: `snapshot(account)` must equal `fold(events())[account]`, and
 `verify_snapshot()` proves it.
 """
@@ -33,7 +38,7 @@ from trade_engine.ledger import codec
 from trade_engine.ledger.events import SCHEMA_VERSION, Event, EventKind
 from trade_engine.ledger.lock import LedgerLockError, SingleInstanceLock
 from trade_engine.ledger.outbox import DrainResult, OutboxItem, OutboxStatus
-from trade_engine.ledger.state import AccountState, FoldCache, apply_event, fold, fold_account
+from trade_engine.ledger.state import AccountState, FoldCache, IncrementalFold, fold
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -82,9 +87,9 @@ class Ledger:
         self._lock = SingleInstanceLock(self.path)
         self._lock_held = False
         self._conn: sqlite3.Connection | None = None
-        # Folded state per account as of the last commit; the base append() validates
-        # against. Safe to cache because this instance is the only writer (I4).
-        self._states: dict[str, AccountState] = {}
+        # Folded state per account as of the last commit (in Rust); the base append()
+        # validates against. Safe to hold because this instance is the only writer (I4).
+        self._fold = IncrementalFold(atomic=False)
         self._listeners: list[Callable[[Event], None]] = []
 
     def add_listener(self, callback: Callable[[Event], None]) -> None:
@@ -114,7 +119,7 @@ class Ledger:
             return self
         self._lock.acquire()
         self._lock_held = True
-        self._states = {}
+        self._fold.clear()
         try:
             conn = sqlite3.connect(str(self.path), isolation_level=None)
             conn.row_factory = sqlite3.Row
@@ -190,7 +195,7 @@ class Ledger:
                 raise ValueError("Event.seq is assigned by the ledger; pass seq=None to append")
 
         conn = self.conn
-        staged: dict[str, AccountState] = {}
+        touched: set[str] = set()
         written: list[Event] = []
         new_events: list[Event] = []
         in_transaction = False
@@ -208,46 +213,67 @@ class Ledger:
                         written.append(self._row_to_event(existing))
                         continue
 
-                # Read the base state before the INSERT, which would otherwise be folded in.
-                if event.account in staged:
-                    current = staged[event.account]
-                else:
-                    current = self._committed_state(event.account)
-                encoded = codec.encode_event(event)
+                # Load the base state before the INSERT, which would otherwise be folded in.
+                if not self._fold.has(event.account):
+                    self._load(event.account)
+                touched.add(event.account)
+                payload_json = codec.payload_text(event.payload)
+                ts_utc = event.ts_utc.isoformat()
                 cursor = conn.execute(
                     "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (
-                        event.ts_utc.isoformat(),
+                        ts_utc,
                         event.account,
                         event.kind.value,
                         event.command_id,
-                        json.dumps(encoded["payload"], separators=(",", ":"), sort_keys=True),
+                        payload_json,
                         event.schema_version,
                     ),
                 )
-                appended = replace(event, seq=int(cursor.lastrowid))
-                staged[event.account] = apply_event(current, appended)
+                seq = int(cursor.lastrowid)
+                # The row as stored, applied once: what a reload from the log will fold.
+                self._fold.apply_row(
+                    event.account, event.kind.value, payload_json, ts_utc, event.command_id, event.schema_version, seq
+                )
+                appended = replace(event, seq=seq)
                 written.append(appended)
                 new_events.append(appended)
                 for destination, payload in outbox_items:
                     self._insert_outbox(int(cursor.lastrowid), destination, payload, event.ts_utc)
             self._commit()
             in_transaction = False
-        except Exception:
-            if in_transaction:
+        except BaseException as exc:
+            # Nothing committed: the touched accounts hold uncommitted events, so they
+            # are dropped and reload from the log on their next read.
+            for account in touched:
+                self._fold.drop(account)
+            if in_transaction and isinstance(exc, Exception):
                 self._rollback()
             raise
-        self._states.update(staged)
         self._notify_listeners(new_events)
         return written
 
+    def _rows(self, account: str, after: int | None = None) -> list[tuple]:
+        """The account's stored rows as the Rust fold reads them, in seq order."""
+        cursor = self.conn.cursor()
+        cursor.row_factory = None
+        sql = (
+            "SELECT kind, payload_json, ts_utc, command_id, schema_version, seq FROM events WHERE account = ?"
+        )
+        params: list[Any] = [account]
+        if after is not None:
+            sql += " AND seq > ?"
+            params.append(after)
+        return cursor.execute(sql + " ORDER BY seq ASC", params).fetchall()
+
+    def _load(self, account: str) -> None:
+        self._fold.load(account, self._rows(account))
+
     def _committed_state(self, account: str) -> AccountState:
-        state = self._states.get(account)
-        if state is None:
-            state = fold_account(self.events(account=account), account)
-            self._states[account] = state
-        return state
+        if not self._fold.has(account):
+            self._load(account)
+        return self._fold.state(account)
 
     # -- read --------------------------------------------------------------------
 
@@ -301,16 +327,15 @@ class Ledger:
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> Event:
-        encoded = {
-            "account": row["account"],
-            "kind": row["kind"],
-            "payload": json.loads(row["payload_json"]),
-            "ts_utc": row["ts_utc"],
-            "command_id": row["command_id"],
-            "schema_version": row["schema_version"],
-            "seq": row["seq"],
-        }
-        return codec.decode_event(encoded)
+        return codec.event_from_row(
+            row["account"],
+            row["kind"],
+            row["payload_json"],
+            row["ts_utc"],
+            row["command_id"],
+            row["schema_version"],
+            row["seq"],
+        )
 
     # -- fold / snapshot ---------------------------------------------------------
 

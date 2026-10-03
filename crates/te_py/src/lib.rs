@@ -384,8 +384,9 @@ fn risk_evaluate(doc: &str) -> String {
     te_core::risk::json_evaluate(doc)
 }
 
-// --- ledger shadow (P2a) ------------------------------------------------------------
-// Test-only entry points: a refusal crosses as ValueError(kind, message).
+// --- ledger (P2a shadow, P2b production) ---------------------------------------------
+// A refusal crosses as ValueError(kind, message); `trade_engine.ledger._rs` maps the kind
+// to the Python exception the old code raised.
 
 fn refuse_ledger(e: te_core::ledger::model::LErr) -> PyErr {
     PyValueError::new_err((e.kind.to_string(), e.msg))
@@ -422,6 +423,283 @@ fn ledger_fold_all(events: Vec<Vec<u8>>) -> PyResult<Vec<u8>> {
     run().map(String::into_bytes).map_err(refuse_ledger)
 }
 
+// --- the ledger (P2b): Python's codec, fold and stores call these ----------------------
+
+use te_core::ledger::bridge as lb;
+use te_core::ledger::canon as lc;
+use te_core::ledger::fold::{apply_event as fold_apply, AccountState};
+use te_core::ledger::json::dumps as ldumps;
+use te_core::ledger::model::{Event, LErr, Obj, R as LR};
+use te_core::ledger::ops::OMap;
+use te_core::ledger::pydec::PyDec;
+
+fn dec_arg(text: &str) -> LR<PyDec> {
+    PyDec::parse(text).ok_or_else(|| LErr { kind: "invalid_operation", msg: String::new() })
+}
+
+/// The old encoder's refusals over the walker's tree; its stored (sorted) bytes.
+#[pyfunction]
+fn ledger_check_payload(text: &str) -> PyResult<Vec<u8>> {
+    lb::check_encoded(text).map_err(refuse_ledger)
+}
+
+/// `decode_payload`'s refusals over an encoded tree (Python builds it once accepted).
+#[pyfunction]
+fn ledger_check_decode_payload(text: &str) -> PyResult<()> {
+    lb::check_decode_payload(text).map_err(refuse_ledger)
+}
+
+/// `decode_event`'s refusals over an encoded event's JSON.
+#[pyfunction]
+fn ledger_check_event(text: &[u8]) -> PyResult<()> {
+    te_core::ledger::codec::event_from_bytes(text).map(|_| ()).map_err(refuse_ledger)
+}
+
+/// `Ledger._row_to_event`'s refusals over one stored row.
+#[pyfunction]
+#[pyo3(signature = (account, kind, payload_json, ts_utc, command_id, schema_version, seq))]
+fn ledger_check_row(
+    account: &str,
+    kind: &str,
+    payload_json: &str,
+    ts_utc: &str,
+    command_id: Option<&str>,
+    schema_version: i64,
+    seq: Option<i64>,
+) -> PyResult<()> {
+    lb::event_from_row(account, kind, payload_json, ts_utc, command_id, schema_version as i128, seq.map(i128::from))
+        .map(|_| ())
+        .map_err(refuse_ledger)
+}
+
+/// `state.apply_event`: one event onto a state, both as canonical JSON.
+#[pyfunction]
+fn ledger_apply_event(state: &str, event: &[u8]) -> PyResult<Vec<u8>> {
+    let run = || -> LR<Vec<u8>> {
+        let mut st = lb::account_from_text(state)?;
+        let ev = te_core::ledger::codec::event_from_bytes(event)?;
+        fold_apply(&mut st, &ev)?;
+        Ok(ldumps(&lc::canon_account(&st)?).into_bytes())
+    };
+    run().map_err(refuse_ledger)
+}
+
+/// `state.apply_fill`: a position (canonical JSON, or None) after one encoded `Fill`.
+#[pyfunction]
+#[pyo3(signature = (account_id, position, fill, multiplier))]
+fn ledger_apply_fill(account_id: &str, position: Option<&str>, fill: &str, multiplier: i64) -> PyResult<Vec<u8>> {
+    let run = || -> LR<Vec<u8>> {
+        let pos = match position {
+            Some(t) => Some(lb::uncanon_position(&lb::json_from_text(t)?)?),
+            None => None,
+        };
+        let Obj::Fill(f) = lb::obj_from_text(fill)? else {
+            return Err(LErr { kind: "type", msg: "apply_fill takes a Fill".into() });
+        };
+        let p = lb::apply_fill(account_id, pos.as_ref(), &f, multiplier as i128)?;
+        Ok(ldumps(&lc::canon_position_pub(&p)?).into_bytes())
+    };
+    run().map_err(refuse_ledger)
+}
+
+/// One mirror fold step (`mirror.on_queued` / `on_refused` / `on_ack` / `on_fill`) over a
+/// `MirrorState`'s canonical JSON; a contradiction is `mirror_fold`.
+#[pyfunction]
+fn ledger_mirror_step(step: &str, mirror: &str, payload: &str) -> PyResult<Vec<u8>> {
+    use te_core::ledger::mirror as m;
+    let run = || -> LR<Vec<u8>> {
+        let mut st = lb::uncanon_mirror(&lb::json_from_text(mirror)?)?;
+        let obj = lb::obj_from_text(payload)?;
+        match (step, &obj) {
+            ("queued", Obj::MQueued(q)) => m::on_queued(&mut st, q)?,
+            ("refused", Obj::MRefused(r)) => m::on_refused(&mut st, r)?,
+            ("ack", Obj::MAck(a)) => m::on_ack(&mut st, a)?,
+            ("fill", Obj::MFill(f)) => m::on_fill(&mut st, f)?,
+            _ => return Err(LErr { kind: "type", msg: format!("mirror step {step} does not take a {}", obj.tag()) }),
+        }
+        Ok(ldumps(&lc::canon_mirror_pub(&st)?).into_bytes())
+    };
+    run().map_err(refuse_ledger)
+}
+
+/// `mirror.pro_rata` over decimal strings.
+#[pyfunction]
+fn ledger_pro_rata(weights: Vec<String>, whole: &str, amount: &str) -> PyResult<Vec<String>> {
+    let run = || -> LR<Vec<String>> {
+        let w: Vec<PyDec> = weights.iter().map(|x| dec_arg(x)).collect::<LR<_>>()?;
+        let out = te_core::ledger::mirror::pro_rata(&w, &dec_arg(whole)?, &dec_arg(amount)?)?;
+        Ok(out.iter().map(|d| d.to_py_string()).collect())
+    };
+    run().map_err(refuse_ledger)
+}
+
+/// `mirror.ticket_contracts`: `{"m": [[contract, signed contracts]]}` for an encoded queue.
+#[pyfunction]
+fn ledger_ticket_contracts(queued: &str, units: &str) -> PyResult<Vec<u8>> {
+    let run = || -> LR<Vec<u8>> {
+        let Obj::MQueued(q) = lb::obj_from_text(queued)? else {
+            return Err(LErr { kind: "type", msg: "ticket_contracts takes a MirrorQueued".into() });
+        };
+        let m = te_core::ledger::mirror::ticket_contracts(&q, &dec_arg(units)?)?;
+        Ok(ldumps(&lc::canon_contracts(&m)?).into_bytes())
+    };
+    run().map_err(refuse_ledger)
+}
+
+struct FoldEntry {
+    st: AccountState,
+    /// Fills the Python carrier holds (the delta appends the rest).
+    fills_held: usize,
+    /// Python holds a carrier built from this state; false = the next export is whole.
+    exported: bool,
+}
+
+impl FoldEntry {
+    fn fresh(st: AccountState) -> FoldEntry {
+        FoldEntry { st, fills_held: 0, exported: false }
+    }
+}
+
+/// The incremental fold the store, the reader and `FoldCache` hold (P2b): one state per
+/// account, each event applied ONCE. `atomic`: a refused event leaves the account as it
+/// was (`FoldCache`); otherwise the refused account is dropped and its owner reloads it
+/// from the log (the store, whose transaction rolled back anyway).
+#[pyclass(module = "trade_engine_rs")]
+struct LedgerFold {
+    atomic: bool,
+    entries: OMap<String, FoldEntry>,
+}
+
+type Row = (String, String, String, Option<String>, i64, Option<i64>);
+
+impl LedgerFold {
+    fn apply(&mut self, account: &str, ev: &Event) -> LR<()> {
+        let created = !self.entries.contains(account);
+        if created {
+            self.entries.put(account, FoldEntry::fresh(AccountState::new(account)));
+        }
+        let atomic = self.atomic;
+        let entry = self.entries.get_mut(account).expect("present");
+        let backup = if atomic && !created { Some(entry.st.clone()) } else { None };
+        match fold_apply(&mut entry.st, ev) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                match backup {
+                    Some(b) => entry.st = b,
+                    None => {
+                        self.entries.remove(account);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn apply_row(&mut self, account: &str, row: &Row) -> LR<()> {
+        let (kind, payload, ts, cmd, sv, seq) = row;
+        match lb::event_from_row(account, kind, payload, ts, cmd.as_deref(), *sv as i128, seq.map(i128::from)) {
+            Ok(ev) => self.apply(account, &ev),
+            Err(e) => {
+                if !self.atomic {
+                    self.entries.remove(account);
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+#[pymethods]
+impl LedgerFold {
+    #[new]
+    #[pyo3(signature = (atomic=false))]
+    fn new(atomic: bool) -> Self {
+        LedgerFold { atomic, entries: OMap::new() }
+    }
+
+    fn has(&self, account: &str) -> bool {
+        self.entries.contains(account)
+    }
+
+    /// Accounts in the order they were first folded.
+    fn accounts(&self) -> Vec<String> {
+        self.entries.iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    fn drop(&mut self, account: &str) {
+        self.entries.remove(account);
+    }
+
+    fn clear(&mut self) {
+        self.entries = OMap::new();
+    }
+
+    /// Start an account from a carrier's canonical JSON (a `FoldCache` seed).
+    fn seed(&mut self, account: &str, state: &str) -> PyResult<()> {
+        let st = lb::account_from_text(state).map_err(refuse_ledger)?;
+        self.entries.remove(account);
+        self.entries.put(account, FoldEntry::fresh(st));
+        Ok(())
+    }
+
+    /// Start (or restart) an account from its stored rows, in seq order:
+    /// `(kind, payload_json, ts_utc, command_id, schema_version, seq)`.
+    fn load(&mut self, account: &str, rows: Vec<Row>) -> PyResult<()> {
+        self.entries.remove(account);
+        self.entries.put(account, FoldEntry::fresh(AccountState::new(account)));
+        self.apply_rows(account, rows)
+    }
+
+    /// Apply stored rows to an account (created empty if absent); a refusal drops it.
+    fn apply_rows(&mut self, account: &str, rows: Vec<Row>) -> PyResult<()> {
+        for row in &rows {
+            if let Err(e) = self.apply_row(account, row) {
+                self.entries.remove(account);
+                return Err(refuse_ledger(e));
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply one stored row (the store's append, after its INSERT).
+    #[pyo3(signature = (account, kind, payload_json, ts_utc, command_id, schema_version, seq))]
+    #[allow(clippy::too_many_arguments)]
+    fn apply_row1(
+        &mut self,
+        account: &str,
+        kind: String,
+        payload_json: String,
+        ts_utc: String,
+        command_id: Option<String>,
+        schema_version: i64,
+        seq: Option<i64>,
+    ) -> PyResult<()> {
+        self.apply_row(account, &(kind, payload_json, ts_utc, command_id, schema_version, seq)).map_err(refuse_ledger)
+    }
+
+    /// Apply one encoded event to its own account (`FoldCache.extend`).
+    fn apply_event(&mut self, event: &[u8]) -> PyResult<()> {
+        let ev = te_core::ledger::codec::event_from_bytes(event).map_err(refuse_ledger)?;
+        let account = ev.account.clone();
+        self.apply(&account, &ev).map_err(refuse_ledger)
+    }
+
+    /// The account's state for Python: `(True, whole canonical state)` the first time (or
+    /// when `full`), else `(False, patch since the last export)`.
+    #[pyo3(signature = (account, full=false))]
+    fn export(&mut self, account: &str, full: bool) -> PyResult<(bool, Vec<u8>)> {
+        let Some(entry) = self.entries.get_mut(account) else {
+            return Err(refuse_ledger(LErr { kind: "key", msg: format!("'{account}'") }));
+        };
+        let whole = full || !entry.exported;
+        let out = if whole { lc::export_full(&mut entry.st) } else { lc::export_delta(&mut entry.st, entry.fills_held) }
+            .map_err(refuse_ledger)?;
+        entry.fills_held = entry.st.fills.len();
+        entry.exported = true;
+        Ok((whole, ldumps(&out).into_bytes()))
+    }
+}
+
 #[pymodule]
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -443,6 +721,16 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ledger_reencode, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_fold, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_fold_all, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_check_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_check_decode_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_check_event, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_check_row, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_apply_event, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_apply_fill, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_mirror_step, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_pro_rata, m)?)?;
+    m.add_function(wrap_pyfunction!(ledger_ticket_contracts, m)?)?;
+    m.add_class::<LedgerFold>()?;
     register_options(m)?;
     m.add_function(wrap_pyfunction!(risk_rules_from_mapping, m)?)?;
     m.add_function(wrap_pyfunction!(risk_validate_rules, m)?)?;

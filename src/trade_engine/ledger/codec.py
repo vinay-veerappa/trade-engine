@@ -6,11 +6,21 @@ float), timestamps keep their UTC offset, and every enum keeps its member.
 
 The type list is an explicit allowlist. An unknown type is refused rather than
 serialized by guesswork (I5).
+
+Since P2b the rules are Rust's (``te_core::ledger::codec``). What stays here is the
+plumbing between Python objects and the encoded tree, and it decides nothing:
+
+- the walker renders each value by its type and refuses nothing; where a value has no
+  encoding it writes a marker (``{"?": type}``, ``{"?i": type}``) and Rust refuses the
+  tree, with the message, in the order the old encoder did;
+- the builder turns a tree Rust has ACCEPTED back into objects, by tag, through each
+  type's own constructor.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -27,11 +37,13 @@ from trade_engine.domain.instruments import (
     Side,
 )
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
-from trade_engine.domain.portfolio import Fill, Lot
+from trade_engine.domain.portfolio import Fill, Lot, Position
 from trade_engine.domain.risk import RiskControlChange, RiskRuleResult, RiskVerdict
 from trade_engine.domain.signals import Signal
 from trade_engine.interfaces.market_data import CorporateAction
 
+from trade_engine.ledger import _rs
+from trade_engine.ledger.errors import PayloadCodecError
 from trade_engine.ledger.events import (
     CashFlow,
     EodRun,
@@ -52,21 +64,7 @@ from trade_engine.ledger.events import (
     VenueReconcile,
 )
 
-
-class PayloadCodecError(ValueError):
-    """Raised when a payload cannot be encoded or decoded without guessing."""
-
-
-_DECIMAL = "d"
-_DATETIME = "T"
-_DATE = "D"
-_ENUM = "e"
-_TUPLE = "t"
-_MAP = "m"
-_DATACLASS = "dc"
-_NONE = "n"
-
-# Leaf/nested types the codec understands. Anything else is refused.
+# Payload types by tag: the walker's dataclass allowlist and the builder's constructors.
 _TAG_TO_TYPE: dict[str, type] = {
     "Equity": Equity,
     "OptionContract": OptionContract,
@@ -98,59 +96,55 @@ _TAG_TO_TYPE: dict[str, type] = {
 }
 _TYPE_TO_TAG: dict[type, str] = {v: k for k, v in _TAG_TO_TYPE.items()}
 
-_ENUM_TYPES: tuple[type[Enum], ...] = (
-    Side,
-    OptionRight,
-    OrderType,
-    OrderState,
-    TimeInForce,
-    EventKind,
-)
-_ENUM_BY_NAME: dict[str, type[Enum]] = {t.__name__: t for t in _ENUM_TYPES}
+_ENUM_BY_NAME: dict[str, type[Enum]] = {
+    t.__name__: t for t in (Side, OptionRight, OrderType, OrderState, TimeInForce, EventKind)
+}
+
+# The folded-state carriers (never stored; a fold's result crossing from Rust). `state`
+# and `mirror` register theirs on import; Position is the domain's.
+_CARRIERS: dict[str, type] = {"Position": Position}
+
+
+def register_carrier(cls: type) -> type:
+    _CARRIERS[cls.__name__] = cls
+    return cls
+
+
+# --- the walker: objects -> tree, deciding nothing ------------------------------------
 
 
 def _encode(value: Any) -> Any:
     if value is None:
-        return {_NONE: True}
-    # Enum must be checked before str/int: StrEnum members ARE str instances, and a
-    # plain-string round-trip would silently drop the member type.
+        return {"n": True}
+    # Enum before str/int: a StrEnum member IS a str, and must keep its member type.
     if isinstance(value, Enum):
-        return {_ENUM: type(value).__name__, "v": value.value}
-    if isinstance(value, bool) or isinstance(value, (int, str)):
+        return {"e": type(value).__name__, "v": value.value}
+    if isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, Decimal):
-        if not value.is_finite():
-            raise PayloadCodecError(f"Refusing to persist a non-finite Decimal: {value} (I5)")
-        return {_DECIMAL: str(value)}
+        return {"d": str(value)}
     if isinstance(value, datetime):
-        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
-            raise PayloadCodecError("Refusing to persist a naive datetime (I7)")
-        return {_DATETIME: value.isoformat()}
+        return {"T": value.isoformat()}
     if isinstance(value, date):
-        return {_DATE: value.isoformat()}
+        return {"D": value.isoformat()}
     if isinstance(value, Instrument):
         return _encode_instrument(value)
     if isinstance(value, tuple):
-        return {_TUPLE: [_encode(item) for item in value]}
+        return {"t": [_encode(item) for item in value]}
     if isinstance(value, Mapping):
-        return {_MAP: [[str(k), _encode(v)] for k, v in value.items()]}
-
+        return {"m": [[str(k), _encode(v)] for k, v in value.items()]}
     tag = _TYPE_TO_TAG.get(type(value))
     if tag is not None and dataclasses.is_dataclass(value):
-        fields = {f.name: _encode(getattr(value, f.name)) for f in dataclasses.fields(value)}
-        return {_DATACLASS: tag, "f": fields}
-
-    raise PayloadCodecError(
-        f"Refusing to persist unsupported payload type {type(value).__name__} (I5)"
-    )
+        return {"dc": tag, "f": {f.name: _encode(getattr(value, f.name)) for f in dataclasses.fields(value)}}
+    return {"?": type(value).__name__}
 
 
 def _encode_instrument(instrument: Instrument) -> Any:
     if isinstance(instrument, Equity):
-        return {_DATACLASS: "Equity", "f": {"symbol": instrument.symbol}}
+        return {"dc": "Equity", "f": {"symbol": instrument.symbol}}
     if isinstance(instrument, OptionContract):
         return {
-            _DATACLASS: "OptionContract",
+            "dc": "OptionContract",
             "f": {
                 "underlying": instrument.underlying,
                 "expiry": _encode(instrument.expiry),
@@ -160,77 +154,45 @@ def _encode_instrument(instrument: Instrument) -> Any:
             },
         }
     if isinstance(instrument, Combo):
-        return {_DATACLASS: "Combo", "f": {"legs": _encode(instrument.legs)}}
-    raise PayloadCodecError(
-        f"Refusing to persist unknown instrument type {type(instrument).__name__} (I6)"
-    )
+        return {"dc": "Combo", "f": {"legs": _encode(instrument.legs)}}
+    return {"?i": type(instrument).__name__}
 
 
-def _decode(node: Any) -> Any:
-    if isinstance(node, (int, str)) or isinstance(node, bool):
-        return node
-    if isinstance(node, list):
-        raise PayloadCodecError("A bare JSON list is not a valid encoded value")
-
-    if not isinstance(node, dict):
-        raise PayloadCodecError(f"Encoded value must be an object, got {type(node).__name__}")
-
-    if _NONE in node:
-        return None
-    if _DECIMAL in node:
-        try:
-            return Decimal(node[_DECIMAL])
-        except Exception as err:  # noqa: BLE001 - surfaced as codec error
-            raise PayloadCodecError(f"Invalid Decimal literal {node[_DECIMAL]!r}") from err
-    if _DATETIME in node:
-        parsed = datetime.fromisoformat(node[_DATETIME])
-        if parsed.tzinfo is None:
-            raise PayloadCodecError("Decoded datetime is naive; stored events must be UTC (I7)")
-        return parsed
-    if _DATE in node:
-        return date.fromisoformat(node[_DATE])
-    if _ENUM in node:
-        enum_type = _ENUM_BY_NAME.get(node[_ENUM])
-        if enum_type is None:
-            raise PayloadCodecError(f"Unknown enum type '{node[_ENUM]}' (I5)")
-        try:
-            return enum_type(node["v"])
-        except ValueError as err:
-            raise PayloadCodecError(f"Invalid {node[_ENUM]} value {node['v']!r}") from err
-    if _TUPLE in node:
-        return tuple(_decode(item) for item in node[_TUPLE])
-    if _MAP in node:
-        return MappingProxyType({k: _decode(v) for k, v in node[_MAP]})
-    if _DATACLASS in node:
-        tag = node[_DATACLASS]
-        target = _TAG_TO_TYPE.get(tag)
-        if target is None:
-            raise PayloadCodecError(f"Unknown payload type tag '{tag}' (I5)")
-        kwargs = {name: _decode(value) for name, value in node["f"].items()}
-        try:
-            return target(**kwargs)
-        except (TypeError, ValueError) as err:
-            raise PayloadCodecError(f"Could not rebuild {tag} from stored fields: {err}") from err
-
-    raise PayloadCodecError(f"Unrecognised encoded object with keys {sorted(node)}")
+def canon(value: Any) -> Any:
+    """A folded state (carrier) as the canonical tree Rust reads it back from: map keys
+    are encoded values, frozensets are ``{"fs": [...]}``. The walker otherwise."""
+    if dataclasses.is_dataclass(value) and _CARRIERS.get(type(value).__name__) is type(value):
+        return {"dc": type(value).__name__, "f": {f.name: canon(getattr(value, f.name)) for f in dataclasses.fields(value)}}
+    if isinstance(value, (frozenset, set)):
+        return {"fs": [canon(v) for v in value]}
+    if isinstance(value, tuple):
+        return {"t": [canon(v) for v in value]}
+    if isinstance(value, Mapping):
+        return {"m": [[canon(k), canon(v)] for k, v in value.items()]}
+    return _encode(value)
 
 
-def encode_payload(payload: Any) -> Any:
-    """Encode a payload into JSON-safe primitives (dicts/lists/str/numbers)."""
-    return _encode(payload)
+def text(tree: Any) -> str:
+    """A tree as JSON text, in walk order (Rust sorts what it stores)."""
+    return json.dumps(tree, separators=(",", ":"))
 
 
-def decode_payload(encoded: Any) -> Any:
-    """Rebuild a payload from its encoded form, exactly (or refuse)."""
-    return _decode(encoded)
+def payload_text(payload: Any) -> str:
+    """The payload's stored JSON text, or the old encoder's refusal (from Rust)."""
+    return _rs.call(_rs.rs.ledger_check_payload, text(_encode(payload))).decode("ascii")
 
 
-def encode_event(event: Event) -> dict[str, Any]:
-    """Encode an Event into a JSON-safe dict (payload included)."""
+def event_bytes(event: Event) -> bytes:
+    """An in-memory event, encoded WITHOUT the encoder's refusals, for an in-memory fold:
+    the old fold never encoded, so a NaN fill must reach the fold and be refused THERE."""
+    return text(_encode_event(event, _encode(event.payload))).encode()
+
+
+def _encode_event(event: Event, payload: Any) -> dict[str, Any]:
     return {
         "account": event.account,
         "kind": event.kind.value,
-        "payload": encode_payload(event.payload),
+        "payload": payload,
         "ts_utc": event.ts_utc.isoformat(),
         "command_id": event.command_id,
         "schema_version": event.schema_version,
@@ -238,14 +200,111 @@ def encode_event(event: Event) -> dict[str, Any]:
     }
 
 
+# --- the builder: an accepted tree -> objects, by tag ---------------------------------
+
+
+def build(node: Any) -> Any:
+    """Objects from a tree Rust accepted (or produced). No rule: each tag is its type's
+    constructor; a constructor that refuses anyway is a codec refusal, as it was."""
+    if not isinstance(node, dict):
+        return node
+    if "n" in node:
+        return None
+    if "d" in node:
+        return Decimal(node["d"])
+    if "T" in node:
+        return datetime.fromisoformat(node["T"])
+    if "D" in node:
+        return date.fromisoformat(node["D"])
+    if "e" in node:
+        return _ENUM_BY_NAME[node["e"]](node["v"])
+    if "t" in node:
+        return tuple([build(item) for item in node["t"]])
+    if "m" in node:
+        return MappingProxyType({build(k): build(v) for k, v in node["m"]})
+    if "fs" in node:
+        return frozenset(build(item) for item in node["fs"])
+    tag = node["dc"]
+    target = _TAG_TO_TYPE.get(tag) or _CARRIERS[tag]
+    kwargs = {name: build(value) for name, value in node["f"].items()}
+    try:
+        return target(**kwargs)
+    except (TypeError, ValueError) as err:
+        raise PayloadCodecError(f"Could not rebuild {tag} from stored fields: {err}") from err
+
+
+def patch(old: Any, node: Any) -> Any:
+    """Apply a Rust state delta (``canon.rs`` ``export_delta``) to the carrier it was taken
+    against: ``+dc`` replaces fields, ``+m`` sets map entries, ``+t`` appends to a tuple,
+    ``+fs`` adds to a frozenset; anything else is a whole value."""
+    if isinstance(node, dict):
+        if "+dc" in node:
+            return dataclasses.replace(old, **{k: patch(getattr(old, k), v) for k, v in node["f"].items()})
+        if "+m" in node:
+            entries = dict(old)
+            for k, v in node["+m"]:
+                entries[build(k)] = build(v)
+            return MappingProxyType(entries)
+        if "+t" in node:
+            return old + tuple([build(item) for item in node["+t"]])
+        if "+fs" in node:
+            return old | frozenset(build(item) for item in node["+fs"])
+    return build(node)
+
+
+def build_text(data: bytes | str) -> Any:
+    return build(json.loads(data))
+
+
+def event_from_row(
+    account: str, kind: str, payload_json: str, ts_utc: str, command_id: str | None, schema_version: int, seq: int | None
+) -> Event:
+    """A stored row as an Event: Rust refuses it as ``decode_event`` did, or it is built."""
+    _rs.call(_rs.rs.ledger_check_row, account, kind, payload_json, ts_utc, command_id, schema_version, seq)
+    return Event(
+        account=account,
+        kind=EventKind(kind),
+        payload=build(json.loads(payload_json)),
+        ts_utc=datetime.fromisoformat(ts_utc),
+        command_id=command_id,
+        schema_version=int(schema_version),
+        seq=seq,
+    )
+
+
+# --- the public codec --------------------------------------------------------------------
+
+
+def encode_payload(payload: Any) -> Any:
+    """Encode a payload into JSON-safe primitives (dicts/lists/str/numbers)."""
+    tree = _encode(payload)
+    _rs.call(_rs.rs.ledger_check_payload, text(tree))
+    return tree
+
+
+def decode_payload(encoded: Any) -> Any:
+    """Rebuild a payload from its encoded form, exactly (or refuse)."""
+    _rs.call(_rs.rs.ledger_check_decode_payload, text(encoded))
+    return build(encoded)
+
+
+def encode_event(event: Event) -> dict[str, Any]:
+    """Encode an Event into a JSON-safe dict (payload included)."""
+    return _encode_event(event, encode_payload(event.payload))
+
+
 def decode_event(encoded: Mapping[str, Any]) -> Event:
     """Rebuild an Event from its stored form, exactly (or refuse)."""
+    _rs.call(_rs.rs.ledger_check_event, text(dict(encoded)).encode())
     return Event(
         account=encoded["account"],
         kind=EventKind(encoded["kind"]),
-        payload=decode_payload(encoded["payload"]),
+        payload=build(encoded["payload"]),
         ts_utc=datetime.fromisoformat(encoded["ts_utc"]),
         command_id=encoded.get("command_id"),
         schema_version=int(encoded.get("schema_version", 1)),
         seq=encoded.get("seq"),
     )
+
+
+__all__ = ["PayloadCodecError", "decode_event", "decode_payload", "encode_event", "encode_payload"]

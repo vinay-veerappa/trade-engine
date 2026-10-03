@@ -6,9 +6,9 @@ service live must still read what the sim did. :class:`LedgerReader` opens the f
 through SQLite's read-only mode. It takes no lock and cannot write. The ledger runs in
 WAL mode, so the reader sees every committed event and never blocks the writer.
 
-``state`` re-folds an account when the file has grown since the last read. The writer's
-cache is sound only because it is the one writer; this instance watches someone else's
-writes.
+``state`` folds an account's new rows when the file has grown since the last read (P2b:
+only the rows past the last fold, applied once, in Rust). The writer's cache is sound
+only because it is the one writer; this instance watches someone else's writes.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from trade_engine.ledger.state import AccountState, fold_account
+from trade_engine.ledger.state import AccountState, IncrementalFold
 from trade_engine.ledger.store import Ledger
 
 
@@ -32,7 +32,7 @@ class LedgerReader(Ledger):
         self._lock = None
         self._lock_held = False
         self._conn = None
-        self._states: dict[str, AccountState] = {}
+        self._fold = IncrementalFold(atomic=False)
         self._folded_at: dict[str, int] = {}
         self._listeners = []
 
@@ -54,10 +54,15 @@ class LedgerReader(Ledger):
     def state(self, account: str) -> AccountState:
         """The account's fold as of the newest committed event, re-read when the file grew."""
         newest = self.next_seq() - 1
-        if self._folded_at.get(account) != newest:
-            self._states[account] = fold_account(self.events(account=account), account)
+        folded_at = self._folded_at.get(account)
+        if folded_at != newest:
+            self._folded_at.pop(account, None)
+            if folded_at is not None and folded_at < newest and self._fold.has(account):
+                self._fold.apply_rows(account, self._rows(account, after=folded_at))
+            else:
+                self._fold.load(account, self._rows(account))
             self._folded_at[account] = newest
-        return self._states[account]
+        return self._fold.state(account)
 
     def _refuse(self, *_args, **_kwargs):
         raise LedgerReadOnlyError(f"{self.path} is open read-only; its writer is another process (I4)")

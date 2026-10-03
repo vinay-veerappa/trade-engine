@@ -289,6 +289,22 @@ fn apply_trade(
     make_position(account_id, instrument.clone(), new_qty, new_avg, realized, lots)
 }
 
+/// `apply_trade`, for `state.apply_fill` (P2b: the public one-fill step).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_trade_pub(
+    account_id: &str,
+    position: Option<&Position>,
+    instrument: &Instrument,
+    side: Side,
+    quantity: &PyDec,
+    price: &PyDec,
+    at: &DateTime,
+    lot_id: String,
+    multiplier: i128,
+) -> R<Position> {
+    apply_trade(account_id, position, instrument, side, quantity, price, at, lot_id, multiplier)
+}
+
 // --- helpers -----------------------------------------------------------------------------------
 
 fn multiplier(i: &Instrument) -> R<i128> {

@@ -1,5 +1,9 @@
 """P2a gate 2: the Rust ledger fold against the Python fold (docs/RUST_PORT.md).
 
+Since P2b the Python side is the FROZEN pre-port fold (`tests/frozen_ledger/`), and the
+production path (`trade_engine.ledger.state.fold` / `fold_account`, now shims over the
+Rust fold handle) is held to the same oracle, refusal kind and message included.
+
 Three sources of event streams, each folded by BOTH implementations; the canonical JSON of
 the whole `AccountState` (positions, lots, orders, fills, marks, the mirror book ...) must
 be identical, and a refusal must be identical in kind AND message:
@@ -31,12 +35,14 @@ import trade_engine_rs as rs  # a missing module is an ERROR, never a skip (D5)
 from ledger_gen import (
     encoded,
     event_zoo,
+    prod_fold,
+    prod_fold_all,
     py_fold,
     py_fold_all,
     random_stream,
 )
 
-from trade_engine.ledger import codec
+from frozen_ledger import codec  # the frozen oracle's codec (P2b)
 from trade_engine.ledger.events import EventKind
 
 STRICT = {"strict", "unsupported"}
@@ -71,6 +77,12 @@ def rs_fold_all(blobs):
         if len(err.args) != 2:
             raise
         return ("err", err.args[0], err.args[1])
+
+
+def same(py, prod, what):
+    """The production path must equal the frozen oracle exactly: state bytes, or refusal
+    kind AND message (the store and every caller see these)."""
+    assert prod == py, f"production differs from the oracle for {what}\npy:   {py!r:.600}\nprod: {prod!r:.600}"
 
 
 class Tally:
@@ -115,8 +127,12 @@ def check_stream(events, tally, what):
     """Per-account `fold_account` and the all-accounts `fold`, both implementations."""
     blobs = encoded(events)
     for account in accounts_of(events):
-        compare(py_fold(events, account), rs_fold(blobs, account), f"{what} account={account}", tally)
-    compare(py_fold_all(events), rs_fold_all(blobs), f"{what} fold-all", tally)
+        py = py_fold(events, account)
+        compare(py, rs_fold(blobs, account), f"{what} account={account}", tally)
+        same(py, prod_fold(events, account), f"{what} account={account}")
+    py = py_fold_all(events)
+    compare(py, rs_fold_all(blobs), f"{what} fold-all", tally)
+    same(py, prod_fold_all(events), f"{what} fold-all")
 
 
 # --- the zoo -------------------------------------------------------------------------
@@ -128,7 +144,9 @@ def test_zoo_every_prefix_per_account_matches():
     for account in accounts_of(zoo):
         sub = [e for e in zoo if e.account == account]
         for n in range(1, len(sub) + 1):
-            compare(py_fold(sub[:n], account), rs_fold(encoded(sub[:n]), account), f"zoo {account}[:{n}]", tally)
+            py = py_fold(sub[:n], account)
+            compare(py, rs_fold(encoded(sub[:n]), account), f"zoo {account}[:{n}]", tally)
+            same(py, prod_fold(sub[:n], account), f"zoo {account}[:{n}]")
     assert tally.ok > 5 and tally.refused > 5
     assert tally.strict == 0
 
@@ -136,6 +154,7 @@ def test_zoo_every_prefix_per_account_matches():
 def test_an_empty_log_folds_to_the_default_state():
     tally = Tally()
     compare(py_fold([], "ACC"), rs_fold([], "ACC"), "empty", tally)
+    same(py_fold([], "ACC"), prod_fold([], "ACC"), "empty")
     assert tally.ok == 1
 
 
@@ -146,6 +165,7 @@ def test_corporate_action_is_refused_as_unhandled_with_the_same_message():
     rust = rs_fold(encoded(zoo), zoo[0].account)
     assert py[0] == "err" and py[1] == "unhandled"
     assert rust == py
+    assert prod_fold(zoo, zoo[0].account) == py
 
 
 def test_an_undecodable_event_is_a_refusal_not_a_state():
@@ -206,11 +226,13 @@ def test_the_suites_streams_fold_identically(recorded):
         if rec["kind"] == "fold_account":
             py = py_fold(events, rec["account"])
             compare(py, rs_fold(blobs, rec["account"]), what, tally)
+            same(py, prod_fold(events, rec["account"]), what)
             if py[0] == "ok":
                 kinds_folded |= {e.kind for e in events if e.account == rec["account"]}
         else:
             py = py_fold_all(events)
             compare(py, rs_fold_all(blobs), what, tally)
+            same(py, prod_fold_all(events), what)
             if py[0] == "ok":
                 kinds_folded |= {e.kind for e in events}
     assert tally.strict == 0
