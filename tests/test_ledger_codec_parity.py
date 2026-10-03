@@ -285,7 +285,7 @@ def test_instrument_variants_are_generic():
         event = _ev(EventKind.MARK, Mark(inst, __import__("decimal").Decimal("1.5"), event_zoo()[0].ts_utc))
         data = encoded([event])[0]
         assert rs_reencode(data) == ("ok", data)
-    # MirrorQueued refuses an Equity in both implementations today (te/T2-follow relaxes both)
+    # MirrorQueued carries shares of an Equity (covered-call mirror, S1a) in both implementations
     venue = "D-1"
     queued = MirrorQueued(venue, "k", C200, Side.SELL, __import__("decimal").Decimal("1"), OrderType.MARKET, None,
                           TimeInForce.DAY, (MirrorAllocation("a", "A", __import__("decimal").Decimal("1")),),
@@ -294,6 +294,9 @@ def test_instrument_variants_are_generic():
     node["payload"]["f"]["instrument"] = {"dc": "Equity", "f": {"symbol": "AAPL"}}
     data = dumps(node)
     py, rust = py_reencode(data), rs_reencode(data)
-    assert py[:2] == rust[:2] == ("err", "codec"), (py, rust)
-    assert "option contract or a vertical" in py[2] and "option contract or a vertical" in rust[2]
+    assert py[0] == "ok" and rust == py, (py, rust)
+    # anything that is not an instrument is still refused by both, in the same category
+    node["payload"]["f"]["instrument"] = {"dc": "Mark", "f": {}}
+    py, rust = py_reencode(dumps(node)), rs_reencode(dumps(node))
+    assert py[0] == rust[0] == "err" and (rust[1] in STRICT or py[1] == rust[1]), (py, rust)
     assert timezone.utc  # keep the import honest

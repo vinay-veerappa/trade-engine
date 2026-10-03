@@ -1909,14 +1909,8 @@ fn require_vertical(legs: &[ComboLeg], name: &str) -> R<()> {
 fn check_mirror_instrument(instrument: &Instrument) -> R<()> {
     match instrument {
         Instrument::Combo(legs) => require_vertical(legs, "MirrorQueued.instrument"),
-        Instrument::Option(_) => Ok(()),
-        other => err(
-            "payload",
-            format!(
-                "MirrorQueued.instrument must be an option contract or a vertical, got {} (I6)",
-                other.tag()
-            ),
-        ),
+        // every decodable instrument is legal now: Python's refusal reaches only non-instruments
+        Instrument::Option(_) | Instrument::Equity(_) => Ok(()),
     }
 }
 

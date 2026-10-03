@@ -50,6 +50,8 @@ RECORDED_SUITES = [
     "test_option_margin.py", "test_option_risk.py", "test_risk_engine.py", "test_risk_parity.py",
     "test_tos_broker.py", "test_tos_mirror.py", "test_tos_mirror_exits.py", "test_tos_mirror_halt.py",
     "test_tos_reconcile.py",
+    "test_tos_stock.py", "test_tos_unavailable.py", "test_tos_cover.py", "test_tos_cover_session.py",
+    "test_tos_netting.py",
 ]
 
 
