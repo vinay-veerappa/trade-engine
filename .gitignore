@@ -66,3 +66,6 @@ Thumbs.db
 # Agent worktrees live inside the repo; never commit them.
 .claude/worktrees/
 debug_tmp/
+
+# Agent-loop and verification logs: local artifacts, never committed
+/logs/

@@ -1,4 +1,0 @@
-﻿mirror-PM-B.db: 4095 events, codec 4095/4095 identical, state 1/1 accounts identical, fold identical, oracle folded
-options-0dte-ledger.db: 3278 events, codec 3278/3278 identical, state 1/1 accounts identical, fold identical, oracle folded
-options-ledger.db: 436 events, codec 436/436 identical, state 9/9 accounts identical, fold identical, oracle folded
-scan-ledger.db: 6296 events, codec 6296/6296 identical, state 12/12 accounts identical, fold identical, oracle folded

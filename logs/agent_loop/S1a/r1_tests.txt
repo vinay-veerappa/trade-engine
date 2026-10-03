@@ -1,2 +1,0 @@
-STILL FAILING (this ticket exists to make these pass):
-  - test_a_mirrored_account_may_buy_shares
