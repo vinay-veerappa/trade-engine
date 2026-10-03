@@ -370,7 +370,12 @@ Requires Python >= 3.13.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e .[test]
+pip install ./crates/te_py   # trade_engine_rs, the Rust core (docs/RUST_PORT.md)
 ```
+
+The engine is moving to Rust module by module; `docs/RUST_PORT.md` is the plan
+and the status. `tools/ci_local.py` rebuilds `trade_engine_rs` before the tests,
+and a missing module is an error, never a skip.
 
 ### Running Tests & Local CI
 

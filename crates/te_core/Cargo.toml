@@ -1,0 +1,10 @@
+[package]
+name = "te_core"
+version = "0.1.0"
+edition = "2021"
+description = "Trade engine core: the rules, with no Python and no clock (I7)."
+license = "MIT"
+
+[dependencies]
+chrono = { workspace = true }
+chrono-tz = { workspace = true }

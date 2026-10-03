@@ -1,42 +1,38 @@
-"""Exchange calendar and session helpers (Architecture §4.9, E2)."""
+"""Exchange calendar and session helpers (Architecture §4.9, E2).
+
+The rules live in Rust (`te_core::calendar`, docs/RUST_PORT.md P1a); this class
+only converts Python dates and datetimes to and from what `trade_engine_rs`
+takes. No calendar rule may be written here: that would be a second reader.
+"""
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Literal, Union
 import zoneinfo
 
-import exchange_calendars as xcals
-import pandas as pd
+import trade_engine_rs as _rs
 
 DateLike = Union[date, datetime, str]
 
+_SUPPORTED = ("XNYS",)
+_MICROSECOND = timedelta(microseconds=1)
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
 
 class ExchangeCalendar:
-    """Exchange session calendar wrapping exchange_calendars (XNYS by default).
+    """The XNYS session calendar, 2000-01-01 through 2040-12-31.
 
     Provides trading session schedules, holiday checks, early-close detection,
-    and session navigation. All returned timestamps are timezone-aware UTC.
+    and session navigation. All returned timestamps are timezone-aware UTC. A
+    date outside the range refuses (I5).
     """
 
-    def __init__(
-        self,
-        exchange: str = "XNYS",
-        start: str = "2000-01-01",
-        end: str = "2040-12-31",
-    ) -> None:
+    def __init__(self, exchange: str = "XNYS") -> None:
+        if exchange not in _SUPPORTED:
+            raise ValueError(f"Unknown or unsupported exchange: {exchange!r}")
         self.exchange = exchange
-        try:
-            self._cal = xcals.get_calendar(exchange, start=start, end=end)
-        except Exception as e:
-            raise ValueError(f"Unknown or unsupported exchange: {exchange!r}") from e
-        cal_tz = self._cal.tz
-        if isinstance(cal_tz, zoneinfo.ZoneInfo):
-            self._tz = cal_tz
-        elif hasattr(cal_tz, "zone"):
-            self._tz = zoneinfo.ZoneInfo(cal_tz.zone)
-        else:
-            self._tz = zoneinfo.ZoneInfo(str(cal_tz))
+        self._tz = zoneinfo.ZoneInfo("America/New_York")
 
     def _to_date(self, d: DateLike) -> date:
         """Parse DateLike into a pure calendar date in exchange local timezone."""
@@ -59,77 +55,39 @@ class ExchangeCalendar:
         else:
             raise TypeError(f"Expected date, datetime, or str, got {type(d).__name__}")
 
+    def _iso(self, d: DateLike) -> str:
+        return self._to_date(d).isoformat()
+
     def is_session(self, d: DateLike) -> bool:
         """Return True if the given date is an open trading session."""
-        session_date = self._to_date(d)
-        iso_str = session_date.isoformat()
-        return bool(self._cal.is_session(iso_str))
+        return _rs.calendar_is_session(self._iso(d))
 
     def is_holiday(self, d: DateLike) -> bool:
-        """Return True if the date is an exchange holiday.
-
-        Specifically returns True for weekdays that are closed for exchange holidays.
-        Regular weekend days (Saturday/Sunday) return False.
-        """
-        session_date = self._to_date(d)
-        if session_date.weekday() >= 5:
-            return False
-        return not self.is_session(session_date)
+        """Return True for a weekday closed for an exchange holiday; weekends return False."""
+        return _rs.calendar_is_holiday(self._iso(d))
 
     def is_early_close(self, d: DateLike) -> bool:
         """Return True if the session closes earlier than regular hours (e.g. 2026-11-27)."""
-        session_date = self._to_date(d)
-        if not self.is_session(session_date):
-            return False
-        ts = pd.Timestamp(session_date)
-        return ts in self._cal.early_closes
+        return _rs.calendar_is_early_close(self._iso(d))
 
     def session_open(self, d: DateLike) -> datetime:
-        """Return market open timestamp as timezone-aware UTC datetime.
-
-        Raises ValueError if date is not a session (I5: refuse, never guess).
-        """
-        session_date = self._to_date(d)
-        iso_str = session_date.isoformat()
-        if not self.is_session(session_date):
-            raise ValueError(f"Date {iso_str} is not a valid trading session of {self.exchange} (I5)")
-        open_ts = self._cal.session_open(iso_str)
-        return open_ts.to_pydatetime().astimezone(timezone.utc)
+        """Return market open as timezone-aware UTC; a non-session raises ValueError (I5)."""
+        return datetime.fromtimestamp(_rs.calendar_session_open(self._iso(d)), tz=timezone.utc)
 
     def session_close(self, d: DateLike) -> datetime:
-        """Return market close timestamp as timezone-aware UTC datetime.
+        """Return market close as timezone-aware UTC, reflecting an early close.
 
-        Reflects early close if applicable (e.g. 18:00 UTC / 13:00 ET on 2026-11-27).
-        Raises ValueError if date is not a session (I5: refuse, never guess).
+        A non-session raises ValueError (I5: refuse, never guess).
         """
-        session_date = self._to_date(d)
-        iso_str = session_date.isoformat()
-        if not self.is_session(session_date):
-            raise ValueError(f"Date {iso_str} is not a valid trading session of {self.exchange} (I5)")
-        close_ts = self._cal.session_close(iso_str)
-        return close_ts.to_pydatetime().astimezone(timezone.utc)
+        return datetime.fromtimestamp(_rs.calendar_session_close(self._iso(d)), tz=timezone.utc)
 
     def next_session(self, d: DateLike) -> date:
         """Return the next active trading session strictly after d."""
-        target_date = self._to_date(d)
-        iso_str = target_date.isoformat()
-        if self.is_session(target_date):
-            next_ts = self._cal.next_session(iso_str)
-            return next_ts.date()
-        # Non-session: find earliest session strictly following target_date
-        next_ts = self._cal.date_to_session(iso_str, direction="next")
-        return next_ts.date()
+        return date.fromisoformat(_rs.calendar_next_session(self._iso(d)))
 
     def previous_session(self, d: DateLike) -> date:
         """Return the previous active trading session strictly before d."""
-        target_date = self._to_date(d)
-        iso_str = target_date.isoformat()
-        if self.is_session(target_date):
-            prev_ts = self._cal.previous_session(iso_str)
-            return prev_ts.date()
-        # Non-session: find latest session strictly preceding target_date
-        prev_ts = self._cal.date_to_session(iso_str, direction="previous")
-        return prev_ts.date()
+        return date.fromisoformat(_rs.calendar_previous_session(self._iso(d)))
 
     def roll_to_session(
         self,
@@ -137,28 +95,19 @@ class ExchangeCalendar:
         direction: Literal["next", "previous"] = "next",
     ) -> date:
         """Return d if it is a session; otherwise roll forward/backward to nearest session."""
-        target_date = self._to_date(d)
-        if self.is_session(target_date):
-            return target_date
-        iso_str = target_date.isoformat()
-        rolled = self._cal.date_to_session(iso_str, direction=direction)
-        return rolled.date()
+        if direction not in ("next", "previous"):
+            raise ValueError(f"direction must be 'next' or 'previous', got {direction!r}")
+        return date.fromisoformat(_rs.calendar_roll_to_session(self._iso(d), direction == "next"))
 
     def sessions_in_range(self, start: DateLike, end: DateLike) -> list[date]:
         """Return list of active session dates between start and end (inclusive)."""
-        start_d = self._to_date(start)
-        end_d = self._to_date(end)
-        if start_d > end_d:
-            raise ValueError(f"start date {start_d} cannot be after end date {end_d}")
-        sessions = self._cal.sessions_in_range(start_d.isoformat(), end_d.isoformat())
-        return [ts.date() for ts in sessions]
+        return [date.fromisoformat(s) for s in _rs.calendar_sessions_in_range(self._iso(start), self._iso(end))]
 
     def is_open_at(self, dt: datetime) -> bool:
         """Return True if the market is open at the specified UTC datetime."""
         if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
             raise ValueError(f"Datetime must be timezone-aware (I7): {dt!r}")
-        ts = pd.Timestamp(dt)
-        return bool(self._cal.is_open_at_time(ts))
+        return _rs.calendar_is_open_at((dt - _EPOCH) // _MICROSECOND)
 
     def missing_sessions(
         self,
@@ -178,5 +127,5 @@ class ExchangeCalendar:
         if not have:
             return []
         first = min(have)
-        wanted = [ts.date() for ts in self._cal.sessions_window(pd.Timestamp(target_session), -window)]
+        wanted = [date.fromisoformat(s) for s in _rs.calendar_sessions_window_back(target_session.isoformat(), window)]
         return [d for d in wanted if d >= first and d not in have]

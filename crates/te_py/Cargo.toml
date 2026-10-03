@@ -1,0 +1,18 @@
+[package]
+name = "te_py"
+version = "0.1.0"
+edition = "2021"
+description = "Python's ONE way into te_core: thin pyo3 wrappers, so Python never carries a second reader of a rule (docs/RUST_PORT.md D2, D3)."
+license = "MIT"
+
+[lib]
+name = "trade_engine_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+te_core = { path = "../te_core" }
+chrono = { workspace = true }
+
+[dependencies.pyo3]
+version = "0.23"
+features = ["extension-module"]

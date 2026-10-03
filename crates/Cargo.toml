@@ -1,0 +1,9 @@
+# The engine's Rust (docs/RUST_PORT.md). te_core is pure Rust and never links
+# Python; te_py is the ONE pyo3 module (`trade_engine_rs`) Python reaches it by.
+[workspace]
+resolver = "2"
+members = ["te_core", "te_py"]
+
+[workspace.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"

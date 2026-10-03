@@ -102,6 +102,62 @@ def check_version() -> bool:
     return True
 
 
+RUST_WORKSPACE = REPO_ROOT / "crates"
+
+# I7 in Rust: te_core takes time as an argument, so no crate may read the clock.
+RUST_CLOCK_READS = ("Utc::now", "Local::now", "SystemTime::now", "Instant::now", "OffsetDateTime::now")
+
+
+def check_rust_invariants() -> bool:
+    say("Checking invariants (I7 in Rust: no clock reads under crates/*/src)...")
+    hits = []
+    for path in sorted(RUST_WORKSPACE.glob("*/src/**/*.rs")):
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if any(read in line for read in RUST_CLOCK_READS):
+                hits.append(f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
+    if hits:
+        say("FAIL: clock reads in Rust:")
+        for h in hits:
+            print(f"  {h}")
+        return False
+    say("Rust invariants check passed.")
+    return True
+
+
+def run_rust_tests() -> bool:
+    # te_core only: te_py is an extension module (it links Python at import, not
+    # at build), so build_extension below is what proves it compiles.
+    code, out = run_command(["cargo", "test", "--manifest-path", str(RUST_WORKSPACE / "Cargo.toml"), "-p", "te_core", "-q"])
+    print(out.strip()[-2000:])
+    if code != 0:
+        say(f"FAIL: cargo test returned exit code {code}")
+        return False
+    say("Rust tests passed.")
+    return True
+
+
+def build_extension() -> bool:
+    """Build and install trade_engine_rs (docs/RUST_PORT.md D5).
+
+    pip drives maturin through crates/te_py/pyproject.toml, which works with or
+    without a virtualenv. A failed build fails the gate: the Python tests import
+    the module and must never run against a stale or missing one.
+    """
+    py_exe = resolve_python()
+    code, out = run_command([py_exe, "-m", "pip", "install", "--no-deps", "--force-reinstall", "-q", str(RUST_WORKSPACE / "te_py")])
+    if code != 0:
+        print(out.strip()[-4000:])
+        say(f"FAIL: building trade_engine_rs returned exit code {code}")
+        return False
+    code, out = run_command([py_exe, "-c", "import trade_engine_rs; print(trade_engine_rs.__file__)"])
+    print(out.strip())
+    if code != 0:
+        say("FAIL: trade_engine_rs did not import after building")
+        return False
+    say("trade_engine_rs built.")
+    return True
+
+
 def run_tests() -> bool:
     py_exe = resolve_python()
     say(f"Running test suite ({py_exe} -m pytest -q)...")
@@ -133,7 +189,16 @@ def main() -> int:
     if not check_invariants():
         return 1
 
+    if not check_rust_invariants():
+        return 1
+
     if not check_version():
+        return 1
+
+    if not run_rust_tests():
+        return 1
+
+    if not build_extension():
         return 1
 
     if not run_tests():
