@@ -1208,9 +1208,20 @@ fn test_smoke_golden_session() {
         "fills": [fill0, fill1],
     });
 
-    let golden_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("smoke");
-    std::fs::create_dir_all(&golden_dir).unwrap();
-    let golden_path = golden_dir.join("golden.json");
-    let golden_text = serde_json::to_string_pretty(&session_output).unwrap();
-    std::fs::write(&golden_path, golden_text).unwrap();
+    let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("smoke")
+        .join("golden.json");
+    if std::env::var("UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+        let golden_text = serde_json::to_string_pretty(&session_output).unwrap();
+        std::fs::write(&golden_path, golden_text).unwrap();
+    } else {
+        let golden_text =
+            std::fs::read_to_string(&golden_path).expect("failed reading smoke/golden.json");
+        let golden_json: serde_json::Value =
+            serde_json::from_str(&golden_text).expect("failed parsing smoke/golden.json");
+        assert_eq!(
+            session_output, golden_json,
+            "Smoke session output drifted from smoke/golden.json"
+        );
+    }
 }
