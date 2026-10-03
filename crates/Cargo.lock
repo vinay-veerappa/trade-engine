@@ -655,6 +655,7 @@ dependencies = [
 name = "te_wasm"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "proptest",
  "serde",
  "serde_json",
