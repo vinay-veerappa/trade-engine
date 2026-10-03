@@ -577,8 +577,116 @@ pub fn open_bracket_stop<H: Host>(_h: &H, _entry: &str) -> R<(Order, PyDec)> {
 /// network); a raise is BrokerOutcomeUnknownError from the original exception. The ack:
 /// pending records ORDER_PENDING, rejected records ORDER_REFUSED then restores the
 /// working state, then refuses; accepted records ORDER_UPDATED with the prior state.
-pub fn replace<H: Host>(_h: &H, _order_id: &str, _changes: &OrderChanges, _command: &str) -> R<Order> {
-    unported("replace")
+pub fn replace<H: Host>(h: &H, order_id: &str, changes: &OrderChanges, command: &str) -> R<Order> {
+    use crate::ledger::model::OrderUpdated;
+
+    let order = get_order(h, order_id)?;
+    let ctx = context(h, order_id)?;
+    let emulated = ctx.emulation.is_some();
+    let triggered = ctx.emulation.as_ref().map_or(false, |e| e.triggered);
+    if plan::local_replace(&order, emulated, emulated && triggered) {
+        return replace_emulated_stop(h, &order, changes, command);
+    }
+    let request_reason = format!("Replace pending: {}", changes.repr());
+    let pending_command_id = format!("{command}:pending");
+    let prior_request = h.event_by_command(&pending_command_id)?;
+    let prior_noop = h.event_by_command(&format!("{command}:noop"))?;
+    if prior_request.is_none() {
+        if let Some(prior) = prior_noop {
+            let expected_reason = format!("No-op replace: {}", changes.repr());
+            plan::replace_replay(
+                &Prior::of(&prior),
+                plan::ReplayMode::Noop,
+                order_id,
+                &order.account_id,
+                &expected_reason,
+                command,
+                None,
+            )?;
+            return Ok(order);
+        }
+    }
+    if let Some(prior) = prior_request {
+        plan::replace_replay(
+            &Prior::of(&prior),
+            plan::ReplayMode::Pending,
+            order_id,
+            &order.account_id,
+            &request_reason,
+            command,
+            Some(order.state),
+        )?;
+        return Ok(order);
+    }
+    let filled = ctx.filled;
+    plan::replace_state(&order)?;
+    let equity = matches!(order.instrument, Instrument::Equity(..));
+    plan::replace_quantity(changes.new_quantity.as_ref(), &filled, equity)?;
+    let (updated, noop) = plan::replace_terms(
+        &order,
+        changes.new_quantity.as_ref(),
+        changes.new_limit_price.as_ref(),
+        changes.new_stop_price.as_ref(),
+    );
+    if noop {
+        let payload = Obj::OrderUpdated(OrderUpdated {
+            order: order.clone(),
+            reason: format!("No-op replace: {}", changes.repr()),
+            venue_order_id: None,
+        });
+        append(h, &order.account_id, EventKind::OrderUpdated, payload, &format!("{command}:noop"))?;
+        return Ok(order);
+    }
+    let previous_state = order.state;
+    let venue_id = plan::confirmed_id(ctx.venue_order_id.as_deref(), order_id, plan::IdMode::Replace)?;
+    let pending_payload = Obj::StateChange(OrderStateChange {
+        order_id: order_id.to_string(),
+        reason: Some(request_reason),
+        venue_order_id: ctx.venue_order_id.clone(),
+    });
+    append(h, &order.account_id, EventKind::OrderPending, pending_payload, &pending_command_id)?;
+    let ack = match h.replace(&venue_id, changes)? {
+        Net::Ok(a) => a,
+        Net::Failed => {
+            return err(
+                "broker_unknown",
+                format!("Replace outcome for order '{order_id}' is unknown; reconciliation is required"),
+            );
+        }
+    };
+    let ack_plan = plan::replace_ack(&ack.status, ack.message.as_deref().unwrap_or(""), order_id, command);
+    if ack_plan.action == plan::Ack::Pending {
+        let pending_ack_payload = Obj::StateChange(OrderStateChange {
+            order_id: order_id.to_string(),
+            reason: Some(ack_plan.reason),
+            venue_order_id: Some(ack.venue_order_id.clone()),
+        });
+        append(
+            h,
+            &order.account_id,
+            EventKind::OrderPending,
+            pending_ack_payload,
+            &format!("{command}:venue-pending"),
+        )?;
+        return get_order(h, order_id);
+    }
+    if ack_plan.action == plan::Ack::Rejected {
+        refuse(h, &order, &ack_plan.reason, &format!("{command}:refused"))?;
+        restore_working_state(h, &order, previous_state, &ack_plan.reason, &ack.venue_order_id, &format!("{command}:rejected"))?;
+        if let Some(refusal) = ack_plan.refusal {
+            return Err(refusal);
+        }
+        return err("order_management", format!("Venue rejected replace for '{order_id}'"));
+    }
+    let mut changed = updated.clone();
+    changed.state = previous_state;
+    let accepted_payload = Obj::OrderUpdated(OrderUpdated {
+        order: changed,
+        reason: ack_plan.reason,
+        venue_order_id: Some(ack.venue_order_id),
+    });
+    append(h, &order.account_id, EventKind::OrderUpdated, accepted_payload, &format!("{command}:accepted"))?;
+    get_order(h, order_id)
 }
 
 /// `_replace_emulated_stop`: a `:local` replay is checked (`replace_replay` mode
@@ -735,14 +843,23 @@ pub fn cancel_order<H: Host>(_h: &H, _order: &Order, _command: &str, _reason: &s
 
 /// `_restore_working_state`: ORDER_UPDATED with the previous state and the venue id.
 pub fn restore_working_state<H: Host>(
-    _h: &H,
-    _order: &Order,
-    _previous: OrderState,
-    _reason: &str,
-    _venue_order_id: &str,
-    _command: &str,
+    h: &H,
+    order: &Order,
+    previous: OrderState,
+    reason: &str,
+    venue_order_id: &str,
+    command: &str,
 ) -> R<()> {
-    unported("restore_working_state")
+    use crate::ledger::model::OrderUpdated;
+    let mut restored = order.clone();
+    restored.state = previous;
+    let payload = Obj::OrderUpdated(OrderUpdated {
+        order: restored,
+        reason: reason.to_string(),
+        venue_order_id: Some(venue_order_id.to_string()),
+    });
+    append(h, &order.account_id, EventKind::OrderUpdated, payload, command)?;
+    Ok(())
 }
 
 /// `_mark_pending`: the current order; already PENDING_UNKNOWN records nothing;
