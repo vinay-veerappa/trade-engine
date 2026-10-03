@@ -942,3 +942,164 @@ fn test_sim_book_parity_walks() {
     assert!(tally.malformed_json > 0);
     assert!(tally.refusals_matched > 0);
 }
+
+#[test]
+fn test_smoke_golden_session() {
+    let mut api = SimBookApi::new("SMOKE_ACC", true, "0").unwrap();
+
+    let connected_at = api.connect("2026-03-02T14:29:00+00:00").unwrap();
+
+    // 1. Submit Entry: Buy 100 AAPL @ Limit 150.00
+    let entry_order = serde_json::json!({
+        "id": "entry_1",
+        "instr": "AAPL",
+        "otype": "LIMIT",
+        "side": "BUY",
+        "quantity": "100",
+        "submitted_at": "2026-03-02T14:29:30+00:00",
+        "tif": "DAY",
+        "limit": "150.00",
+        "stop": null,
+        "trail": null,
+        "allocs": [{"soid": "s1", "account": "SMOKE_ACC", "qty": "100"}],
+        "parent": null,
+        "oco": null,
+    });
+    let entry_ack_json = api
+        .submit(&serde_json::to_string(&entry_order).unwrap(), "2026-03-02T14:29:30+00:00")
+        .unwrap();
+    let entry_ack: serde_json::Value = serde_json::from_str(&entry_ack_json).unwrap();
+
+    // 2. Bar 1 fills entry @ 150.00
+    let bar1 = serde_json::json!({
+        "instr": "AAPL",
+        "ts": "2026-03-02T14:30:00+00:00",
+        "open": "150.50",
+        "high": "151.00",
+        "low": "149.50",
+        "close": "150.00",
+        "volume": "1000",
+        "as_of": "2026-03-02T14:31:00+00:00",
+    });
+    let bar1_fills_json = api
+        .process_bar(Some(&serde_json::to_string(&bar1).unwrap()))
+        .unwrap();
+    let bar1_fills: Vec<usize> = serde_json::from_str(&bar1_fills_json).unwrap();
+    assert_eq!(bar1_fills, vec![0]);
+
+    // 3. Submit Target: Sell 100 AAPL @ Limit 155.00
+    let target_order = serde_json::json!({
+        "id": "target_1",
+        "instr": "AAPL",
+        "otype": "LIMIT",
+        "side": "SELL",
+        "quantity": "100",
+        "submitted_at": "2026-03-02T14:30:30+00:00",
+        "tif": "DAY",
+        "limit": "155.00",
+        "stop": null,
+        "trail": null,
+        "allocs": [{"soid": "s1:target:1", "account": "SMOKE_ACC", "qty": "100"}],
+        "parent": "entry_1",
+        "oco": "entry_1:oco",
+    });
+    let target_ack_json = api
+        .submit(&serde_json::to_string(&target_order).unwrap(), "2026-03-02T14:30:30+00:00")
+        .unwrap();
+    let target_ack: serde_json::Value = serde_json::from_str(&target_ack_json).unwrap();
+
+    // 4. Submit Stop: Sell 100 AAPL @ Stop 145.00
+    let stop_order = serde_json::json!({
+        "id": "stop_1",
+        "instr": "AAPL",
+        "otype": "STOP",
+        "side": "SELL",
+        "quantity": "100",
+        "submitted_at": "2026-03-02T14:30:30+00:00",
+        "tif": "DAY",
+        "limit": null,
+        "stop": "145.00",
+        "trail": null,
+        "allocs": [{"soid": "s1:stop", "account": "SMOKE_ACC", "qty": "100"}],
+        "parent": "entry_1",
+        "oco": "entry_1:oco",
+    });
+    let stop_ack_json = api
+        .submit(&serde_json::to_string(&stop_order).unwrap(), "2026-03-02T14:30:30+00:00")
+        .unwrap();
+    let stop_ack: serde_json::Value = serde_json::from_str(&stop_ack_json).unwrap();
+
+    // 5. Bar 2: between stop and target
+    let bar2 = serde_json::json!({
+        "instr": "AAPL",
+        "ts": "2026-03-02T14:31:00+00:00",
+        "open": "150.00",
+        "high": "152.00",
+        "low": "149.80",
+        "close": "151.50",
+        "volume": "1000",
+        "as_of": "2026-03-02T14:32:00+00:00",
+    });
+    let bar2_fills_json = api
+        .process_bar(Some(&serde_json::to_string(&bar2).unwrap()))
+        .unwrap();
+    let bar2_fills: Vec<usize> = serde_json::from_str(&bar2_fills_json).unwrap();
+    assert_eq!(bar2_fills, Vec::<usize>::new());
+
+    // 6. Bar 3: fills target @ 155.00
+    let bar3 = serde_json::json!({
+        "instr": "AAPL",
+        "ts": "2026-03-02T14:32:00+00:00",
+        "open": "152.00",
+        "high": "156.00",
+        "low": "151.00",
+        "close": "155.50",
+        "volume": "1000",
+        "as_of": "2026-03-02T14:33:00+00:00",
+    });
+    let bar3_fills_json = api
+        .process_bar(Some(&serde_json::to_string(&bar3).unwrap()))
+        .unwrap();
+    let bar3_fills: Vec<usize> = serde_json::from_str(&bar3_fills_json).unwrap();
+    assert_eq!(bar3_fills, vec![1]);
+
+    // 7. Query positions
+    let positions_json = api.positions("2026-03-02T14:33:00+00:00").unwrap();
+    let positions: serde_json::Value = serde_json::from_str(&positions_json).unwrap();
+    assert_eq!(positions, serde_json::json!([]));
+
+    // 8. Query orders
+    let orders_json = api
+        .orders_since("2026-03-02T14:29:00+00:00", "2026-03-02T14:33:00+00:00")
+        .unwrap();
+    let orders: serde_json::Value = serde_json::from_str(&orders_json).unwrap();
+
+    // 9. Query fills
+    let fills_indices_json = api
+        .fills_since("2026-03-02T14:29:00+00:00", "2026-03-02T14:33:00+00:00")
+        .unwrap();
+    let fills_indices: Vec<usize> = serde_json::from_str(&fills_indices_json).unwrap();
+    assert_eq!(fills_indices, vec![0, 1]);
+
+    let fill0: serde_json::Value = serde_json::from_str(&api.fill(0).unwrap()).unwrap();
+    let fill1: serde_json::Value = serde_json::from_str(&api.fill(1).unwrap()).unwrap();
+
+    let session_output = serde_json::json!({
+        "connected_at": connected_at,
+        "entry_ack": entry_ack,
+        "bar1_fills": bar1_fills,
+        "target_ack": target_ack,
+        "stop_ack": stop_ack,
+        "bar2_fills": bar2_fills,
+        "bar3_fills": bar3_fills,
+        "positions": positions,
+        "orders": orders,
+        "fills": [fill0, fill1],
+    });
+
+    let golden_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("smoke");
+    std::fs::create_dir_all(&golden_dir).unwrap();
+    let golden_path = golden_dir.join("golden.json");
+    let golden_text = serde_json::to_string_pretty(&session_output).unwrap();
+    std::fs::write(&golden_path, golden_text).unwrap();
+}

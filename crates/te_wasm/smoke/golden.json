@@ -1,0 +1,76 @@
+{
+  "bar1_fills": [
+    0
+  ],
+  "bar2_fills": [],
+  "bar3_fills": [
+    1
+  ],
+  "connected_at": "2026-03-02T14:29:00+00:00",
+  "entry_ack": {
+    "id": "entry_1",
+    "msg": null,
+    "status": "ACCEPTED",
+    "ts": "2026-03-02T14:29:30+00:00"
+  },
+  "fills": [
+    {
+      "fill_id": "entry_1:fill:1",
+      "filled_at": "2026-03-02T14:30:00+00:00",
+      "instrument": "AAPL",
+      "order_id": "entry_1",
+      "price": "150.00",
+      "quantity": "100",
+      "side": "BUY",
+      "src": null,
+      "symbol": "AAPL"
+    },
+    {
+      "fill_id": "target_1:fill:1",
+      "filled_at": "2026-03-02T14:32:00+00:00",
+      "instrument": "AAPL",
+      "order_id": "target_1",
+      "price": "155.00",
+      "quantity": "100",
+      "side": "SELL",
+      "src": null,
+      "symbol": "AAPL"
+    }
+  ],
+  "orders": [
+    {
+      "filled": "100",
+      "id": "entry_1",
+      "remaining": "0",
+      "state": "FILLED",
+      "updated_at": "2026-03-02T14:30:00+00:00"
+    },
+    {
+      "filled": "0",
+      "id": "stop_1",
+      "remaining": "100",
+      "state": "ACCEPTED",
+      "updated_at": "2026-03-02T14:30:30+00:00"
+    },
+    {
+      "filled": "100",
+      "id": "target_1",
+      "remaining": "0",
+      "state": "FILLED",
+      "updated_at": "2026-03-02T14:32:00+00:00"
+    }
+  ],
+  "positions": [],
+  "stop_ack": {
+    "id": "stop_1",
+    "msg": null,
+    "status": "ACCEPTED",
+    "ts": "2026-03-02T14:30:30+00:00"
+  },
+  "target_ack": {
+    "id": "target_1",
+    "msg": null,
+    "status": "ACCEPTED",
+    "ts": "2026-03-02T14:30:30+00:00"
+  }
+}
