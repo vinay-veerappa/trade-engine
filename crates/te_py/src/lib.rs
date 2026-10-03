@@ -7,6 +7,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use te_core::calendar as cal;
+use te_core::greeks as gk;
 
 fn date(iso: &str) -> PyResult<NaiveDate> {
     NaiveDate::parse_from_str(iso, "%Y-%m-%d")
@@ -85,6 +86,31 @@ fn calendar_is_open_at(epoch_us: i64) -> PyResult<bool> {
     cal::is_open_at(t).map_err(refuse)
 }
 
+fn right(flag: &str) -> PyResult<gk::Right> {
+    match flag {
+        "c" => Ok(gk::Right::Call),
+        "p" => Ok(gk::Right::Put),
+        other => Err(PyValueError::new_err(format!("flag must be 'c' or 'p', got {other:?}"))),
+    }
+}
+
+#[pyfunction]
+fn greeks_price(flag: &str, spot: f64, strike: f64, t: f64, rate: f64, q: f64, sigma: f64) -> PyResult<f64> {
+    gk::price(right(flag)?, spot, strike, t, rate, q, sigma).map_err(refuse)
+}
+
+#[pyfunction]
+fn greeks_implied_vol(flag: &str, spot: f64, strike: f64, t: f64, rate: f64, q: f64, price: f64) -> PyResult<f64> {
+    gk::implied_vol(right(flag)?, spot, strike, t, rate, q, price).map_err(refuse)
+}
+
+/// (delta, gamma, theta per day, vega per point, rho per point)
+#[pyfunction]
+fn greeks_greeks(flag: &str, spot: f64, strike: f64, t: f64, rate: f64, q: f64, sigma: f64) -> PyResult<(f64, f64, f64, f64, f64)> {
+    let g = gk::greeks(right(flag)?, spot, strike, t, rate, q, sigma).map_err(refuse)?;
+    Ok((g.delta, g.gamma, g.theta, g.vega, g.rho))
+}
+
 #[pymodule]
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -99,5 +125,8 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calendar_sessions_in_range, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_sessions_window_back, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_open_at, m)?)?;
+    m.add_function(wrap_pyfunction!(greeks_price, m)?)?;
+    m.add_function(wrap_pyfunction!(greeks_implied_vol, m)?)?;
+    m.add_function(wrap_pyfunction!(greeks_greeks, m)?)?;
     Ok(())
 }

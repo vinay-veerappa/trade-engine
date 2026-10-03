@@ -1,4 +1,4 @@
-"""Implied volatility and greeks, Black-Scholes-Merton via vollib (O1, Architecture §5).
+"""Implied volatility and greeks, Black-Scholes-Merton, the math in Rust (O1, Architecture §5).
 
 Time runs from the quote to the contract's settlement instant (the open for AM-settled
 roots, the close for PM) in calendar years of 365 days; ``rate`` and ``dividend_yield``
@@ -15,11 +15,7 @@ import math
 from datetime import datetime
 from decimal import Decimal
 
-from vollib.black_scholes_merton import black_scholes_merton
-from vollib.black_scholes_merton.greeks import analytical
-from vollib.black_scholes_merton.implied_volatility import implied_volatility
-from vollib.helpers.exceptions import PriceIsAboveMaximum, PriceIsBelowIntrinsic
-from vollib.lets_be_rational import AboveMaximumException, BelowIntrinsicException
+import trade_engine_rs
 
 from trade_engine.domain.instruments import OptionContract, OptionRight
 from trade_engine.domain.option_roots import settlement_instant
@@ -53,6 +49,14 @@ def _inputs(contract, underlying_price, rate, dividend_yield) -> tuple[str, floa
     return flag, spot, float(contract.strike), float(rate), float(dividend_yield)
 
 
+def _rust(fn, contract, *args):
+    """Call a trade_engine_rs greeks function; its ValueError refusal becomes GreeksUnavailable."""
+    try:
+        return fn(*args)
+    except ValueError as err:
+        raise GreeksUnavailable(f"{contract.occ}: {err}") from err
+
+
 def model_price(
     contract: OptionContract,
     sigma: float,
@@ -67,7 +71,7 @@ def model_price(
     if not math.isfinite(sigma) or sigma <= 0:
         raise GreeksUnavailable(f"Volatility {sigma} is not positive")
     t = years_to_settlement(contract, as_of, calendar)
-    return float(black_scholes_merton(flag, spot, strike, t, r, sigma, q))
+    return _rust(trade_engine_rs.greeks_price, contract, flag, spot, strike, t, r, q, sigma)
 
 
 def implied_vol(
@@ -85,17 +89,9 @@ def implied_vol(
     if not math.isfinite(premium) or premium <= 0:
         raise GreeksUnavailable(f"Price {price} for {contract.occ} is not positive")
     t = years_to_settlement(contract, as_of, calendar)
-    # vollib signals the two bounds with its own exceptions or, depending on the solver
-    # path, lets_be_rational's; both mean no volatility gives this price.
-    try:
-        sigma = float(implied_volatility(premium, spot, strike, t, r, q, flag))
-    except (PriceIsBelowIntrinsic, BelowIntrinsicException) as err:
-        raise GreeksUnavailable(f"{contract.occ} price {price} is below its discounted intrinsic value") from err
-    except (PriceIsAboveMaximum, AboveMaximumException) as err:
-        raise GreeksUnavailable(f"{contract.occ} price {price} is above what any volatility gives") from err
-    if not math.isfinite(sigma) or sigma <= 0:
-        raise GreeksUnavailable(f"No implied volatility for {contract.occ} at {price}")
-    return sigma
+    # Rust refuses a price no volatility reaches (below intrinsic, at or above the
+    # maximum) with the reason; never 0, never NaN.
+    return _rust(trade_engine_rs.greeks_implied_vol, contract, flag, spot, strike, t, r, q, premium)
 
 
 def model_greeks(
@@ -112,11 +108,5 @@ def model_greeks(
     if not math.isfinite(sigma) or sigma <= 0:
         raise GreeksUnavailable(f"Volatility {sigma} is not positive")
     t = years_to_settlement(contract, as_of, calendar)
-    return Greeks(
-        delta=float(analytical.delta(flag, spot, strike, t, r, sigma, q)),
-        gamma=float(analytical.gamma(flag, spot, strike, t, r, sigma, q)),
-        theta=float(analytical.theta(flag, spot, strike, t, r, sigma, q)),
-        vega=float(analytical.vega(flag, spot, strike, t, r, sigma, q)),
-        rho=float(analytical.rho(flag, spot, strike, t, r, sigma, q)),
-        source="model",
-    )
+    delta, gamma, theta, vega, rho = _rust(trade_engine_rs.greeks_greeks, contract, flag, spot, strike, t, r, q, sigma)
+    return Greeks(delta=delta, gamma=gamma, theta=theta, vega=vega, rho=rho, source="model")
