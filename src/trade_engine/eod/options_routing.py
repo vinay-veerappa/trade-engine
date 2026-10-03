@@ -26,6 +26,7 @@ from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.options import OptionOrderManager, open_structures
 from trade_engine.sim import underlying_of
+from trade_engine.eod._runtime import decide, flag
 
 ROUNDS = 4  # how many times a strategy may act at one snapshot: a buy-write needs two
 
@@ -40,9 +41,10 @@ class RoutingTally:
 
     def __add__(self, other: "RoutingTally") -> "RoutingTally":
         return RoutingTally(
-            self.orders_submitted + other.orders_submitted,
-            self.exit_actions + other.exit_actions,
-            self.snapshots_processed + other.snapshots_processed,
+            *(int(v) for v in decide("routing:tally", text=tuple(str(v) for v in (
+                self.orders_submitted, self.exit_actions, self.snapshots_processed,
+                other.orders_submitted, other.exit_actions, other.snapshots_processed,
+            )))[0])
         )
 
 
@@ -96,7 +98,7 @@ class OptionRouter:
         return OptionContext(
             session=session,
             account_id=account_id,
-            phase=phase or ("close" if snapshot is None else "snapshot"),
+            phase=decide("routing:phase", (phase or "",), flags=(snapshot is not None,))[0][0],
             now=now,
             state=self._ledger.state(account_id),
             structures=structures,
@@ -109,9 +111,11 @@ class OptionRouter:
         command_id = getattr(action, "command_id", None)
         if not command_id:
             return False
-        if self._ledger.has_command(command_id):
+        if flag("routing:taken", flags=(True, self._ledger.has_command(command_id), False, False)):
             return True
-        return isinstance(action, OptionIntent) and self._ledger.has_command(f"risk:{command_id}")
+        if not flag("routing:risk_lookup", flags=(bool(command_id), isinstance(action, OptionIntent))):
+            return False
+        return flag("routing:taken", flags=(True, False, True, self._ledger.has_command(f"risk:{command_id}")))
 
     # -- the snapshot pass -------------------------------------------------------
 
@@ -153,7 +157,7 @@ class OptionRouter:
         manager = self.manager(account_id)
         tally = RoutingTally()
         self.match_snapshot(account_id, snapshot, cause, snapshot.as_of)
-        tally.snapshots_processed += 1
+        tally.snapshots_processed = decide("routing:increment", numbers=(tally.snapshots_processed, 1))[1][0]
         snapshots[snapshot.underlying] = snapshot
         manage = getattr(self._strategies.get(account_id), "manage_options", None)
         if not callable(manage):
@@ -177,10 +181,7 @@ class OptionRouter:
             tally += self.apply(account_id, session, actions, snapshot, snapshots, cause)
             # Decided on these quotes, so traded on them.
             self.match_snapshot(account_id, snapshot, cause, snapshot.as_of)
-        raise _fail(
-            f"The strategy for '{account_id}' was still acting at the {snapshot.underlying} "
-            f"snapshot after {ROUNDS} rounds; refusing to loop on it"
-        )
+        decide("routing:rounds", (account_id, snapshot.underlying), numbers=(ROUNDS,))
 
     def apply(
         self,
@@ -200,25 +201,20 @@ class OptionRouter:
         manager = self.manager(account_id)
         tally = RoutingTally()
         for action in actions:
-            if snapshot is not None and self._action_underlying(account_id, action) != snapshot.underlying:
-                raise _fail(
-                    f"'{account_id}' returned {type(action).__name__} "
-                    f"'{getattr(action, 'command_id', '?')}' at the {snapshot.underlying} "
-                    f"snapshot for another underlying"
-                )
-            if not isinstance(action, (OptionIntent, CloseStructure, CloseHolding)):
-                raise _fail(
-                    f"Options account '{account_id}' was handed {type(action).__name__}; it enters "
-                    "with OptionIntent"
-                )
+            underlying = self._action_underlying(account_id, action) if snapshot is not None else ""
+            decide("routing:action", (
+                account_id, type(action).__name__, getattr(action, "command_id", "?"),
+                underlying, snapshot.underlying if snapshot is not None else "",
+            ), flags=(snapshot is not None, isinstance(action, (OptionIntent, CloseStructure, CloseHolding))))
             if isinstance(action, OptionIntent):
-                tally.orders_submitted += self.enter_option(account_id, session, action, snapshot, snapshots)
+                submitted = self.enter_option(account_id, session, action, snapshot, snapshots)
+                tally.orders_submitted = decide("routing:increment", numbers=(tally.orders_submitted, submitted))[1][0]
             elif isinstance(action, CloseStructure):
                 manager.close(account_id, action)
-                tally.exit_actions += 1
+                tally.exit_actions = decide("routing:increment", numbers=(tally.exit_actions, 1))[1][0]
             elif isinstance(action, CloseHolding):
                 manager.close_holding(account_id, action)
-                tally.exit_actions += 1
+                tally.exit_actions = decide("routing:increment", numbers=(tally.exit_actions, 1))[1][0]
             else:
                 raise _fail(
                     f"Strategy for '{account_id}' returned {type(action).__name__}; options "
@@ -227,19 +223,20 @@ class OptionRouter:
         return tally
 
     def _action_underlying(self, account_id: str, action: Any) -> str:
+        entry = None
         if isinstance(action, OptionIntent):
-            return underlying_of(action.instrument)
-        if isinstance(action, CloseHolding):
-            return action.instrument.symbol
-        if isinstance(action, CloseStructure):
+            kind, underlying = "intent", underlying_of(action.instrument)
+        elif isinstance(action, CloseHolding):
+            kind, underlying = "holding", action.instrument.symbol
+        elif isinstance(action, CloseStructure):
             entry = self._ledger.state(account_id).orders.get(action.entry_order_id)
-            if entry is None:
-                raise _fail(
-                    f"Close '{action.command_id}' names '{action.entry_order_id}', which is not "
-                    f"an order of '{account_id}' (I8)"
-                )
-            return underlying_of(entry.instrument)
-        raise _fail(f"Unknown options action {type(action).__name__}")
+            kind, underlying = "close", underlying_of(entry.instrument) if entry is not None else ""
+        else:
+            kind, underlying = "unknown", ""
+        return decide("routing:underlying", (
+            kind, account_id, getattr(action, "command_id", ""), getattr(action, "entry_order_id", ""),
+            underlying, type(action).__name__,
+        ), flags=(entry is not None,))[0][0]
 
     def enter_option(
         self,
@@ -249,22 +246,11 @@ class OptionRouter:
         snapshot: ChainSnapshot | None,
         snapshots: dict[str, ChainSnapshot] | None,
     ) -> int:
-        if not isinstance(intent, OptionIntent):
-            raise _fail(
-                f"Options account '{account_id}' was handed {type(intent).__name__}; it enters "
-                "with OptionIntent"
-            )
-        if intent.account_id != account_id:
-            raise _fail(
-                f"Intent '{intent.intent_id}' targets account '{intent.account_id}' but was "
-                f"produced for '{account_id}' (I8)"
-            )
+        decide("routing:entry", (account_id, type(intent).__name__,
+            getattr(intent, "account_id", ""), getattr(intent, "intent_id", "")),
+            flags=(isinstance(intent, OptionIntent),))
         engine = self._option_risk_engines.get(account_id)
-        if engine is None:
-            raise _fail(
-                f"'{account_id}' asked to enter '{intent.intent_id}' and has no options risk "
-                f"engine; nothing enters unchecked (I5)"
-            )
+        decide("routing:engine", (account_id, intent.intent_id), flags=(engine is not None,))
         now = self._clock.now_utc()
         context = self.context(
             account_id,
@@ -276,9 +262,12 @@ class OptionRouter:
         )
         verdict = engine.evaluate(intent, context)
         self._record_verdict(account_id, intent, verdict)
-        if not verdict.accepted:
+        accepted, resize = decide("routing:approved",
+            (str(verdict.approved_quantity), str(intent.quantity)),
+            flags=(verdict.accepted, verdict.approved_quantity is not None))[2]
+        if not accepted:
             return 0
-        if verdict.approved_quantity is not None and verdict.approved_quantity != intent.quantity:
+        if resize:
             from dataclasses import replace
 
             intent = replace(intent, quantity=verdict.approved_quantity)

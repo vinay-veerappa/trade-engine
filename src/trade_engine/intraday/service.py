@@ -57,6 +57,8 @@ from trade_engine.ledger import EodRun, Event, EventKind, Ledger, VenueReconcile
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.restore import MIN_TIME, PendingResolution, RestoreError
 from trade_engine.sim import underlying_of
+from trade_engine.sim._rs import register
+from trade_engine.eod._runtime import decide, flag, micros
 
 NEW_YORK = ZoneInfo("America/New_York")
 _ENTRY_WORKING = frozenset(
@@ -94,6 +96,10 @@ class Heartbeat:
     exited: bool = False
 
 
+register("runtime_intraday", IntradayServiceError)
+register("runtime_stale", StaleDataError)
+
+
 @dataclass(frozen=True)
 class IntradayConfig:
     """Wiring for one service instance, supplied entirely by the host (I5).
@@ -129,26 +135,15 @@ class IntradayConfig:
     journal_account: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.job_name:
-            raise IntradayServiceError("job_name must be non-empty")
-        if not self.account_id:
-            raise IntradayServiceError("account_id must be non-empty")
-        if not self.underlying:
-            raise IntradayServiceError("underlying must be non-empty")
-        if not self.eod_job_name:
-            raise IntradayServiceError(
-                "eod_job_name must name the after-close job whose marker gates the next session"
-            )
-        if self.max_quote_age_seconds <= 0 or self.tick_seconds <= 0:
-            raise IntradayServiceError("quote age and tick must be positive")
-        if self.heartbeat_ttl_seconds <= 0 or self.close_mark_window_seconds <= 0:
-            raise IntradayServiceError("heartbeat ttl and close-mark window must be positive")
-        if self.entry_end > self.flat_at:
-            raise IntradayServiceError("entry_end must not come after flat_at")
-        if not timedelta(0) < self.flat_before_close <= self.entry_before_close:
-            raise IntradayServiceError(
-                "flat_before_close must be positive and no later than entry_before_close"
-            )
+        decide("intraday:config_identity",
+            flags=tuple(bool(v) for v in (self.job_name, self.account_id, self.underlying, self.eod_job_name)))
+        decide("intraday:config_rates",
+            floats=(self.max_quote_age_seconds, self.tick_seconds, self.heartbeat_ttl_seconds, self.close_mark_window_seconds))
+        midnight = date(2000, 1, 1)
+        decide("intraday:config_wall",
+            numbers=(micros(datetime.combine(midnight, self.entry_end, tzinfo=NEW_YORK)),
+                micros(datetime.combine(midnight, self.flat_at, tzinfo=NEW_YORK))))
+        decide("intraday:config_early",numbers=(micros(self.flat_before_close),micros(self.entry_before_close)))
 
 
 class _EntryGate:
@@ -170,10 +165,9 @@ class _EntryGate:
         if not callable(manage):
             return []
         actions = list(manage(context))
-        if self.allow:
-            return actions
-        kept = [action for action in actions if not isinstance(action, OptionIntent)]
-        self.dropped += len(actions) - len(kept)
+        keep = decide("intraday:gate", flags=(self.allow, *(isinstance(action, OptionIntent) for action in actions)))[2]
+        kept = [action for action, selected in zip(actions, keep) if selected]
+        self.dropped = decide("routing:increment", numbers=(self.dropped, len(actions) - len(kept)))[1][0]
         return kept
 
 
@@ -219,11 +213,7 @@ class IntradayService:
     ) -> dict[str, Any]:
         """Walk one session. ``stop_at`` simulates a crash: the loop stops there
         without a marker, exactly as a killed process would leave the ledger (I2)."""
-        if not self._calendar.is_session(session):
-            raise IntradayServiceError(
-                f"{session.isoformat()} is not a trading session of "
-                f"{self._calendar.exchange} (I5)"
-            )
+        decide("intraday:session", (session.isoformat(), self._calendar.exchange), flags=(self._calendar.is_session(session),))
         state = _TickState()
         if self._ledger.event_by_command(self._eod_marker(session)) is not None:
             # The after-close pass has settled this session: nothing here may add to it (I9).
@@ -269,14 +259,15 @@ class IntradayService:
         # are allowed again (unless the whole session is barred).
         state.refusing = False
         entry_end, flat = self._deadlines(session)
-        flat_due = now >= flat
-        entries_open = state.barred is None and now <= entry_end and not flat_due
+        flat_due, entries_open = decide("intraday:tick", numbers=(micros(now), micros(entry_end), micros(flat)),
+            flags=(state.barred is not None,))[2]
         if not entries_open:
             self._cancel_working_entries(session, "flat-sweep" if flat_due else "entry-end")
         if flat_due:
-            state.tally.exit_actions += self._flatten(
+            closed = self._flatten(
                 session, "flat-sweep", f"flat by {flat.astimezone(NEW_YORK):%H:%M} ET"
             )
+            state.tally.exit_actions = decide("routing:increment", numbers=(state.tally.exit_actions, closed))[1][0]
         self._gate.allow = entries_open
         # A refusal here (a reconcile that does not add up, an OMS guard) is unexpected
         # mid-session: it ends in the emergency path, which alerts and exits (I5).
@@ -289,38 +280,22 @@ class IntradayService:
     def _fresh_view(self, snapshot: ChainSnapshot, now: datetime) -> ChainSnapshot:
         """``snapshot`` cut to its fresh quotes, if it proves a live market; else refuse."""
         limit = self._config.max_quote_age_seconds
-        if not isinstance(snapshot, ChainSnapshot):
-            raise StaleDataError(f"The snapshot source returned {type(snapshot).__name__} (I5)")
-        if snapshot.underlying != self._config.underlying:
-            raise StaleDataError(
-                f"Asked for the {self._config.underlying} chain, got {snapshot.underlying} (I5)"
-            )
+        decide("intraday:snapshot_identity", (type(snapshot).__name__, self._config.underlying,
+            snapshot.underlying if isinstance(snapshot, ChainSnapshot) else ""),
+            flags=(isinstance(snapshot, ChainSnapshot),))
         snapshot.require_fresh(now, limit)
         quoted = snapshot.underlying_as_of
-        if quoted is None:
-            raise StaleDataError(
-                f"The {snapshot.underlying} snapshot of {snapshot.as_of.isoformat()} does not say "
-                f"when {snapshot.underlying} itself was quoted; a live market cannot be assumed (I5)"
-            )
+        decide("intraday:underlying_stamp", (snapshot.underlying, snapshot.as_of.isoformat()), flags=(quoted is not None,))
         age = (now - quoted).total_seconds()
-        if age > limit:
-            raise StaleDataError(
-                f"{snapshot.underlying} was last quoted {age:.0f}s ago ({quoted.isoformat()}), "
-                f"over the {limit:.0f}s allowed (I5)"
-            )
+        decide("intraday:underlying_age", (snapshot.underlying, f"{age:.0f}", quoted.isoformat(), f"{limit:.0f}"),
+            floats=(age, limit))
         for contract in self._held_contracts():
             quote = snapshot.get(contract)
-            if quote is None:
-                raise StaleDataError(
-                    f"Held leg {contract.occ.strip()} is not in the {snapshot.underlying} snapshot (I5)"
-                )
-            leg_age = (now - quote.as_of).total_seconds()
-            if leg_age > limit:
-                raise StaleDataError(
-                    f"Held leg {contract.occ.strip()} was last quoted {leg_age:.0f}s ago, over the "
-                    f"{limit:.0f}s allowed (I5)"
-                )
-        fresh = tuple(q for q in snapshot.quotes if (now - q.as_of).total_seconds() <= limit)
+            leg_age = (now - quote.as_of).total_seconds() if quote is not None else 0
+            decide("intraday:leg", (contract.occ.strip(), snapshot.underlying, f"{leg_age:.0f}", f"{limit:.0f}"),
+                flags=(quote is not None,), floats=(leg_age, limit))
+        selected = decide("intraday:fresh", floats=(limit, *((now - q.as_of).total_seconds() for q in snapshot.quotes)))[2]
+        fresh = tuple(q for q, keep in zip(snapshot.quotes, selected) if keep)
         return snapshot if len(fresh) == len(snapshot.quotes) else replace(snapshot, quotes=fresh)
 
     def _held_contracts(self) -> list[OptionContract]:
@@ -329,9 +304,9 @@ class IntradayService:
             (
                 instrument
                 for instrument, position in folded.positions.items()
-                if isinstance(instrument, OptionContract)
-                and position.quantity != 0
-                and underlying_of(instrument) == self._config.underlying
+                if isinstance(instrument, OptionContract) and flag("intraday:held",
+                    (underlying_of(instrument), self._config.underlying),
+                    flags=(True, flag("eod:nonzero", (str(position.quantity),))))
             ),
             key=lambda contract: contract.occ,
         )
@@ -344,7 +319,8 @@ class IntradayService:
         """
         state.refusing = True
         self._cancel_working_entries(session, "stale-quote")
-        state.tally.exit_actions += self._flatten(session, "stale-quote", f"stale quote: {why}")
+        closed = self._flatten(session, "stale-quote", f"stale quote: {why}")
+        state.tally.exit_actions = decide("routing:increment", numbers=(state.tally.exit_actions, closed))[1][0]
 
     def _flatten(self, session: date, code: str, reason: str) -> int:
         """Close at market whatever is open and not already closing; returns how many."""
@@ -354,17 +330,14 @@ class IntradayService:
 
         closed = 0
         for structure in open_structures(folded):
-            if structure.closing_order_id is not None:
-                continue  # its close is working; a second would over-close it (C5)
-            if underlying_of(structure.instrument) != self._config.underlying:
+            if not flag("intraday:flatten", (underlying_of(structure.instrument), self._config.underlying),
+                flags=(structure.closing_order_id is not None,)):
                 continue
             # A close the venue rejected leaves the structure open: the next attempt
             # needs its own command id, derived from the fold so a restart agrees (I3).
-            attempt = 1 + sum(
-                1 for order_id in folded.orders if order_id.startswith(f"{structure.entry_order_id}:close:")
-            )
+            attempt = decide("intraday:attempt", (structure.entry_order_id, *folded.orders))[1][0]
             manager.close(self._config.account_id, flat_close(structure, session, code, attempt, reason))
-            closed += 1
+            closed = decide("routing:increment", numbers=(closed, 1))[1][0]
         return closed
 
     def _cancel_working_entries(self, session: date, code: str) -> None:
@@ -372,11 +345,9 @@ class IntradayService:
         manager = self._router.manager(self._config.account_id)
         folded = self._ledger.state(self._config.account_id)
         for order in sorted(folded.orders.values(), key=lambda value: value.order_id):
-            if order.parent_order_id is not None or not is_structure(order.instrument):
-                continue
-            if order.state not in _ENTRY_WORKING:
-                continue
-            if underlying_of(order.instrument) != self._config.underlying:
+            if not flag("intraday:cancel", (order.state.value,
+                underlying_of(order.instrument) if is_structure(order.instrument) else "", self._config.underlying),
+                flags=(order.parent_order_id is None, is_structure(order.instrument))):
                 continue
             manager.orders.cancel(
                 order.order_id,
@@ -391,13 +362,9 @@ class IntradayService:
         folded = self._ledger.state(self._config.account_id)
         ledger_side = {i: p.quantity for i, p in folded.positions.items() if p.quantity != 0}
         venue_side = {p.instrument: p.quantity for p in self._config.broker.positions() if p.quantity != 0}
-        drift = tuple(
-            sorted(
-                instrument.symbol
-                for instrument in set(ledger_side) | set(venue_side)
-                if ledger_side.get(instrument) != venue_side.get(instrument)
-            )
-        )
+        drift = tuple(decide("intraday:drift", tuple(value
+            for instrument in set(ledger_side) | set(venue_side)
+            for value in (instrument.symbol, str(ledger_side.get(instrument)), str(venue_side.get(instrument)))))[0])
         now = self._clock.now_utc()
         self._ledger.append(
             Event(
@@ -414,27 +381,19 @@ class IntradayService:
                 command_id=command,
             )
         )
-        if drift:
-            raise IntradayServiceError(
-                f"The venue's positions disagree with the ledger for '{self._config.account_id}' "
-                f"on {', '.join(drift)}; refusing to trade on either (I11)"
-            )
+        decide("intraday:drift_refuse", (self._config.account_id, ", ".join(drift)))
 
     # -- clock rules ---------------------------------------------------------------
 
     def _deadlines(self, session: date) -> tuple[datetime, datetime]:
         """(the last instant an entry may be made, the sweep instant), early closes included."""
         close = self._calendar.session_close(session)
-        flat = min(
-            datetime.combine(session, self._config.flat_at, tzinfo=NEW_YORK),
-            close - self._config.flat_before_close,
-        )
-        entry_end = min(
-            datetime.combine(session, self._config.entry_end, tzinfo=NEW_YORK),
-            close - self._config.entry_before_close,
-            flat,
-        )
-        return entry_end, flat
+        flat = datetime.combine(session, self._config.flat_at, tzinfo=NEW_YORK)
+        entry_end = datetime.combine(session, self._config.entry_end, tzinfo=NEW_YORK)
+        times = decide("intraday:deadlines", numbers=(micros(flat), micros(entry_end), micros(close),
+            micros(self._config.flat_before_close), micros(self._config.entry_before_close)))[1]
+        chosen_flat = (flat, close - self._config.flat_before_close)[times[1]]
+        return (entry_end, close - self._config.entry_before_close, chosen_flat)[times[0]], chosen_flat
 
     # -- restart -------------------------------------------------------------------
 
@@ -469,13 +428,13 @@ class IntradayService:
         if resolution.unresolved:
             state.barred = "; ".join(resolution.unresolved.values())
         for order in sorted(self._ledger.state(account).orders.values(), key=lambda o: o.order_id):
-            if order.state is not OrderState.NEW:
-                continue
-            if order.parent_order_id is None and is_structure(order.instrument):
+            action = decide("intraday:restart", (order.state.value, order.order_id, str(order.parent_order_id)),
+                flags=(order.parent_order_id is None, is_structure(order.instrument)))[0][0]
+            if action == "cancel":
                 manager.orders.cancel(
                     order.order_id, command_id=f"intraday:orphan:{order.order_id}:{session.isoformat()}"
                 )
-            elif order.order_id.startswith(f"{order.parent_order_id}:close:"):
+            elif action == "submit":
                 sent = manager.orders.submit(order)
                 if sent.state not in (OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED):
                     manager.orders.reconcile_order(order.order_id)
@@ -531,11 +490,13 @@ class IntradayService:
         marks: dict[Any, tuple[Any, str]] = {}
         note = "nothing held at the close"
         if held:
-            usable = snapshot is not None and (
-                (close - snapshot.as_of).total_seconds() <= self._config.close_mark_window_seconds
-            )
+            usable = flag("intraday:close_usable", flags=(snapshot is not None,),
+                floats=((close - snapshot.as_of).total_seconds() if snapshot is not None else 0,
+                    self._config.close_mark_window_seconds))
             quotes = {i: snapshot.get(i) for i in held if isinstance(i, OptionContract)} if usable else {}
-            if not usable or any(q is None or q.mid <= 0 for q in quotes.values()) or len(quotes) != len(held):
+            if not flag("intraday:close_plan", flags=(usable,
+                all(q is not None and flag("eod:positive", (str(q.mid),)) for q in quotes.values())),
+                numbers=(len(quotes), len(held))):
                 note = "no fresh snapshot near the close; marks left to the after-close pass"
             else:
                 source = f"snapshot:{snapshot.as_of.isoformat()}"
@@ -579,22 +540,20 @@ class IntradayService:
     def _session_snapshot_count(self, session: date) -> int:
         """Fresh snapshots processed this session, across every process (I2, I3)."""
         prefix = f"{self._cause(session)}:tick:"
-        return sum(
-            1
+        return decide("eod:count_events", (EventKind.VENUE_RECONCILE.value, prefix, *(value
             for event in self._ledger.events(account=self._config.account_id)
-            if event.kind is EventKind.VENUE_RECONCILE and (event.command_id or "").startswith(prefix)
-        )
+            for value in (event.kind.value, event.command_id or ""))))[1][0]
 
     # -- restart gate, heartbeat, plumbing ---------------------------------------
 
     def _cause(self, session: date) -> str:
-        return f"intraday:{self._config.job_name}:{self._config.account_id}:{session.isoformat()}"
+        return decide("eod:command", ("intraday", self._config.job_name, self._config.account_id, session.isoformat()))[0][0]
 
     def _own_marker(self, session: date) -> str:
         return self._cause(session)
 
     def _eod_marker(self, session: date) -> str:
-        return f"eod:{self._config.eod_job_name}:{self._config.account_id}:{session.isoformat()}"
+        return decide("eod:command", ("eod", self._config.eod_job_name, self._config.account_id, session.isoformat()))[0][0]
 
     def _result(self, session: date, state: "_TickState", **extra: Any) -> dict[str, Any]:
         result = {
@@ -614,22 +573,12 @@ class IntradayService:
         heartbeat = self._read_heartbeat()
         if heartbeat is None:
             return
-        if heartbeat.account_id != self._config.account_id:
-            raise IntradayServiceError(
-                f"The heartbeat file {self._heartbeat_path} belongs to '{heartbeat.account_id}', "
-                f"not '{self._config.account_id}'; two accounts must not share one (C4)"
-            )
+        decide("intraday:heartbeat_account", (heartbeat.account_id, self._config.account_id, str(self._heartbeat_path)))
         if heartbeat.exited:
             return  # the last process said it stopped; nobody is running
-        fresh = (
-            self._clock.now_utc() - heartbeat.at_utc
-        ).total_seconds() <= self._config.heartbeat_ttl_seconds
-        if heartbeat.session == session and fresh:
-            raise IntradayServiceError(
-                f"A heartbeat for '{self._config.account_id}' written "
-                f"{heartbeat.at_utc.isoformat()} is still fresh; another instance is "
-                f"running this session — refusing to start a second one (C4)"
-            )
+        decide("intraday:heartbeat", (self._config.account_id, heartbeat.at_utc.isoformat()),
+            flags=(heartbeat.session == session,),
+            floats=((self._clock.now_utc() - heartbeat.at_utc).total_seconds(), self._config.heartbeat_ttl_seconds))
 
     def _require_previous_eod_complete(self, session: date) -> None:
         account = self._config.account_id
@@ -638,16 +587,12 @@ class IntradayService:
         previous = self._calendar.previous_session(session)
         if self._ledger.event_by_command(self._eod_marker(previous)) is not None:
             return
-        if self._has_history(account):
-            raise IntradayServiceError(
-                f"Cannot run {session.isoformat()} for '{account}': the previous session "
-                f"{previous.isoformat()} has no '{self._config.eod_job_name}' EOD marker "
-                f"({self._eod_marker(previous)}); complete it first (I3)"
-            )
+        decide("intraday:previous", (session.isoformat(), account, previous.isoformat(), self._config.eod_job_name,
+            self._eod_marker(previous)), flags=(self._has_history(account),))
 
     def _has_history(self, account_id: str) -> bool:
         for event in self._ledger.events(account=account_id):
-            if event.kind is EventKind.EOD_RUN:
+            if flag("eod:any_history", (event.kind.value,)):
                 return True
         return False
 
@@ -731,8 +676,10 @@ def flat_close(
     structure: Any, session: date, code: str, attempt: int = 1, reason: str | None = None
 ) -> CloseStructure:
     """The market close that undoes whatever is still open of ``structure``."""
+    values = decide("intraday:flat_close", (reason or "", code, structure.entry_order_id, session.isoformat()),
+        numbers=(attempt,))[0]
     return CloseStructure(
         entry_order_id=structure.entry_order_id,
-        reason=reason or code,
-        command_id=f"intraday:flat:{structure.entry_order_id}:{code}:{session.isoformat()}:{attempt}",
+        reason=values[0],
+        command_id=values[1],
     )

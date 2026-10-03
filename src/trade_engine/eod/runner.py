@@ -90,35 +90,24 @@ from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
 from trade_engine.oms.options import OptionOrderManager, open_structures
 from trade_engine.oms.reconcile import ReconcileError
-from trade_engine.oms.restore import VENUE_WORKING as _VENUE_WORKING
 from trade_engine.oms.restore import RestoreError
 from trade_engine.risk import RiskContext, RiskEngine
 from trade_engine.sim import SimBroker, SnapshotVenue, underlying_of
+from trade_engine.sim._rs import register
+from trade_engine.eod._runtime import decide, flag, micros
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
-_MARK_COMMAND = "eod:mark:{account}:{session}:{symbol}"
-_RUN_COMMAND = "eod:{job}:{account}:{session}"
 MORNING_SUFFIX = "-morning"
 # The in-session passes, in the order a session runs them: the morning's entries, then
 # the midday and late exits (owner, 2026-09-26: exits reach the venue the same day).
 PASSES = ("morning", "midday", "late")
-_TERMINAL = frozenset(
-    {
-        OrderState.FILLED,
-        OrderState.CANCELLED,
-        OrderState.EXPIRED,
-        OrderState.REJECTED,
-    }
-)
 
 
 def pass_of(job: str) -> str | None:
     """The in-session pass a run marker's job names (``eod-midday``), or None."""
-    for name in PASSES:
-        if job.endswith("-" + name):
-            return name
-    return None
+    names = decide("eod:pass_of", (job,))[0]
+    return names[0] if names else None
 
 
 class EodRunnerError(RuntimeError):
@@ -131,6 +120,11 @@ class SessionIncompleteError(EodRunnerError):
 
 class ReplayDataError(EodRunnerError):
     """The market-data answer cannot support a deterministic session replay."""
+
+
+register("runtime_eod", EodRunnerError)
+register("runtime_incomplete", SessionIncompleteError)
+register("runtime_replay", ReplayDataError)
 
 
 def _normalize(mapping: Mapping | None) -> Mapping:
@@ -184,18 +178,11 @@ class EodRunnerConfig:
         )
 
     def __post_init__(self) -> None:
-        if not self.job_name:
-            raise EodRunnerError("job_name must be non-empty")
-        if not self.brokers:
-            raise EodRunnerError("at least one broker is required")
-        if (
-            not isinstance(self.bars_max_age_seconds, (int, float))
-            or isinstance(self.bars_max_age_seconds, bool)
-            or self.bars_max_age_seconds <= 0
-        ):
-            raise EodRunnerError("bars_max_age_seconds must be positive")
-        if not isinstance(self.settle_delay, timedelta) or self.settle_delay < timedelta(0):
-            raise EodRunnerError("settle_delay must be a non-negative timedelta")
+        age_type = isinstance(self.bars_max_age_seconds, (int, float)) and not isinstance(self.bars_max_age_seconds, bool)
+        delay_type = isinstance(self.settle_delay, timedelta)
+        decide("eod:config", numbers=(micros(self.settle_delay) if delay_type else 0,),
+            flags=(bool(self.job_name), bool(self.brokers), age_type, delay_type),
+            floats=(self.bars_max_age_seconds if age_type else 0,))
 
 
 @dataclass(frozen=True)
@@ -262,13 +249,8 @@ class EodRunner:
     # -- entry -------------------------------------------------------------------
 
     def run(self, session: date) -> EodRunResult:
-        if not isinstance(session, date) or isinstance(session, datetime):
-            raise EodRunnerError(f"session must be a date, got {type(session).__name__}")
-        if not self._calendar.is_session(session):
-            raise EodRunnerError(
-                f"{session.isoformat()} is not a trading session of "
-                f"{self._calendar.exchange} (I5)"
-            )
+        decide("eod:session_type", (type(session).__name__,), flags=(isinstance(session, date) and not isinstance(session, datetime),))
+        decide("eod:session", (session.isoformat(), self._calendar.exchange), flags=(self._calendar.is_session(session),))
         self._require_previous_session_complete(session)
 
         pending = [
@@ -333,25 +315,14 @@ class EodRunner:
         underlying with no snapshot yet is not refused: nothing is marked in a pass, and
         its orders work at a later one.
         """
-        if name not in PASSES:
-            raise EodRunnerError(f"Unknown pass {name!r}; the passes are {', '.join(PASSES)}")
-        if not isinstance(session, date) or isinstance(session, datetime):
-            raise EodRunnerError(f"session must be a date, got {type(session).__name__}")
-        if not self._calendar.is_session(session):
-            raise EodRunnerError(
-                f"{session.isoformat()} is not a trading session of "
-                f"{self._calendar.exchange} (I5)"
-            )
-        if not isinstance(through, datetime) or through.tzinfo is None or through.utcoffset() is None:
-            raise EodRunnerError(f"through must be a timezone-aware datetime, got {through!r} (I7)")
+        decide("eod:pass_name", (name, repr(name)))
+        decide("eod:session_type", (type(session).__name__,), flags=(isinstance(session, date) and not isinstance(session, datetime),))
+        decide("eod:session", (session.isoformat(), self._calendar.exchange), flags=(self._calendar.is_session(session),))
+        decide("eod:through", (repr(through),), flags=(isinstance(through, datetime) and through.tzinfo is not None and through.utcoffset() is not None,))
         session_open = self._calendar.session_open(session)
         session_close = self._calendar.session_close(session)
-        if not session_open <= through < session_close:
-            raise EodRunnerError(
-                f"The {name} pass of {session.isoformat()} must end inside the session "
-                f"({session_open.isoformat()} to {session_close.isoformat()}), got "
-                f"{through.isoformat()}"
-            )
+        decide("eod:pass_boundary", (name, session.isoformat(), session_open.isoformat(), session_close.isoformat(), through.isoformat()),
+            numbers=(micros(session_open), micros(through), micros(session_close)))
         self._require_previous_session_complete(session)
         options = [
             account_id
@@ -366,18 +337,14 @@ class EodRunner:
             if (since := self._passes_through(account_id, session)) is not None
         }
         for account_id, since in sorted(earlier.items()):
-            if through <= since:
-                raise EodRunnerError(
-                    f"The {name} pass of {session.isoformat()} must end after the previous "
-                    f"pass of '{account_id}', which ran to {since.isoformat()}; got "
-                    f"{through.isoformat()} (I7)"
-                )
+            decide("eod:resume", (name, session.isoformat(), account_id, since.isoformat(), through.isoformat()),
+                numbers=(micros(through), micros(since)))
         replays = {account_id: self._prepare_account(account_id) for account_id in options}
         tallies = {account_id: _Tally(fills_before=self._fill_count(account_id)) for account_id in options}
         snapshots = [
             snapshot
             for snapshot in self._session_snapshots(session, options, covered=False)
-            if snapshot.as_of <= through
+            if flag("eod:cutoff", numbers=(micros(snapshot.as_of), micros(through)))
         ]
         self._replay_session(session, replays, tallies, snapshots, options, earlier)
         self._advance_clock(through)  # the marker's at_close: where the next run resumes
@@ -393,7 +360,7 @@ class EodRunner:
             )
             results[account_id] = AccountRunResult(
                 account_id=account_id,
-                fills_recorded=self._fill_count(account_id) - tally.fills_before,
+                fills_recorded=decide("eod:difference", numbers=(self._fill_count(account_id), tally.fills_before))[1][0],
                 orders_submitted=tally.orders_submitted,
                 exit_actions=tally.exit_actions,
                 snapshots_processed=tally.snapshots_processed,
@@ -405,10 +372,10 @@ class EodRunner:
         )
 
     def _pass_job(self, name: str) -> str:
-        return f"{self._config.job_name}-{name}"
+        return decide("eod:pass_job", (self._config.job_name, name))[0][0]
 
     def _pass_command(self, account_id: str, session: date, name: str) -> str:
-        return _RUN_COMMAND.format(job=self._pass_job(name), account=account_id, session=session.isoformat())
+        return decide("eod:command", ("eod", self._pass_job(name), account_id, session.isoformat()))[0][0]
 
     def _passes_through(self, account_id: str, session: date) -> datetime | None:
         """Where the account's newest pass of the session stopped, if one ran."""
@@ -417,15 +384,14 @@ class EodRunner:
             for name in PASSES
             if (event := self._ledger.event_by_command(self._pass_command(account_id, session, name))) is not None
         ]
-        return max(ends) if ends else None
+        chosen = decide("eod:latest", numbers=tuple(micros(end) for end in ends))[1]
+        return ends[chosen[0]] if chosen else None
 
     def _is_options(self, account_id: str) -> bool:
         return callable(getattr(self._config.brokers[account_id], "process_snapshot", None))
 
     def _run_command(self, account_id: str, session: date) -> str:
-        return _RUN_COMMAND.format(
-            job=self._config.job_name, account=account_id, session=session.isoformat()
-        )
+        return decide("eod:command", ("eod", self._config.job_name, account_id, session.isoformat()))[0][0]
 
     def _require_previous_session_complete(self, session: date) -> None:
         previous = self._calendar.previous_session(session)
@@ -433,14 +399,9 @@ class EodRunner:
             if self._ledger.event_by_command(self._run_command(account_id, session)) is not None:
                 # This session already completed; the re-run proves idempotency itself.
                 continue
-            if self._account_has_history(account_id) and self._ledger.event_by_command(
-                self._run_command(account_id, previous)
-            ) is None:
-                raise SessionIncompleteError(
-                    f"Cannot run {session.isoformat()} for '{account_id}': the previous "
-                    f"session {previous.isoformat()} has no {self._config.job_name} "
-                    f"marker; complete it first (I3)"
-                )
+            if self._account_has_history(account_id):
+                decide("eod:previous", (session.isoformat(), account_id, previous.isoformat(), self._config.job_name),
+                    flags=(True, self._ledger.event_by_command(self._run_command(account_id, previous)) is not None))
 
     def _account_has_history(self, account_id: str) -> bool:
         """Whether this job has completed a session for the account before.
@@ -450,9 +411,8 @@ class EodRunner:
         refused for lacking a previous session it never had (I3). An in-session pass is
         this job's own: the session it began still needs its after-close run.
         """
-        jobs = (self._config.job_name, *(self._pass_job(name) for name in PASSES))
         for event in self._ledger.events(account=account_id):
-            if event.kind is EventKind.EOD_RUN and event.payload.job in jobs:
+            if flag("eod:history", (event.payload.job if event.kind is EventKind.EOD_RUN else "", self._config.job_name), flags=(event.kind is EventKind.EOD_RUN,)):
                 return True
         return False
 
@@ -497,13 +457,10 @@ class EodRunner:
             return
         session_open = self._calendar.session_open(session)
         session_close = self._calendar.session_close(session)
-        if self._clock.now_utc() > session_open:
-            raise EodRunnerError(
-                f"Cannot replay {session.isoformat()}: the injected clock reads "
-                f"{self._clock.now_utc().isoformat()}, past the session open "
-                f"{session_open.isoformat()}. Replay needs a clock it can advance bar by "
-                f"bar (I7); inject a replay clock positioned at or before the session open"
-            )
+        clock_read = self._clock.now_utc()
+        if flag("eod:after", numbers=(micros(clock_read), micros(session_open))):
+            decide("eod:replay_clock", (session.isoformat(), self._clock.now_utc().isoformat(), session_open.isoformat()),
+                numbers=(micros(clock_read), micros(session_open)))
         timeline = []
         for instrument in sorted(holders, key=lambda value: value.symbol):
             for bar, is_regular in self._load_bars(instrument, session_open, session_close):
@@ -515,7 +472,7 @@ class EodRunner:
             self._advance_clock(timestamp)
             if kind == 0:
                 for account_id in options:
-                    if account_id in mornings and item.as_of <= mornings[account_id]:
+                    if account_id in mornings and flag("eod:cutoff", numbers=(micros(item.as_of), micros(mornings[account_id]))):
                         tallies[account_id].snapshots[item.underlying] = item
                         continue
                     self._options_at_snapshot(account_id, session, item, tallies[account_id])
@@ -530,7 +487,7 @@ class EodRunner:
                 self._reconcile_after_bar(
                     account_id, broker, self._manager_for(account_id, broker), timestamp
                 )
-                tally.bars_processed += 1
+                tally.bars_processed = decide("routing:increment", numbers=(tally.bars_processed, 1))[1][0]
 
     def _finish_account(
         self,
@@ -555,27 +512,22 @@ class EodRunner:
             bars_processed=tally.bars_processed,
             # Counted from the ledger: the OMS records some fills itself, such as a
             # stop filled inside its entry's bar while the entry fill is recorded.
-            fills_recorded=self._fill_count(account_id) - tally.fills_before,
+            fills_recorded=decide("eod:difference", numbers=(self._fill_count(account_id), tally.fills_before))[1][0],
             marks_appended=self._marks_appended(account_id, session),
             orders_submitted=orders_submitted,
             exit_actions=exit_actions,
         )
 
     def _fill_count(self, account_id: str) -> int:
-        return sum(
-            1 for event in self._ledger.events(account=account_id) if event.kind is EventKind.FILL
-        )
+        return decide("eod:count_events", (EventKind.FILL.value, "", *(value
+            for event in self._ledger.events(account=account_id)
+            for value in (event.kind.value, event.command_id or ""))))[1][0]
 
     def _marks_appended(self, account_id: str, session: date) -> int:
-        count = 0
-        for event in self._ledger.events(account=account_id):
-            if (
-                event.kind is EventKind.MARK
-                and event.command_id is not None
-                and event.command_id.startswith(f"eod:mark:{account_id}:{session.isoformat()}:")
-            ):
-                count += 1
-        return count
+        return decide("eod:count_events", (EventKind.MARK.value,
+            f"eod:mark:{account_id}:{session.isoformat()}:", *(value
+            for event in self._ledger.events(account=account_id)
+            for value in (event.kind.value, event.command_id or ""))))[1][0]
 
     def _rehydrate_venue(
         self, account_id: str, broker: BrokerAdapter, state: AccountState
@@ -597,22 +549,14 @@ class EodRunner:
                 broker.restore(orders, fills, self._restorable_positions(state))
         held = {item.venue_order_id: item for item in broker.orders(MIN_TIME)}
         for order in sorted(state.orders.values(), key=lambda value: value.order_id):
-            if order.state not in _VENUE_WORKING:
+            if not flag("eod:working", (order.state.value,)):
                 continue
             venue_id = state.venue_order_ids.get(order.order_id, order.order_id)
             found = held.get(venue_id)
-            if found is None:
-                raise EodRunnerError(
-                    f"Venue for '{account_id}' does not hold working order "
-                    f"'{order.order_id}' ({order.state.value}); refusing to replay a "
-                    f"session it could never fill in (I5)"
-                )
             recorded = state.filled_quantity.get(order.order_id, Decimal("0"))
-            if found.filled_quantity < recorded:
-                raise EodRunnerError(
-                    f"Venue reports {found.filled_quantity} filled for '{order.order_id}' "
-                    f"but the ledger records {recorded} (I5)"
-                )
+            decide("eod:rehydrate", (account_id, order.order_id, order.state.value,
+                str(found.filled_quantity) if found is not None else "0", str(recorded)),
+                flags=(found is not None,))
 
     def _restorable(
         self, account_id: str, state: AccountState
@@ -641,18 +585,14 @@ class EodRunner:
         instruments: set[Instrument] = {
             instrument
             for instrument, position in state.positions.items()
-            if position.quantity != Decimal("0")
+            if flag("eod:nonzero", (str(position.quantity),))
         }
         for order in state.orders.values():
-            if order.state in _VENUE_WORKING:
+            if flag("eod:working", (order.state.value,)):
                 instruments.add(order.instrument)
         ordered = tuple(sorted(instruments, key=lambda value: value.symbol))
         for instrument in ordered:
-            if not isinstance(instrument, Equity):
-                raise EodRunnerError(
-                    f"Equity EOD replay cannot value {instrument.symbol}; option marks "
-                    f"and the lifecycle pass are wired into the EOD run by O4 (I5)"
-                )
+            decide("eod:replay_instrument", (instrument.symbol,), flags=(isinstance(instrument, Equity),))
         return ordered
 
     def _load_bars(
@@ -665,28 +605,15 @@ class EodRunner:
             session_close,
             self._config.bars_max_age_seconds,
         )
-        if not raw:
-            raise ReplayDataError(
-                f"No one-minute bars returned for {instrument.symbol} for this session; "
-                f"refusing to simulate from memory (I5)"
-            )
-        if raw[0].timestamp != session_open:
-            raise ReplayDataError(
-                f"Bar series for {instrument.symbol} starts at "
-                f"{raw[0].timestamp.isoformat()}, not the session open "
-                f"{session_open.isoformat()} (I5)"
-            )
-        if raw[-1].timestamp != session_close - timedelta(minutes=1):
-            raise ReplayDataError(
-                f"Bar series for {instrument.symbol} ends at "
-                f"{raw[-1].timestamp.isoformat()}, not the session's final minute "
-                f"{(session_close - timedelta(minutes=1)).isoformat()} (I5)"
-            )
+        final = session_close - timedelta(minutes=1)
+        decide("eod:bars", (instrument.symbol,
+            raw[0].timestamp.isoformat() if raw else "", session_open.isoformat(),
+            raw[-1].timestamp.isoformat() if raw else "", final.isoformat()),
+            numbers=(micros(raw[0].timestamp) if raw else 0, micros(session_open),
+                micros(raw[-1].timestamp) if raw else 0, micros(session_close)), flags=(bool(raw),))
         regular = []
         for bar in raw:
-            is_regular = (
-                session_open <= bar.timestamp < session_close
-            )
+            is_regular = flag("eod:regular", numbers=(micros(session_open), micros(bar.timestamp), micros(session_close)))
             regular.append((bar, is_regular))
         return regular
 
@@ -742,21 +669,13 @@ class EodRunner:
         for instrument, position in sorted(
             state.positions.items(), key=lambda item: item[0].symbol
         ):
-            if position.quantity == Decimal("0"):
+            if not flag("eod:nonzero", (str(position.quantity),)):
                 continue
-            mark_command = _MARK_COMMAND.format(
-                account=account_id,
-                session=session.isoformat(),
-                symbol=instrument.symbol,
-            )
+            mark_command = decide("eod:command", ("eod:mark",account_id,session.isoformat(),instrument.symbol))[0][0]
             if self._ledger.event_by_command(mark_command) is not None:
                 continue
             close = last_regular_closes.get(instrument)
-            if close is None:
-                raise ReplayDataError(
-                    f"No regular-session bar for open position {instrument.symbol} in "
-                    f"'{account_id}'; refusing to mark without one (I5)"
-                )
+            decide("eod:mark", (str(position.quantity), instrument.symbol, account_id), flags=(False, close is not None))
             now = self._clock.now_utc()
             self._ledger.append(
                 Event(
@@ -826,11 +745,8 @@ class EodRunner:
         manager = self._manager_for(account_id, self._config.brokers[account_id])
         applied = 0
         for action in actions:
-            if action.entry_order_id not in by_entry:
-                raise EodRunnerError(
-                    f"Exit action '{action.command_id}' names '{action.entry_order_id}', "
-                    f"which is not an open bracket of '{account_id}' (I8)"
-                )
+            decide("eod:exit_action", (action.command_id, action.entry_order_id, account_id, type(action).__name__),
+                flags=(action.entry_order_id in by_entry, isinstance(action, (MoveStop, ClosePosition, ReducePosition))))
             if isinstance(action, MoveStop):
                 manager.move_stop(
                     action.entry_order_id, action.stop_price, command_id=action.command_id
@@ -839,7 +755,7 @@ class EodRunner:
                 order = manager.close_bracket(
                     action.entry_order_id, command_id=action.command_id, reason=action.reason
                 )
-                if order.state not in _TERMINAL:
+                if not flag("eod:terminal", (order.state.value,)):
                     manager.reconcile_order(order.order_id)
             elif isinstance(action, ReducePosition):
                 order = manager.reduce_bracket(
@@ -848,14 +764,9 @@ class EodRunner:
                     command_id=action.command_id,
                     reason=action.reason,
                 )
-                if order.state not in _TERMINAL:
+                if not flag("eod:terminal", (order.state.value,)):
                     manager.reconcile_order(order.order_id)
-            else:
-                raise EodRunnerError(
-                    f"Strategy for '{account_id}' returned {type(action).__name__}; exit "
-                    "actions are MoveStop, ClosePosition or ReducePosition"
-                )
-            applied += 1
+            applied = decide("routing:increment", numbers=(applied, 1))[1][0]
         return applied
 
     def _open_brackets(
@@ -869,22 +780,24 @@ class EodRunner:
         for entry in sorted(state.orders.values(), key=lambda order: order.order_id):
             if entry.parent_order_id is not None:
                 continue
-            children = [
-                order for order in state.orders.values() if order.parent_order_id == entry.order_id
-            ]
-            stop = next((order for order in children if order.order_type is OrderType.STOP), None)
+            orders = tuple(state.orders.values())
+            _, indices, child_mask = decide("eod:children", (entry.order_id, *(value
+                for order in orders for value in (order.parent_order_id or "", order.order_type.value, order.state.value))))
+            children = [order for order, child in zip(orders, child_mask) if child]
+            stop = orders[indices[0]] if indices[0] >= 0 else None
             entry_fills = [fill for fill in state.fills if fill.order_id == entry.order_id]
             if stop is None or stop.stop_price is None or not entry_fills:
                 continue
-            filled = sum((fill.quantity for fill in entry_fills), Decimal("0"))
-            exited = sum(
-                (state.filled_quantity.get(order.order_id, Decimal("0")) for order in children),
-                Decimal("0"),
-            )
-            if filled - exited <= 0:
+            values, _, opened = decide("eod:bracket", (
+                *(str(fill.quantity) for fill in entry_fills),
+                *(str(state.filled_quantity.get(order.order_id, Decimal("0"))) for order in children),
+                *(value for fill in entry_fills for value in (str(fill.price), str(fill.quantity))),
+            ), numbers=(len(entry_fills), len(entry_fills) + len(children)))
+            if not opened[0]:
                 continue
-            targets = [order for order in children if order.order_type is OrderType.LIMIT]
-            first_fill = min(fill.filled_at for fill in entry_fills)
+            filled, open_quantity, average = map(Decimal, values)
+            targets = [orders[i] for i in indices[1:]]
+            first_fill = entry_fills[decide("eod:earliest", numbers=tuple(micros(fill.filled_at) for fill in entry_fills))[1][0]].filled_at
             entry_session = self._calendar.roll_to_session(
                 first_fill.astimezone(NEW_YORK).date(), "next"
             )
@@ -895,27 +808,22 @@ class EodRunner:
                     instrument=entry.instrument,
                     side=entry.side,
                     entry_quantity=filled,
-                    open_quantity=filled - exited,
-                    average_entry_price=sum(
-                        (fill.price * fill.quantity for fill in entry_fills), Decimal("0")
-                    )
-                    / filled,
+                    open_quantity=open_quantity,
+                    average_entry_price=average,
                     entry_filled_at=first_fill,
                     entry_session=entry_session,
                     sessions_held=len(self._calendar.sessions_in_range(entry_session, session))
                     - 1,
                     stop_price=stop.stop_price,
-                    targets_filled=sum(
-                        1 for order in targets if order.state is OrderState.FILLED
-                    ),
+                    targets_filled=decide("eod:filled", tuple(order.state.value for order in targets))[1][0],
                     open_targets=tuple(
                         (
                             order.limit_price,
-                            order.quantity
-                            - state.filled_quantity.get(order.order_id, Decimal("0")),
+                            Decimal(decide("eod:subtract", (str(order.quantity),
+                                str(state.filled_quantity.get(order.order_id, Decimal("0")))))[0][0]),
                         )
                         for order in targets
-                        if order.state not in _TERMINAL and order.limit_price is not None
+                        if not flag("eod:terminal", (order.state.value,)) and order.limit_price is not None
                     ),
                     last_close=last_regular_closes.get(entry.instrument),
                 )
@@ -940,11 +848,7 @@ class EodRunner:
         )
         submitted = 0
         for intent in intents:
-            if intent.account_id != account_id:
-                raise EodRunnerError(
-                    f"Intent '{intent.intent_id}' targets account '{intent.account_id}' "
-                    f"but was produced for '{account_id}' (I8)"
-                )
+            decide("eod:intent", (intent.account_id, account_id, intent.intent_id))
             state = self._ledger.state(account_id)
             builder = self._config.context_builder
             context = (
@@ -954,15 +858,15 @@ class EodRunner:
             )
             verdict = risk_engine.evaluate(intent, context)
             self._record_verdict(account_id, intent, verdict)
-            if not verdict.accepted or verdict.approved_quantity is None:
+            if not flag("eod:equity_approved", flags=(verdict.accepted, verdict.approved_quantity is not None)):
                 continue
             bracket = manager.create_bracket(intent, verdict.approved_quantity)
             submitted_entry = manager.submit(bracket.entry)
-            if submitted_entry.state not in _TERMINAL:
+            if not flag("eod:terminal", (submitted_entry.state.value,)):
                 # Confirm the venue ack in the same run, so a re-run derives the same
                 # reconcile command and changes nothing the second time.
                 manager.reconcile_order(bracket.entry.order_id)
-            submitted += 1
+            submitted = decide("routing:increment", numbers=(submitted, 1))[1][0]
         return submitted
 
     def _record_signal(self, account_id: str, signal: Signal) -> None:
@@ -994,32 +898,19 @@ class EodRunner:
     ) -> RiskContext:
         """Fold-derived measurements; every input the fold cannot supply stays None,
         so the matching rule records UNKNOWN and refuses (I5), never guesses."""
-        marks_value = sum(
-            (
-                position.quantity * state.marks[position.instrument]
-                for position in state.positions.values()
-                if position.instrument in state.marks
-            ),
-            Decimal("0"),
-        )
-        equity = state.cash + marks_value
-        gross = sum(
-            (
-                abs(position.quantity) * state.marks.get(position.instrument, Decimal("0"))
-                for position in state.positions.values()
-            ),
-            Decimal("0"),
-        )
-        open_positions = [
-            position for position in state.positions.values() if position.quantity != Decimal("0")
-        ]
         held = state.positions.get(intent.instrument)
+        positions = tuple(state.positions.values())
+        values, counts, positive = decide("eod:risk", (
+            str(state.cash), str(held.quantity) if held is not None else "0",
+            *(value for position in positions for value in (
+                str(position.quantity), str(state.marks.get(position.instrument, Decimal("0"))))),
+        ), flags=tuple(position.instrument in state.marks for position in positions))
         return RiskContext(
-            equity=equity if equity > 0 else None,
+            equity=Decimal(values[0]) if positive[0] else None,
             current_price=None,
-            gross_exposure=gross,
+            gross_exposure=Decimal(values[1]),
             portfolio_heat=None,
-            open_positions=len(open_positions),
+            open_positions=counts[0],
             industry=None,
             industry_positions=None,
             average_dollar_volume_20d=None,
@@ -1030,7 +921,7 @@ class EodRunner:
             previous_session_pnl_frac=None,
             venue_orders_today=None,
             venue_daily_pnl=None,
-            current_position_quantity=int(held.quantity) if held is not None else 0,
+            current_position_quantity=int(values[2]),
         )
 
     # -- options accounts (O4) ---------------------------------------------------
@@ -1053,33 +944,23 @@ class EodRunner:
         """
         if not options:
             return []
-        if self._config.chain_snapshots is None or self._config.settlements is None:
-            raise EodRunnerError(
-                f"Options accounts {list(options)} need chain_snapshots to fill and mark "
-                f"options and settlements to mark shares; neither may be defaulted (I5)"
-            )
+        decide("eod:snapshots_wiring", (str(list(options)),),
+            flags=(self._config.chain_snapshots is not None, self._config.settlements is not None))
         session_open = self._calendar.session_open(session)
         session_close = self._calendar.session_close(session)
         snapshots = sorted(
             self._config.chain_snapshots(session), key=lambda item: (item.as_of, item.underlying)
         )
         for snapshot in snapshots:
-            if not isinstance(snapshot, ChainSnapshot):
-                raise EodRunnerError(f"chain_snapshots returned {type(snapshot).__name__} (I5)")
-            if not session_open <= snapshot.as_of <= session_close:
-                raise ReplayDataError(
-                    f"{snapshot.underlying} snapshot of {snapshot.as_of.isoformat()} is outside "
-                    f"the {session.isoformat()} session (I7)"
-                )
+            valid = isinstance(snapshot, ChainSnapshot)
+            decide("eod:snapshot", (type(snapshot).__name__, snapshot.underlying if valid else "",
+                snapshot.as_of.isoformat() if valid else "", session.isoformat()),
+                numbers=(micros(session_open), micros(snapshot.as_of) if valid else 0, micros(session_close)),
+                flags=(valid,))
         have = {snapshot.underlying for snapshot in snapshots}
         for account_id in options if covered else ():
             missing = sorted(self._option_underlyings(self._ledger.state(account_id)) - have)
-            if missing:
-                raise ReplayDataError(
-                    f"No {session.isoformat()} chain snapshot for {', '.join(missing)}, which "
-                    f"'{account_id}' holds options on or has orders working on; refusing to "
-                    f"fill or mark them from memory (I5)"
-                )
+            decide("eod:coverage", (", ".join(missing), session.isoformat(), account_id))
         return snapshots
 
     @staticmethod
@@ -1087,12 +968,12 @@ class EodRunner:
         needed = {
             underlying_of(instrument)
             for instrument, position in state.positions.items()
-            if isinstance(instrument, OptionContract) and position.quantity != 0
+            if isinstance(instrument, OptionContract) and flag("eod:nonzero", (str(position.quantity),))
         }
         needed |= {
             underlying_of(order.instrument)
             for order in state.orders.values()
-            if order.state in _VENUE_WORKING
+            if flag("eod:working", (order.state.value,))
         }
         return needed
 
@@ -1103,9 +984,9 @@ class EodRunner:
         tallied = self._router(account_id).manage_at_snapshot(
             account_id, session, snapshot, tally.snapshots, self._run_command(account_id, session)
         )
-        tally.orders_submitted += tallied.orders_submitted
-        tally.exit_actions += tallied.exit_actions
-        tally.snapshots_processed += tallied.snapshots_processed
+        tally.orders_submitted, tally.exit_actions, tally.snapshots_processed = (int(v) for v in decide("routing:tally", text=tuple(str(v) for v in (
+            tally.orders_submitted, tally.exit_actions, tally.snapshots_processed,
+            tallied.orders_submitted, tallied.exit_actions, tallied.snapshots_processed)))[0])
 
     def _router(self, account_id: str) -> "OptionRouter":
         return self._option_routers[account_id]
@@ -1116,17 +997,13 @@ class EodRunner:
             account_id
             for account_id in options
             if any(
-                isinstance(instrument, OptionContract) and position.quantity != 0
+                isinstance(instrument, OptionContract) and flag("eod:nonzero", (str(position.quantity),))
                 for instrument, position in self._ledger.state(account_id).positions.items()
             )
         ]
         if not holding:
             return
-        if self._config.lifecycle is None:
-            raise EodRunnerError(
-                f"{holding} hold options and no lifecycle pass is configured; expiry and "
-                f"assignment cannot be decided (I9)"
-            )
+        decide("eod:lifecycle", (str(holding),), flags=(bool(holding), self._config.lifecycle is not None))
         self._config.lifecycle.run(session, holding)
 
     def _finish_options_account(
@@ -1159,13 +1036,14 @@ class EodRunner:
                 account_id, session, actions, None, tally.snapshots,
                 f"eod:{self._config.job_name}:{account_id}:{session.isoformat()}:close",
             )
-            tally.orders_submitted += tallied.orders_submitted
-            tally.exit_actions += tallied.exit_actions
+            tally.orders_submitted, tally.exit_actions, _ = (int(v) for v in decide("routing:tally", text=tuple(str(v) for v in (
+                tally.orders_submitted, tally.exit_actions, 0,
+                tallied.orders_submitted, tallied.exit_actions, 0)))[0])
         self._submit_new_option_entries(account_id, session, tally)
         self._append_run_marker(account_id, session, tally.bars_processed)
         return AccountRunResult(
             account_id=account_id,
-            fills_recorded=self._fill_count(account_id) - tally.fills_before,
+            fills_recorded=decide("eod:difference", numbers=(self._fill_count(account_id), tally.fills_before))[1][0],
             marks_appended=self._marks_appended(account_id, session),
             orders_submitted=tally.orders_submitted,
             exit_actions=tally.exit_actions,
@@ -1202,7 +1080,8 @@ class EodRunner:
             snapshots=tally.snapshots,
         )
         for intent in strategy.generate_intents(signals, context):
-            tally.orders_submitted += self._enter_option(account_id, session, intent, tally, None)
+            submitted = self._enter_option(account_id, session, intent, tally, None)
+            tally.orders_submitted = decide("routing:increment", numbers=(tally.orders_submitted, submitted))[1][0]
 
     def _credit_dividends(self, account_id: str, session: date) -> None:
         """Credit (or charge) today's ex-dividends on the shares held at the open.
@@ -1213,25 +1092,22 @@ class EodRunner:
         """
         session_open = self._calendar.session_open(session)
         before = fold_account(
-            (event for event in self._ledger.events(account=account_id) if event.ts_utc < session_open),
+            (event for event in self._ledger.events(account=account_id)
+                if flag("eod:preopen", numbers=(micros(event.ts_utc), micros(session_open)))),
             account_id,
         )
         shares = sorted(
             (
                 (instrument, position)
                 for instrument, position in before.positions.items()
-                if isinstance(instrument, Equity) and position.quantity != 0
+                if isinstance(instrument, Equity) and flag("eod:nonzero", (str(position.quantity),))
             ),
             key=lambda item: item[0].symbol,
         )
         if not shares:
             return
         source = self._config.dividends
-        if source is None:
-            raise EodRunnerError(
-                f"'{account_id}' holds shares and no dividend source is configured; a dividend "
-                f"going ex would be missed (I5)"
-            )
+        decide("eod:dividend_source", (account_id,), flags=(source is not None,))
         now = self._clock.now_utc()
         for instrument, position in shares:
             try:
@@ -1239,20 +1115,18 @@ class EodRunner:
             except StaleDataError as err:
                 raise ReplayDataError(f"'{account_id}' holds {instrument.symbol}: {err}") from err
             for dividend in found:
-                if dividend.as_of > now:
-                    raise ReplayDataError(
-                        f"{instrument.symbol} dividend record is stamped {dividend.as_of.isoformat()}, "
-                        f"after the clock: look-ahead (I7)"
-                    )
-            per_share = sum((dividend.amount for dividend in found), Decimal("0"))
-            if per_share == 0:
+                decide("eod:dividend_stamp", (instrument.symbol, dividend.as_of.isoformat()),
+                    numbers=(micros(dividend.as_of), micros(now)))
+            values, _, credit = decide("eod:dividend", (str(position.quantity), *(str(dividend.amount) for dividend in found)))
+            if not credit[0]:
                 continue
+            per_share, amount = map(Decimal, values)
             self._ledger.append(
                 Event(
                     account=account_id,
                     kind=EventKind.CASH_FLOW,
                     payload=CashFlow(
-                        amount=position.quantity * per_share,
+                        amount=amount,
                         kind="dividend",
                         as_of=now,
                         note=(
@@ -1275,31 +1149,26 @@ class EodRunner:
         marks: dict[Instrument, tuple[Decimal, str]] = {}
         underlyings: set[str] = set()
         for instrument, position in sorted(state.positions.items(), key=lambda item: item[0].symbol):
-            if position.quantity == 0:
+            if not flag("eod:nonzero", (str(position.quantity),)):
                 continue
             if isinstance(instrument, OptionContract):
                 underlying = underlying_of(instrument)
                 snapshot = tally.snapshots.get(underlying)
                 quote = None if snapshot is None else snapshot.get(instrument)
-                if quote is None or quote.mid <= 0:
-                    raise ReplayDataError(
-                        f"No usable {session.isoformat()} quote for {instrument.occ.strip()} in "
-                        f"'{account_id}'; refusing to mark it (I5)"
-                    )
+                decide("eod:option_mark", (str(quote.mid) if quote is not None else "0",
+                    session.isoformat(), instrument.occ.strip(), account_id), flags=(quote is not None,))
                 marks[instrument] = (quote.mid, f"snapshot:{snapshot.as_of.isoformat()}")
                 underlyings.add(underlying)
             elif isinstance(instrument, Equity):
                 marks[instrument] = self._official_close(instrument.symbol, session)
             else:
-                raise EodRunnerError(f"'{account_id}' holds {instrument.symbol}, which cannot be marked (I6)")
+                decide("eod:unmarkable", (account_id, instrument.symbol))
         for underlying in sorted(underlyings):
             if Equity(underlying) not in marks:
                 marks[Equity(underlying)] = self._official_close(underlying, session)
         now = self._clock.now_utc()
         for instrument, (price, source) in sorted(marks.items(), key=lambda item: item[0].symbol):
-            command = _MARK_COMMAND.format(
-                account=account_id, session=session.isoformat(), symbol=instrument.symbol
-            )
+            command = decide("eod:command", ("eod:mark",account_id,session.isoformat(),instrument.symbol))[0][0]
             if self._ledger.event_by_command(command) is not None:
                 continue
             self._ledger.append(
@@ -1317,22 +1186,12 @@ class EodRunner:
             price = self._config.settlements.settlement(symbol, session, SettleTime.PM)
         except StaleDataError as err:
             raise ReplayDataError(f"No official {session.isoformat()} close for {symbol}: {err}") from err
-        if (price.underlying, price.session, price.settle_time) != (symbol, session, SettleTime.PM):
-            raise ReplayDataError(
-                f"Asked for the {session.isoformat()} close of {symbol}, got {price.underlying} "
-                f"{price.settle_time.value} on {price.session} (I5)"
-            )
+        decide("eod:official_identity", (symbol, price.underlying, session.isoformat(), price.session.isoformat(), price.settle_time.value))
         now = self._clock.now_utc()
-        if price.as_of > now:
-            raise ReplayDataError(
-                f"{symbol} close is stamped {price.as_of.isoformat()}, after the clock "
-                f"{now.isoformat()}: look-ahead (I7)"
-            )
-        if price.as_of < self._calendar.session_close(session):
-            raise ReplayDataError(
-                f"{symbol} close is stamped {price.as_of.isoformat()}, before the session "
-                f"closed; it cannot be the official close (I9)"
-            )
+        decide("eod:official_future", (symbol, price.as_of.isoformat(), now.isoformat()),
+            numbers=(micros(price.as_of), micros(now)))
+        decide("eod:official_close", (symbol, price.as_of.isoformat()),
+            numbers=(micros(price.as_of), micros(self._calendar.session_close(session))))
         return price.price, price.source
 
     # -- sinks -------------------------------------------------------------------
@@ -1340,10 +1199,7 @@ class EodRunner:
     def _drain_outbox(self) -> None:
         for destination, sink in sorted(self._config.sinks.items()):
             publisher = getattr(sink, "publish", None)
-            if not callable(publisher):
-                raise EodRunnerError(
-                    f"Sink for '{destination}' does not declare a publish method (I5)"
-                )
+            decide("eod:sink", (destination,), flags=(callable(publisher),))
             # The outbox calls publisher(item); a JournalSink takes (event_seq, event).
             self._ledger.drain_outbox(
                 destination,
