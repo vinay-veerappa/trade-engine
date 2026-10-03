@@ -1,7 +1,8 @@
-"""The door from the simulated venues and the option-risk gate into Rust (P3a).
+"""The door from simulated venues, option-risk and OMS decisions into Rust.
 
 A Rust refusal crosses as ``ValueError((kind, message))``. The kinds the P3a rules add
-name exceptions their Python modules own, so each module registers its own class here;
+name exceptions their Python modules own, so each module registers its own class here
+(including the P3b-2a manager's reconciliation and idempotency refusals);
 every other kind is the ledger's (``trade_engine.ledger._rs``). An exception a host
 callback raised (the clock, a quote lookup) crosses back as itself.
 

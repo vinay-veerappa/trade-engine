@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
+from enum import Enum
 
 from trade_engine.domain.instruments import Equity, Instrument, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
@@ -30,9 +30,11 @@ from trade_engine.ledger import (
     OrderUpdated,
     OrdersCreated,
 )
+from trade_engine.ledger import codec
 from trade_engine.ledger.codec import encode_payload
 from trade_engine.oms.models import Bracket
 from trade_engine.oms.trailing import TrailingStopEmulator
+from trade_engine.sim import _rs
 
 
 class OrderManagementError(RuntimeError):
@@ -63,9 +65,43 @@ class OrderReconciliationError(OrderManagementError):
     """Venue read-back could not establish an order's state."""
 
 
-_TERMINAL = frozenset(
-    {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED}
-)
+for _kind, _cls in (
+    ("order_management", OrderManagementError),
+    ("idempotency", IdempotencyConflictError),
+    ("unsupported_order", UnsupportedOrderCapabilityError),
+    ("pending_reconciliation", OrderPendingReconciliationError),
+    ("broker_unknown", BrokerOutcomeUnknownError),
+    ("oco_unknown", OCOOutcomeUnknownError),
+    ("order_reconciliation", OrderReconciliationError),
+    ("stop_iteration", StopIteration),
+    ("manager_int_overflow", OverflowError),
+):
+    _rs.register(_kind, _cls)
+
+
+def _wire(value):
+    """Exact boundary plumbing, not OMS decisions."""
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, OrderIntent):
+        return {item.name: _wire(getattr(value, item.name)) for item in fields(value)}
+    if is_dataclass(value):
+        return encode_payload(value)
+    if isinstance(value, dict):
+        return {key: _wire(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return [_wire(item) for item in value]
+    return value
+
+
+def _plan(operation: str, **request):
+    return json.loads(_rs.call(_rs.rs.oms_manager_decide, operation, codec.text(_wire(request))))
+
+
+def _event(event: Event):
+    return dict(account=event.account, kind=event.kind.name, payload=event.payload)
 
 
 @dataclass(frozen=True)
@@ -86,46 +122,21 @@ class OrderManager:
 
     def create_bracket(self, intent: OrderIntent, quantity: Decimal) -> Bracket:
         """Persist a deterministic bracket; conflicting command replays are refused."""
-        if not quantity.is_finite() or quantity <= 0:
-            raise ValueError("quantity must be finite and positive")
-        unsupported = sorted(
-            {intent.entry_tif, intent.exit_tif} - self._broker.capabilities.supported_tifs
-        )
-        if unsupported:
-            # Refuse before the entry can fill; a GTC stop refused later leaves an open
-            # position unprotected.
-            raise UnsupportedOrderCapabilityError(
-                "Venue does not support bracket time in force "
-                f"{', '.join(tif.value for tif in unsupported)}"
-            )
-        if intent.entry_type is OrderType.STOP and not self._supports_native_type(OrderType.STOP):
-            # An emulated entry triggers only on prices someone feeds it; nothing watches
-            # an EOD entry overnight, so the breakout would silently never trade.
-            raise UnsupportedOrderCapabilityError(
-                "Venue has no native STOP orders; a stop entry cannot be worked"
-            )
-        if intent.entry_type is OrderType.STOP_LIMIT and not self._supports_native_type(
-            OrderType.STOP_LIMIT
-        ):
-            # Same reason: the chase limit must rest at the venue, not in a local watcher.
-            raise UnsupportedOrderCapabilityError(
-                "Venue has no native STOP_LIMIT orders; a stop-limit entry cannot be worked"
-            )
+        _plan("positive_quantity", quantity=quantity)
+        _plan("bracket_capabilities", type=intent.entry_type, entry_tif=intent.entry_tif,
+              exit_tif=intent.exit_tif, **self._capabilities())
         fingerprint = self._bracket_fingerprint(intent, quantity)
         existing = self._ledger.event_by_command(intent.command_id)
         if existing is not None:
-            if (
-                existing.kind is not EventKind.ORDERS_CREATED
-                or existing.account != intent.account_id
-                or existing.payload.fingerprint != fingerprint
-            ):
-                raise IdempotencyConflictError(
-                    f"command_id '{intent.command_id}' was already used for a different OMS command"
-                )
+            _plan("created_replay", existing=_event(existing), account=intent.account_id,
+                  fingerprint=fingerprint, command=intent.command_id)
             return self._bracket_from_orders(existing.payload.orders)
 
         now = self._utc_now()
         prefix = intent.command_id
+        limit, stop_price, exit_side = _plan("entry_terms", type=intent.entry_type,
+                                           side=intent.side, price=intent.entry_price,
+                                           limit=intent.entry_limit_price)
         entry = Order(
             order_id=f"{prefix}:entry",
             account_id=intent.account_id,
@@ -135,15 +146,11 @@ class OrderManager:
             quantity=quantity,
             command_id=f"{prefix}:entry",
             created_at=now,
-            limit_price=(
-                intent.entry_price
-                if intent.entry_type is OrderType.LIMIT
-                else intent.entry_limit_price
-            ),
-            stop_price=intent.entry_price if intent.entry_type is not OrderType.LIMIT else None,
+            limit_price=None if limit is None else Decimal(limit),
+            stop_price=None if stop_price is None else Decimal(stop_price),
             tif=intent.entry_tif,
         )
-        exit_side = Side.SELL if intent.side is Side.BUY else Side.BUY
+        exit_side = Side(exit_side)
         stop = Order(
             order_id=f"{prefix}:stop",
             account_id=intent.account_id,
@@ -159,7 +166,7 @@ class OrderManager:
             oco_group=f"{prefix}:exits",
         )
         self._validate_quantity(intent.instrument, quantity)
-        if intent.target_fractions is None:
+        if _plan("fraction_mode", fractions=intent.target_fractions) == "split":
             target_quantities = self._split_quantity(
                 quantity, len(intent.profit_targets), intent.instrument
             )
@@ -202,31 +209,20 @@ class OrderManager:
         self._ensure_stored(order)
         context = self._context(order.order_id)
         current = context.order
-        if current.parent_order_id is not None:
-            parent = self._context(current.parent_order_id)
-            if self._account_state(current.account_id).filled_quantity.get(
+        parent_id = _plan("parent", parent=current.parent_order_id)
+        if parent_id is not None:
+            parent = self._context(parent_id)
+            if _plan("child_hold", filled=self._account_state(current.account_id).filled_quantity.get(
                 parent.order.order_id, Decimal("0")
-            ) <= 0:
-                self._refuse(
-                    current,
-                    f"Child held until parent '{parent.order.order_id}' has a fill",
-                    f"{current.command_id}:child-held",
-                )
-                raise OrderManagementError(
-                    f"Child order '{current.order_id}' is held until its entry fills"
-                )
-        if current.order_type in (
-            OrderType.STOP,
-            OrderType.STOP_LIMIT,
-            OrderType.TRAIL,
-        ) and not self._supports_native_type(current.order_type):
+            )):
+                self._planned_refusal(current, "child", parent=parent.order.order_id)
+        if _plan("submit_mode", type=current.order_type, **self._capabilities()) == "emulate":
             return self._start_emulation(current)
         return self._submit_native(current)
 
     def submit_trailing(self, order: Order) -> Order:
         """Start a native venue trail or persist a live emulated trail locally."""
-        if order.order_type is not OrderType.TRAIL:
-            raise ValueError("submit_trailing requires a TRAIL order")
+        _plan("trailing_check", type=order.order_type, method="submit_trailing")
         return self.submit(order)
 
     def update_trailing(
@@ -234,62 +230,37 @@ class OrderManager:
     ) -> Order:
         """Apply one live price observation to a persisted emulated trailing stop."""
         order = self.get_order(order_id)
-        if order.order_type is not OrderType.TRAIL:
-            raise ValueError("update_trailing requires a TRAIL order")
-        if OrderType.TRAIL in self._broker.capabilities.supported_order_types:
-            raise OrderManagementError(
-                f"Order '{order_id}' is native at this venue; no local trail is running"
-            )
+        _plan("trailing_check", type=order.order_type, method="update_trailing", order=order_id,
+              types=self._broker.capabilities.supported_order_types)
         return self.update_emulated_order(order_id, price, command_id=command_id)
 
     def update_emulated_order(
         self, order_id: str, price: Decimal, *, command_id: str
     ) -> Order:
         """Evaluate one observed price against a persisted emulated order."""
-        if not price.is_finite() or price <= 0:
-            raise ValueError(f"price must be finite and positive, got {price}")
+        _plan("price", price=price)
         context = self._context(order_id)
         order = context.order
         emulation = context.emulation
-        if emulation is None:
-            raise OrderManagementError(f"Emulated order '{order_id}' has not been started")
-        if self._supports_native_type(order.order_type):
-            raise OrderManagementError(
-                f"Order '{order_id}' is native at this venue; no local emulation is running"
-            )
+        _plan("emulation_check", order=order_id, type=order.order_type,
+              emulated=emulation is not None, **self._capabilities())
         prior = self._ledger.event_by_command(command_id)
         if prior is not None:
-            if (
-                prior.kind is not EventKind.ORDER_EMULATION_UPDATED
-                or prior.account != order.account_id
-                or prior.payload.order_id != order_id
-                or prior.payload.observed_price != price
-            ):
-                raise IdempotencyConflictError(
-                    f"command_id '{command_id}' was replayed with a different price observation"
-                )
+            _plan("observation_replay", existing=_event(prior), account=order.account_id,
+                  order=order_id, price=price, command=command_id)
             current = self.get_order(order_id)
-            if prior.payload.triggered:
-                if current.state is OrderState.PENDING_UNKNOWN:
-                    raise OrderPendingReconciliationError(
-                        f"Triggered emulated order '{order_id}' awaits venue reconciliation"
-                    )
-                if current.state is OrderState.NEW:
-                    return self._route_emulated_trigger(
-                        order, prior.payload.observed_price, command_id
-                    )
+            action = _plan("observed_action", triggered=prior.payload.triggered,
+                           state=current.state, order=order_id)
+            if action == "route":
+                return self._route_emulated_trigger(order, prior.payload.observed_price, command_id)
             return current
-        if emulation.triggered:
-            if order.state is OrderState.PENDING_UNKNOWN:
-                raise OrderPendingReconciliationError(
-                    f"Triggered emulated order '{order_id}' awaits venue reconciliation"
-                )
-            if order.state is OrderState.NEW:
-                return self._route_emulated_trigger(
-                    order, emulation.observed_price, command_id
-                )
+        action = _plan("observed_action", triggered=emulation.triggered,
+                       state=order.state, order=order_id)
+        if action == "route":
+            return self._route_emulated_trigger(order, emulation.observed_price, command_id)
+        if action == "return":
             return order
-        if order.order_type is OrderType.TRAIL:
+        if _plan("type_is", type=order.order_type, expected=OrderType.TRAIL):
             emulator = TrailingStopEmulator(
                 order.side,
                 order.trail_amount or Decimal("0"),
@@ -301,26 +272,16 @@ class OrderManager:
             extreme = emulator.extreme
             stop_price = emulator.stop_price
         else:
-            stop_price = order.stop_price
-            if stop_price is None:
-                raise OrderManagementError(
-                    f"Emulated {order.order_type.value} order '{order_id}' has no stop price"
-                )
+            stop, triggered = _plan("stop_observation", order=order, price=price)
+            stop_price = Decimal(stop)
             extreme = None
-            triggered = (
-                price >= stop_price if order.side is Side.BUY else price <= stop_price
-            )
         new_emulation = EmulatedOrderState(
             order_id=order_id,
             observed_price=price,
             extreme=extreme,
             stop_price=stop_price,
             triggered=triggered,
-            reason=(
-                f"{order.order_type.value} triggered at observed price {price}"
-                if triggered
-                else f"Emulated {order.order_type.value} observed price {price}"
-            ),
+            reason=_plan("observation_reason", type=order.order_type, price=price, triggered=triggered),
         )
         self._append(
             order.account_id,
@@ -335,16 +296,13 @@ class OrderManager:
     def _route_emulated_trigger(
         self, order: Order, trigger_price: Decimal | None, command_id: str
     ) -> Order:
-        if trigger_price is None:
-            raise OrderManagementError(
-                f"Triggered emulated order '{order.order_id}' has no observed price"
-            )
-        if order.order_type is OrderType.STOP_LIMIT:
+        if _plan("trigger_price", order=order, price=trigger_price):
             venue_type = OrderType.LIMIT
             limit_price = order.limit_price
         else:
             venue_type = self._trigger_order_type(order)
-            limit_price = trigger_price if venue_type is OrderType.LIMIT else None
+            limit = _plan("route_limit", type=venue_type, price=trigger_price)
+            limit_price = None if limit is None else Decimal(limit)
         self._require_tif(order, venue_type)
         self._cancel_emulated_siblings(order, command_id)
         return self._submit_emulated(
@@ -356,25 +314,18 @@ class OrderManager:
         )
 
     def _cancel_emulated_siblings(self, order: Order, command_id: str) -> None:
-        if order.parent_order_id is None or order.oco_group is None:
-            return
-        siblings = [
-            candidate
-            for candidate in self._account_state(order.account_id).orders.values()
-            if candidate.order_id != order.order_id
-            and candidate.parent_order_id == order.parent_order_id
-            and candidate.oco_group == order.oco_group
-        ]
+        state = self._account_state(order.account_id)
+        ids = _plan("siblings", entry=order.parent_order_id or "", order=order,
+                    orders=list(state.orders.values()))
+        siblings = [state.orders[item] for item in ids]
         self._cancel_exits(siblings, f"{command_id}:{order.order_id}:trigger")
 
     def record_fill(self, fill: Fill) -> Order:
         """Persist a venue fill and synchronize bracket protection from folded state."""
         context = self._context(fill.order_id)
         order = context.order
-        if fill.account_id != order.account_id or fill.venue_env != self._broker.env:
-            raise OrderManagementError(
-                f"Fill '{fill.fill_id}' account or venue environment does not match order '{order.order_id}'"
-            )
+        _plan("fill_match", fill=fill.fill_id, order=order.order_id, account=order.account_id,
+              fill_account=fill.account_id, env=self._broker.env, fill_env=fill.venue_env)
         self._validate_quantity(order.instrument, fill.quantity)
         self._append(order.account_id, EventKind.FILL, fill, f"fill:{fill.fill_id}")
         self._synchronize_bracket(order, fill.fill_id)
@@ -383,50 +334,21 @@ class OrderManager:
     def cancel(self, order_id: str, *, command_id: str) -> Order:
         """Cancel a working order; only a confirmed venue ack becomes CANCELLED."""
         order = self.get_order(order_id)
-        if order.parent_order_id is not None and order.order_type is OrderType.STOP:
+        if _plan("protective_child", parent=order.parent_order_id, type=order.order_type):
             state = self._account_state(order.account_id)
-            entry_filled = state.filled_quantity.get(order.parent_order_id, Decimal("0"))
-            exits_filled = sum(
-                (
-                    quantity
-                    for candidate_id, quantity in state.filled_quantity.items()
-                    if state.orders[candidate_id].parent_order_id == order.parent_order_id
-                ),
-                Decimal("0"),
-            )
-            if entry_filled > exits_filled and order.state not in (
-                OrderState.CANCELLED,
-                OrderState.FILLED,
-                OrderState.REJECTED,
-                OrderState.EXPIRED,
-            ):
-                self._refuse(
-                    order,
-                    "Cannot cancel the only protective stop while the bracket has open quantity",
-                    f"{command_id}:protective-stop-refused",
-                )
-                raise OrderManagementError(
-                    f"Cannot cancel protective stop '{order_id}' while its position is open"
-                )
+            if _plan("cancel_protective", state=codec.canon(state),
+                     entry=self.get_order(order.parent_order_id), order=order):
+                self._planned_refusal(order, "protective", command_id=command_id)
         result = self._cancel_order(order, command_id, "Cancelled by OMS command")
-        if order.parent_order_id is None:
+        if _plan("parent", parent=order.parent_order_id) is None:
             self._synchronize_bracket(order, command_id)
         return result
 
     def move_stop(self, entry_order_id: str, stop_price: Decimal, *, command_id: str) -> Order:
         """Tighten an open bracket's protective stop; loosening it refuses (I5)."""
         stop, open_quantity = self._open_bracket_stop(entry_order_id)
-        current = stop.stop_price
-        if current is None:
-            raise OrderManagementError(f"Protective stop '{stop.order_id}' has no stop price")
-        if stop_price == current:
+        if _plan("move_stop", order=stop, price=stop_price) == "return":
             return stop
-        loosens = stop_price < current if stop.side is Side.SELL else stop_price > current
-        if loosens:
-            raise OrderManagementError(
-                f"Moving stop '{stop.order_id}' from {current} to {stop_price} would widen "
-                "the bracket's risk; stops only tighten"
-            )
         return self.replace(
             stop.order_id, OrderChanges(new_stop_price=stop_price), command_id=command_id
         )
@@ -442,24 +364,12 @@ class OrderManager:
             existing = self.get_order(order_id)
         except KeyError:
             existing = None
-        if existing is not None and existing.command_id != command_id:
-            raise IdempotencyConflictError(
-                f"Bracket '{entry_order_id}' already has close order '{order_id}' from "
-                f"command '{existing.command_id}'"
-            )
-        if existing is not None and existing.state is not OrderState.NEW:
-            # Already sent (or resolved): a replayed command changes nothing (I3).
+        if existing is not None and _plan("close_replay", order=existing,
+                                         entry=entry_order_id, command=command_id):
             return existing
         stop, open_quantity = self._open_bracket_stop(entry_order_id)
-        if existing is None and any(
-            self._is_reduce(order, entry_order_id) and order.state not in _TERMINAL
-            for order in self._bracket_children(entry_order_id)
-        ):
-            # Both would be sized from the same open quantity and could oversell it.
-            raise OrderManagementError(
-                f"Bracket '{entry_order_id}' has a reduce order working; it must resolve "
-                "before the bracket can be closed"
-            )
+        if existing is None:
+            _plan("close_guard", entry=entry_order_id, children=self._bracket_children(entry_order_id))
         close = existing or Order(
             order_id=order_id,
             account_id=stop.account_id,
@@ -495,53 +405,28 @@ class OrderManager:
         taken at the target or after N days, whichever comes first. The protective stop
         stays live; once the reduce fills, it shrinks to the remaining open quantity.
         """
-        if not fraction.is_finite() or not Decimal("0") < fraction < Decimal("1"):
-            raise ValueError(f"fraction must be between 0 and 1 exclusive, got {fraction}")
+        _plan("fraction", fraction=fraction)
         entry = self.get_order(entry_order_id)
         fingerprint = self._reduce_fingerprint(entry_order_id, fraction, reason)
         existing = self._ledger.event_by_command(command_id)
         if existing is not None:
-            if (
-                existing.kind is not EventKind.ORDERS_CREATED
-                or existing.account != entry.account_id
-                or existing.payload.fingerprint != fingerprint
-            ):
-                raise IdempotencyConflictError(
-                    f"command_id '{command_id}' was already used for a different OMS command"
-                )
+            _plan("created_replay", existing=_event(existing), account=entry.account_id,
+                  fingerprint=fingerprint, command=command_id)
             # Resumes a reduce persisted before a crash; once sent (or resolved), cancelling
             # the targets and submitting are both no-ops, so a replay changes nothing (I3).
             return self._send_reduce(
                 self.get_order(existing.payload.orders[0].order_id), command_id
             )
         stop, open_quantity = self._open_bracket_stop(entry_order_id)
-        children = self._bracket_children(entry_order_id)
-        if any(
-            order.order_id == f"{entry_order_id}:close" and order.state not in _TERMINAL
-            for order in children
-        ):
-            raise OrderManagementError(
-                f"Bracket '{entry_order_id}' has a close order working; nothing is left to reduce"
-            )
-        reduces = [order for order in children if self._is_reduce(order, entry_order_id)]
-        if any(order.state not in _TERMINAL for order in reduces):
-            # Two reduces sized from the same open quantity could oversell it.
-            raise OrderManagementError(
-                f"Bracket '{entry_order_id}' already has a reduce order working"
-            )
-        quantity = (open_quantity * fraction).to_integral_value(rounding=ROUND_FLOOR)
-        if quantity < 1:
-            raise OrderManagementError(
-                f"Reducing bracket '{entry_order_id}' by {fraction} of {open_quantity} rounds "
-                "down to nothing; refusing to guess a size"
-            )
+        quantity, reduce_id = _plan("reduce", entry=entry_order_id, fraction=fraction,
+                                   open=open_quantity, children=self._bracket_children(entry_order_id))
         reduce = Order(
-            order_id=f"{entry_order_id}:reduce:{len(reduces) + 1}",
+            order_id=reduce_id,
             account_id=stop.account_id,
             instrument=stop.instrument,
             order_type=OrderType.MARKET,
             side=stop.side,
-            quantity=quantity,
+            quantity=Decimal(quantity),
             command_id=command_id,
             created_at=self._utc_now(),
             tif=TimeInForce.DAY,
@@ -562,48 +447,27 @@ class OrderManager:
 
     def _send_reduce(self, reduce: Order, command_id: str) -> Order:
         # Cancelled before the reduce goes out, so the targets cannot also fill against it.
-        targets = [
-            order
-            for order in self._bracket_children(reduce.parent_order_id)
-            if order.order_type is OrderType.LIMIT
-        ]
+        children = self._bracket_children(reduce.parent_order_id)
+        ids = _plan("filter_types", orders=children, types=[OrderType.LIMIT])
+        by_id = {order.order_id: order for order in children}
+        targets = [by_id[item] for item in ids]
         self._cancel_exits(targets, f"{command_id}:replaces-targets")
         return self.submit(reduce)
 
     def _bracket_children(self, entry_order_id: str) -> list[Order]:
         state = self._account_state(self.get_order(entry_order_id).account_id)
-        return [
-            order for order in state.orders.values() if order.parent_order_id == entry_order_id
-        ]
+        return [state.orders[item] for item in _plan("children", entry=entry_order_id,
+                                                    orders=list(state.orders.values()))]
 
     @staticmethod
     def _is_reduce(order: Order, entry_order_id: str) -> bool:
-        return order.order_id.startswith(f"{entry_order_id}:reduce:")
+        return _plan("is_reduce", entry=entry_order_id, order_id=order.order_id)
 
     def _open_bracket_stop(self, entry_order_id: str) -> tuple[Order, Decimal]:
         entry = self.get_order(entry_order_id)
-        if entry.parent_order_id is not None:
-            raise OrderManagementError(f"Order '{entry_order_id}' is not a bracket entry")
         state = self._account_state(entry.account_id)
-        children = [
-            order for order in state.orders.values() if order.parent_order_id == entry_order_id
-        ]
-        stop = next((order for order in children if order.order_type is OrderType.STOP), None)
-        if stop is None:
-            raise OrderManagementError(f"Order '{entry_order_id}' has no protective stop")
-        exited = sum(
-            (state.filled_quantity.get(order.order_id, Decimal("0")) for order in children),
-            Decimal("0"),
-        )
-        open_quantity = state.filled_quantity.get(entry_order_id, Decimal("0")) - exited
-        if open_quantity <= 0:
-            raise OrderManagementError(f"Bracket '{entry_order_id}' has no open quantity")
-        if stop.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
-            raise OrderManagementError(
-                f"Protective stop '{stop.order_id}' is {stop.state.value}, not working at "
-                "the venue; reconcile before managing the bracket"
-            )
-        return stop, open_quantity
+        stop_id, open_quantity = _plan("open_stop", entry=entry, state=codec.canon(state))
+        return state.orders[stop_id], Decimal(open_quantity)
 
     def replace(
         self, order_id: str, changes: OrderChanges, *, command_id: str
@@ -611,12 +475,8 @@ class OrderManager:
         """Replace a live order; pending/unknown acknowledgements remain unknown."""
         order = self.get_order(order_id)
         context = self._context(order_id)
-        if (
-            order.state is OrderState.NEW
-            and order.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
-            and context.emulation is not None
-            and not context.emulation.triggered
-        ):
+        if _plan("local_replace", order=order, emulated=context.emulation is not None,
+                 triggered=False if context.emulation is None else context.emulation.triggered):
             return self._replace_emulated_stop(order, changes, command_id)
         request_reason = f"Replace pending: {changes!r}"
         pending_command_id = f"{command_id}:pending"
@@ -624,61 +484,18 @@ class OrderManager:
         prior_noop = self._ledger.event_by_command(f"{command_id}:noop")
         if prior_request is None and prior_noop is not None:
             expected_reason = f"No-op replace: {changes!r}"
-            if (
-                prior_noop.account != order.account_id
-                or prior_noop.kind is not EventKind.ORDER_UPDATED
-                or prior_noop.payload.order.order_id != order_id
-                or prior_noop.payload.reason != expected_reason
-            ):
-                raise IdempotencyConflictError(
-                    f"command_id '{command_id}' was replayed with different replace changes"
-                )
+            _plan("replace_replay", existing=_event(prior_noop), mode="noop", order=order_id,
+                  account=order.account_id, reason=expected_reason, command=command_id)
             return order
         if prior_request is not None:
-            if (
-                prior_request.account != order.account_id
-                or prior_request.kind is not EventKind.ORDER_PENDING
-                or prior_request.payload.order_id != order_id
-                or prior_request.payload.reason != request_reason
-            ):
-                raise IdempotencyConflictError(
-                    f"command_id '{command_id}' was replayed with different replace changes"
-                )
-            if order.state is OrderState.PENDING_UNKNOWN:
-                raise OrderPendingReconciliationError(
-                    f"Replace command '{command_id}' remains pending reconciliation"
-                )
+            _plan("replace_replay", existing=_event(prior_request), mode="pending", order=order_id,
+                  account=order.account_id, reason=request_reason, command=command_id,
+                  state=order.state)
             return order
         filled = context.filled
-        if order.state in (
-            OrderState.NEW,
-            OrderState.FILLED,
-            OrderState.CANCELLED,
-            OrderState.EXPIRED,
-            OrderState.REJECTED,
-        ):
-            raise OrderManagementError(
-                f"Cannot replace order '{order_id}' in state {order.state.value}"
-            )
-        if order.state is OrderState.PENDING_UNKNOWN:
-            raise OrderPendingReconciliationError(
-                f"Order '{order_id}' is pending reconciliation"
-            )
-        if changes.new_quantity is not None and (
-            not changes.new_quantity.is_finite() or changes.new_quantity < filled or changes.new_quantity <= 0
-        ):
-            raise ValueError(
-                f"replacement quantity must be finite, positive, and at least filled quantity {filled}"
-            )
-        if changes.new_quantity is not None:
-            self._validate_quantity(order.instrument, changes.new_quantity)
-        updated = replace(
-            order,
-            quantity=changes.new_quantity if changes.new_quantity is not None else order.quantity,
-            limit_price=changes.new_limit_price if changes.new_limit_price is not None else order.limit_price,
-            stop_price=changes.new_stop_price if changes.new_stop_price is not None else order.stop_price,
-        )
-        if updated == order:
+        _plan("replace_state", order=order)
+        updated, noop = self._replacement_terms(order, changes, filled)
+        if noop:
             self._append(
                 order.account_id,
                 EventKind.ORDER_UPDATED,
@@ -689,10 +506,7 @@ class OrderManager:
 
         previous_state = order.state
         venue_id = context.venue_order_id
-        if venue_id is None:
-            raise OrderPendingReconciliationError(
-                f"Order '{order_id}' has no confirmed venue order id"
-            )
+        _plan("confirmed_id", venue=venue_id, order=order_id, mode="replace")
         self._append(
             order.account_id,
             EventKind.ORDER_PENDING,
@@ -709,41 +523,42 @@ class OrderManager:
             raise BrokerOutcomeUnknownError(
                 f"Replace outcome for order '{order_id}' is unknown; reconciliation is required"
             ) from err
-        if ack.status == "PENDING":
+        action, ack_reason, refused = _plan("replace_ack", status=ack.status,
+                                          message=ack.message or "", order=order_id,
+                                          command=command_id)
+        if action == "pending":
             self._append(
                 order.account_id,
                 EventKind.ORDER_PENDING,
                 OrderStateChange(
                     order_id,
-                    f"Venue replace remains pending: {ack.message or 'no status message'}",
+                    ack_reason,
                     ack.venue_order_id,
                 ),
                 f"{command_id}:venue-pending",
             )
             return self.get_order(order_id)
-        if ack.status == "REJECTED":
+        if action == "rejected":
             self._refuse(
                 order,
-                f"Venue rejected replace: {ack.message or 'reason not supplied'}",
+                ack_reason,
                 f"{command_id}:refused",
             )
             self._restore_working_state(
                 order,
                 previous_state,
-                f"Venue rejected replace: {ack.message or 'reason not supplied'}",
+                ack_reason,
                 ack.venue_order_id,
                 f"{command_id}:rejected",
             )
-            raise OrderManagementError(
-                f"Venue rejected replace for '{order_id}': {ack.message or 'reason not supplied'}"
-            )
+            raise _rs.refusal(*refused)
         changed = replace(updated, state=previous_state)
         self._append(
             order.account_id,
             EventKind.ORDER_UPDATED,
             OrderUpdated(
                 order=changed,
-                reason=f"Venue confirmed replace: {command_id}",
+                reason=ack_reason,
                 venue_order_id=ack.venue_order_id,
             ),
             f"{command_id}:accepted",
@@ -757,33 +572,11 @@ class OrderManager:
         local_command_id = f"{command_id}:local"
         prior = self._ledger.event_by_command(local_command_id)
         if prior is not None:
-            if (
-                prior.account != order.account_id
-                or prior.kind is not EventKind.ORDER_UPDATED
-                or prior.payload.order.order_id != order.order_id
-                or prior.payload.reason != reason
-            ):
-                raise IdempotencyConflictError(
-                    f"command_id '{command_id}' was replayed with different emulated stop changes"
-                )
+            _plan("replace_replay", existing=_event(prior), mode="local", order=order.order_id,
+                  account=order.account_id, reason=reason, command=command_id)
             return self.get_order(order.order_id)
         context = self._context(order.order_id)
-        if changes.new_quantity is not None:
-            if (
-                not changes.new_quantity.is_finite()
-                or changes.new_quantity <= 0
-                or changes.new_quantity < context.filled
-            ):
-                raise ValueError(
-                    f"replacement quantity must be finite, positive, and at least filled quantity {context.filled}"
-                )
-            self._validate_quantity(order.instrument, changes.new_quantity)
-        updated = replace(
-            order,
-            quantity=changes.new_quantity if changes.new_quantity is not None else order.quantity,
-            limit_price=changes.new_limit_price if changes.new_limit_price is not None else order.limit_price,
-            stop_price=changes.new_stop_price if changes.new_stop_price is not None else order.stop_price,
-        )
+        updated, _ = self._replacement_terms(order, changes, context.filled)
         self._append(
             order.account_id,
             EventKind.ORDER_UPDATED,
@@ -792,52 +585,41 @@ class OrderManager:
         )
         return self.get_order(order.order_id)
 
+    @staticmethod
+    def _replacement_terms(order: Order, changes: OrderChanges, filled: Decimal):
+        _plan("replace_quantity", quantity=changes.new_quantity, filled=filled,
+              equity=isinstance(order.instrument, Equity))
+        quantity, limit, stop, noop = _plan(
+            "replace_terms", order=order, quantity=changes.new_quantity,
+            limit=changes.new_limit_price, stop=changes.new_stop_price,
+        )
+        return replace(order, quantity=Decimal(quantity),
+                       limit_price=None if limit is None else Decimal(limit),
+                       stop_price=None if stop is None else Decimal(stop)), noop
+
     def reconcile_order(self, order_id: str) -> Order:
         """Read back an ambiguous venue order; never resend it."""
         context = self._context(order_id)
         order = context.order
         states = self._broker.orders(order.created_at)
         venue_id = context.venue_order_id or order_id
-        found = next(
-            (
-                item
-                for item in states
-                if item.venue_order_id == venue_id or item.venue_order_id == order_id
-            ),
-            None,
-        )
-        if found is None:
-            raise OrderReconciliationError(
-                f"Venue has no read-back for order '{order_id}'; it remains {order.state.value}"
-            )
-        terminal = found.state in (
-            OrderState.FILLED,
-            OrderState.CANCELLED,
-            OrderState.REJECTED,
-            OrderState.EXPIRED,
-        )
+        index = _plan("reconcile_find", order=order_id, venue=venue_id,
+                      ids=[item.venue_order_id for item in states], state=order.state)
+        found = states[index]
         # Status-only read-back cannot show which terms a working order carries, so a
         # pending replace resolves only once the venue reports the order finished.
-        if (
-            order.state is OrderState.PENDING_UNKNOWN
-            and self._has_unresolved_replace(order_id)
-            and not terminal
-        ):
-            raise OrderReconciliationError(
-                f"Pending replace terms for '{order_id}' cannot be resolved from status-only venue read-back"
-            )
+        if _plan("pending_state", state=order.state):
+            _plan("reconcile_replace", order=order_id, found=found.state,
+                  unresolved=self._has_unresolved_replace(order_id))
         # Fills go in before any terminal state: the ledger refuses a fill on a cancelled
         # order, so a partial fill dropped here could never be recorded later (I1).
-        if found.filled_quantity > context.filled:
+        if _plan("reconcile_fills", found=found.filled_quantity, recorded=context.filled):
             self._ingest_venue_fills(order, found)
         order = self.get_order(order_id)
-        if found.state is OrderState.FILLED or found.state is OrderState.PARTIALLY_FILLED:
-            if found.state is OrderState.FILLED and order.state is not OrderState.FILLED:
-                raise OrderReconciliationError(
-                    f"Venue reports '{order_id}' FILLED but its fill records do not complete it"
-                )
+        action = _plan("reconcile_result", found=found.state, state=order.state, order=order_id)
+        if action == "return":
             return order
-        if found.state is OrderState.SUBMITTED:
+        if action == "updated":
             self._append(
                 order.account_id,
                 EventKind.ORDER_UPDATED,
@@ -851,40 +633,25 @@ class OrderManager:
             resolved = self.get_order(order_id)
             self._synchronize_bracket(resolved, f"{order_id}:reconcile-submitted")
             return resolved
-        if found.state in (
-            OrderState.ACCEPTED,
-            OrderState.CANCELLED,
-            OrderState.REJECTED,
-            OrderState.EXPIRED,
-        ):
-            if found.state is OrderState.CANCELLED:
-                kind = EventKind.ORDER_CANCELLED
-            elif found.state is OrderState.REJECTED:
-                kind = EventKind.ORDER_REJECTED
-            elif found.state is OrderState.EXPIRED:
-                kind = EventKind.ORDER_EXPIRED
-            else:
-                kind = EventKind.ORDER_ACCEPTED
-            self._append(
-                order.account_id,
-                kind,
-                OrderStateChange(
-                    order_id=order_id,
-                    reason=f"Venue reconciliation confirmed {found.state.value}",
-                    venue_order_id=found.venue_order_id,
-                ),
-                f"{order.command_id}:reconcile:{found.updated_at.isoformat()}:{found.state.value}",
-            )
-            resolved = self.get_order(order_id)
-            self._synchronize_bracket(resolved, f"{order_id}:reconcile-{found.state.value}")
-            return resolved
-        raise OrderReconciliationError(
-            f"Venue state {found.state.value} does not resolve order '{order_id}'"
+        self._append(
+            order.account_id,
+            EventKind[action],
+            OrderStateChange(
+                order_id=order_id,
+                reason=f"Venue reconciliation confirmed {found.state.value}",
+                venue_order_id=found.venue_order_id,
+            ),
+            f"{order.command_id}:reconcile:{found.updated_at.isoformat()}:{found.state.value}",
         )
+        resolved = self.get_order(order_id)
+        self._synchronize_bracket(resolved, f"{order_id}:reconcile-{found.state.value}")
+        return resolved
 
     def _ingest_venue_fills(self, order: Order, found: VenueOrderState) -> None:
         fills = self._broker.fills(order.created_at)
-        matching = [item for item in fills if item.venue_order_id == found.venue_order_id]
+        indices = _plan("matching_ids", ids=[item.venue_order_id for item in fills],
+                        venue=found.venue_order_id)
+        matching = [fills[index] for index in indices]
         for item in matching:
             self.record_fill(
                 Fill(
@@ -904,26 +671,15 @@ class OrderManager:
                 )
             )
         recorded = self._context(order.order_id).filled
-        if recorded < found.filled_quantity:
-            raise OrderReconciliationError(
-                f"Venue reports {found.filled_quantity} filled for '{order.order_id}' but its "
-                f"fill records account for {recorded}; it remains {self.get_order(order.order_id).state.value}"
-            )
+        if _plan("reconcile_fills", found=found.filled_quantity, recorded=recorded):
+            _plan("ingest_check", found=found.filled_quantity, recorded=recorded,
+                  order=order.order_id, state=self.get_order(order.order_id).state)
 
     def _submit_native(self, order: Order) -> Order:
-        if order.state is not OrderState.NEW:
-            if order.state in (OrderState.SUBMITTED, OrderState.PENDING_UNKNOWN):
-                return order
+        if not _plan("new", state=order.state):
             return order
         if not self._supports_native_type(order.order_type):
-            self._refuse(
-                order,
-                f"Venue does not support {order.order_type.value}; no native order was sent",
-                f"{order.command_id}:unsupported-type",
-            )
-            raise UnsupportedOrderCapabilityError(
-                f"Venue does not support order type {order.order_type.value}"
-            )
+            self._planned_refusal(order, "native")
         self._require_tif(order)
         submitted = replace(order, state=OrderState.SUBMITTED)
         self._append(
@@ -947,22 +703,13 @@ class OrderManager:
         return self.get_order(order.order_id)
 
     def _start_emulation(self, order: Order) -> Order:
-        if order.state is OrderState.PENDING_UNKNOWN:
-            raise OrderPendingReconciliationError(
-                f"Emulated order '{order.order_id}' is pending reconciliation"
-            )
-        if order.state is not OrderState.NEW:
+        action = _plan("start_emulation", order=order,
+                       types=self._broker.capabilities.supported_order_types)
+        if action == "return":
             return order
-        if order.order_type is OrderType.STOP_LIMIT:
-            if OrderType.LIMIT not in self._broker.capabilities.supported_order_types:
-                self._refuse(
-                    order,
-                    "Emulated STOP_LIMIT requires venue LIMIT support",
-                    f"{order.command_id}:no-stop-limit-fallback",
-                )
-                raise UnsupportedOrderCapabilityError(
-                    "Emulated STOP_LIMIT requires venue LIMIT support"
-                )
+        if action == "refuse_limit":
+            self._planned_refusal(order, "limit")
+        if action == "limit":
             trigger_type = OrderType.LIMIT
         else:
             trigger_type = self._trigger_order_type(order)
@@ -993,11 +740,7 @@ class OrderManager:
         limit_price: Decimal | None,
     ) -> Order:
         current = self.get_order(order.order_id)
-        if current.state is not OrderState.NEW:
-            if current.state is OrderState.PENDING_UNKNOWN:
-                raise OrderPendingReconciliationError(
-                    f"Triggered order '{order.order_id}' awaits venue reconciliation"
-                )
+        if not _plan("submit_emulated", order=current):
             return current
         self._require_tif(current, venue_type)
         submitted = replace(current, state=OrderState.SUBMITTED)
@@ -1032,93 +775,47 @@ class OrderManager:
         return self.get_order(current.order_id)
 
     def _record_submit_ack(self, order: Order, ack: VenueAck, command_id: str) -> None:
-        if ack.status == "ACCEPTED":
-            kind = EventKind.ORDER_ACCEPTED
-            reason = "Venue accepted order"
-        elif ack.status == "REJECTED":
-            kind = EventKind.ORDER_REJECTED
-            reason = f"Venue rejected order: {ack.message or 'reason not supplied'}"
-        elif ack.status == "PENDING":
-            kind = EventKind.ORDER_PENDING
-            reason = f"Venue has not resolved order: {ack.message or 'no status message'}"
-        else:
-            raise OrderManagementError(f"Unrecognized venue submit status {ack.status!r}")
+        kind, reason = _plan("submit_ack", status=ack.status, message=ack.message or "")
         self._append(
             order.account_id,
-            kind,
+            EventKind[kind],
             OrderStateChange(order.order_id, reason, ack.venue_order_id),
             command_id,
         )
 
     def _synchronize_bracket(self, changed_order: Order, cause_id: str) -> None:
-        if changed_order.parent_order_id is not None:
-            entry = self.get_order(changed_order.parent_order_id)
+        parent_id = _plan("parent", parent=changed_order.parent_order_id)
+        if parent_id is not None:
+            entry = self.get_order(parent_id)
         else:
             entry = changed_order
-        context = self._context(entry.order_id)
         state = self._account_state(entry.account_id)
-        entry_filled = state.filled_quantity.get(entry.order_id, Decimal("0"))
-        children = [
-            order
-            for order in state.orders.values()
-            if order.parent_order_id == entry.order_id
-        ]
-        stop = next((order for order in children if order.order_type is OrderType.STOP), None)
-        targets = [order for order in children if order.order_type is OrderType.LIMIT]
-        # A strategy's close (close_bracket) or reduce (reduce_bracket) order exits
-        # alongside the stop and targets. A filled reduce leaves open quantity, so it only
-        # shrinks the stop below; a stop fill cancels a reduce still working.
-        closers = [order for order in children if order.order_type is OrderType.MARKET]
-        if stop is None:
+        plan = _plan("sync", entry=entry, state=codec.canon(state))
+        if plan is None:
             return
-        entry_terminal = context.order.state in (
-            OrderState.FILLED,
-            OrderState.CANCELLED,
-            OrderState.REJECTED,
-            OrderState.EXPIRED,
-        )
-        if (
-            state.filled_quantity.get(entry.order_id, Decimal("0")) == 0
-            and not entry_terminal
-        ):
-            return
-
-        stop_filled = state.filled_quantity.get(stop.order_id, Decimal("0"))
-        target_filled = sum(
-            (
-                state.filled_quantity.get(order.order_id, Decimal("0"))
-                for order in (*targets, *closers)
-            ),
-            Decimal("0"),
-        )
-        open_quantity = entry_filled - stop_filled - target_filled
-        if open_quantity < 0:
-            raise OrderManagementError(
-                f"Exit fills exceed entry fills for bracket '{entry.order_id}'; venue reconciliation required"
-            )
-
-        if entry_filled > 0 and open_quantity > 0:
+        stop_id, quantities, entry_terminal, target_ids, closer_ids = plan
+        entry_filled, open_quantity, stop_filled = map(Decimal, quantities)
+        stop = state.orders[stop_id]
+        targets = [state.orders[item] for item in target_ids]
+        closers = [state.orders[item] for item in closer_ids]
+        if _plan("sync_mode", filled=entry_filled, open=open_quantity) == "protect":
             self._ensure_child_quantity(
                 stop,
                 open_quantity,
                 f"{cause_id}:{stop.order_id}:protective-stop",
             )
-            if stop_filled == 0 and entry_terminal:
+            if _plan("sync_targets", stop_filled=stop_filled, terminal=entry_terminal):
                 target_weights = tuple(
                     self._planned_quantity(target.order_id) for target in targets
                 )
-                # Targets planned below the entry size leave a runner; it keeps its share
-                # of a partial entry fill instead of the targets absorbing all of it.
-                runner = self._planned_quantity(entry.order_id) - sum(
-                    target_weights, Decimal("0")
-                )
-                weights = (*target_weights, runner) if runner > 0 else target_weights
+                weights = tuple(map(Decimal, _plan("target_weights", weights=target_weights,
+                                                  planned=self._planned_quantity(entry.order_id))))
                 target_budgets = self._allocate_quantity(
                     entry_filled, weights, entry.instrument
                 )[: len(targets)]
                 for target, budget in zip(targets, target_budgets, strict=True):
-                    if target.state is OrderState.NEW:
-                        if budget <= 0:
+                    if _plan("new", state=target.state):
+                        if not _plan("positive", quantity=budget):
                             self._cancel_order(
                                 target,
                                 f"{cause_id}:{target.order_id}:zero-budget",
@@ -1136,7 +833,7 @@ class OrderManager:
                 f"{cause_id}:{entry.order_id}:flat",
             )
 
-        if stop_filled > 0:
+        if _plan("positive", quantity=stop_filled):
             self._cancel_targets(
                 [*targets, *closers],
                 f"{cause_id}:{stop.order_id}:stop-fill",
@@ -1145,26 +842,16 @@ class OrderManager:
     def _ensure_child_quantity(self, child: Order, quantity: Decimal, command_id: str) -> None:
         context = self._context(child.order_id)
         current = context.order
-        if current.state in (OrderState.CANCELLED, OrderState.FILLED, OrderState.REJECTED):
-            if current.state is OrderState.REJECTED:
-                if current.order_type is OrderType.STOP:
-                    raise OrderManagementError(
-                        f"Protective stop '{current.order_id}' was rejected; "
-                        "open quantity requires venue reconciliation"
-                    )
-                return
-            raise OrderManagementError(
-                f"Protective child '{current.order_id}' is terminal in state {current.state.value}"
-            )
-        filled = context.filled
-        self._validate_quantity(current.instrument, quantity)
-        total_quantity = filled + quantity
-        if current.quantity == total_quantity:
-            if current.state is OrderState.NEW:
-                self._submit_child(current)
+        action, total = _plan("child_quantity", order=current, filled=context.filled,
+                              quantity=quantity)
+        if action == "return":
             return
+        if action == "submit":
+            self._submit_child(current)
+            return
+        total_quantity = Decimal(total)
         updated = replace(current, quantity=total_quantity)
-        if current.state is OrderState.NEW:
+        if action == "local":
             self._append(
                 current.account_id,
                 EventKind.ORDER_UPDATED,
@@ -1181,13 +868,9 @@ class OrderManager:
 
     def _submit_child(self, child: Order) -> None:
         current = self.get_order(child.order_id)
-        if current.state is OrderState.NEW:
+        if _plan("new", state=current.state):
             submitted = self.submit(current)
-            if child.order_type is OrderType.STOP and submitted.state is OrderState.REJECTED:
-                raise OrderManagementError(
-                    f"Protective stop '{child.order_id}' was rejected; "
-                    "open quantity requires venue reconciliation"
-                )
+            _plan("stop_rejected", type=child.order_type, state=submitted.state, order=child.order_id)
 
     def _cancel_targets(self, targets: list[Order], command_id: str) -> None:
         self._cancel_exits(targets, command_id)
@@ -1195,12 +878,7 @@ class OrderManager:
     def _cancel_exits(self, exits: list[Order], command_id: str) -> None:
         for sibling in exits:
             current = self.get_order(sibling.order_id)
-            if current.state in (
-                OrderState.CANCELLED,
-                OrderState.FILLED,
-                OrderState.REJECTED,
-                OrderState.EXPIRED,
-            ):
+            if _plan("terminal", state=current.state):
                 continue
             cancelled = self._cancel_order(
                 current,
@@ -1208,15 +886,7 @@ class OrderManager:
                 f"Exit sibling cancelled after bracket resolution ({command_id})",
                 oco=True,
             )
-            if cancelled.state not in (
-                OrderState.CANCELLED,
-                OrderState.FILLED,
-                OrderState.REJECTED,
-                OrderState.EXPIRED,
-            ):
-                raise OCOOutcomeUnknownError(
-                    f"Could not confirm cancellation of OCO sibling '{current.order_id}'"
-                )
+            _plan("oco_check", state=cancelled.state, order=current.order_id)
 
     def _cancel_order(
         self,
@@ -1228,20 +898,10 @@ class OrderManager:
     ) -> Order:
         context = self._context(order.order_id)
         current = context.order
-        if current.state in (
-            OrderState.CANCELLED,
-            OrderState.FILLED,
-            OrderState.REJECTED,
-            OrderState.EXPIRED,
-        ):
+        action = _plan("cancel_mode", state=current.state, order=current.order_id, oco=oco)
+        if action == "return":
             return current
-        if current.state is OrderState.PENDING_UNKNOWN:
-            if oco:
-                raise OCOOutcomeUnknownError(
-                    f"OCO sibling '{current.order_id}' is already pending reconciliation"
-                )
-            return current
-        if current.state is OrderState.NEW:
+        if action == "local":
             self._append(
                 current.account_id,
                 EventKind.ORDER_CANCELLED,
@@ -1250,10 +910,7 @@ class OrderManager:
             )
             return self.get_order(current.order_id)
         venue_id = context.venue_order_id
-        if venue_id is None:
-            raise OrderPendingReconciliationError(
-                f"Working order '{current.order_id}' has no venue id"
-            )
+        _plan("confirmed_id", venue=venue_id, order=current.order_id, mode="cancel")
         self._mark_pending(current, f"Cancel pending: {reason}", f"{command_id}:pending")
         try:
             ack = self._broker.cancel(venue_id)
@@ -1262,7 +919,9 @@ class OrderManager:
             if oco:
                 raise OCOOutcomeUnknownError(message) from err
             raise BrokerOutcomeUnknownError(message) from err
-        if ack.status == "ACCEPTED":
+        action, ack_reason, refused = _plan("cancel_ack", status=ack.status, reason=reason,
+                                          message=ack.message or "", order=current.order_id, oco=oco)
+        if action == "accepted":
             self._append(
                 current.account_id,
                 EventKind.ORDER_CANCELLED,
@@ -1270,36 +929,27 @@ class OrderManager:
                 f"{command_id}:accepted",
             )
             return self.get_order(current.order_id)
-        if ack.status == "REJECTED":
-            message = (
-                f"Venue rejected cancel for '{current.order_id}': "
-                f"{ack.message or 'order may already have filled; reconcile required'}"
-            )
+        if action == "rejected":
             self._refuse(
                 current,
-                message,
+                ack_reason,
                 f"{command_id}:refused",
             )
-            if oco:
-                raise OCOOutcomeUnknownError(message)
-            raise OrderPendingReconciliationError(message)
-        if ack.status == "PENDING":
+            raise _rs.refusal(*refused)
+        if action == "pending":
             self._append(
                 current.account_id,
                 EventKind.ORDER_PENDING,
                 OrderStateChange(
                     current.order_id,
-                    f"Venue cancel remains pending: {ack.message or 'no status message'}",
+                    ack_reason,
                     ack.venue_order_id,
                 ),
                 f"{command_id}:venue-pending",
             )
-            if oco:
-                raise OCOOutcomeUnknownError(
-                    f"Venue has not confirmed cancellation of OCO sibling '{current.order_id}'"
-                )
+            if refused is not None:
+                raise _rs.refusal(*refused)
             return self.get_order(current.order_id)
-        raise OrderManagementError(f"Unrecognized venue cancel status {ack.status!r}")
 
     def _restore_working_state(
         self,
@@ -1319,7 +969,7 @@ class OrderManager:
 
     def _mark_pending(self, order: Order, reason: str, command_id: str) -> None:
         current = self.get_order(order.order_id)
-        if current.state is OrderState.PENDING_UNKNOWN:
+        if _plan("pending_state", state=current.state):
             return
         self._append(
             current.account_id,
@@ -1356,43 +1006,28 @@ class OrderManager:
         )
 
     def _trigger_order_type(self, order: Order) -> OrderType:
-        supported = self._broker.capabilities.supported_order_types
-        if OrderType.MARKET in supported:
-            return OrderType.MARKET
-        if OrderType.LIMIT in supported:
-            return OrderType.LIMIT
-        self._refuse(
-            order,
-            "Emulated stop requires venue MARKET or LIMIT support when triggered",
-            f"{order.command_id}:no-trigger-order",
-        )
-        raise UnsupportedOrderCapabilityError(
-            "Emulated stops require MARKET or LIMIT capability"
-        )
+        planned = _plan("trigger_type", types=self._broker.capabilities.supported_order_types)
+        if planned is not None:
+            return OrderType(planned)
+        self._planned_refusal(order, "trigger")
 
     def _supports_native_type(self, order_type: OrderType) -> bool:
+        return _plan("native", type=order_type, **self._capabilities())
+
+    def _capabilities(self):
         capabilities = self._broker.capabilities
-        if (
-            order_type in (OrderType.STOP, OrderType.STOP_LIMIT)
-            and not capabilities.supports_native_stops
-        ):
-            return False
-        return order_type in capabilities.supported_order_types
+        return dict(types=capabilities.supported_order_types,
+                    tifs=capabilities.supported_tifs,
+                    native_stops=capabilities.supports_native_stops)
 
     def _require_tif(self, order: Order, venue_type: OrderType | None = None) -> None:
-        if order.tif not in self._broker.capabilities.supported_tifs:
-            self._refuse(
-                order,
-                f"Venue does not support time in force {order.tif.value}",
-                f"{order.command_id}:unsupported-tif:{order.tif.value}",
-            )
-            raise UnsupportedOrderCapabilityError(
-                f"Venue does not support time in force {order.tif.value}"
-            )
-        if venue_type is not None and venue_type not in self._broker.capabilities.supported_order_types:
-            raise UnsupportedOrderCapabilityError(
-                f"Venue does not support trigger order type {venue_type.value}"
-            )
+        if _plan("tif", tif=order.tif, venue_type=venue_type, **self._capabilities()) == "refuse":
+            self._planned_refusal(order, "tif")
+
+    def _planned_refusal(self, order: Order, mode: str, *, command_id: str | None = None, **values):
+        reason, suffix, refusal = _plan("refused", order=order, mode=mode, **values)
+        self._refuse(order, reason, f"{order.command_id if command_id is None else command_id}:{suffix}")
+        raise _rs.refusal(*refusal)
 
     def _refuse(self, order: Order, reason: str, command_id: str) -> None:
         self._append(
@@ -1420,18 +1055,7 @@ class OrderManager:
             )
             return
         created = self._planned_order(order.order_id)
-        candidate = replace(order, state=OrderState.NEW)
-        if created.parent_order_id is None:
-            matches = candidate == created
-        else:
-            matches = (
-                replace(candidate, quantity=created.quantity) == created
-                and candidate.quantity <= created.quantity
-            )
-        if not matches:
-            raise IdempotencyConflictError(
-                f"order_id '{order.order_id}' was reused with a different order payload"
-            )
+        _plan("stored", created=created, candidate=order)
 
     def _context(self, order_id: str) -> _OrderContext:
         # Each account's cached state (the ledger folds every append into it), in
@@ -1464,21 +1088,13 @@ class OrderManager:
 
     def _has_unresolved_replace(self, order_id: str) -> bool:
         for event in self._ledger.events_of_kind(EventKind.ORDER_PENDING):
-            if (
-                event.kind is not EventKind.ORDER_PENDING
-                or event.payload.order_id != order_id
-                or event.payload.reason is None
-                or not event.payload.reason.startswith("Replace pending:")
-                or event.command_id is None
-                or not event.command_id.endswith(":pending")
-            ):
-                continue
-            command_id = event.command_id.removesuffix(":pending")
-            if (
-                self._ledger.event_by_command(f"{command_id}:accepted") is None
-                and self._ledger.event_by_command(f"{command_id}:rejected") is None
-            ):
-                return True
+            command_id = _plan("pending_candidate", order=order_id, event=dict(
+                pending=event.kind is EventKind.ORDER_PENDING, order=event.payload.order_id,
+                reason=event.payload.reason, command=event.command_id))
+            if command_id is not None:
+                if (self._ledger.event_by_command(f"{command_id}:accepted") is None
+                        and self._ledger.event_by_command(f"{command_id}:rejected") is None):
+                    return True
         return False
 
     def _append(
@@ -1493,166 +1109,53 @@ class OrderManager:
         )
         existing = self._ledger.event_by_command(command_id)
         if existing is not None:
-            if (
-                existing.account != account_id
-                or existing.kind is not kind
-                or existing.payload != payload
-            ):
-                raise IdempotencyConflictError(
-                    f"command_id '{command_id}' was replayed with a different payload"
-                )
+            _plan("append_replay", existing=_event(existing), account=account_id,
+                  kind=kind.name, payload=payload, command=command_id)
             return existing
         return self._ledger.append(event)
 
     @staticmethod
     def _bracket_fingerprint(intent: OrderIntent, quantity: Decimal) -> str:
-        payload = {
-            "intent_id": intent.intent_id,
-            "account_id": intent.account_id,
-            "instrument": encode_payload(intent.instrument),
-            "side": intent.side.value,
-            "quantity_rule": intent.quantity_rule,
-            "quantity": str(quantity),
-            "entry_price": str(intent.entry_price),
-            "stop_loss": str(intent.stop_loss),
-            "profit_targets": [str(value) for value in intent.profit_targets],
-            "reason": intent.reason,
-            "command_id": intent.command_id,
-            "entry_tif": intent.entry_tif.value,
-            "exit_tif": intent.exit_tif.value,
-        }
-        if intent.entry_type is not OrderType.LIMIT:
-            # Added only when set, so brackets persisted before stop entries keep their
-            # fingerprints and still replay idempotently (I3).
-            payload["entry_type"] = intent.entry_type.value
-        if intent.entry_type is OrderType.STOP_LIMIT:
-            # Only a STOP_LIMIT carries a limit, so LIMIT and STOP brackets keep theirs.
-            payload["entry_limit_price"] = str(intent.entry_limit_price)
-        if intent.target_fractions is not None:
-            payload["target_fractions"] = [str(value) for value in intent.target_fractions]
-        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return _plan("bracket_fingerprint", intent=intent, quantity=quantity)
 
     @staticmethod
     def _reduce_fingerprint(entry_order_id: str, fraction: Decimal, reason: str) -> str:
         # The command, not the order: its size depends on the open quantity at the time.
-        payload = {
-            "action": "reduce",
-            "entry_order_id": entry_order_id,
-            "fraction": str(fraction),
-            "reason": reason,
-        }
-        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return _plan("reduce_fingerprint", entry=entry_order_id, fraction=fraction, reason=reason)
 
     @staticmethod
     def _fingerprint_order(order: Order) -> str:
-        encoded = json.dumps(encode_payload(order), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        return _plan("fingerprint", payload=encode_payload(order))
 
     @staticmethod
     def _validate_quantity(instrument: Instrument, quantity: Decimal) -> None:
-        if isinstance(instrument, Equity) and quantity != quantity.to_integral_value():
-            raise ValueError(f"Equity order quantity must be a whole number of shares, got {quantity}")
+        _plan("quantity", equity=isinstance(instrument, Equity), quantity=quantity)
 
     @classmethod
     def _split_quantity(
         cls, quantity: Decimal, count: int, instrument: Instrument
     ) -> tuple[Decimal, ...]:
-        if count == 0:
-            return ()
-        cls._validate_quantity(instrument, quantity)
-        portions = cls._allocate_quantity(
-            quantity, tuple(Decimal("1") for _ in range(count)), instrument
-        )
-        if any(portion <= 0 for portion in portions):
-            raise ValueError("quantity is too small to allocate a positive amount to each target")
-        return portions
+        return tuple(map(Decimal, _plan("split", quantity=quantity,
+                         equity=isinstance(instrument, Equity), weights=[Decimal("1")] * count)))
 
     @classmethod
     def _fraction_quantities(
         cls, quantity: Decimal, fractions: tuple[Decimal, ...], instrument: Instrument
     ) -> tuple[Decimal, ...]:
-        """Size each target to its share of the position; any remainder is the runner.
-
-        Equities round by largest remainder over the targets plus the runner, so the
-        shares always add up to the entry and no target silently rounds to zero.
-        """
-        cls._validate_quantity(instrument, quantity)
-        runner = Decimal("1") - sum(fractions, Decimal("0"))
-        weights = (*fractions, runner) if runner > 0 else fractions
-        if isinstance(instrument, Equity):
-            exact = [quantity * weight for weight in weights]
-            portions = [value.to_integral_value(rounding=ROUND_FLOOR) for value in exact]
-            remaining = int(quantity - sum(portions, Decimal("0")))
-            by_remainder = sorted(
-                range(len(weights)), key=lambda index: (-(exact[index] - portions[index]), index)
-            )
-            for index in by_remainder[:remaining]:
-                portions[index] += 1
-        else:
-            portions = [quantity * weight for weight in weights]
-        targets = tuple(portions[: len(fractions)])
-        if any(portion <= 0 for portion in targets):
-            raise ValueError(
-                f"quantity {quantity} is too small to give every target its fraction"
-            )
-        return targets
+        return tuple(map(Decimal, _plan("fractions", quantity=quantity,
+                         equity=isinstance(instrument, Equity), weights=fractions)))
 
     @staticmethod
     def _allocate_quantity(
         quantity: Decimal, weights: tuple[Decimal, ...], instrument: Instrument
     ) -> tuple[Decimal, ...]:
-        if not weights:
-            return ()
-        if any(weight <= 0 for weight in weights):
-            raise ValueError("target allocation weights must be positive")
-        total_weight = sum(weights, Decimal("0"))
-        if isinstance(instrument, Equity):
-            OrderManager._validate_quantity(instrument, quantity)
-            if any(weight != weight.to_integral_value() for weight in weights):
-                raise ValueError("Equity target allocation weights must be whole shares")
-            shares = int(quantity)
-            integer_weights = tuple(int(weight) for weight in weights)
-            denominator = sum(integer_weights)
-            allocations, remainders = zip(
-                *(divmod(shares * weight, denominator) for weight in integer_weights),
-                strict=True,
-            )
-            remaining = shares - sum(allocations)
-            order = sorted(
-                range(len(weights)),
-                key=lambda index: (-remainders[index], index),
-            )
-            adjusted = list(allocations)
-            for index in order[:remaining]:
-                adjusted[index] += 1
-            return tuple(Decimal(value) for value in adjusted)
-
-        portions = tuple(quantity * weight / total_weight for weight in weights)
-        return (*portions[:-1], quantity - sum(portions[:-1], Decimal("0")))
+        return tuple(map(Decimal, _plan("allocate", quantity=quantity,
+                         equity=isinstance(instrument, Equity), weights=weights)))
 
     def _bracket_from_orders(self, orders: tuple[Order, ...]) -> Bracket:
         by_id = {order.order_id: self._stored_order(order) for order in orders}
-        entry = next(order for order in by_id.values() if order.parent_order_id is None)
-        # The protective stop is the entry's STOP child; a stop entry is STOP too.
-        stop = next(
-            order
-            for order in by_id.values()
-            if order.parent_order_id == entry.order_id and order.order_type is OrderType.STOP
-        )
-        targets = tuple(
-            sorted(
-                (
-                    order
-                    for order in by_id.values()
-                    if order.parent_order_id == entry.order_id
-                    and order.order_type is OrderType.LIMIT
-                ),
-                key=lambda order: order.order_id,
-            )
-        )
-        return Bracket(entry, stop, targets)
+        entry, stop, targets = _plan("bracket", entry="", orders=list(by_id.values()))
+        return Bracket(by_id[entry], by_id[stop], tuple(by_id[item] for item in targets))
 
     def _stored_order(self, order: Order) -> Order:
         try:

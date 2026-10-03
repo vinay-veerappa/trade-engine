@@ -242,6 +242,7 @@ pub(crate) fn oms_sync_plan(state: &str) -> PyResult<Vec<(String, Option<String>
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(oms_manager_decide, m)?)?;
     m.add_function(wrap_pyfunction!(oms_orders_to_read, m)?)?;
     m.add_function(wrap_pyfunction!(oms_check_known_order, m)?)?;
     m.add_function(wrap_pyfunction!(oms_journal_payload, m)?)?;
@@ -258,4 +259,9 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(oms_plan_holding, m)?)?;
     m.add_function(wrap_pyfunction!(oms_sync_plan, m)?)?;
     Ok(())
+}
+
+#[pyfunction]
+pub(crate) fn oms_manager_decide(operation: &str, request: &str) -> PyResult<String> {
+    te_core::oms::manager::decide(operation, request).map_err(refuse)
 }
