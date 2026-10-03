@@ -34,6 +34,7 @@ cargo test --manifest-path crates/Cargo.toml -p te_wasm
 
 ```typescript
 export class SimBook {
+    free(): void;
     constructor(account_id: string, is_decimal: boolean, slippage_bps: string);
     connect(now_iso: string): string;
     restore(orders_json: string, fills_json: string, positions_json: string, now_iso: string): void;
