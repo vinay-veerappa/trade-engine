@@ -160,11 +160,13 @@ def _encode_instrument(instrument: Instrument) -> Any:
 
 def canon(value: Any) -> Any:
     """A folded state (carrier) as the canonical tree Rust reads it back from: map keys
-    are encoded values, frozensets are ``{"fs": [...]}``. The walker otherwise."""
+    are encoded values, frozensets are ``{"fs": [...]}`` sorted by their text (a set's
+    iteration order depends on its build history, so equal states would print apart).
+    The walker otherwise."""
     if dataclasses.is_dataclass(value) and _CARRIERS.get(type(value).__name__) is type(value):
         return {"dc": type(value).__name__, "f": {f.name: canon(getattr(value, f.name)) for f in dataclasses.fields(value)}}
     if isinstance(value, (frozenset, set)):
-        return {"fs": [canon(v) for v in value]}
+        return {"fs": sorted((canon(v) for v in value), key=text)}
     if isinstance(value, tuple):
         return {"t": [canon(v) for v in value]}
     if isinstance(value, Mapping):
