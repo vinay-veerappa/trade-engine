@@ -77,11 +77,34 @@ pub fn parse_ts(iso: &str, name: &str) -> ApiResult<Ts> {
 }
 
 pub fn parse_instrument(text: &str) -> ApiResult<Instrument> {
-    if !text.starts_with('{') && !text.starts_with('[') {
-        if !text.is_empty() {
-            return Ok(Instrument::Equity(text.to_string()));
-        } else {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        if text.is_empty() {
             return fail("value", "expected an instrument");
+        }
+        if trimmed.starts_with('/') {
+            let fc = te_core::sim::tick::parse_future_symbol(text)?;
+            return Ok(Instrument::Future(fc));
+        }
+        if let Ok(fc) = te_core::sim::tick::parse_future_symbol(text) {
+            return Ok(Instrument::Future(fc));
+        }
+        return Ok(Instrument::Equity(text.to_string()));
+    }
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(trimmed) {
+        if let Some(root) = map.get("root").and_then(|s| s.as_str()) {
+            let sym = match map.get("contract_month") {
+                Some(serde_json::Value::String(cm)) if !cm.is_empty() => format!("{root}{cm}"),
+                Some(serde_json::Value::Object(cmo)) => {
+                    let y = cmo.get("year").and_then(|val| val.as_i64()).unwrap_or(2026) as i32;
+                    let m = cmo.get("month").and_then(|val| val.as_u64()).unwrap_or(12) as u32;
+                    let code = te_core::sim::tick::month_to_code(m);
+                    format!("{}{}{:02}", root, code, y.rem_euclid(100))
+                }
+                _ => root.to_string(),
+            };
+            let fc = te_core::sim::tick::parse_future_symbol(&sym)?;
+            return Ok(Instrument::Future(fc));
         }
     }
     match lb::obj_from_text(text)? {
@@ -94,12 +117,28 @@ pub fn instrument_from_value(v: &serde_json::Value) -> ApiResult<Instrument> {
     match v {
         serde_json::Value::String(s) => parse_instrument(s),
         serde_json::Value::Object(map) => {
-            if map.contains_key("dc") {
+            if let Some(root) = map.get("root").and_then(|s| s.as_str()) {
+                let sym = match map.get("contract_month") {
+                    Some(serde_json::Value::String(cm)) if !cm.is_empty() => format!("{root}{cm}"),
+                    Some(serde_json::Value::Object(cmo)) => {
+                        let y = cmo.get("year").and_then(|val| val.as_i64()).unwrap_or(2026) as i32;
+                        let m = cmo.get("month").and_then(|val| val.as_u64()).unwrap_or(12) as u32;
+                        let code = te_core::sim::tick::month_to_code(m);
+                        format!("{}{}{:02}", root, code, y.rem_euclid(100))
+                    }
+                    _ => root.to_string(),
+                };
+                let fc = te_core::sim::tick::parse_future_symbol(&sym)?;
+                Ok(Instrument::Future(fc))
+            } else if map.contains_key("dc") {
                 let text =
                     serde_json::to_string(v).map_err(|e| ApiError::new("value", e.to_string()))?;
-                parse_instrument(&text)
+                match lb::obj_from_text(&text)? {
+                    Obj::Instr(i) => Ok(i),
+                    _ => fail("value", "expected an instrument"),
+                }
             } else if let Some(sym) = map.get("symbol").and_then(|s| s.as_str()) {
-                Ok(Instrument::Equity(sym.to_string()))
+                parse_instrument(sym)
             } else {
                 fail("value", "expected an instrument")
             }
@@ -500,6 +539,22 @@ fn serialize_ack(ack: &sb::Ack) -> String {
 pub fn instrument_to_json_val(i: &Instrument) -> serde_json::Value {
     match i {
         Instrument::Equity(s) => serde_json::Value::String(s.clone()),
+        Instrument::Future(f) => {
+            let cm_val = match &f.contract_month {
+                None => serde_json::Value::Null,
+                Some(cm) => serde_json::Value::String(format!(
+                    "{}{:02}",
+                    cm.month_code(),
+                    cm.year.rem_euclid(100)
+                )),
+            };
+            serde_json::json!({
+                "root": f.root,
+                "contract_month": cm_val,
+                "tick_size": f.tick_size.to_py_string(),
+                "point_value": f.point_value.to_py_string(),
+            })
+        }
         other => {
             let j = te_core::ledger::codec::enc_instrument(other).unwrap();
             serde_json::from_str(&te_core::ledger::json::dumps(&j)).unwrap()
@@ -563,6 +618,11 @@ impl SimBookApi {
     pub fn new(account_id: &str, is_decimal: bool, slippage_bps: &str) -> ApiResult<Self> {
         let dec_val = parse_dec(slippage_bps)?;
         let book = Book::new(account_id, is_decimal, dec_val)?;
+        Ok(SimBookApi { book })
+    }
+
+    pub fn new_futures(account_id: &str, slippage_ticks: u32) -> ApiResult<Self> {
+        let book = Book::new_futures(account_id, slippage_ticks)?;
         Ok(SimBookApi { book })
     }
 
@@ -672,6 +732,7 @@ impl SimBookApi {
                     let instr_val = m
                         .get("instr")
                         .or_else(|| m.get("instrument"))
+                        .or_else(|| m.get("symbol"))
                         .ok_or_else(|| ApiError::new("value", "missing fill instr"))?;
                     let instr = instrument_from_value(instr_val)?;
                     let q_str = m
@@ -741,6 +802,7 @@ impl SimBookApi {
                     let instr_val = m
                         .get("instr")
                         .or_else(|| m.get("instrument"))
+                        .or_else(|| m.get("symbol"))
                         .ok_or_else(|| ApiError::new("value", "missing pos instr"))?;
                     let instr = instrument_from_value(instr_val)?;
                     let q_str = m
@@ -882,16 +944,31 @@ impl SimBookApi {
             .map(|p| {
                 let sym = p.instr.symbol().unwrap_or_else(|_| "UNKNOWN".to_string());
                 let hk = p.instr.hk();
-                serde_json::json!({
-                    "symbol": sym.clone(),
-                    "key": hk,
-                    "instrument": sym,
-                    "quantity": p.qty.to_py_string(),
-                    "qty": p.qty.to_py_string(),
-                    "avg_price": p.avg.to_py_string(),
-                    "avg": p.avg.to_py_string(),
-                    "as_of": p.as_of.iso,
-                })
+                if let Instrument::Future(ref fc) = p.instr {
+                    serde_json::json!({
+                        "symbol": sym.clone(),
+                        "key": hk,
+                        "instrument": sym,
+                        "quantity": p.qty.to_py_string(),
+                        "qty": p.qty.to_py_string(),
+                        "avg_price": p.avg.to_py_string(),
+                        "avg": p.avg.to_py_string(),
+                        "as_of": p.as_of.iso,
+                        "point_value": fc.point_value.to_py_string(),
+                        "tick_size": fc.tick_size.to_py_string(),
+                    })
+                } else {
+                    serde_json::json!({
+                        "symbol": sym.clone(),
+                        "key": hk,
+                        "instrument": sym,
+                        "quantity": p.qty.to_py_string(),
+                        "qty": p.qty.to_py_string(),
+                        "avg_price": p.avg.to_py_string(),
+                        "avg": p.avg.to_py_string(),
+                        "as_of": p.as_of.iso,
+                    })
+                }
             })
             .collect();
         Ok(serde_json::to_string(&out).unwrap())
@@ -944,6 +1021,12 @@ impl SimBookApi {
     pub fn cash_events(&self, since: &str) -> ApiResult<String> {
         self.book.cash_events(since)?;
         Ok("[]".to_string())
+    }
+
+    pub fn position_pnl(&self, symbol: &str, mark_str: &str) -> ApiResult<Option<String>> {
+        let mark = parse_dec(mark_str)?;
+        let pnl = self.book.position_pnl(symbol, &mark)?;
+        Ok(pnl.map(|d| d.to_py_string()))
     }
 }
 
@@ -1040,4 +1123,502 @@ pub fn trail_update(
     };
 
     Ok(serde_json::to_string(&out).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_futures_parse_roundtrip() {
+        let symbols = [
+            "NQ", "MNQ", "ES", "MES",
+            "/NQ", "/MNQ", "/ES", "/MES",
+            "NQZ26", "MNQZ26", "/ESZ26", "MESH25", "NQZ6", "NQZ2026",
+        ];
+        for sym in symbols {
+            let instr = parse_instrument(sym).unwrap();
+            let Instrument::Future(ref fc) = instr else {
+                panic!("Expected Instrument::Future for {sym}");
+            };
+            assert!(!fc.root.is_empty());
+
+            // 1. JSON representation via instrument_to_json_val
+            let json_val = instrument_to_json_val(&instr);
+            let obj = json_val.as_object().unwrap();
+            assert_eq!(obj["root"].as_str().unwrap(), fc.root);
+            assert_eq!(obj["tick_size"].as_str().unwrap(), fc.tick_size.to_py_string());
+            assert_eq!(obj["point_value"].as_str().unwrap(), fc.point_value.to_py_string());
+
+            if let Some(ref cm) = fc.contract_month {
+                let expected_cm = format!("{}{:02}", cm.month_code(), cm.year.rem_euclid(100));
+                assert_eq!(obj["contract_month"].as_str().unwrap(), expected_cm);
+            } else {
+                assert!(obj["contract_month"].is_null());
+            }
+
+            // 2. Round-trip via instrument_from_value
+            let from_val = instrument_from_value(&json_val).unwrap();
+            assert!(instr.same(&from_val), "Mismatch on instrument_from_value for {sym}");
+
+            // 3. Round-trip via parse_instrument from serialized JSON string
+            let json_str = serde_json::to_string(&json_val).unwrap();
+            let from_str = parse_instrument(&json_str).unwrap();
+            assert!(instr.same(&from_str), "Mismatch on parse_instrument(json_str) for {sym}");
+        }
+
+        // Test VOrder roundtrip
+        let order_json = serde_json::json!({
+            "id": "ord_fut_1",
+            "instr": "MNQ",
+            "otype": "LIMIT",
+            "side": "BUY",
+            "quantity": "2",
+            "submitted_at": "2026-03-01T23:00:00+00:00",
+            "tif": "DAY",
+            "limit": "18000.00",
+            "stop": null,
+            "trail": null,
+            "allocs": [{"soid": "s1", "account": "ACC", "qty": "2"}],
+            "parent": null,
+            "oco": null,
+        });
+        let vorder = parse_vorder_value(&order_json).unwrap();
+        let serialized_order = vorder_to_json(&vorder);
+        let roundtrip_order = parse_vorder_json(&serialized_order).unwrap();
+        assert_eq!(vorder.id, roundtrip_order.id);
+        assert!(vorder.instr.same(&roundtrip_order.instr));
+
+        // Test Bar roundtrip
+        let bar_json = serde_json::json!({
+            "instr": "NQZ26",
+            "ts": "2026-03-01T23:00:00+00:00",
+            "open": "18000.00",
+            "high": "18010.00",
+            "low": "17995.00",
+            "close": "18005.00",
+            "volume": "100",
+            "as_of": "2026-03-01T23:01:00+00:00",
+        });
+        let bar = parse_bar_value(&bar_json).unwrap();
+        let serialized_bar = bar_to_json(&bar);
+        let roundtrip_bar = parse_bar_json(&serialized_bar).unwrap().unwrap();
+        assert!(bar.instr.same(&roundtrip_bar.instr));
+        assert_eq!(bar.ts.iso, roundtrip_bar.ts.iso);
+    }
+
+    #[test]
+    fn test_new_futures_slippage_on_stop_fill() {
+        // NQ tick size is 0.25. 2 ticks slippage = 0.50 adverse.
+        let mut api = SimBookApi::new_futures("ACC", 2).unwrap();
+        api.connect("2020-11-22T23:00:00+00:00").unwrap();
+
+        // 1. Buy stop at 12000.00
+        let buy_stop = serde_json::json!({
+            "id": "buy_stop",
+            "instr": "NQ",
+            "otype": "STOP",
+            "side": "BUY",
+            "quantity": "1",
+            "submitted_at": "2020-11-22T23:00:00+00:00",
+            "tif": "DAY",
+            "limit": null,
+            "stop": "12000.00",
+            "trail": null,
+            "allocs": [{"soid": "s1", "account": "ACC", "qty": "1"}],
+            "parent": null,
+            "oco": null,
+        });
+        api.submit(&buy_stop.to_string(), "2020-11-22T23:00:00+00:00").unwrap();
+
+        // Bar triggers stop: open 11990.00, high 12010.00, low 11985.00, close 12005.00
+        let bar1 = serde_json::json!({
+            "instr": "NQ",
+            "ts": "2020-11-22T23:01:00+00:00",
+            "open": "11990.00",
+            "high": "12010.00",
+            "low": "11985.00",
+            "close": "12005.00",
+            "volume": "100",
+            "as_of": "2020-11-22T23:02:00+00:00",
+        });
+        let fills1 = api.process_bar(Some(&bar1.to_string())).unwrap();
+        assert_eq!(fills1, "[0]");
+        let fill0: serde_json::Value = serde_json::from_str(&api.fill(0).unwrap()).unwrap();
+        // Slipped adverse buy: 12000.00 + 2 * 0.25 = 12000.50
+        assert_eq!(fill0["price"].as_str().unwrap(), "12000.50");
+        assert_eq!(fill0["side"].as_str().unwrap(), "BUY");
+
+        // 2. Sell stop at 12000.00
+        let sell_stop = serde_json::json!({
+            "id": "sell_stop",
+            "instr": "NQ",
+            "otype": "STOP",
+            "side": "SELL",
+            "quantity": "1",
+            "submitted_at": "2020-11-22T23:01:30+00:00",
+            "tif": "DAY",
+            "limit": null,
+            "stop": "12000.00",
+            "trail": null,
+            "allocs": [{"soid": "s2", "account": "ACC", "qty": "1"}],
+            "parent": null,
+            "oco": null,
+        });
+        api.submit(&sell_stop.to_string(), "2020-11-22T23:01:30+00:00").unwrap();
+
+        // Bar triggers sell stop: open 12010.00, high 12015.00, low 11990.00, close 11995.00
+        let bar2 = serde_json::json!({
+            "instr": "NQ",
+            "ts": "2020-11-22T23:02:00+00:00",
+            "open": "12010.00",
+            "high": "12015.00",
+            "low": "11990.00",
+            "close": "11995.00",
+            "volume": "100",
+            "as_of": "2020-11-22T23:03:00+00:00",
+        });
+        let fills2 = api.process_bar(Some(&bar2.to_string())).unwrap();
+        assert_eq!(fills2, "[1]");
+        let fill1: serde_json::Value = serde_json::from_str(&api.fill(1).unwrap()).unwrap();
+        // Slipped adverse sell: 12000.00 - 2 * 0.25 = 11999.50
+        assert_eq!(fill1["price"].as_str().unwrap(), "11999.50");
+        assert_eq!(fill1["side"].as_str().unwrap(), "SELL");
+    }
+
+    #[test]
+    fn test_day_order_expiring_at_early_halt() {
+        // Thanksgiving Friday 2020-11-27 has early halt at 13:15 ET (18:15 UTC).
+        let mut api = SimBookApi::new_futures("ACC", 0).unwrap();
+        api.connect("2020-11-27T15:00:00+00:00").unwrap();
+
+        let day_order = serde_json::json!({
+            "id": "day_ord",
+            "instr": "NQ",
+            "otype": "LIMIT",
+            "side": "BUY",
+            "quantity": "1",
+            "submitted_at": "2020-11-27T15:00:00+00:00",
+            "tif": "DAY",
+            "limit": "10000.00",
+            "stop": null,
+            "trail": null,
+            "allocs": [{"soid": "s1", "account": "ACC", "qty": "1"}],
+            "parent": null,
+            "oco": null,
+        });
+        api.submit(&day_order.to_string(), "2020-11-27T15:00:00+00:00").unwrap();
+
+        // Bar at 13:14 ET (18:14 UTC)
+        let bar_before = serde_json::json!({
+            "instr": "NQ",
+            "ts": "2020-11-27T18:14:00+00:00",
+            "open": "12170.00",
+            "high": "12175.00",
+            "low": "12165.00",
+            "close": "12170.00",
+            "volume": "100",
+            "as_of": "2020-11-27T18:15:00+00:00",
+        });
+        api.process_bar(Some(&bar_before.to_string())).unwrap();
+
+        let orders_before: Vec<serde_json::Value> = serde_json::from_str(
+            &api.orders_since("2020-11-27T00:00:00+00:00", "2020-11-27T18:14:00+00:00").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(orders_before[0]["state"].as_str().unwrap(), "ACCEPTED");
+
+        // Advance clock to early halt 13:15 ET (18:15 UTC)
+        let orders_after: Vec<serde_json::Value> = serde_json::from_str(
+            &api.orders_since("2020-11-27T00:00:00+00:00", "2020-11-27T18:15:00+00:00").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(orders_after[0]["state"].as_str().unwrap(), "EXPIRED");
+    }
+
+    #[test]
+    fn test_halt_bar_refused_with_missing_bar() {
+        let mut api = SimBookApi::new_futures("ACC", 0).unwrap();
+        api.connect("2020-11-23T22:30:00+00:00").unwrap();
+
+        // Daily maintenance halt 17:00-18:00 ET (22:00-23:00 UTC)
+        let halt_bar = serde_json::json!({
+            "instr": "NQ",
+            "ts": "2020-11-23T22:30:00+00:00",
+            "open": "11900.00",
+            "high": "11905.00",
+            "low": "11895.00",
+            "close": "11900.00",
+            "volume": "100",
+            "as_of": "2020-11-23T22:31:00+00:00",
+        });
+        let err = api.process_bar(Some(&halt_bar.to_string())).unwrap_err();
+        assert_eq!(err.kind, "missing_bar");
+        assert!(err.msg.contains("is not inside a Globex session (halt, weekend or closure)"));
+
+        // Weekend bar: Saturday 12:00 ET (17:00 UTC)
+        let mut api_wknd = SimBookApi::new_futures("ACC", 0).unwrap();
+        api_wknd.connect("2020-11-21T17:00:00+00:00").unwrap();
+        let wknd_bar = serde_json::json!({
+            "instr": "NQ",
+            "ts": "2020-11-21T17:00:00+00:00",
+            "open": "11900.00",
+            "high": "11905.00",
+            "low": "11895.00",
+            "close": "11900.00",
+            "volume": "100",
+            "as_of": "2020-11-21T17:01:00+00:00",
+        });
+        let err_wknd = api_wknd.process_bar(Some(&wknd_bar.to_string())).unwrap_err();
+        assert_eq!(err_wknd.kind, "missing_bar");
+        assert!(err_wknd.msg.contains("is not inside a Globex session (halt, weekend or closure)"));
+
+        // Out-of-range calendar error: year 1999 (outside 2006..2027)
+        let mut api_oor = SimBookApi::new_futures("ACC", 0).unwrap();
+        api_oor.connect("1999-01-01T15:00:00+00:00").unwrap();
+        let oor_bar = serde_json::json!({
+            "instr": "NQ",
+            "ts": "1999-01-01T15:00:00+00:00",
+            "open": "11900.00",
+            "high": "11905.00",
+            "low": "11895.00",
+            "close": "11900.00",
+            "volume": "100",
+            "as_of": "1999-01-01T15:01:00+00:00",
+        });
+        let err_oor = api_oor.process_bar(Some(&oor_bar.to_string())).unwrap_err();
+        assert_eq!(err_oor.kind, "value");
+        assert!(err_oor.msg.contains("outside the CME Globex calendar range"));
+    }
+
+    #[test]
+    fn test_point_value_in_positions() {
+        // Futures book: MNQ point value is 2
+        let mut api_fut = SimBookApi::new_futures("ACC", 0).unwrap();
+        api_fut.connect("2020-11-22T23:00:00+00:00").unwrap();
+        let order_mnq = serde_json::json!({
+            "id": "mnq_buy",
+            "instr": "MNQ",
+            "otype": "MARKET",
+            "side": "BUY",
+            "quantity": "2",
+            "submitted_at": "2020-11-22T23:00:00+00:00",
+            "tif": "DAY",
+            "limit": null,
+            "stop": null,
+            "trail": null,
+            "allocs": [{"soid": "s1", "account": "ACC", "qty": "2"}],
+            "parent": null,
+            "oco": null,
+        });
+        api_fut.submit(&order_mnq.to_string(), "2020-11-22T23:00:00+00:00").unwrap();
+        let bar_mnq = serde_json::json!({
+            "instr": "MNQ",
+            "ts": "2020-11-22T23:01:00+00:00",
+            "open": "18000.00",
+            "high": "18010.00",
+            "low": "17990.00",
+            "close": "18005.00",
+            "volume": "100",
+            "as_of": "2020-11-22T23:02:00+00:00",
+        });
+        api_fut.process_bar(Some(&bar_mnq.to_string())).unwrap();
+
+        let fut_pos: Vec<serde_json::Value> = serde_json::from_str(
+            &api_fut.positions("2020-11-22T23:02:00+00:00").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fut_pos.len(), 1);
+        assert_eq!(fut_pos[0]["symbol"].as_str().unwrap(), "MNQ");
+        assert_eq!(fut_pos[0]["point_value"].as_str().unwrap(), "2");
+        assert_eq!(fut_pos[0]["tick_size"].as_str().unwrap(), "0.25");
+        assert_eq!(fut_pos[0]["quantity"].as_str().unwrap(), "2");
+
+        // PnL query via position_pnl: 2 contracts @ 18000.00, mark at 18010.00 -> (18010 - 18000) * 2 * 2 = 40.00
+        let pnl = api_fut.position_pnl("MNQ", "18010.00").unwrap().unwrap();
+        assert_eq!(pnl, "40.00");
+
+        // Equity book: AAPL should NOT have point_value or tick_size in positions
+        let mut api_eq = SimBookApi::new("ACC", true, "0").unwrap();
+        api_eq.connect("2026-03-02T14:29:00+00:00").unwrap();
+        let order_eq = serde_json::json!({
+            "id": "aapl_buy",
+            "instr": "AAPL",
+            "otype": "MARKET",
+            "side": "BUY",
+            "quantity": "10",
+            "submitted_at": "2026-03-02T14:29:30+00:00",
+            "tif": "DAY",
+            "limit": null,
+            "stop": null,
+            "trail": null,
+            "allocs": [{"soid": "s1", "account": "ACC", "qty": "10"}],
+            "parent": null,
+            "oco": null,
+        });
+        api_eq.submit(&order_eq.to_string(), "2026-03-02T14:29:30+00:00").unwrap();
+        let bar_eq = serde_json::json!({
+            "instr": "AAPL",
+            "ts": "2026-03-02T14:30:00+00:00",
+            "open": "150.00",
+            "high": "151.00",
+            "low": "149.00",
+            "close": "150.50",
+            "volume": "100",
+            "as_of": "2026-03-02T14:31:00+00:00",
+        });
+        api_eq.process_bar(Some(&bar_eq.to_string())).unwrap();
+
+        let eq_pos: Vec<serde_json::Value> = serde_json::from_str(
+            &api_eq.positions("2026-03-02T14:31:00+00:00").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(eq_pos.len(), 1);
+        assert_eq!(eq_pos[0]["symbol"].as_str().unwrap(), "AAPL");
+        assert!(eq_pos[0].get("point_value").is_none());
+        assert!(eq_pos[0].get("tick_size").is_none());
+    }
+
+    #[test]
+    fn test_mixed_venue_refusal() {
+        // Equity book refuses futures:
+        let mut eq_book = SimBookApi::new("ACC", true, "0").unwrap();
+        eq_book.connect("2026-03-02T14:29:00+00:00").unwrap();
+
+        let fut_ord = serde_json::json!({
+            "id": "nq_on_eq",
+            "instr": "NQ",
+            "otype": "LIMIT",
+            "side": "BUY",
+            "quantity": "1",
+            "submitted_at": "2026-03-02T14:29:30+00:00",
+            "tif": "DAY",
+            "limit": "18000.00",
+            "stop": null,
+            "trail": null,
+            "allocs": [{"soid": "s1", "account": "ACC", "qty": "1"}],
+            "parent": null,
+            "oco": null,
+        });
+        let e_ord = eq_book.submit(&fut_ord.to_string(), "2026-03-02T14:29:30+00:00").unwrap_err();
+        assert_eq!(e_ord.kind, "value");
+        assert_eq!(e_ord.msg, "SimBroker accepts equity orders only");
+
+        let fut_bar = serde_json::json!({
+            "instr": "NQ",
+            "ts": "2026-03-02T14:30:00+00:00",
+            "open": "18000.00",
+            "high": "18010.00",
+            "low": "17990.00",
+            "close": "18005.00",
+            "volume": "100",
+            "as_of": "2026-03-02T14:31:00+00:00",
+        });
+        let e_bar = eq_book.process_bar(Some(&fut_bar.to_string())).unwrap_err();
+        assert_eq!(e_bar.kind, "value");
+        assert_eq!(e_bar.msg, "SimBroker supports equities only");
+
+        // Futures book refuses equities:
+        let mut fut_book = SimBookApi::new_futures("ACC", 0).unwrap();
+        fut_book.connect("2020-11-22T23:00:00+00:00").unwrap();
+
+        let eq_ord = serde_json::json!({
+            "id": "aapl_on_fut",
+            "instr": "AAPL",
+            "otype": "LIMIT",
+            "side": "BUY",
+            "quantity": "1",
+            "submitted_at": "2020-11-22T23:00:00+00:00",
+            "tif": "DAY",
+            "limit": "150.00",
+            "stop": null,
+            "trail": null,
+            "allocs": [{"soid": "s1", "account": "ACC", "qty": "1"}],
+            "parent": null,
+            "oco": null,
+        });
+        let e_fut_ord = fut_book.submit(&eq_ord.to_string(), "2020-11-22T23:00:00+00:00").unwrap_err();
+        assert_eq!(e_fut_ord.kind, "value");
+        assert_eq!(e_fut_ord.msg, "SimBroker accepts futures orders only");
+
+        let eq_bar = serde_json::json!({
+            "instr": "AAPL",
+            "ts": "2020-11-22T23:01:00+00:00",
+            "open": "150.00",
+            "high": "151.00",
+            "low": "149.00",
+            "close": "150.50",
+            "volume": "100",
+            "as_of": "2020-11-22T23:02:00+00:00",
+        });
+        let e_fut_bar = fut_book.process_bar(Some(&eq_bar.to_string())).unwrap_err();
+        assert_eq!(e_fut_bar.kind, "value");
+        assert_eq!(e_fut_bar.msg, "SimBroker supports futures only");
+    }
+
+    #[test]
+    fn test_restore_futures_book() {
+        let mut api = SimBookApi::new_futures("ACC", 0).unwrap();
+        api.connect("2020-11-22T23:00:00+00:00").unwrap();
+
+        let orders_json = serde_json::json!([
+            [{
+                "id": "rest_ord",
+                "instr": "MNQ",
+                "otype": "LIMIT",
+                "side": "SELL",
+                "quantity": "1",
+                "submitted_at": "2020-11-22T22:59:00+00:00",
+                "tif": "GTC",
+                "limit": "18020.00",
+                "stop": null,
+                "trail": null,
+                "allocs": [{"soid": "s1", "account": "ACC", "qty": "1"}],
+                "parent": null,
+                "oco": null,
+            }, "ACCEPTED"]
+        ]);
+
+        let positions_json = serde_json::json!([
+            {
+                "instr": "MNQ",
+                "quantity": "1",
+                "avg_price": "18000.00",
+                "as_of": "2020-11-22T22:59:00+00:00"
+            }
+        ]);
+
+        api.restore(
+            &orders_json.to_string(),
+            "[]",
+            &positions_json.to_string(),
+            "2020-11-22T23:00:00+00:00",
+        )
+        .unwrap();
+
+        // Check positions were restored with point_value
+        let pos_restored: Vec<serde_json::Value> = serde_json::from_str(
+            &api.positions("2020-11-22T23:00:00+00:00").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pos_restored.len(), 1);
+        assert_eq!(pos_restored[0]["symbol"].as_str().unwrap(), "MNQ");
+        assert_eq!(pos_restored[0]["point_value"].as_str().unwrap(), "2");
+
+        // Feed bar that fills the restored order
+        let bar = serde_json::json!({
+            "instr": "MNQ",
+            "ts": "2020-11-22T23:01:00+00:00",
+            "open": "18015.00",
+            "high": "18025.00",
+            "low": "18010.00",
+            "close": "18022.00",
+            "volume": "100",
+            "as_of": "2020-11-22T23:02:00+00:00",
+        });
+        let fills = api.process_bar(Some(&bar.to_string())).unwrap();
+        assert_eq!(fills, "[0]");
+        let f: serde_json::Value = serde_json::from_str(&api.fill(0).unwrap()).unwrap();
+        assert_eq!(f["price"].as_str().unwrap(), "18020.00");
+    }
 }

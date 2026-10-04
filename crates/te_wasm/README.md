@@ -36,6 +36,7 @@ cargo test --manifest-path crates/Cargo.toml -p te_wasm
 export class SimBook {
     free(): void;
     constructor(account_id: string, is_decimal: boolean, slippage_bps: string);
+    static newFutures(account_id: string, slippage_ticks: number): SimBook;
     connect(now_iso: string): string;
     restore(orders_json: string, fills_json: string, positions_json: string, now_iso: string): void;
     submit(order_json: string, now_iso: string): string;
@@ -48,6 +49,7 @@ export class SimBook {
     fills(since: string, now_iso: string): string;
     fills_since(since: string, now_iso: string): string;
     positions(now_iso: string): string;
+    position_pnl(symbol: string, mark_str: string): string | undefined;
     process_bar(bar_json?: string | null): string;
     on_bar(bar_json?: string | null): string;
     has(id: string): boolean;
@@ -60,3 +62,29 @@ export function sim_instrument_key(text: string): string;
 export function trail_check_amount(trail_amount: string): void;
 export function trail_update(side: string, trail_amount: string, state_json: string, price: string): string;
 ```
+
+### Futures Instruments (P6B)
+
+`parse_instrument` and `instrument_from_value` accept futures symbol strings (`"NQ"`, `"MNQ"`, `"ES"`, `"MES"`, `"/NQ"`, `"NQZ26"`, `"MNQZ6"`, etc.) as well as structured JSON objects.
+
+When serialized via `instrument_to_json_val`, `Instrument::Future` produces a JSON object with the following schema:
+```json
+{
+  "root": "NQ",
+  "contract_month": "Z26",
+  "tick_size": "0.25",
+  "point_value": "20"
+}
+```
+- **`root`**: The product root string (e.g. `"NQ"`, `"MNQ"`, `"ES"`, `"MES"`).
+- **`contract_month`**: Contract month code and 2-digit year (e.g. `"Z26"`, `"H25"`), or `null` for continuous contracts.
+- **`tick_size`**: Decimal string for the minimum tick size increment (`"0.25"`).
+- **`point_value`**: Decimal string for dollar valuation per 1.0 point move (`"20"` for NQ, `"2"` for MNQ, `"50"` for ES, `"5"` for MES).
+
+### Positions Output
+
+`positions(now_iso)` returns an array of position objects. For futures instruments, each position object carries:
+- `point_value`: Decimal string (e.g. `"2"` for MNQ, `"20"` for NQ)
+- `tick_size`: Decimal string (e.g. `"0.25"`)
+
+For equity instruments, these keys are omitted to keep backward compatibility and byte-identical equity golden output.

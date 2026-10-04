@@ -177,4 +177,123 @@ assert.strictEqual(trailRes.triggered, false);
 assert.strictEqual(trailRes.state.extreme, "100.00");
 assert.strictEqual(trailRes.state.stop_price, "98.00");
 
-console.log("Smoke test passed: session matched golden.json and refusal contract verified.");
+// 12. Futures scenario: MNQ stop entry with 1-tick slippage, then a target
+console.log("Running futures smoke test with SimBook.newFutures...");
+const futBook = SimBook.newFutures("SMOKE_FUT", 1);
+const fut_connected_at = futBook.connect("2026-03-01T22:59:00+00:00");
+assert.strictEqual(fut_connected_at, "2026-03-01T22:59:00+00:00");
+
+// 12.1 Submit Entry: Buy 1 MNQ @ Stop 18000.00
+const futEntryOrder = {
+  id: "fut_entry_1",
+  instr: "MNQ",
+  otype: "STOP",
+  side: "BUY",
+  quantity: "1",
+  submitted_at: "2026-03-01T22:59:30+00:00",
+  tif: "DAY",
+  limit: null,
+  stop: "18000.00",
+  trail: null,
+  allocs: [{ soid: "fe1", account: "SMOKE_FUT", qty: "1" }],
+  parent: null,
+  oco: null,
+};
+const fut_entry_ack = JSON.parse(futBook.submit(JSON.stringify(futEntryOrder), "2026-03-01T22:59:30+00:00"));
+assert.strictEqual(fut_entry_ack.status, "ACCEPTED");
+
+// 12.2 Bar 1: Triggers buy stop @ 18000.00. 1-tick (0.25) slippage adverse -> 18000.25
+const futBar1 = {
+  instr: "MNQ",
+  ts: "2026-03-01T23:00:00+00:00",
+  open: "17990.00",
+  high: "18010.00",
+  low: "17985.00",
+  close: "18005.00",
+  volume: "500",
+  as_of: "2026-03-01T23:01:00+00:00",
+};
+const futBar1_fills = JSON.parse(futBook.process_bar(JSON.stringify(futBar1)));
+assert.deepStrictEqual(futBar1_fills, [0]);
+
+const futFill0 = JSON.parse(futBook.fill(0));
+assert.strictEqual(futFill0.price, "18000.25");
+assert.strictEqual(futFill0.quantity, "1");
+assert.strictEqual(futFill0.side, "BUY");
+assert.strictEqual(futFill0.symbol, "MNQ");
+
+// 12.3 Query positions: carries point_value (2) and tick_size (0.25)
+const futPositions1 = JSON.parse(futBook.positions("2026-03-01T23:01:00+00:00"));
+assert.strictEqual(futPositions1.length, 1);
+assert.strictEqual(futPositions1[0].symbol, "MNQ");
+assert.strictEqual(futPositions1[0].quantity, "1");
+assert.strictEqual(futPositions1[0].avg_price, "18000.25");
+assert.strictEqual(futPositions1[0].point_value, "2");
+assert.strictEqual(futPositions1[0].tick_size, "0.25");
+
+// 12.4 Submit Target: Sell 1 MNQ @ Limit 18020.00
+const futTargetOrder = {
+  id: "fut_target_1",
+  instr: "MNQ",
+  otype: "LIMIT",
+  side: "SELL",
+  quantity: "1",
+  submitted_at: "2026-03-01T23:00:30+00:00",
+  tif: "DAY",
+  limit: "18020.00",
+  stop: null,
+  trail: null,
+  allocs: [{ soid: "fe1:target:1", account: "SMOKE_FUT", qty: "1" }],
+  parent: "fut_entry_1",
+  oco: "fut_entry_1:oco",
+};
+const fut_target_ack = JSON.parse(futBook.submit(JSON.stringify(futTargetOrder), "2026-03-01T23:00:30+00:00"));
+assert.strictEqual(fut_target_ack.status, "ACCEPTED");
+
+// 12.5 Bar 2: Fills target limit @ 18020.00 without slippage
+const futBar2 = {
+  instr: "MNQ",
+  ts: "2026-03-01T23:01:00+00:00",
+  open: "18005.00",
+  high: "18025.00",
+  low: "18000.00",
+  close: "18020.00",
+  volume: "500",
+  as_of: "2026-03-01T23:02:00+00:00",
+};
+const futBar2_fills = JSON.parse(futBook.process_bar(JSON.stringify(futBar2)));
+assert.deepStrictEqual(futBar2_fills, [1]);
+
+const futFill1 = JSON.parse(futBook.fill(1));
+assert.strictEqual(futFill1.price, "18020.00");
+assert.strictEqual(futFill1.quantity, "1");
+assert.strictEqual(futFill1.side, "SELL");
+
+// 12.6 Query positions: position is now closed
+const futPositions2 = JSON.parse(futBook.positions("2026-03-01T23:02:00+00:00"));
+assert.deepStrictEqual(futPositions2, []);
+
+// 12.7 Cross-venue refusals
+assert.throws(
+  () => futBook.submit(JSON.stringify({ ...futEntryOrder, id: "bad_equity", instr: "AAPL" }), "2026-03-01T23:02:00+00:00"),
+  (err) => {
+    assert.match(err.message, /^value: SimBroker accepts futures orders only$/);
+    return true;
+  },
+  "Equity order on futures book must throw 'value: SimBroker accepts futures orders only'"
+);
+
+assert.throws(
+  () => book.submit(JSON.stringify({ ...futEntryOrder, id: "bad_fut", instr: "MNQ" }), "2026-03-02T14:33:00+00:00"),
+  (err) => {
+    assert.match(err.message, /^value: SimBroker accepts equity orders only$/);
+    return true;
+  },
+  "Futures order on equity book must throw 'value: SimBroker accepts equity orders only'"
+);
+
+// 12.8 Futures instrument key helper
+assert.strictEqual(sim_instrument_key("MNQ"), "F\u0001MNQ\u0001\u000125e-2\u00012e0");
+assert.strictEqual(sim_instrument_key("/ES"), "F\u0001ES\u0001\u000125e-2\u00015e1");
+
+console.log("Smoke test passed: equity matched golden.json and futures scenario verified.");

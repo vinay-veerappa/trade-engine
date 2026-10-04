@@ -31,6 +31,16 @@ impl SimBook {
             .map_err(to_js_error)
     }
 
+    #[wasm_bindgen(js_name = newFutures)]
+    pub fn new_futures(
+        account_id: &str,
+        slippage_ticks: u32,
+    ) -> Result<SimBook, wasm_bindgen::JsError> {
+        SimBookApi::new_futures(account_id, slippage_ticks)
+            .map(|inner| SimBook { inner })
+            .map_err(to_js_error)
+    }
+
     pub fn connect(&mut self, now_iso: &str) -> Result<String, wasm_bindgen::JsError> {
         self.inner.connect(now_iso).map_err(to_js_error)
     }
@@ -147,6 +157,14 @@ impl SimBook {
 
     pub fn cash_events(&self, since: &str) -> Result<String, wasm_bindgen::JsError> {
         self.inner.cash_events(since).map_err(to_js_error)
+    }
+
+    pub fn position_pnl(
+        &self,
+        symbol: &str,
+        mark_str: &str,
+    ) -> Result<Option<String>, wasm_bindgen::JsError> {
+        self.inner.position_pnl(symbol, mark_str).map_err(to_js_error)
     }
 }
 
