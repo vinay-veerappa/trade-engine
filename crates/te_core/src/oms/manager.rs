@@ -41,28 +41,11 @@ fn optional(j: &Json, k: &str) -> R<Option<PyDec>> {
 fn order(j: &Json) -> R<Order> {
     match bridge::obj_from_text(&dumps(j))? { Obj::Order(o) => Ok(o), _ => err("value", "manager expected order") }
 }
-fn orders(j: &Json, k: &str) -> R<Vec<Order>> { array(field(j,k)?)?.iter().map(order).collect() }
-fn order_type(s: &str) -> R<OrderType> {
-    OrderType::parse(s).ok_or_else(|| LErr {kind: "value", msg: format!("manager expected order type, got {s}")})
-}
-fn order_state(s: &str) -> R<OrderState> {
-    OrderState::parse(s).ok_or_else(|| LErr {kind: "value", msg: format!("manager expected order state, got {s}")})
-}
-fn ot(j: &Json, k: &str) -> R<OrderType> { order_type(st(j,k)?) }
-fn os(j: &Json, k: &str) -> R<OrderState> { order_state(st(j,k)?) }
-fn types(j: &Json, k: &str) -> R<Vec<OrderType>> { array(field(j,k)?)?.iter().map(|v| order_type(text(v)?)).collect() }
-fn tif_of(s: &str) -> R<Tif> {
-    Tif::parse(s).ok_or_else(|| LErr {kind: "value", msg: format!("manager expected time in force, got {s}")})
-}
-fn tifs(j: &Json, k: &str) -> R<Vec<Tif>> { array(field(j,k)?)?.iter().map(|v| tif_of(text(v)?)).collect() }
 fn js(s: impl Into<String>) -> Json { Json::Str(s.into()) }
 fn jd(d: &PyDec) -> Json { js(s(d)) }
 fn jod(d: &Option<PyDec>) -> Json { d.as_ref().map_or(Json::Null, jd) }
 fn ds(a: &[PyDec]) -> Json { Json::Arr(a.iter().map(jd).collect()) }
-fn ids(a: &[String]) -> Json { Json::Arr(a.iter().map(js).collect()) }
 fn tuple(a: Vec<Json>) -> Json { Json::Arr(a) }
-fn refusal(e: &LErr) -> Json { tuple(vec![js(e.kind), js(&e.msg)]) }
-fn refs(a: &[Order]) -> Vec<&Order> { a.iter().collect() }
 
 /// `OrderState` in FILLED, CANCELLED, REJECTED or EXPIRED.
 pub fn terminal(s: OrderState) -> bool {
@@ -226,12 +209,6 @@ fn fractions(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
 pub fn supports_native(t: OrderType, supported: &[OrderType], native_stops: bool) -> bool {
     (!(t == OrderType::Stop || t == OrderType::StopLimit) || native_stops) && supported.contains(&t)
 }
-fn native(t: &str, supported: &[Json], native_stops: bool) -> bool {
-    let Some(t) = OrderType::parse(t) else { return false; };
-    let supported: Vec<OrderType> = supported.iter()
-        .filter_map(|v| match v { Json::Str(s) => OrderType::parse(s), _ => None }).collect();
-    supports_native(t, &supported, native_stops)
-}
 fn conflict<T>(id: &str, message: &str) -> R<T> {
     err("idempotency",format!("command_id '{id}' {message}"))
 }
@@ -239,7 +216,6 @@ fn pending<T>(id: &str) -> R<T> {
     err("pending_reconciliation",format!("Order '{id}' is pending reconciliation"))
 }
 fn management<T>(message: impl Into<String>) -> R<T> { err("order_management",message) }
-fn event_payload(j: &Json) -> R<Obj> { bridge::obj_from_text(&dumps(field(j,"payload")?)) }
 fn payload_equal(a: &Json, b: &Json) -> R<bool> {
     if let (Some(da), Some(db))=(a.get("d"),b.get("d")) { return eq(&dec(da)?,&dec(db)?); }
     if let (Some(ta), Some(tb))=(a.get("T"),b.get("T")) {
@@ -263,22 +239,6 @@ fn payload_equal(a: &Json, b: &Json) -> R<bool> {
     }
 }
 
-/// `EventKind.name`: the SCREAMING_SNAKE spelling of the stored value.
-pub fn kind_name(k: EventKind) -> String {
-    let mut out = String::new();
-    for (i, c) in k.value().chars().enumerate() {
-        if i > 0 && c.is_ascii_uppercase() { out.push('_'); }
-        out.push(c.to_ascii_uppercase());
-    }
-    out
-}
-fn kind_from_name(name: &str) -> Option<EventKind> {
-    let camel: String = name.split('_').map(|w| {
-        let mut c = w.chars();
-        match c.next() { Some(f) => f.to_ascii_uppercase().to_string() + &c.as_str().to_ascii_lowercase(), None => String::new() }
-    }).collect();
-    EventKind::parse(&camel).filter(|k| kind_name(*k) == name)
-}
 
 /// A prior event a replay is checked against (`_event(existing)`).
 pub struct Prior<'a> {
@@ -288,9 +248,6 @@ pub struct Prior<'a> {
 }
 impl<'a> Prior<'a> {
     pub fn of(e: &'a Event) -> Prior<'a> { Prior {account: &e.account, kind: Some(e.kind), payload: &e.payload} }
-}
-fn prior_of<'a>(e: &'a Json, payload: &'a Obj) -> R<Prior<'a>> {
-    Ok(Prior {account: st(e,"account")?, kind: kind_from_name(st(e,"kind")?), payload})
 }
 
 pub fn created_replay(prior: &Prior, account: &str, fingerprint: &str, command: &str) -> R<()> {
@@ -347,10 +304,6 @@ pub fn append_replay(prior: &Prior, account: &str, kind: EventKind, payload: &Ob
 pub fn entry_terms(t: OrderType, side: Side, price: &PyDec, limit: Option<&PyDec>) -> (Option<PyDec>, Option<PyDec>, Side) {
     let exit=if side==Side::Buy {Side::Sell} else {Side::Buy};
     if t==OrderType::Limit { (Some(price.clone()),None,exit) } else { (limit.cloned(),Some(price.clone()),exit) }
-}
-
-pub fn filter_types(orders: &[&Order], types: &[OrderType]) -> Vec<String> {
-    orders.iter().filter(|o|types.contains(&o.order_type)).map(|o|o.order_id.clone()).collect()
 }
 
 /// `submit_mode`: whether a stop or trail is emulated locally rather than sent.
@@ -482,11 +435,6 @@ pub fn submit_ack(status: &str, message: &str) -> R<(EventKind, String)> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ack { Accepted, Rejected, Pending }
-impl Ack {
-    fn name(self) -> &'static str {
-        match self { Ack::Accepted => "accepted", Ack::Rejected => "rejected", Ack::Pending => "pending" }
-    }
-}
 
 /// A replace or cancel acknowledgement: the action, its reason, and the refusal raised
 /// after the action's events are recorded.
@@ -495,9 +443,6 @@ pub struct AckPlan {
     pub action: Ack,
     pub reason: String,
     pub refusal: Option<LErr>,
-}
-fn ack_json(p: AckPlan) -> Json {
-    tuple(vec![js(p.action.name()),js(p.reason),p.refusal.as_ref().map_or(Json::Null,refusal)])
 }
 
 pub fn replace_ack(status: &str, message: &str, order: &str, command: &str) -> AckPlan {
@@ -935,157 +880,7 @@ pub fn decide(op: &str, raw: &str) -> R<String> {
 
 fn decision(op: &str, j: &Json) -> R<Json> {
     match op {
-        "created_replay" => {
-            let e=field(j,"existing")?; let payload=event_payload(e)?;
-            created_replay(&prior_of(e,&payload)?,st(j,"account")?,st(j,"fingerprint")?,st(j,"command")?)?;
-            Ok(Json::Null)
-        }
-        "replace_replay" => {
-            let e=field(j,"existing")?; let payload=event_payload(e)?;
-            let mode=match st(j,"mode")? { "pending"=>ReplayMode::Pending, "local"=>ReplayMode::Local, _=>ReplayMode::Noop };
-            let state=match j.get("state") { Some(v)=>OrderState::parse(text(v)?), None=>None };
-            replace_replay(&prior_of(e,&payload)?,mode,st(j,"order")?,st(j,"account")?,st(j,"reason")?,st(j,"command")?,state)?;
-            Ok(Json::Null)
-        }
-        "observation_replay" => {
-            let e=field(j,"existing")?; let payload=event_payload(e)?;
-            observation_replay(&prior_of(e,&payload)?,st(j,"account")?,st(j,"order")?,&d(j,"price")?,st(j,"command")?)?;
-            Ok(Json::Null)
-        }
-        "append_replay" => {
-            // The request carries both encoded payloads; they are compared as sent.
-            let e=field(j,"existing")?;
-            let matches=st(e,"account")?==st(j,"account")? && st(e,"kind")?==st(j,"kind")? &&
-                payload_equal(field(e,"payload")?,field(j,"payload")?)?;
-            if !matches { return conflict(st(j,"command")?,"was replayed with a different payload"); }
-            Ok(Json::Null)
-        }
-        "entry_terms" => {
-            let (limit,stop,exit)=entry_terms(ot(j,"type")?,if st(j,"side")?=="BUY" {Side::Buy} else {Side::Sell},
-                &d(j,"price")?,optional(j,"limit")?.as_ref());
-            Ok(tuple(vec![jod(&limit),jod(&stop),js(exit.value())]))
-        }
-        "filter_types" => Ok(ids(&filter_types(&refs(&orders(j,"orders")?),&types(j,"types")?))),
-        "submit_mode" => Ok(js(if emulates(ot(j,"type")?,&types(j,"types")?,flag(j,"native_stops")?) {"emulate"}else{"native"})),
-        "trailing_check" => {
-            let t=ot(j,"type")?; let method=st(j,"method")?;
-            let native=if t==OrderType::Trail && method=="update_trailing" { types(j,"types")? } else { vec![] };
-            let order=match j.get("order") { Some(v)=>text(v)?, None=>"" };
-            trailing_check(t,method,order,&native)?;
-            Ok(Json::Null)
-        }
-        "emulation_check" => {
-            emulation_check(st(j,"order")?,ot(j,"type")?,flag(j,"emulated")?,&types(j,"types")?,flag(j,"native_stops")?)?;
-            Ok(Json::Null)
-        }
-        "observed_action" => {
-            let triggered=flag(j,"triggered")?;
-            if !triggered { return Ok(js("observe")); }
-            Ok(js(match observed_action(triggered,os(j,"state")?,st(j,"order")?)? {
-                Observed::Observe=>"observe", Observed::Route=>"route", Observed::Return=>"return" }))
-        }
-        "observation_reason" => Ok(js(observation_reason(ot(j,"type")?,&d(j,"price")?,flag(j,"triggered")?))),
-        "start_emulation" => Ok(js(match start_emulation(&order(field(j,"order")?)?,&types(j,"types")?)? {
-            Start::Return=>"return", Start::RefuseLimit=>"refuse_limit", Start::Limit=>"limit", Start::Trigger=>"trigger" })),
-        "submit_emulated" => Ok(Json::Bool(submit_emulated(&order(field(j,"order")?)?)?)),
-        "new" => Ok(Json::Bool(st(j,"state")?=="NEW")),
-        "terminal" => Ok(Json::Bool(terminal(os(j,"state")?))),
-        "stop_rejected" => { stop_rejected(ot(j,"type")?,os(j,"state")?,st(j,"order")?)?; Ok(Json::Null) }
-        "child_hold" => Ok(Json::Bool(child_hold(&d(j,"filled")?)?)),
-        "fill_match" => {
-            fill_match(st(j,"fill")?,st(j,"order")?,st(j,"account")?,st(j,"fill_account")?,st(j,"env")?,st(j,"fill_env")?)?;
-            Ok(Json::Null)
-        }
-        "close_replay" => Ok(Json::Bool(close_replay(&order(field(j,"order")?)?,st(j,"entry")?,st(j,"command")?)?)),
-        "confirmed_id" => {
-            let venue=match field(j,"venue")? { Json::Null=>None, v=>Some(text(v)?) };
-            let mode=if venue.is_none() && st(j,"mode")?=="replace" {IdMode::Replace} else {IdMode::Cancel};
-            let order=if venue.is_none() { st(j,"order")? } else { "" };
-            confirmed_id(venue,order,mode)?;
-            Ok(Json::Null)
-        }
-        "cancel_mode" => {
-            let state=os(j,"state")?;
-            let oco=if state==OrderState::PendingUnknown { flag(j,"oco")? } else { false };
-            let order=if oco { st(j,"order")? } else { "" };
-            Ok(js(match cancel_mode(state,order,oco)? {
-                CancelMode::Return=>"return", CancelMode::Local=>"local", CancelMode::Venue=>"venue" }))
-        }
-        "submit_ack" => {
-            let (kind,reason)=submit_ack(st(j,"status")?,st(j,"message")?)?;
-            Ok(tuple(vec![js(kind_name(kind)),js(reason)]))
-        }
-        "replace_ack" => Ok(ack_json(replace_ack(st(j,"status")?,st(j,"message")?,st(j,"order")?,st(j,"command")?))),
-        "cancel_ack" => {
-            let (status,m,id,oco)=(st(j,"status")?,st(j,"message")?,st(j,"order")?,flag(j,"oco")?);
-            let reason=if status=="ACCEPTED" { st(j,"reason")? } else { "" };
-            Ok(ack_json(cancel_ack(status,reason,m,id,oco)?))
-        }
-        "reconcile_find" => {
-            // The read-back ids are compared as sent: a missing venue id never matches.
-            let (id,venue)=(st(j,"order")?,st(j,"venue")?);
-            if let Some(i)=array(field(j,"ids")?)?.iter().position(|v|v==&js(venue)||v==&js(id)) { return Ok(Json::Int(i as i128)); }
-            Ok(Json::Int(reconcile_find(id,venue,&[],os(j,"state")?)? as i128))
-        }
-        "reconcile_replace" => {
-            let unresolved=flag(j,"unresolved")?;
-            let found=if unresolved { os(j,"found")? } else { OrderState::Filled };
-            let order=if unresolved && !terminal(found) { st(j,"order")? } else { "" };
-            reconcile_replace(order,found,unresolved)?;
-            Ok(Json::Null)
-        }
-        "pending_state" => Ok(Json::Bool(st(j,"state")?=="PENDING_UNKNOWN")),
-        "reconcile_fills" => Ok(Json::Bool(reconcile_fills(&d(j,"found")?,&d(j,"recorded")?)?)),
-        "reconcile_result" => {
-            let found=os(j,"found")?;
-            let state=if found==OrderState::Filled { os(j,"state")? } else { OrderState::Filled };
-            Ok(js(match reconcile_result(found,state,st(j,"order")?)? {
-                Resolution::Return=>"return".to_string(), Resolution::Updated=>"updated".to_string(),
-                Resolution::Record(k)=>kind_name(k) }))
-        }
-        "ingest_check" => {
-            let (found,recorded)=(d(j,"found")?,d(j,"recorded")?);
-            if lt(&recorded,&found)? { ingest_check(&found,&recorded,st(j,"order")?,os(j,"state")?)?; }
-            Ok(Json::Null)
-        }
-        "matching_ids" => {
-            let venue=field(j,"venue")?;
-            Ok(tuple(array(field(j,"ids")?)?.iter().enumerate().filter(|(_,v)|*v==venue)
-                .map(|(i,_)|Json::Int(i as i128)).collect()))
-        }
-        "kind_is" => Ok(Json::Bool(st(j,"kind")?==st(j,"expected")?)),
-        "type_is" => Ok(Json::Bool(st(j,"type")?==st(j,"expected")?)),
-        "fraction_mode" => Ok(js(if field(j,"fractions")?==&Json::Null {"split"}else{"fractions"})),
-        "parent" => Ok(field(j,"parent")?.clone()),
-        "protective_child" => {
-            let parent=match field(j,"parent")? { Json::Null=>None, v=>Some(text(v).unwrap_or("")) };
-            Ok(Json::Bool(parent.is_some() && protective_child(parent,ot(j,"type")?)))
-        }
-        "route_limit" => Ok(if ot(j,"type")?==OrderType::Limit {field(j,"price")?.clone()}else{Json::Null}),
-        "refused" => {
-            let o=order(field(j,"order")?)?;
-            let mode=match st(j,"mode")? {
-                "child"=>Refusal::Child(st(j,"parent")?), "protective"=>Refusal::Protective, "native"=>Refusal::Native,
-                "limit"=>Refusal::Limit, "trigger"=>Refusal::Trigger, "tif"=>Refusal::Tif,
-                _=>return err("value","unknown refusal plan"),
-            };
-            let (reason,suffix,e)=refused(&o,mode);
-            Ok(tuple(vec![js(reason),js(suffix),refusal(&e)]))
-        }
-        "oco_check" => { oco_check(os(j,"state")?,st(j,"order")?)?; Ok(Json::Null) }
-        "pending_candidate" => {
-            let e=field(j,"event")?;
-            if !flag(e,"pending")? || st(e,"order")?!=st(j,"order")? { return Ok(Json::Null); }
-            let reason=match field(e,"reason")? { Json::Null=>None, v=>Some(text(v)?) };
-            let command=if reason.is_some_and(|r| r.starts_with("Replace pending:")) {
-                match field(e,"command")? { Json::Null=>None, v=>Some(text(v)?) }
-            } else { None };
-            Ok(pending_candidate(st(j,"order")?,true,st(e,"order")?,reason,command).map_or(Json::Null,js))
-        }
         "quantity" => { quantity(flag(j,"equity")?, &d(j,"quantity")?)?; Ok(Json::Null) }
-        "positive_quantity" => { positive_quantity(&d(j,"quantity")?)?; Ok(Json::Null) }
-        "price" => { check_price(&d(j,"price")?)?; Ok(Json::Null) }
-        "fraction" => { check_fraction(&d(j,"fraction")?)?; Ok(Json::Null) }
         "allocate" | "split" | "fractions" => {
             let q=d(j,"quantity")?;
             let equity=flag(j,"equity")?;
@@ -1095,94 +890,7 @@ fn decision(op: &str, j: &Json) -> R<Json> {
         "fingerprint" => Ok(js(sha256_hex(dumps(field(j,"payload")?).as_bytes()))),
         "reduce_fingerprint" => Ok(js(reduce_fingerprint(st(j,"entry")?,&d(j,"fraction")?,st(j,"reason")?))),
         "bracket_fingerprint" => Ok(js(bracket_fingerprint(field(j,"intent")?,&d(j,"quantity")?)?)),
-        "native" => Ok(Json::Bool(native(st(j,"type")?,array(field(j,"types")?)?,flag(j,"native_stops")?))),
-        "bracket_capabilities" => {
-            let tifs=tifs(j,"tifs")?;
-            let (entry,exit)=(tif_of(st(j,"entry_tif")?)?,tif_of(st(j,"exit_tif")?)?);
-            let t=ot(j,"type")?;
-            let types=if tifs.contains(&entry) && tifs.contains(&exit) && matches!(t,OrderType::Stop|OrderType::StopLimit) {
-                types(j,"types")?
-            } else { vec![] };
-            let native_stops=if types.contains(&t) { flag(j,"native_stops")? } else { false };
-            bracket_capabilities(t,entry,exit,&types,&tifs,native_stops)?;
-            Ok(Json::Null)
-        }
-        "trigger_type" => Ok(trigger_type(&types(j,"types")?).map_or(Json::Null,|t|js(t.value()))),
-        "tif" => {
-            let tifs=tifs(j,"tifs")?;
-            let t=tif_of(st(j,"tif")?)?;
-            if !tifs.contains(&t) { return Ok(js("refuse")); }
-            let venue=match field(j,"venue_type")? { Json::Null=>None, v=>Some(order_type(text(v)?)?) };
-            let types=if venue.is_some() { types(j,"types")? } else { vec![] };
-            Ok(js(if tif(t,venue,&types,&tifs)? {"refuse"} else {"ok"}))
-        }
-        "children" | "bracket" | "siblings" => {
-            let orders=orders(j,"orders")?;
-            let all=refs(&orders);
-            let id=st(j,"entry")?;
-            if op == "children" { return Ok(ids(&children(id,&all))); }
-            if op == "siblings" { return Ok(ids(&siblings(&order(field(j,"order")?)?,&all))); }
-            let (entry,stop,targets)=bracket(&all)?;
-            Ok(tuple(vec![js(entry),js(stop),ids(&targets)]))
-        }
         "is_reduce" => Ok(Json::Bool(is_reduce(st(j,"entry")?,st(j,"order_id")?))),
-        "open_stop" | "sync" | "cancel_protective" => {
-            let state=bridge::uncanon_account(field(j,"state")?)?;
-            let entry=order(field(j,"entry")?)?;
-            match op {
-                "open_stop" => { let (stop,open)=open_stop(&state,&entry)?; Ok(tuple(vec![js(stop),jd(&open)])) }
-                "cancel_protective" => {
-                    let children=exits(&state,&entry.order_id);
-                    if !children.iter().any(|o|o.order_type==OrderType::Stop) { return Ok(Json::Null); }
-                    Ok(Json::Bool(cancel_protective(&state,&entry,&order(field(j,"order")?)?)?))
-                }
-                _ => Ok(match sync(&state,&entry)? {
-                    None => Json::Null,
-                    Some(p) => tuple(vec![js(&p.stop),ds(&[p.entry_filled,p.open,p.stop_filled]),
-                        Json::Bool(p.entry_terminal),ids(&p.targets),ids(&p.closers)]),
-                }),
-            }
-        }
-        "sync_mode" => Ok(js(if sync_mode(&d(j,"filled")?,&d(j,"open")?)? { "protect" } else { "flat" })),
-        "sync_targets" => {
-            let stop_filled=d(j,"stop_filled")?;
-            let terminal=if eq(&stop_filled,&zero())? { flag(j,"terminal")? } else { false };
-            Ok(Json::Bool(sync_targets(&stop_filled,terminal)?))
-        }
-        "positive" => Ok(Json::Bool(is_positive(&d(j,"quantity")?)?)),
-        "target_weights" => {
-            let w:Vec<PyDec>=array(field(j,"weights")?)?.iter().map(dec).collect::<R<_>>()?;
-            Ok(ds(&target_weights(&w,&d(j,"planned")?)?))
-        }
-        "child_quantity" => {
-            let o=order(field(j,"order")?)?;
-            let terminal=matches!(o.state,OrderState::Cancelled|OrderState::Filled|OrderState::Rejected);
-            let (q,filled)=if terminal { (zero(),zero()) } else { (d(j,"quantity")?,zero()) };
-            let filled=if terminal { filled } else {
-                quantity(equity(&o.instrument),&q)?;
-                d(j,"filled")?
-            };
-            let (mode,total)=child_quantity(&o,&filled,&q)?;
-            Ok(tuple(vec![js(match mode { ChildPlan::Return=>"return", ChildPlan::Submit=>"submit",
-                ChildPlan::Local=>"local", ChildPlan::Replace=>"replace" }),jod(&total)]))
-        }
-        "move_stop" => {
-            let o=order(field(j,"order")?)?;
-            if o.stop_price.is_none() { move_stop(&o,&zero())?; }
-            Ok(js(if move_stop(&o,&d(j,"price")?)? { "replace" } else { "return" }))
-        }
-        "reduce" | "close_guard" => {
-            let id=st(j,"entry")?;
-            let children=orders(j,"children")?;
-            let all=refs(&children);
-            if op=="close_guard" { close_guard(id,&all)?; return Ok(Json::Null); }
-            if all.iter().any(|o|o.order_id==format!("{id}:close") && !terminal(o.state))
-                || reduces(id,&all).iter().any(|o|!terminal(o.state)) {
-                reduce(id,&all,&zero(),&zero())?;
-            }
-            let (q,reduce_id)=reduce(id,&all,&d(j,"open")?,&d(j,"fraction")?)?;
-            Ok(tuple(vec![jd(&q),js(reduce_id)]))
-        }
         "replace_quantity" => {
             let q=optional(j,"quantity")?;
             let filled=if q.is_some() { d(j,"filled")? } else { zero() };
@@ -1190,44 +898,11 @@ fn decision(op: &str, j: &Json) -> R<Json> {
             replace_quantity(q.as_ref(),&filled,equity)?;
             Ok(Json::Null)
         }
-        "replace_state" => { replace_state(&order(field(j,"order")?)?)?; Ok(Json::Null) }
-        "local_replace" => {
-            let o=order(field(j,"order")?)?;
-            let gate=o.state==OrderState::New && matches!(o.order_type,OrderType::Stop|OrderType::StopLimit);
-            Ok(Json::Bool(gate && local_replace(&o,flag(j,"emulated")?,flag(j,"emulated")? && flag(j,"triggered")?)))
-        }
         "replace_terms" => {
             let o=order(field(j,"order")?)?;
             let (q,limit,stop)=(optional(j,"quantity")?,optional(j,"limit")?,optional(j,"stop")?);
             let (updated,same)=replace_terms(&o,q.as_ref(),limit.as_ref(),stop.as_ref());
             Ok(tuple(vec![jd(&updated.quantity),jod(&updated.limit_price),jod(&updated.stop_price),Json::Bool(same)]))
-        }
-        "stored" => { stored(&order(field(j,"created")?)?,&order(field(j,"candidate")?)?)?; Ok(Json::Null) }
-        "replay" => {
-            if !flag(j,"matches")? {
-                return conflict(st(j,"command")?,st(j,"message")?);
-            }
-            Ok(Json::Null)
-        }
-        "trigger_price" => {
-            let o=order(field(j,"order")?)?;
-            let price=match field(j,"price")? { Json::Null=>None, _=>Some(zero()) };
-            Ok(Json::Bool(trigger_price(&o,price.as_ref())?))
-        }
-        "stop_observation" => {
-            let o=order(field(j,"order")?)?;
-            if o.stop_price.is_none() { stop_observation(&o,&zero())?; }
-            let (stop,triggered)=stop_observation(&o,&d(j,"price")?)?;
-            Ok(tuple(vec![jd(&stop),Json::Bool(triggered)]))
-        }
-        "unresolved" => {
-            for e in array(field(j,"events")?)? {
-                if !flag(e,"pending")? || st(e,"order")?!=st(j,"order")? { continue; }
-                if field(e,"reason")?==&Json::Null || !st(e,"reason")?.starts_with("Replace pending:") { continue; }
-                if field(e,"command")?==&Json::Null || !st(e,"command")?.ends_with(":pending") { continue; }
-                if !flag(e,"accepted")? && !flag(e,"rejected")? { return Ok(Json::Bool(true)); }
-            }
-            Ok(Json::Bool(false))
         }
         _ => err("value",format!("unknown manager decision {op}")),
     }
@@ -1251,12 +926,5 @@ mod tests {
     #[test]
     fn floor_reduce_never_guesses_zero() {
         assert_eq!(s(&floor(&mul(&p("3"),&p("0.5")).unwrap()).unwrap()),"1");
-    }
-    #[test]
-    fn native_stop_flag_and_trigger_preference_are_independent() {
-        let types=vec![js("MARKET"),js("LIMIT"),js("STOP")];
-        assert!(!native("STOP",&types,false));
-        assert!(native("LIMIT",&types,false));
-        assert_eq!(decide("trigger_type",r#"{"types":["MARKET","LIMIT"]}"#).unwrap(),r#""MARKET""#);
     }
 }
