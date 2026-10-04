@@ -1454,3 +1454,318 @@ def test_p5_existing_cover_vectors_through_the_door(monkeypatch) -> None:
     monkeypatch.setattr(V, "holdings", holdings)
     monkeypatch.setattr(V, "cover_reason", cover_reason)
     assert run_module_tests(V) >= 40
+
+
+# -- T6 netting ------------------------------------------------------------------------------
+
+from frozen_p5 import netting as FN6  # noqa: E402
+from trade_engine.domain.orders import Order  # noqa: E402
+from trade_engine.interfaces.broker import VenueOrderAllocation  # noqa: E402
+from trade_engine.tos_paper import netting as PNET  # noqa: E402
+
+sim_rs.register("tos_netting_error", PNET.NettingError)
+
+NMIRROR = ("OPT_CSP", "OPT_PUT_SPREAD")
+NACCTS = ["OPT_CSP", "OPT_PUT_SPREAD", "OPT_WHEEL_CORE", "O'Q"]
+NMOST = ["OPT_CSP", "OPT_PUT_SPREAD"] * 8 + ["OPT_WHEEL_CORE", "O'Q"]
+NQTYS = ["1", "2", "3", "5", "1.5", "0.5", "2.0", "1E+1", "100", "7"]
+NLIMITS = ["2.00", "2", "2.0", "3.00", "0.05", "1E+1"]
+NHOLD = ["0", "1", "-1", "2", "-2", "1.0", "-3", "-0", "0.5"]
+NINSTS = [AAPL, P200, P195, C200, opt(strike="200.0"), opt(strike="190"), opt(multiplier=10)]
+NVERT = [
+    combo((P200, 1, Side.SELL), (P195, 1, Side.BUY)), combo((P200, 1, Side.BUY), (P195, 1, Side.SELL)),
+    combo((P200, 2, Side.SELL), (P195, 2, Side.BUY)), combo((P200, 1, Side.SELL), (P195, 2, Side.BUY)),
+    combo((P200, 1, Side.SELL), (opt(strike="200.0"), 1, Side.BUY)), combo((P200, 1, Side.SELL), (C200, 1, Side.BUY)),
+    combo((P195, 1, Side.SELL), (P200, 1, Side.BUY)), combo((P200, 1, Side.SELL)),
+    combo((AAPL, 100, Side.BUY), (C200, 1, Side.SELL)),
+]
+N_AT = [T, T, T, T, datetime(2026, 9, 24, 20, 0), datetime(2026, 9, 24, 15, 0, tzinfo=timezone(timedelta(hours=-5)))]
+
+
+def norder(oid, account, instrument, side, qty="1", otype=OrderType.LIMIT, limit="2.00", tif=TimeInForce.DAY,
+           stop=None):
+    return Order(order_id=oid, account_id=account, instrument=instrument, order_type=otype, side=side,
+                 quantity=D(qty), command_id=oid, created_at=T,
+                 limit_price=None if limit is None else D(limit),
+                 stop_price=None if stop is None else D(stop), tif=tif)
+
+
+def nopen(o) -> dict:
+    return {"order_id": o.order_id, "account_id": o.account_id, "instrument": wire(o.instrument),
+            "order_type": o.order_type.value, "side": o.side.value, "quantity": str(o.quantity),
+            "tif": o.tif.value, "limit_price": None if o.limit_price is None else str(o.limit_price)}
+
+
+def vo_doc(v) -> dict:
+    return {"venue_order_id": v.venue_order_id, "instrument": wire(v.instrument), "order_type": v.order_type.value,
+            "side": v.side.value, "quantity": str(v.quantity), "submitted_at": v.submitted_at.isoformat(),
+            "tif": v.tif.value, "limit_price": None if v.limit_price is None else str(v.limit_price),
+            "allocations": [[a.strategy_order_id, a.account_id, str(a.quantity)] for a in v.allocations]}
+
+
+def batch_doc(b) -> dict:
+    return {"venue_orders": [vo_doc(v) for v in b.venue_orders], "refused": [list(r) for r in b.refused]}
+
+
+def holdings_doc(holdings) -> list:
+    return [[a, wire(i), str(q)] for (a, i), q in (holdings or {}).items()]
+
+
+def net_doc(orders, venue_account, mirrored, at, holdings) -> dict:
+    return {"orders": [nopen(o) for o in orders], "venue_account": venue_account, "mirrored": list(mirrored),
+            "at": at.isoformat(), "holdings": holdings_doc(holdings)}
+
+
+def check_net(label, orders, holdings=None, mirrored=NMIRROR, at=T, venue=VENUE):
+    got = step("net", label,
+               lambda: batch_doc(FN6.net_strategy_orders(orders, venue_account=venue, mirrored_accounts=mirrored,
+                                                         at=at, holdings=holdings)),
+               lambda: door("net_strategy_orders", net_doc(orders, venue, mirrored, at, holdings)))
+    if got[0] == "ok":
+        for _, reason in got[1]["refused"]:
+            for tag in ("is not mirrored", "multi-leg combo", "one net LIMIT", "order type", "TIF", "not a whole number",
+                        "duplicate", "opposes first-in", "opposite side of", "is not a mirrored option"):
+                if tag in reason:
+                    seen("net", tag)
+        if len(got[1]["venue_orders"]) > 1:
+            seen("net", "several tickets")
+        if any(len(v["allocations"]) > 1 for v in got[1]["venue_orders"]):
+            seen("net", "netted")
+        if any(isinstance(o.instrument, Combo) for o in orders) and any(
+                v["instrument"]["kind"] == "combo" for v in got[1]["venue_orders"]):
+            seen("net", "vertical ticket")
+    else:
+        seen("net", got[1])
+    return got
+
+
+def net_case(rng):
+    n = rng.choice([1, 2, 2, 3, 3, 4, 5, 6])
+    orders = []
+    for k in range(n):
+        oid = f"o{rng.randrange(n + 1)}" if rng.random() < 0.12 else f"o{k}"
+        roll = rng.random()
+        if roll < 0.16:
+            inst = rng.choice(NVERT)
+        elif roll < 0.18:
+            inst = FutureLike()
+        else:
+            inst = rng.choice(NINSTS)
+        otype = rng.choice([OrderType.LIMIT] * 8 + [OrderType.MARKET] * 3 + [OrderType.STOP, OrderType.STOP_LIMIT])
+        limit = None if otype is OrderType.MARKET else rng.choice(NLIMITS)
+        stop = "1.00" if otype in (OrderType.STOP, OrderType.STOP_LIMIT) else None
+        if otype is OrderType.STOP:
+            limit = None
+        tif = rng.choice([TimeInForce.DAY] * 6 + [TimeInForce.GTC] * 3 + [TimeInForce.OPG, TimeInForce.GTD])
+        orders.append(norder(oid, rng.choice(NMOST), inst, rng.choice([Side.BUY, Side.SELL]), rng.choice(NQTYS),
+                             otype, limit, tif, stop))
+    holdings = {}
+    for _ in range(rng.choice([0, 0, 1, 2, 3, 4])):
+        holdings[(rng.choice(NMOST), rng.choice(NINSTS))] = D(rng.choice(NHOLD))
+    mirrored = rng.choice([NMIRROR] * 6 + [NMIRROR + ("O'Q",), ("OPT_CSP",), NMIRROR[::-1]])
+    return orders, holdings, mirrored, rng.choice(N_AT)
+
+
+def test_p5_t6_net_strategy_orders_lockstep() -> None:
+    rng = random.Random(6006)
+    S_, B_ = Side.SELL, Side.BUY
+    csp, psp = "OPT_CSP", "OPT_PUT_SPREAD"
+    # the plan's edge grid
+    check_net("same-side-sum", [norder("a", csp, P200, S_, "1"), norder("b", psp, P200, S_, "3")])
+    check_net("opposing-same-batch", [norder("a", csp, P200, S_), norder("b", psp, P200, B_)])
+    check_net("opposing-same-account", [norder("a", csp, P200, S_), norder("b", csp, P200, B_)])
+    check_net("opposing-vs-book", [norder("a", csp, P200, S_)], {(psp, P200): D("2")})
+    check_net("opposing-vs-book-flat", [norder("a", csp, P200, S_)], {(psp, P200): D("0")})
+    check_net("same-account-closes", [norder("a", csp, P200, B_)], {(csp, P200): D("-2")})
+    check_net("across-accounts-book", [norder("a", csp, P200, B_), norder("b", psp, P200, B_)],
+              {(csp, P200): D("-1"), (psp, P200): D("-1")})
+    check_net("across-accounts-flip", [norder("a", csp, P200, S_), norder("b", psp, P200, S_)],
+              {(csp, P200): D("1")})
+    check_net("fractional-contracts", [norder("a", csp, P200, S_, "1.5"), norder("b", csp, P200, S_, "2")])
+    check_net("fractional-shares", [norder("a", csp, AAPL, B_, "0.5", OrderType.MARKET, None)])
+    check_net("whole-shares-as-decimal", [norder("a", csp, AAPL, B_, "1E+2", OrderType.MARKET, None)])
+    check_net("stop", [norder("a", csp, P200, S_, "1", OrderType.STOP, None, stop="1.00")])
+    check_net("stop-limit", [norder("a", csp, P200, S_, "1", OrderType.STOP_LIMIT, "2.00", stop="1.00")])
+    for tif in (TimeInForce.GTD, TimeInForce.OPG, TimeInForce.MOC, TimeInForce.GTC):
+        check_net(f"tif-{tif}", [norder("a", csp, P200, S_, tif=tif), norder("b", csp, P195, S_)])
+    check_net("other-kind", [norder("a", csp, FutureLike(), B_)])
+    check_net("not-mirrored", [norder("a", "OPT_WHEEL_CORE", P200, S_)])
+    check_net("not-mirrored-quote", [norder("a", "O'Q", P200, S_)], mirrored=("A'B", "z", "O'R"))
+    check_net("duplicate", [norder("a", csp, P200, S_), norder("a", csp, P200, S_)])
+    check_net("duplicate-refused-first", [norder("a", "OPT_WHEEL_CORE", P200, S_), norder("a", csp, P200, S_)])
+    for q in ("1", "2"):
+        check_net("vertical", [norder("v", psp, NVERT[0], S_, q)])
+        check_net("vertical-buy", [norder("v", psp, NVERT[1], B_, q)])
+    check_net("vertical-market", [norder("v", psp, NVERT[0], S_, "1", OrderType.MARKET, None)])
+    check_net("vertical-shapes", [norder(f"v{k}", psp, v, S_) for k, v in enumerate(NVERT)])
+    check_net("vertical-then-leg", [norder("v", psp, NVERT[0], S_), norder("l", csp, P200, B_)])
+    check_net("leg-then-vertical", [norder("l", csp, P200, S_), norder("v", psp, NVERT[0], S_)])
+    check_net("refused-vertical-claims-nothing", [norder("v", psp, NVERT[0], S_, "1", OrderType.MARKET, None),
+                                                  norder("l", csp, P200, B_)])
+    check_net("vertical-vs-book", [norder("v", psp, NVERT[0], S_)], {(csp, P195): D("-1")})
+    check_net("vertical-second-leg-conflict", [norder("v", psp, NVERT[0], S_)], {(csp, P195): D("-1")})
+    check_net("vertical-ratio-2", [norder("v", psp, NVERT[2], S_, "3")])
+    check_net("empty", [])
+    check_net("naive-at", [norder("a", csp, P200, S_)], at=datetime(2026, 9, 24, 20, 0))
+    check_net("naive-at-vertical", [norder("v", psp, NVERT[0], S_)], at=datetime(2026, 9, 24, 20, 0))
+    check_net("offset-at", [norder("a", csp, P200, S_)], at=datetime(2026, 9, 24, 15, 0, tzinfo=timezone(timedelta(hours=-5))))
+    check_net("limits-differ", [norder("a", csp, P200, S_, limit="2.00"), norder("b", psp, P200, S_, limit="3.00")])
+    check_net("limits-spell-alike", [norder("a", csp, P200, S_, limit="2.00"), norder("b", psp, P200, S_, limit="2")])
+    check_net("equal-strikes", [norder("a", csp, P200, S_), norder("b", psp, opt(strike="200.0"), S_)])
+    check_net("hold-equal-spelling", [norder("a", csp, P200, S_)], {(psp, opt(strike="200.0")): D("1")})
+    check_net("market-and-limit", [norder("a", csp, P200, S_, otype=OrderType.MARKET, limit=None),
+                                   norder("b", psp, P200, S_)])
+    for k in range(3200):                                   # seeded
+        orders, holdings, mirrored, at = net_case(rng)
+        check_net(k, orders, holdings, mirrored, at)
+    c = SEEN["net"]
+    for tag in ("is not mirrored", "multi-leg combo", "one net LIMIT", "order type", "TIF", "not a whole number",
+                "duplicate", "opposes first-in", "opposite side of", "is not a mirrored option", "several tickets",
+                "netted", "vertical ticket"):
+        assert c[tag] > 20, (tag, c)
+    settle("net", 3200, ["ValueError: submitted_at must be timezone-aware", "NettingError: no strategy orders to net"])
+
+
+def test_p5_t6_ticket_key_lockstep() -> None:
+    rng = random.Random(6007)
+    qs = ["1", "2", "100", "1E+2", "1.50", "0", "-1", "1234567890123456789012345678901", "0.0000001", "Infinity",
+          "-0.00", "1E-30", "12345678901234567890123456.78"]
+    ls = [None, "2.00", "2", "0", "3.1400", "1E+1", "-1", "1E+27"]
+    insts = [AAPL, Equity("BRK"), P200, opt(strike="200.0"), opt(multiplier=10)] + NVERT[:3]
+    accts = [VENUE, "", "x\x1fy", "É", "D-2"]
+    idsets = [["a"], ["b", "a"], [], ["a", "a"], ["é", "e", "Z"], ["", "x"], ["1", "10", "2"]]
+    n = 0
+    for _ in range(2500):
+        args = (rng.choice(accts), rng.choice(insts), rng.choice([Side.BUY, Side.SELL]), D(rng.choice(qs)),
+                rng.choice(list(OrderType)), None if (lim := rng.choice(ls)) is None else D(lim),
+                rng.choice(list(TimeInForce)), rng.choice(idsets))
+        va, inst, side, q, ot, lim, tif, ids = args
+        step("ticket_key", n,
+             lambda: FN6.ticket_key(*args),
+             lambda: door("ticket_key", {"venue_account": va, "instrument": wire(inst), "side": side.value,
+                                         "quantity": str(q), "order_type": ot.value,
+                                         "limit_price": None if lim is None else str(lim), "tif": tif.value,
+                                         "order_ids": ids})["key"])
+        n += 1
+    # the key is sensitive to every field, and spelling-blind where Decimal.normalize is
+    base = door("ticket_key", {"venue_account": "v", "instrument": wire(P200), "side": "SELL", "quantity": "2",
+                               "order_type": "LIMIT", "limit_price": "2.00", "tif": "DAY", "order_ids": ["a"]})["key"]
+    assert base == FN6.ticket_key("v", P200, Side.SELL, D("2"), OrderType.LIMIT, D("2.00"), TimeInForce.DAY, ["a"])
+    assert base == door("ticket_key", {"venue_account": "v", "instrument": wire(P200), "side": "SELL",
+                                       "quantity": "2.0", "order_type": "LIMIT", "limit_price": "2", "tif": "DAY",
+                                       "order_ids": ["a"]})["key"]
+    settle("ticket_key", 2500, [])
+
+
+def test_p5_t6_screen_mixed_signs_and_invariant_lockstep() -> None:
+    rng = random.Random(6008)
+    insts = NINSTS + NVERT + [FutureLike()]
+    for k in range(2400):
+        otype = rng.choice(list(OrderType))
+        limit = rng.choice(NLIMITS)
+        stop = "1.00"
+        if otype is OrderType.MARKET:
+            limit, stop = None, None
+        elif otype is OrderType.LIMIT:
+            stop = None
+        elif otype is OrderType.STOP:
+            limit = None
+        elif otype is OrderType.TRAIL:
+            continue
+        o = norder("o", rng.choice(NMOST), rng.choice(insts), rng.choice([Side.BUY, Side.SELL]),
+                   rng.choice(NQTYS), otype, limit, rng.choice(list(TimeInForce)), stop)
+        mirrored = rng.choice([NMIRROR] * 8 + [("OPT_CSP",), ("O'Q", "a"), ()])
+        got = step("screen", k, lambda: FN6._screen(o, frozenset(mirrored)),
+                   lambda: door("screen", {"order": nopen(o), "mirrored": list(mirrored)})["reason"])
+        seen("screen", got[1] is None)
+        for tag in ("is not mirrored", "multi-leg combo", "a vertical is mirrored", "order type", "TIF",
+                    "not a whole number", "not a mirrored option"):
+            if got[1] and tag in got[1]:
+                seen("screen", tag)
+    assert SEEN["screen"][True] > 100 and SEEN["screen"][False] > 800, SEEN["screen"]
+    for k in range(1500):
+        book = {rng.choice(["a", "b", "c", "d"]): D(rng.choice(NHOLD)) for _ in range(rng.choice([0, 1, 2, 3, 4]))}
+        got = step("mixed_signs", k, lambda: FN6._mixed_signs(book),
+                   lambda: door("mixed_signs", {"book": [[a, str(q)] for a, q in book.items()]})["result"])
+        seen("mixed", got[1])
+    assert SEEN["mixed"][True] > 100 and SEEN["mixed"][False] > 100, SEEN["mixed"]
+    ids = ["a", "b", "c", "é", "d'e"]
+    for k in range(1200):
+        orders = [SimpleNamespace(order_id=rng.choice(ids)) for _ in range(rng.choice([0, 1, 2, 3]))]
+        allocated = [rng.choice(ids) for _ in range(rng.choice([0, 1, 2]))]
+        refused = [rng.choice(ids) for _ in range(rng.choice([0, 1, 2]))]
+        vos = [SimpleNamespace(allocations=[SimpleNamespace(strategy_order_id=i) for i in allocated])]
+        step("afe", k, lambda: FN6._account_for_everything(orders, vos, [(r, "x") for r in refused]),
+             lambda: door("account_for_everything", {"orders": [o.order_id for o in orders], "allocated": allocated,
+                                                       "refused": refused}) and None)
+    for tag in ("is not mirrored", "multi-leg combo", "a vertical is mirrored", "order type", "TIF",
+                "not a whole number", "not a mirrored option"):
+        assert SEEN["screen"][tag] > 20, (tag, SEEN["screen"])
+    settle("screen", 1800, [])
+    settle("mixed_signs", 1500, [])
+    settle("afe", 1200, ["NettingError: netting lost or duplicated an order: inputs"])
+
+
+def test_p5_t6_ticket_lockstep() -> None:
+    rng = random.Random(6009)
+    for k in range(1800):
+        inst = rng.choice(NINSTS + NVERT[:3])
+        side = rng.choice([Side.BUY, Side.SELL])
+        otype = rng.choice([OrderType.LIMIT, OrderType.MARKET])
+        limit = rng.choice(NLIMITS + [None])
+        if otype is OrderType.MARKET:
+            order_limit = None
+        else:
+            order_limit = limit or "2.00"
+        group = [norder(f"g{i}", rng.choice(NACCTS), inst, side, rng.choice(NQTYS), otype, order_limit,
+                        TimeInForce.DAY) for i in range(rng.choice([1, 1, 2, 3]))]
+        tif = rng.choice([TimeInForce.DAY, TimeInForce.GTC])
+        at = rng.choice(N_AT)
+        # the (type, limit) the ticket is built with need not match its orders': the constructor decides
+        lim = None if limit is None else D(limit)
+        step("ticket", k, lambda: vo_doc(FN6._ticket(VENUE, inst, otype, tif, lim, group, at)),
+             lambda: door("ticket", {"venue_account": VENUE, "instrument": wire(inst), "order_type": otype.value,
+                                     "tif": tif.value, "limit_price": None if lim is None else str(lim),
+                                     "group": [nopen(o) for o in group], "at": at.isoformat()}))
+    settle("ticket", 1800, ["ValueError: submitted_at must be timezone-aware", "ValueError: MARKET order cannot",
+                            "ValueError: LIMIT order must"])
+
+
+def test_p5_existing_netting_vectors_through_the_door(monkeypatch) -> None:
+    import test_tos_netting as V
+
+    def inst_back(w):
+        if w["kind"] == "combo":
+            return Combo([ComboLeg(inst_back(l["contract"]), l["ratio"], Side(l["side"])) for l in w["legs"]])
+        return instrument_of(w)
+
+    def venue_back(d):
+        return VenueOrder(
+            venue_order_id=d["venue_order_id"], instrument=inst_back(d["instrument"]),
+            order_type=OrderType(d["order_type"]), side=Side(d["side"]), quantity=D(d["quantity"]),
+            submitted_at=datetime.fromisoformat(d["submitted_at"]), tif=TimeInForce(d["tif"]),
+            limit_price=None if d["limit_price"] is None else D(d["limit_price"]),
+            allocations=tuple(VenueOrderAllocation(o, a, D(q)) for o, a, q in d["allocations"]))
+
+    def net(orders, *, venue_account, mirrored_accounts, at, holdings=None):
+        r = door("net_strategy_orders", net_doc(orders, venue_account, mirrored_accounts, at, holdings))
+        return PNET.NettedBatch(venue_orders=tuple(venue_back(v) for v in r["venue_orders"]),
+                                refused=tuple((o, why) for o, why in r["refused"]))
+
+    def key(venue_account, instrument, side, quantity, order_type, limit_price, tif, order_ids):
+        return door("ticket_key", {"venue_account": venue_account, "instrument": wire(instrument),
+                                   "side": side.value, "quantity": str(quantity), "order_type": order_type.value,
+                                   "limit_price": None if limit_price is None else str(limit_price),
+                                   "tif": tif.value, "order_ids": list(order_ids)})["key"]
+
+    def afe(orders, venue_orders, refused):
+        door("account_for_everything", {"orders": [o.order_id for o in orders],
+                                        "allocated": [a.strategy_order_id for v in venue_orders for a in v.allocations],
+                                        "refused": [o for o, _ in refused]})
+
+    monkeypatch.setattr(V, "net_strategy_orders", net)
+    monkeypatch.setattr(V, "ticket_key", key)
+    monkeypatch.setattr(PNET, "_account_for_everything", afe)
+    ran = run_module_tests(V, only={n for n in vars(V) if n.startswith("test_")} - {
+        "test_a_ticket_error_refuses_its_orders_not_the_batch"})   # that one patches Python's own _ticket
+    assert ran >= 20

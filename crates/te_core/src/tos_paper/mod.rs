@@ -30,6 +30,8 @@ pub const VALUE: &str = "value";
 /// `int(Infinity)`: Python's `OverflowError`.
 pub const OVERFLOW_ERROR: &str = "tos_overflow_error";
 /// A host bug (a malformed door document), never a Python parity case.
+/// `NettingError`.
+pub const NETTING: &str = "tos_netting_error";
 pub const WIRE: &str = "tos_wire";
 
 /// `op` over the JSON document `text`; the answer as JSON text.
@@ -55,6 +57,12 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "unreadable" => reconcile::unreadable_op(&doc)?,
         "confirm_ticket" => reconcile::confirm_ticket_op(&doc)?,
         "ticket_contracts" => reconcile::ticket_contracts_op(&doc)?,
+        "ticket_key" => netting::ticket_key_op(&doc)?,
+        "screen" => netting::screen_op(&doc)?,
+        "mixed_signs" => netting::mixed_signs_op(&doc)?,
+        "net_strategy_orders" => netting::net_op(&doc)?,
+        "ticket" => netting::ticket_op(&doc)?,
+        "account_for_everything" => netting::account_for_everything_op(&doc)?,
         "covers" => cover::covers_op(&doc)?,
         "bare" => cover::bare_op(&doc)?,
         "uncovered" => cover::uncovered_op(&doc)?,
