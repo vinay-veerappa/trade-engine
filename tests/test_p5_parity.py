@@ -1769,3 +1769,498 @@ def test_p5_existing_netting_vectors_through_the_door(monkeypatch) -> None:
     ran = run_module_tests(V, only={n for n in vars(V) if n.startswith("test_")} - {
         "test_a_ticket_error_refuses_its_orders_not_the_batch"})   # that one patches Python's own _ticket
     assert ran >= 20
+
+
+# -- T7 exits --------------------------------------------------------------------------------
+
+from frozen_p5 import exits as FE  # noqa: E402
+from frozen_p5.broker import MirrorBinding  # noqa: E402
+from trade_engine.domain.portfolio import Position  # noqa: E402
+from trade_engine.ledger.state import AccountState  # noqa: E402
+from trade_engine.tos_paper import exits as PE  # noqa: E402
+
+sim_rs.register("tos_exit_plan_error", PE.ExitPlanError)
+
+XS = date(2026, 9, 28)
+XAT = datetime(2026, 9, 28, 16, 35, tzinfo=UTC)
+XMIRROR = ("OPT_CSP", "OPT_PUT_SPREAD")
+XOTHER = "OPT_WHEEL_CORE"
+P205C = opt(strike="205", right="C")
+P200E = opt(strike="200.0")
+XVERTS = [
+    combo((P200, 1, Side.SELL), (P195, 1, Side.BUY)),
+    combo((P200, 1, Side.BUY), (P195, 1, Side.SELL)),
+    combo((P200, 2, Side.SELL), (P195, 2, Side.BUY)),
+    combo((C200, 1, Side.SELL), (P205C, 1, Side.BUY)),
+]
+XFLAT = [P200, P195, C200, AAPL, P205C]
+XSTATES = [OrderState.ACCEPTED, OrderState.ACCEPTED, OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED,
+           OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED, OrderState.NEW]
+XUNITS = ["0", "1", "1", "2", "3", "-1", "-2", "1.0", "0.5", "-0"]
+XNAMES = ["morning", "midday", "late", "follow-1235", "follow-0931", "noon", "follow-", "", "Follow-1", "late "]
+XPRICES = ["0.60", "1.25", "0.60", "2", "0.05", "0", "-1", None, None, "1E+1"]
+
+
+class XLedger:
+    def __init__(self, mirror, states):
+        self.mirror, self.states = mirror, states
+
+    def state(self, account):
+        return self.states.get(account) or AccountState(account)
+
+
+def xorder(oid, account, instrument, side, qty="1", state=OrderState.ACCEPTED, parent=None, tif=TimeInForce.GTC,
+           otype=OrderType.LIMIT, limit="1.00"):
+    return Order(order_id=oid, account_id=account, instrument=instrument, order_type=otype, side=side,
+                 quantity=D(qty), command_id=oid, created_at=T,
+                 limit_price=None if otype is OrderType.MARKET else D(limit),
+                 tif=tif, state=state, parent_order_id=parent)
+
+
+def xticket(key, instrument, side, qty, allocs, filled="0", closed=False) -> MirrorTicketState:
+    """allocs: [(strategy order id, account, quantity)]."""
+    queued = MirrorQueued(
+        venue=VENUE, ticket_key=key, instrument=instrument, side=side, quantity=D(qty), order_type=OrderType.LIMIT,
+        limit_price=D("1.00"), tif=TimeInForce.DAY,
+        allocations=tuple(MirrorAllocation(o, a, D(q)) for o, a, q in allocs), at=T)
+    return MirrorTicketState(queued=queued, filled=D(filled), closed=closed)
+
+
+def xstate(account, positions=(), orders=(), filled=None) -> AccountState:
+    return AccountState(
+        account_id=account,
+        positions=MappingProxyType({i: Position(account_id=account, instrument=i, quantity=D(q), avg_cost=D("1"))
+                                    for i, q in positions}),
+        orders=MappingProxyType({o.order_id: o for o in orders}),
+        filled_quantity=MappingProxyType({k: D(v) for k, v in (filled or {}).items()}))
+
+
+def xmirror(book=(), tickets=(), queued=(), refused=()) -> MirrorState:
+    return MirrorState(venue=VENUE, tickets=MappingProxyType({t.key: t for t in tickets}),
+                       book=MappingProxyType({(a, i): D(q) for a, i, q in book}),
+                       queued_orders=MappingProxyType({k: "tos:x" for k in queued}),
+                       refused_orders=MappingProxyType({k: "why" for k in refused}))
+
+
+def inst_back(w):
+    if w["kind"] == "combo":
+        return Combo([ComboLeg(inst_back(l["contract"]), l["ratio"], Side(l["side"])) for l in w["legs"]])
+    return instrument_of(w)
+
+
+def xdoc(mirror, states, mirrored, session, name, prices, at) -> dict:
+    return {"mirror": LCODEC.canon(mirror), "accounts": [[a, LCODEC.canon(s)] for a, s in states.items()],
+            "mirrored": list(mirrored), "session": session.isoformat(), "name": name,
+            "prices": [[wire(c), side.value, None if p is None else str(p)] for (c, side), p in prices.items()],
+            "at": at.isoformat()}
+
+
+def xorder_doc(o) -> dict:
+    return {"order_id": o.order_id, "account_id": o.account_id, "instrument": wire(o.instrument),
+            "order_type": o.order_type.value, "side": o.side.value, "quantity": str(o.quantity),
+            "command_id": o.command_id, "created_at": o.created_at.isoformat(),
+            "limit_price": None if o.limit_price is None else str(o.limit_price), "tif": o.tif.value}
+
+
+def xplan_doc(p) -> dict:
+    return {"cancel": list(p.cancel), "orders": [xorder_doc(o) for o in p.orders],
+            "refused": [list(r) for r in p.refused], "waits": [list(w) for w in p.waits]}
+
+
+def check_exit(label, mirror, states, prices, name="midday", at=XAT, mirrored=XMIRROR, session=XS):
+    calls = []
+
+    def price(contract, side):
+        calls.append([wire(contract), side.value])
+        return prices.get((contract, side))
+
+    def oracle():
+        FE.mirror_of = lambda ledger, venue: ledger.mirror
+        plan = FE.plan_exits(XLedger(mirror, states), MirrorBinding(VENUE, "margin", tuple(mirrored), D("1000")),
+                             session, name=name, price=price, at=at)
+        return {**xplan_doc(plan), "priced": calls}
+
+    got = step("exit", label, oracle,
+               lambda: door("plan_exits", xdoc(mirror, states, mirrored, session, name, prices, at)))
+    if got[0] == "ok":
+        plan = got[1]
+        seen("exit", "plan")
+        for key in ("cancel", "orders", "refused", "waits", "priced"):
+            if plan[key]:
+                seen("exit", key)
+        for o in plan["orders"]:
+            seen("exit", "combo order" if o["instrument"]["kind"] == "combo" else "leg order")
+            seen("exit", "target" if "@" in o["order_id"] else "close")
+        for _, _, reason in plan["refused"]:
+            for tag in ("a leg of a vertical", "shared with", "no price for it", "a legged book"):
+                if tag in reason:
+                    seen("exit", tag)
+            if reason.startswith("the venue holds the two"):
+                seen("exit", "legged venue")
+            if reason.startswith("the sim holds the two"):
+                seen("exit", "legged sim")
+    else:
+        seen("exit", got[1] + ": " + family(got[2]))
+    return got
+
+
+def xleg_units(vertical, n) -> list:
+    """(contract, signed quantity) for n spreads of the vertical."""
+    return [(l.contract, D(n) * l.ratio * (1 if l.side is Side.BUY else -1)) for l in vertical.legs]
+
+
+def x_case(rng):
+    """One session's state: a mirror, the sim's accounts, and the pass's quotes."""
+    book, positions, orders, tickets = [], {a: [] for a in XMIRROR}, {a: [] for a in XMIRROR}, []
+    filled = {a: {} for a in XMIRROR}
+    queued, refused, ids = [], [], []
+    keys = iter(f"tos:{n}" for n in range(100))
+    for account in XMIRROR:
+        for _ in range(rng.choice([0, 1, 1, 2])):
+            mode = rng.choice(["leg", "leg", "vertical", "vertical", "vertical"])
+            if mode == "leg":
+                c = rng.choice(XFLAT)
+                venue_q, sim_q = rng.choice(XUNITS), rng.choice(XUNITS + ["same"] * 4)
+                sim_q = venue_q if sim_q == "same" else sim_q
+                book.append((account, c, venue_q))
+                if rng.random() < 0.85:
+                    positions[account].append((c, sim_q))
+                entry = xorder(f"e-{account}-{c.symbol[-8:]}", account, c,
+                               Side.SELL if rng.random() < 0.7 else Side.BUY,
+                               state=rng.choice([OrderState.FILLED, OrderState.ACCEPTED]))
+                orders[account].append(entry)
+                for t in range(rng.choice([0, 1, 1, 2])):
+                    side = rng.choice([Side.BUY, Side.SELL])
+                    target = xorder(f"t-{account}-{t}-{c.symbol[-8:]}", account, c, side,
+                                    qty=rng.choice(["1", "2", "3", "0.5"]),
+                                    state=rng.choice(XSTATES), parent=entry.order_id,
+                                    tif=rng.choice([TimeInForce.GTC] * 4 + [TimeInForce.DAY]),
+                                    otype=rng.choice([OrderType.LIMIT] * 6 + [OrderType.MARKET]),
+                                    limit=rng.choice(["1.00", "0.95", "1E+0"]))
+                    orders[account].append(target)
+                    if rng.random() < 0.5:
+                        filled[account][target.order_id] = rng.choice(["0", "0", "1", "0.5", "5"])
+                    ids.append(target)
+                for _ in range(rng.choice([0, 0, 1, 2])):
+                    oid = entry.order_id if rng.random() < 0.6 else rng.choice(orders[account]).order_id
+                    allocs = [(oid + rng.choice(["", "@" + XS.isoformat(), "@2026-09-29"]), account, "1")]
+                    if rng.random() < 0.25:
+                        allocs.append(("x-other", XOTHER, "1"))
+                    tickets.append(xticket(next(keys), c, rng.choice([Side.BUY, Side.SELL]), str(len(allocs)), allocs,
+                                           filled=rng.choice(["0", "0", "1"]), closed=rng.random() < 0.2))
+            else:
+                v = rng.choice(XVERTS)
+                opening, closing = v, FE._flip(v)
+                nv, ns = rng.choice(XUNITS), rng.choice(XUNITS + ["same"] * 5)
+                ns = nv if ns == "same" else ns
+                for contract, q in xleg_units(v, nv):
+                    if rng.random() < 0.07:
+                        q = q + 1                        # a legged book
+                    book.append((account, contract, q))
+                for contract, q in xleg_units(v, ns):
+                    if rng.random() < 0.07:
+                        q = q - 1
+                    if rng.random() < 0.9:
+                        positions[account].append((contract, q))
+                entry = xorder(f"ve-{account}-{len(orders[account])}", account, opening, Side.SELL,
+                               state=rng.choice(XSTATES))
+                if rng.random() < 0.9:
+                    orders[account].append(entry)
+                if rng.random() < 0.5:
+                    filled[account][entry.order_id] = rng.choice(["0", "1", "2"])
+                for t in range(rng.choice([0, 1, 1, 2])):
+                    target = xorder(f"vt-{account}-{t}", account, closing, rng.choice([Side.BUY] * 5 + [Side.SELL]),
+                                    qty=rng.choice(["1", "2", "3"]), state=rng.choice(XSTATES), parent=entry.order_id,
+                                    tif=rng.choice([TimeInForce.GTC] * 4 + [TimeInForce.DAY]))
+                    orders[account].append(target)
+                    if rng.random() < 0.4:
+                        filled[account][target.order_id] = rng.choice(["0", "1", "0.5"])
+                    ids.append(target)
+                for inst in rng.sample([opening, closing, opening], rng.choice([0, 1, 1, 2])):
+                    pool = [o.order_id for o in orders[account]] or ["none"]
+                    oid = rng.choice(pool)
+                    allocs = [(oid + rng.choice(["", "@" + XS.isoformat()]), account, "1")]
+                    if rng.random() < 0.2:
+                        allocs.append(("x-other", XOTHER, "1"))
+                    tickets.append(xticket(next(keys), inst, Side.SELL if inst == opening else Side.BUY,
+                                           str(len(allocs)), allocs, filled=rng.choice(["0", "0", "1"]),
+                                           closed=rng.random() < 0.2))
+    name = rng.choice(XNAMES[:4] * 3 + XNAMES)
+    # handled ids: closes, refusals and rested targets this session already sent
+    for account, c, _ in list(book):
+        if rng.random() < 0.15:
+            (queued if rng.random() < 0.6 else refused).append(
+                FE.close_id(account, c, XS, name) if rng.random() < 0.6 else FE._refusal_id(account, c, XS))
+    for account in XMIRROR:
+        for o in orders[account]:
+            if rng.random() < 0.1:
+                queued.append(FE.target_id(o, XS))
+    for account in XMIRROR:
+        for v in XVERTS:
+            if rng.random() < 0.08:
+                queued.append(FE.close_id(account, FE._flip(v), XS, name))
+            if rng.random() < 0.08:
+                refused.append(FE._refusal_id(account, v, XS))
+    prices = {}
+    for c in XFLAT + XVERTS + [FE._flip(v) for v in XVERTS]:
+        for side in (Side.BUY, Side.SELL):
+            if rng.random() < 0.9:
+                p = rng.choice(XPRICES)
+                prices[(c, side)] = None if p is None else D(p)
+    mirror = xmirror(book, tickets, queued, refused)
+    states = {a: xstate(a, positions[a], orders[a], filled[a]) for a in XMIRROR if rng.random() < 0.93}
+    return mirror, states, prices, name
+
+
+def test_p5_t7_plan_exits_lockstep() -> None:
+    rng = random.Random(7001)
+    spread, closing = XVERTS[0], FE._flip(XVERTS[0])
+    prices = {(P200, Side.BUY): D("0.60"), (P200, Side.SELL): D("0.60"), (P195, Side.SELL): D("0.60"),
+              (P195, Side.BUY): D("0.60"), (spread, Side.BUY): D("1.10"), (closing, Side.BUY): D("1.10"),
+              (AAPL, Side.SELL): D("190"), (AAPL, Side.BUY): D("190")}
+    csp, ps = "OPT_CSP", "OPT_PUT_SPREAD"
+    # the edge grid
+    check_exit("empty", xmirror(), {}, {})
+    check_exit("bad-name", xmirror(), {}, {}, name="noon")
+    check_exit("bare-follow", xmirror(), {}, {}, name="follow-")
+    check_exit("naive-at-empty", xmirror(), {}, {}, at=datetime(2026, 9, 28, 16, 35))
+    check_exit("close", xmirror([(csp, P200, "-1")]), {}, prices)
+    check_exit("close-naive", xmirror([(csp, P200, "-1")]), {}, prices, at=datetime(2026, 9, 28, 16, 35))
+    check_exit("close-no-price", xmirror([(csp, P200, "-1")]), {csp: xstate(csp)}, {})
+    check_exit("close-zero-price", xmirror([(csp, P200, "-1")]), {}, {(P200, Side.BUY): D("0")})
+    check_exit("long-closes-by-sale", xmirror([(csp, AAPL, "100")]), {csp: xstate(csp, [(AAPL, "40")])}, prices)
+    check_exit("sim-opposite", xmirror([(csp, AAPL, "100")]), {csp: xstate(csp, [(AAPL, "-40")])}, prices)
+    check_exit("unmirrored-account", xmirror([(XOTHER, P200, "-1")]), {}, prices)
+    entry = xorder("e1", csp, P200, Side.SELL, state=OrderState.FILLED)
+    target = xorder("t1", csp, P200, Side.BUY, parent="e1")
+    held = xmirror([(csp, P200, "-3")])
+    sim = {csp: xstate(csp, [(P200, "-3")], [entry, target], {"t1": "1"})}
+    check_exit("rest-target", held, sim, prices)
+    check_exit("rest-target-sorted", held,
+               {csp: xstate(csp, [(P200, "-3")], [entry, target, xorder("a0", csp, P200, Side.BUY, parent="e1", qty="5")])},
+               prices)
+    check_exit("target-handled", xmirror([(csp, P200, "-3")], queued=[FE.target_id(target, XS)]), sim, prices)
+    check_exit("target-overfilled", held, {csp: xstate(csp, [(P200, "-3")], [entry, target], {"t1": "9"})}, prices)
+    check_exit("target-room-caps", xmirror([(csp, P200, "-1")]),
+               {csp: xstate(csp, [(P200, "-1")], [entry, xorder("t1", csp, P200, Side.BUY, qty="5", parent="e1")])},
+               prices)
+    check_exit("two-targets-share-room", xmirror([(csp, P200, "-3")]),
+               {csp: xstate(csp, [(P200, "-3")], [entry, xorder("t1", csp, P200, Side.BUY, qty="2", parent="e1"),
+                                                  xorder("t2", csp, P200, Side.BUY, qty="2", parent="e1")])}, prices)
+    for label, o in [("tif-day", xorder("t1", csp, P200, Side.BUY, parent="e1", tif=TimeInForce.DAY)),
+                     ("market", xorder("t1", csp, P200, Side.BUY, parent="e1", otype=OrderType.MARKET)),
+                     ("wrong-side", xorder("t1", csp, P200, Side.SELL, parent="e1")),
+                     ("no-parent", xorder("t1", csp, P200, Side.BUY)),
+                     ("cancelled", xorder("t1", csp, P200, Side.BUY, parent="e1", state=OrderState.CANCELLED)),
+                     ("other-contract", xorder("t1", csp, P195, Side.BUY, parent="e1")),
+                     ("equal-contract", xorder("t1", csp, P200E, Side.BUY, parent="e1"))]:
+        check_exit("not-a-target-" + label, held, {csp: xstate(csp, [(P200, "-3")], [entry, o])}, prices)
+    resting = xticket("tos:r", P200, Side.BUY, "1", [("t1@2026-09-28", csp, "1")])
+    check_exit("target-already-rests", xmirror([(csp, P200, "-3")], [resting]), sim, prices)
+    check_exit("opposite-ticket-rests",
+               xmirror([(csp, P200, "-3")], [xticket("tos:r", P200, Side.SELL, "1", [("z", csp, "1")])]), sim, prices)
+    check_exit("close-cancels-resting", xmirror([(csp, P200, "-1")], [resting]),
+               {csp: xstate(csp, [], [entry, target])}, prices)
+    shared = xticket("tos:s", P200, Side.BUY, "3", [("a", csp, "1"), ("b", XOTHER, "1"), ("c", ps, "1")])
+    check_exit("close-shared", xmirror([(csp, P200, "-1")], [shared]), {}, prices)
+    check_exit("close-done-ticket", xmirror([(csp, P200, "-1")],
+                                            [xticket("tos:d", P200, Side.BUY, "1", [("a", csp, "1")], closed=True)]),
+               {}, prices)
+    check_exit("close-handled", xmirror([(csp, P200, "-1")], queued=[FE.close_id(csp, P200, XS, "midday")]), {}, prices)
+    check_exit("close-refused-once", xmirror([(csp, P200, "-1")], refused=[FE._refusal_id(csp, P200, XS)]), {}, {})
+    check_exit("close-other-pass", xmirror([(csp, P200, "-1")], queued=[FE.close_id(csp, P200, XS, "morning")]),
+               {}, prices)
+    # verticals
+    legs = [(csp, c, q) for c, q in xleg_units(spread, "2")]
+    ventry = xorder("ve", csp, spread, Side.SELL, state=OrderState.FILLED)
+    vticket = xticket("tos:v", spread, Side.SELL, "2", [("ve", csp, "2")], filled="2")
+
+    def vsim(n, *orders, filled=None):
+        return {csp: xstate(csp, xleg_units(spread, n), [ventry, *orders], filled)}
+
+    vtarget = xorder("vt", csp, closing, Side.BUY, qty="2", parent="ve")
+    check_exit("vertical-held", xmirror(legs, [vticket]), vsim("2"), prices)
+    check_exit("vertical-target-rests", xmirror(legs, [vticket]), vsim("2", vtarget), prices)
+    check_exit("vertical-sim-closed", xmirror(legs, [vticket]), vsim("0", vtarget), prices)
+    check_exit("vertical-sim-half", xmirror(legs, [vticket]), vsim("1", vtarget), prices)
+    check_exit("vertical-sim-short", xmirror(legs, [vticket]), vsim("-1"), prices)
+    check_exit("vertical-no-price", xmirror(legs, [vticket]), vsim("0"), {})
+    check_exit("vertical-zero-price", xmirror(legs, [vticket]), vsim("0"), {(closing, Side.BUY): D("0")})
+    check_exit("vertical-shared",
+               xmirror(legs, [vticket, xticket("tos:w", closing, Side.BUY, "2", [("p", csp, "1"), ("q", XOTHER, "1")])]),
+               vsim("0"), prices)
+    check_exit("vertical-legged-venue", xmirror([legs[0], (csp, legs[1][1], legs[1][2] + 1)], [vticket]),
+               vsim("2"), prices)
+    check_exit("vertical-legged-sim", xmirror(legs, [vticket]),
+               {csp: xstate(csp, [(P200, "-2"), (P195, "1")], [ventry])}, prices)
+    check_exit("vertical-leg-position-missing", xmirror(legs, [vticket]),
+               {csp: xstate(csp, [(P200, "-2")], [ventry])}, prices)
+    check_exit("vertical-close-handled",
+               xmirror(legs, [vticket], queued=[FE.close_id(csp, closing, XS, "midday")]), vsim("0"), prices)
+    entry_ticket = xticket("tos:v", spread, Side.SELL, "2", [("ve", csp, "2")])
+    check_exit("vertical-entry-unworked", xmirror([], [entry_ticket]),
+               {csp: xstate(csp, [], [xorder("ve", csp, spread, Side.SELL, state=OrderState.CANCELLED)])}, prices)
+    check_exit("vertical-entry-worked", xmirror([], [entry_ticket]),
+               {csp: xstate(csp, [], [xorder("ve", csp, spread, Side.SELL, state=OrderState.ACCEPTED)])}, prices)
+    check_exit("vertical-entry-ended-unfilled", xmirror([], [entry_ticket]),
+               {csp: xstate(csp, xleg_units(spread, "1"),
+                            [xorder("ve", csp, spread, Side.SELL, state=OrderState.CANCELLED)])}, prices)
+    check_exit("vertical-entry-filled-keeps", xmirror([], [entry_ticket]),
+               {csp: xstate(csp, xleg_units(spread, "1"),
+                            [xorder("ve", csp, spread, Side.SELL, state=OrderState.CANCELLED)], {"ve": "1"})}, prices)
+    vt_ticket = xticket("tos:t", closing, Side.BUY, "2", [("vt@2026-09-28", csp, "2")])
+    check_exit("vertical-target-cancelled", xmirror(legs, [vticket, vt_ticket]),
+               vsim("2", xorder("vt", csp, closing, Side.BUY, qty="2", parent="ve", state=OrderState.CANCELLED)), prices)
+    check_exit("vertical-target-rests-already", xmirror(legs, [vticket, vt_ticket]), vsim("2", vtarget), prices)
+    check_exit("vertical-no-entry-order", xmirror(legs, [vticket]),
+               {csp: xstate(csp, xleg_units(spread, "2"), [])}, prices)
+    check_exit("vertical-entry-is-a-child", xmirror(legs, [vticket]),
+               {csp: xstate(csp, xleg_units(spread, "2"), [xorder("ve", csp, spread, Side.SELL, parent="p")])}, prices)
+    check_exit("vertical-unmirrored", xmirror([(XOTHER, c, q) for c, q in xleg_units(spread, "2")],
+                                              [xticket("tos:v", spread, Side.SELL, "2", [("ve", XOTHER, "2")])]),
+               {}, prices)
+    check_exit("vertical-leg-alone", xmirror([(csp, P200, "-2")], [vticket]), vsim("0"), prices)
+    check_exit("two-accounts-one-pair", xmirror(legs + [(ps, c, q) for c, q in xleg_units(spread, "1")],
+                                                [vticket, xticket("tos:v2", spread, Side.SELL, "1", [("ve2", ps, "1")])]),
+               {csp: vsim("0")[csp], ps: xstate(ps, [], [xorder("ve2", ps, spread, Side.SELL)])}, prices)
+    check_exit("leg-in-vertical-no-entry", xmirror([(csp, P200, "-1"), (csp, P195, "1")],
+                                                   [xticket("tos:v", spread, Side.SELL, "1", [("zz", csp, "1")])]),
+               {}, prices)
+    check_exit("vertical-follow", xmirror(legs, [vticket]), vsim("0"), prices, name="follow-1235")
+    for n in range(4200):                                    # seeded
+        mirror, states, quotes, name = x_case(rng)
+        check_exit(n, mirror, states, quotes, name=name,
+                   at=XAT if rng.random() < 0.97 else datetime(2026, 9, 28, 16, 35))
+    c = SEEN["exit"]
+    for want in ("plan", "cancel", "orders", "refused", "waits", "priced", "combo order", "leg order", "target", "close",
+                 "a leg of a vertical", "shared with", "no price for it", "a legged book", "legged venue",
+                 "legged sim"):
+        assert c[want] > 25, (want, sorted(c.items()))
+    settle("exit", 4200, ["ExitPlanError: Unknown pass", "ValueError: Order created_at must be timezone-aware"])
+
+
+def test_p5_t7_helpers_lockstep() -> None:
+    rng = random.Random(7002)
+    csp, ps = "OPT_CSP", "OPT_PUT_SPREAD"
+    for n in range(300):                                     # ids
+        account, c = rng.choice(["OPT_CSP", "O'Q", "é"]), rng.choice(XFLAT + XVERTS)
+        name = rng.choice(XNAMES)
+        o = xorder(rng.choice(["t-1", "x@y", "e"]), csp, P200, Side.BUY)
+        for which, py in (("close", FE.close_id(account, c, XS, name)), ("target", FE.target_id(o, XS)),
+                          ("refusal", FE._refusal_id(account, c, XS))):
+            doc = {"which": which, "session": XS.isoformat(), "account": account, "instrument": wire(c), "name": name,
+                   "order_id": o.order_id}
+            assert door("exit_id", doc) == {"id": py}, (which, n)
+            seen("exit_id", which)
+    odd = [combo((P200, 1, Side.SELL), (P195, 2, Side.BUY)), combo((AAPL, 100, Side.BUY), (C200, 1, Side.SELL))]
+    for v in XVERTS + odd:                                   # _flip
+        got = step("exit_flip", v, lambda v=v: wire(FE._flip(v)), lambda v=v: door("exit_flip", {"combo": wire(v)}))
+        assert got[0] == "ok"
+    ones = ["0", "1", "-1", "2", "-2", "1.0", "1.00", "0.5", "-0", "3", "100", "-100"]
+    for n in range(1200):                                    # _units
+        v = rng.choice(XVERTS + odd + [combo((P200, 1, Side.SELL), (P200E, 1, Side.BUY))])
+        held = {}
+        for l in v.legs:
+            if rng.random() < 0.9:
+                q = D(rng.choice(ones))
+                held[l.contract] = q if rng.random() < 0.5 else q * l.ratio * (1 if l.side is Side.BUY else -1)
+        got = step("exit_units", n, lambda: (lambda u: None if u is None else str(u))(FE._units(held, v)),
+                   lambda: door("exit_units", {"combo": wire(v), "held": pairs_doc(held)})["units"])
+        seen("exit_units", "none" if got[1] is None else "units")
+    assert SEEN["exit_units"]["units"] > 100 and SEEN["exit_units"]["none"] > 100, SEEN["exit_units"]
+    settle("exit_flip", 6, [])
+    settle("exit_units", 1200, [])
+    for n in range(1500):          # _open_on, _in_vertical, _sim_orders, _verticals, _plan_verticals on states
+        mirror, states, prices, name = x_case(rng)
+        base = xdoc(mirror, states, XMIRROR, XS, name, prices, XAT)
+        account = rng.choice([csp, ps, XOTHER])
+        contract = rng.choice(XFLAT + [P200E])
+        want = [t.key for t in FE._open_on(mirror, account, contract)]
+        got = door("exit_open_on", {**base, "which": "open_on", "account": account, "contract": wire(contract)})
+        assert got["keys"] == want, (n, got, want)
+        got = door("exit_open_on", {**base, "which": "in_vertical", "account": account, "contract": wire(contract)})
+        assert got["in_vertical"] == FE._in_vertical(mirror, account, contract), n
+        seen("exit_open", (bool(want), got["in_vertical"]))
+        for key, ticket in mirror.tickets.items():
+            state = XLedger(mirror, states).state(account)
+            want = [o.order_id for o in FE._sim_orders(state, ticket, XS)]
+            assert door("exit_sim_orders", {**base, "ticket": key, "account": account}) == want, (n, key)
+            seen("exit_sim", bool(want))
+        ledger = XLedger(mirror, states)
+        binding = MirrorBinding(VENUE, "margin", XMIRROR, D("1000"))
+        want = [[a, wire(c), [t.key for t in ts]] for (a, c), ts in FE._verticals(ledger, binding, mirror).items()]
+        assert door("exit_verticals", base) == want, n
+        seen("exit_verticals", bool(want))
+        cancel, orders, refused, waits, calls = [], [], [], [], []
+
+        def price(c, side):
+            calls.append([wire(c), side.value])
+            return prices.get((c, side))
+
+        covered = FE._plan_verticals(ledger, binding, mirror, XS, name, price, XAT, cancel, orders, refused, waits)
+        got = door("plan_verticals", base)
+        assert got["cancel"] == cancel and got["refused"] == [list(r) for r in refused], n
+        assert got["waits"] == [list(w) for w in waits] and got["orders"] == [xorder_doc(o) for o in orders], n
+        assert got["priced"] == calls, n
+        key = lambda row: json.dumps(row, sort_keys=True)  # noqa: E731
+        assert sorted({key(r) for r in got["covered"]}) == sorted({key([a, wire(c)]) for a, c in covered}), n
+    for tally, want in (("exit_id", 3), ("exit_open", 3), ("exit_sim", 2), ("exit_verticals", 2)):
+        assert len(SEEN[tally]) >= want, (tally, SEEN[tally])
+    assert SEEN["exit_open"][(True, False)] > 20 and SEEN["exit_open"][(False, True)] > 20, SEEN["exit_open"]
+
+
+def run_module_with_ledger(module, tmp_path, only=None) -> int:
+    """``run_module_tests`` for a module whose tests take the ``ledger`` fixture (a fresh one each)."""
+    from trade_engine.ledger import Ledger
+
+    ran = 0
+    for name, fn in sorted(vars(module).items()):
+        if not name.startswith("test_") or not inspect.isfunction(fn) or (only and name not in only):
+            continue
+        fixtures = [p for p in inspect.signature(fn).parameters if p in ("ledger", "tmp_path")]
+        assert fixtures in ([], ["ledger"], ["tmp_path"]), (name, fixtures)
+        for args in parametrized(fn):
+            ran += 1
+            if fixtures == ["ledger"]:
+                with Ledger(tmp_path / f"{ran}.db") as lg:
+                    fn(lg, *args)
+            elif fixtures == ["tmp_path"]:
+                (tmp_path / str(ran)).mkdir()
+                fn(tmp_path / str(ran), *args)
+            else:
+                fn(*args)
+    return ran
+
+
+def test_p5_existing_exits_vectors_through_the_door(monkeypatch, tmp_path) -> None:
+    import test_tos_mirror_exits as V
+
+    def door_plan(ledger, binding, session, *, name, price, at):
+        mirror = PE.mirror_of(ledger, binding.venue_account)
+        accounts = {a: ledger.state(a) for a in binding.mirrored_accounts}
+        asked = [c for (_, c) in mirror.book]
+        for t in mirror.tickets.values():
+            asked.append(t.queued.instrument)
+            if isinstance(t.queued.instrument, Combo):
+                asked.append(FE._flip(t.queued.instrument))
+        quotes = {}
+        for c in asked:
+            for side in (Side.BUY, Side.SELL):
+                quotes[(c, side)] = price(c, side)
+        if hasattr(price, "seen"):
+            price.seen.clear()
+        r = door("plan_exits", xdoc(mirror, accounts, binding.mirrored_accounts, session, name, quotes, at))
+        for w, side in r["priced"]:
+            price(inst_back(w), Side(side))
+        orders = tuple(Order(order_id=o["order_id"], account_id=o["account_id"], instrument=inst_back(o["instrument"]),
+                             order_type=OrderType(o["order_type"]), side=Side(o["side"]), quantity=D(o["quantity"]),
+                             command_id=o["command_id"], created_at=datetime.fromisoformat(o["created_at"]),
+                             limit_price=None if o["limit_price"] is None else D(o["limit_price"]),
+                             tif=TimeInForce(o["tif"])) for o in r["orders"])
+        return PE.ExitPlan(cancel=tuple(r["cancel"]), orders=orders, refused=tuple(tuple(x) for x in r["refused"]),
+                           waits=tuple(tuple(x) for x in r["waits"]))
+
+    monkeypatch.setattr(V, "plan_exits", door_plan)
+    monkeypatch.setattr(PE, "plan_exits", door_plan)
+    ran = run_module_with_ledger(V, tmp_path)
+    assert ran >= 30, ran

@@ -10,6 +10,7 @@
 //! decimal kinds), its message exactly the Python's.
 
 pub mod cover;
+pub mod exits;
 pub mod netting;
 pub mod normalize;
 pub mod pytables;
@@ -32,6 +33,8 @@ pub const OVERFLOW_ERROR: &str = "tos_overflow_error";
 /// A host bug (a malformed door document), never a Python parity case.
 /// `NettingError`.
 pub const NETTING: &str = "tos_netting_error";
+/// `ExitPlanError`.
+pub const EXIT_PLAN: &str = "tos_exit_plan_error";
 pub const WIRE: &str = "tos_wire";
 
 /// `op` over the JSON document `text`; the answer as JSON text.
@@ -69,6 +72,14 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "holdings" => cover::holdings_op(&doc)?,
         "sold" => cover::sold_op(&doc)?,
         "cover_reason" => cover::cover_reason_op(&doc)?,
+        "plan_exits" => exits::plan_exits_op(&doc)?,
+        "plan_verticals" => exits::plan_verticals_op(&doc)?,
+        "exit_verticals" => exits::verticals_op(&doc)?,
+        "exit_id" => exits::ids_op(&doc)?,
+        "exit_units" => exits::units_op(&doc)?,
+        "exit_flip" => exits::flip_op(&doc)?,
+        "exit_open_on" => exits::open_on_op(&doc)?,
+        "exit_sim_orders" => exits::sim_orders_op(&doc)?,
         "text_probe" => wire::text_probe(&doc)?,
         _ => return err(WIRE, format!("unknown tos_paper op {op:?}")),
     };
