@@ -13,6 +13,7 @@ pub mod netting;
 pub mod normalize;
 pub mod pytables;
 pub mod pytext;
+pub mod reconcile;
 pub mod slippage;
 pub mod transport;
 pub mod wire;
@@ -48,6 +49,11 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "position" => normalize::position(&doc)?,
         "allocate_venue_fill" => slippage::allocate_venue_fill(&doc)?,
         "slippage_report" => slippage::slippage_report(&doc)?,
+        "position_book" => reconcile::position_book_op(&doc)?,
+        "reconcile" => reconcile::reconcile_op(&doc)?,
+        "unreadable" => reconcile::unreadable_op(&doc)?,
+        "confirm_ticket" => reconcile::confirm_ticket_op(&doc)?,
+        "ticket_contracts" => reconcile::ticket_contracts_op(&doc)?,
         "text_probe" => wire::text_probe(&doc)?,
         _ => return err(WIRE, format!("unknown tos_paper op {op:?}")),
     };

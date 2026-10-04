@@ -238,3 +238,89 @@ pub fn text_probe(j: &Json) -> R<Json> {
             .collect(),
     ))
 }
+
+// -- the ledger model's instruments, for the decisions that fold with the ledger -------------------
+
+use crate::ledger::model as lm;
+
+/// An instrument document read as the ledger model's `Instrument` (an equity, an option
+/// or a combo: `kind: "other"` is not one, and refuses as a host bug).
+pub fn linstr(j: &Json) -> R<lm::Instrument> {
+    match req_str(j, "kind")? {
+        "equity" => Ok(lm::Instrument::Equity(req_str(j, "symbol")?.to_string())),
+        "option" => {
+            let right = match req_str(j, "right")? {
+                "C" => Right::Call,
+                "P" => Right::Put,
+                other => return wire(format!("bad right {other:?}")),
+            };
+            Ok(lm::Instrument::Option(lm::OptionContract {
+                underlying: req_str(j, "underlying")?.to_string(),
+                expiry: lm::parse_date(req_str(j, "expiry")?)?,
+                strike: req_dec(j, "strike")?,
+                right,
+                multiplier: req_int(j, "multiplier")?,
+            }))
+        }
+        "combo" => {
+            let mut legs = Vec::new();
+            for leg in req_arr(j, "legs")? {
+                legs.push(lm::ComboLeg {
+                    contract: linstr(req(leg, "contract")?)?,
+                    ratio: req_int(leg, "ratio")?,
+                    side: side_of(req_str(leg, "side")?)?,
+                });
+            }
+            Ok(lm::Instrument::Combo(legs))
+        }
+        other => wire(format!("instrument kind {other:?} has no ledger form")),
+    }
+}
+
+/// The wire document of a model instrument (the strike keeps its spelling).
+pub fn linstr_json(i: &lm::Instrument) -> Json {
+    match i {
+        lm::Instrument::Equity(s) => obj(vec![("kind", jstr("equity")), ("symbol", jstr(s.clone()))]),
+        lm::Instrument::Option(c) => obj(vec![
+            ("kind", jstr("option")),
+            ("underlying", jstr(c.underlying.clone())),
+            ("expiry", jstr(lm::date_iso(&c.expiry))),
+            ("strike", jstr(c.strike.to_py_string())),
+            ("right", jstr(if c.right == Right::Call { "C" } else { "P" })),
+            ("multiplier", Json::Int(c.multiplier)),
+        ]),
+        lm::Instrument::Combo(legs) => obj(vec![
+            ("kind", jstr("combo")),
+            (
+                "legs",
+                Json::Arr(
+                    legs.iter()
+                        .map(|l| {
+                            obj(vec![
+                                ("contract", linstr_json(&l.contract)),
+                                ("ratio", Json::Int(l.ratio)),
+                                ("side", jstr(l.side.value())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]),
+    }
+}
+
+pub fn side_of(text: &str) -> R<lm::Side> {
+    lm::Side::parse(text).map_or_else(|| wire(format!("bad side {text:?}")), Ok)
+}
+
+pub fn order_type_of(text: &str) -> R<lm::OrderType> {
+    lm::OrderType::parse(text).map_or_else(|| wire(format!("bad order type {text:?}")), Ok)
+}
+
+pub fn state_of(text: &str) -> R<lm::OrderState> {
+    lm::OrderState::parse(text).map_or_else(|| wire(format!("bad order state {text:?}")), Ok)
+}
+
+pub fn tif_of(text: &str) -> R<lm::Tif> {
+    lm::Tif::parse(text).map_or_else(|| wire(format!("bad tif {text:?}")), Ok)
+}

@@ -16,7 +16,7 @@ import os
 import random
 import sys
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -868,3 +868,310 @@ def test_p5_existing_ticket_vectors_through_the_door(monkeypatch) -> None:
         "test_an_equity_order_becomes_a_stock_ticket_exactly", "test_an_option_order_is_still_an_option_ticket",
         "test_a_stock_order_the_venue_cannot_express_is_unsupported_never_approximated"})
     assert ran >= 19
+
+
+# -- T4 reconcile ----------------------------------------------------------------------------
+
+from frozen_p5 import reconcile as FR  # noqa: E402
+from trade_engine.ledger.events import VenueReconcile  # noqa: E402
+
+VENUE = "D-00000001"
+SEEN: dict[str, Counter] = {}
+
+
+def seen(tally: str, key) -> None:
+    SEEN.setdefault(tally, Counter())[key] += 1
+
+
+def pos(instrument, quantity) -> VenuePosition:
+    return VenuePosition(instrument, D(quantity), D("2.00"), T)
+
+
+def pos_docs(positions) -> list:
+    return [{"instrument": wire(p.instrument), "quantity": str(p.quantity)} for p in positions]
+
+
+def pairs_doc(mapping) -> list:
+    return [[wire(k), str(v)] for k, v in mapping.items()]
+
+
+def work(instrument, side, qty="1", filled="0", state=OrderState.ACCEPTED, limit="2.00", order_type=None):
+    ot = order_type or (OrderType.LIMIT if limit else OrderType.MARKET)
+    return FR.WorkingOrder(instrument, side, D(qty), D(filled), ot, D(limit) if limit else None, state)
+
+
+def work_doc(rows) -> list:
+    return [row_json(r) for r in rows]
+
+
+def rec_json(e) -> dict:
+    return {"venue": e.venue, "as_of": e.as_of.isoformat(), "reconciled": e.reconciled, "drift": list(e.drift),
+            "note": e.note}
+
+
+RCONTRACTS = [P200, P195, C200, AAPL, opt(strike="200.0"), opt(multiplier=10), opt(strike="190"), opt(strike="1234.567")]
+RQTYS = ["0", "1", "-1", "2", "-2", "3", "1.0", "-1.0", "0.50", "100", "-100", "1E+1", "-0"]
+STATES = list(OrderState)
+LIVE = [OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED]
+
+
+def reconcile_case(rng):
+    """A mirror book, and what the venue shows of it: right, drifted, missing, unknown, empty."""
+    contracts = rng.sample(RCONTRACTS, rng.randint(0, 4))
+    expected = {c: D(rng.choice(RQTYS)) for c in contracts}
+    positions, working = [], []
+    mode = rng.choice(["clean", "clean", "drift", "missing", "extra", "unknown", "empty", "split", "wild"])
+    for c, want in expected.items():
+        have = want
+        if mode == "drift" and rng.random() < 0.5:
+            have = want + rng.choice([D(1), D(-1), D("0.5")])
+        if mode == "missing" and rng.random() < 0.5:
+            have = D(0)
+        if mode == "empty":
+            have = D(0)
+        if rng.random() < 0.4:                      # part of it rests on the book
+            rest = D(rng.choice(["1", "2", "-1", "-2"]))
+            have = have - rest
+            side = Side.BUY if rest > 0 else Side.SELL
+            filled = D(rng.choice(["0", "0", "1"]))
+            working.append(FR.WorkingOrder(c, side, abs(rest) + filled, filled, OrderType.LIMIT, D("2.00"),
+                                           rng.choice(LIVE)))
+        if have != 0 or rng.random() < 0.3:
+            if mode == "split" and rng.random() < 0.7:
+                positions += [pos(c, str(have / 2)), pos(c, str(have - have / 2))]
+            else:
+                positions.append(pos(c, str(have)))
+    if mode == "extra":
+        positions.append(pos(rng.choice(RCONTRACTS), rng.choice(["1", "-1", "5"])))
+    if mode in ("unknown", "wild"):
+        working.append(work(rng.choice(RCONTRACTS), rng.choice(list(Side)), state=OrderState.PENDING_UNKNOWN))
+    if mode == "wild":
+        for _ in range(rng.randint(1, 4)):
+            working.append(work(rng.choice(RCONTRACTS), rng.choice(list(Side)), qty=rng.choice(["1", "2", "3"]),
+                                filled=rng.choice(["0", "1", "2"]), state=rng.choice(STATES)))
+        for _ in range(rng.randint(0, 3)):
+            positions.append(pos(rng.choice(RCONTRACTS), rng.choice(RQTYS)))
+    rng.shuffle(working)
+    return expected, positions, working
+
+
+def check_reconcile(label, venue, as_of, expected, positions, working) -> None:
+    got = step("reconcile", label,
+               lambda: rec_json(FR.reconcile(venue, as_of, expected, positions, working)),
+               lambda: door("reconcile", {"venue": venue, "as_of": as_of.isoformat(), "expected": pairs_doc(expected),
+                                          "positions": pos_docs(positions), "working": work_doc(working)}))
+    if got[0] == "ok":
+        seen("reconcile", (got[1]["reconciled"], bool(got[1]["drift"])))
+    step("position_book", label, lambda: pairs_doc(FR.position_book(positions)),
+         lambda: door("position_book", {"positions": pos_docs(positions)}))
+
+
+def test_p5_t4_reconcile_lockstep() -> None:
+    rng = random.Random(5101)
+    naive = datetime(2026, 9, 24, 20, 0)
+    # the edge grid: an empty day ({} from the web driver), then each way a contract can drift
+    check_reconcile("empty-clean", VENUE, T, {}, [], [])
+    check_reconcile("empty-day", VENUE, T, {P200: D(-1)}, [], [])
+    check_reconcile("equal-strike-spellings", VENUE, T, {P200: D(-1)}, [pos(opt(strike="200.0"), "-1")], [])
+    check_reconcile("one-share-drift", VENUE, T, {AAPL: D(100)}, [pos(AAPL, "99")], [])
+    check_reconcile("one-contract-drift", VENUE, T, {P200: D(-2)}, [pos(P200, "-1")], [])
+    check_reconcile("sell-rest", VENUE, T, {P200: D(-2)}, [pos(P200, "-1")], [work(P200, Side.SELL, "1")])
+    check_reconcile("buy-rest-wrong-way", VENUE, T, {P200: D(-2)}, [pos(P200, "-1")], [work(P200, Side.BUY, "1")])
+    check_reconcile("partial-rest", VENUE, T, {P200: D(-2)}, [pos(P200, "-1")],
+                    [work(P200, Side.SELL, "2", "1", OrderState.PARTIALLY_FILLED)])
+    check_reconcile("unknown-row", VENUE, T, {P200: D(-1)}, [pos(P200, "-1")],
+                    [work(P200, Side.SELL, state=OrderState.PENDING_UNKNOWN)])
+    check_reconcile("unknown-alone", VENUE, T, {}, [], [work(P200, Side.SELL, state=OrderState.PENDING_UNKNOWN)])
+    for state in STATES:
+        check_reconcile(("state", state), VENUE, T, {P200: D(-1)}, [], [work(P200, Side.SELL, state=state)])
+    check_reconcile("empty-venue", "", T, {}, [], [])
+    check_reconcile("empty-venue-drift", "", T, {P200: D(-1)}, [], [])
+    check_reconcile("naive", VENUE, naive, {}, [], [])
+    check_reconcile("naive-drift", VENUE, naive, {P200: D(-1)}, [], [])
+    check_reconcile("offset", "D-2", datetime(2026, 9, 24, 15, 0, tzinfo=timezone(timedelta(hours=-5))), {}, [], [])
+    for n in range(2500):                                   # seeded
+        expected, positions, working = reconcile_case(rng)
+        venue = "" if rng.random() < 0.01 else rng.choice([VENUE, "D-2"])
+        check_reconcile(n, venue, naive if rng.random() < 0.01 else T, expected, positions, working)
+    c = SEEN["reconcile"]
+    assert c[(True, False)] > 100 and c[(False, True)] > 300, c
+    settle("reconcile", 2500, ["EventPayloadError: VenueReconcile.venue must be non-empty",
+                               "EventPayloadError: VenueReconcile.as_of must be timezone-aware"])
+    assert sum(TALLY["position_book"].values()) >= 2500
+
+
+def check_unreadable(label, venue, as_of, contracts, why) -> None:
+    step("unreadable", label, lambda: rec_json(FR.unreadable(venue, as_of, contracts, why)),
+         lambda: door("unreadable", {"venue": venue, "as_of": as_of.isoformat(),
+                                     "contracts": [wire(c) for c in contracts], "why": why}))
+
+
+def test_p5_t4_unreadable_lockstep() -> None:
+    rng = random.Random(5102)
+    check_unreadable("none", VENUE, T, [], "JAB down")
+    check_unreadable("dupes", VENUE, T, [P200, P195, P200, opt(strike="200.0")], "x")
+    check_unreadable("no-venue", "", T, [P200], "x")
+    check_unreadable("naive", VENUE, datetime(2026, 9, 24), [], "x")
+    for n in range(400):
+        check_unreadable(n, rng.choice([VENUE, "D-2"]), T, [rng.choice(RCONTRACTS) for _ in range(rng.randint(0, 5))],
+                         rng.choice(["JAB down", "", "é\n", "timeout after 30s", "x" * 80]))
+    settle("unreadable", 400, ["EventPayloadError: VenueReconcile.venue must be non-empty",
+                               "EventPayloadError: VenueReconcile.as_of must be timezone-aware"])
+
+
+def vorder(instrument, side, qty, limit, order_type=None, stop=None):
+    ot = order_type or (OrderType.LIMIT if limit else OrderType.MARKET)
+    return VenueOrder(venue_order_id="tos:abc", instrument=instrument, order_type=ot, side=side, quantity=D(qty),
+                      submitted_at=T, limit_price=D(limit) if limit else None,
+                      stop_price=D(stop) if stop else None,
+                      allocations=(VenueOrderAllocation("so-1", "OPT", D(qty)),))
+
+
+def ticket_doc(t) -> dict:
+    return {"instrument": wire(t.instrument), "order_type": t.order_type.value, "side": t.side.value,
+            "quantity": str(t.quantity), "limit_price": None if t.limit_price is None else str(t.limit_price)}
+
+
+VERTICALS = [
+    combo((P200, 1, Side.SELL), (P195, 1, Side.BUY)),
+    combo((P200, 1, Side.BUY), (P195, 1, Side.SELL)),
+    combo((C200, 1, Side.SELL), (opt(strike="205", right="C"), 1, Side.BUY)),
+    combo((AAPL, 100, Side.BUY), (C200, 1, Side.SELL)),
+    combo((P200, 2, Side.SELL), (P195, 2, Side.BUY)),
+]
+
+
+def confirm_case(rng):
+    if rng.random() < 0.5:
+        ticket_instrument = rng.choice(VERTICALS)
+    else:
+        ticket_instrument = rng.choice([P200, P195, C200, AAPL, opt(strike="200.0")])
+    side = rng.choice(list(Side))
+    qty = rng.choice(["1", "1", "2", "3", "100", "1.0"])
+    if isinstance(ticket_instrument, Combo):
+        order_type, limit = rng.choice([(OrderType.LIMIT, "1.50"), (OrderType.LIMIT, "0.8"), (OrderType.MARKET, None)])
+    else:
+        order_type, limit = rng.choice([(OrderType.LIMIT, "2.00"), (OrderType.MARKET, None), (OrderType.LIMIT, "2.0")])
+    stop = None
+    if rng.random() < 0.03:
+        order_type, limit, stop = OrderType.STOP, None, "1.0"
+    ticket = vorder(ticket_instrument, side, qty, limit, order_type, stop)
+    rows, positions, before = [], [], {}
+    legs = ([(l.contract, l.side, D(qty) * l.ratio) for l in ticket_instrument.legs]
+            if isinstance(ticket_instrument, Combo) else [(ticket_instrument, side, D(qty))])
+    for contract, leg_side, leg_qty in legs:                # the rows the ticket should have made
+        if rng.random() < 0.85:
+            row_qty = leg_qty + rng.choice([0, 0, 0, 0, 1, -1])
+            row_limit = ticket.limit_price if (isinstance(ticket_instrument, Combo) or order_type is OrderType.LIMIT) else None
+            row_ot = rng.choice([OrderType.LIMIT, OrderType.MARKET]) if rng.random() < 0.05 else (
+                OrderType.LIMIT if row_limit is not None else OrderType.MARKET)
+            if row_qty > 0:
+                rows.append(FR.WorkingOrder(contract, leg_side if rng.random() < 0.95 else
+                                            (Side.BUY if leg_side is Side.SELL else Side.SELL), row_qty, D(0),
+                                            row_ot, row_limit, rng.choice(STATES)))
+    for _ in range(rng.choice([0, 0, 1, 2])):
+        rows.append(work(rng.choice(RCONTRACTS), rng.choice(list(Side)), state=rng.choice(STATES)))
+    if rng.random() < 0.3 and rows:                          # a twin: two identical tickets, one row
+        rows.append(rng.choice(rows))
+    rng.shuffle(rows)
+    if rng.random() < 0.5:                                   # positions: moved by the ticket, or not
+        for contract, leg_side, leg_qty in legs:
+            was = D(rng.choice(["0", "5", "-3", "100"]))
+            before[contract] = was
+            moved = leg_qty if leg_side is Side.BUY else -leg_qty
+            if rng.random() < 0.3:
+                moved = moved + rng.choice([D(1), D(-1)])
+            if rng.random() < 0.15:
+                moved = D(0)
+            positions.append(pos(contract, str(was + moved)))
+            if rng.random() < 0.2:
+                positions.append(pos(contract, "0"))
+    claimed = {i for i in range(len(rows)) if rng.random() < 0.15}
+    return ticket, before, positions, rows, claimed
+
+
+def check_confirm(label, ticket, before, positions, rows, claimed) -> None:
+    def oracle():
+        mine = set(claimed)
+        status, reason = FR.confirm_ticket(ticket, before, positions, rows, mine)
+        return {"status": status, "reason": reason, "claimed": sorted(mine)}
+    got = step("confirm_ticket", label, oracle,
+               lambda: door("confirm_ticket", {"ticket": ticket_doc(ticket), "before": pairs_doc(before),
+                                               "positions": pos_docs(positions), "working": work_doc(rows),
+                                               "claimed": sorted(claimed)}))
+    if got[0] == "ok":
+        seen("confirm", (got[1]["status"], got[1]["reason"]))
+    step("ticket_contracts", label, lambda: pairs_doc(FR.ticket_contracts(ticket)),
+         lambda: door("ticket_contracts", {"ticket": ticket_doc(ticket), "units": None}))
+
+
+def test_p5_t4_confirm_ticket_lockstep() -> None:
+    rng = random.Random(5103)
+    sell = vorder(P200, Side.SELL, "1", "2.00")
+    vertical = vorder(VERTICALS[0], Side.SELL, "1", "1.50")
+    for state in STATES:                                     # the grid: each row state, single and vertical
+        check_confirm(("single", state), sell, {}, [], [work(P200, Side.SELL, state=state)], set())
+        legs = [work(P200, Side.SELL, state=state, limit="1.50"),
+                work(P195, Side.BUY, state=OrderState.ACCEPTED, limit="1.50")]
+        check_confirm(("vertical-a", state), vertical, {}, [], legs, set())
+        check_confirm(("vertical-b", state), vertical, {}, [], list(reversed(legs)), set())
+    check_confirm("moved", sell, {P200: D(0)}, [pos(P200, "-1")], [], set())
+    check_confirm("moved-wrong-way", sell, {P200: D(0)}, [pos(P200, "1")], [], set())
+    check_confirm("moved-by-two", sell, {P200: D(0)}, [pos(P200, "-2")], [], set())
+    check_confirm("claimed-row", sell, {}, [], [work(P200, Side.SELL)], {0})
+    check_confirm("twin-rows", sell, {}, [], [work(P200, Side.SELL), work(P200, Side.SELL)], {0})
+    check_confirm("vertical-moved", vertical, {}, [pos(P200, "-1"), pos(P195, "1")], [], set())
+    check_confirm("vertical-one-leg-moved", vertical, {}, [pos(P200, "-1")], [], set())
+    check_confirm("vertical-leg-row-missing", vertical, {}, [], [work(P200, Side.SELL, limit="1.50")], set())
+    check_confirm("vertical-one-share-off", vertical, {}, [],
+                  [work(P200, Side.SELL, limit="1.50"), work(P195, Side.BUY, qty="2", limit="1.50")], set())
+    for n in range(3500):                                    # seeded
+        check_confirm(n, *confirm_case(rng))
+    c = SEEN["confirm"]
+    assert {s for s, _ in c} == {"ACCEPTED", "PENDING", "REJECTED"}, c
+    reasons = [r for _, r in c]
+    for want in ("on the order book (", "filled (order book)", "order book row in an", "venue order book shows",
+                 "filled (position moved", "not visible on the order book", "a leg's order book row",
+                 "on the order book, both legs", "filled (every leg's position moved)"):
+        assert any(r.startswith(want) for r in reasons), (want, sorted(reasons))
+    settle("confirm_ticket", 3500, [])
+    assert sum(TALLY["ticket_contracts"].values()) >= 3500
+
+
+def test_p5_t4_ticket_contracts_units_lockstep() -> None:
+    rng = random.Random(5104)
+    for n in range(600):
+        ticket, *_ = confirm_case(rng)
+        units = rng.choice([None, "1", "2", "0", "0.5", "-1", "1E+2", "7", "12345678901234567890123456789"])
+        step("ticket_contracts_units", (n, units), lambda: pairs_doc(FR.ticket_contracts(
+                 ticket, None if units is None else D(units))),
+             lambda: door("ticket_contracts", {"ticket": ticket_doc(ticket), "units": units}))
+    assert sum(TALLY["ticket_contracts_units"].values()) == 600
+
+
+def test_p5_existing_reconcile_vectors_through_the_door(monkeypatch) -> None:
+    import test_tos_reconcile as V
+
+    def event(r):
+        return VenueReconcile(r["venue"], datetime.fromisoformat(r["as_of"]), r["reconciled"], tuple(r["drift"]),
+                              r["note"])
+
+    def reconcile(venue, as_of, expected, positions, working):
+        return event(door("reconcile", {"venue": venue, "as_of": as_of.isoformat(), "expected": pairs_doc(expected),
+                                        "positions": pos_docs(positions), "working": work_doc(working)}))
+
+    def unreadable(venue, as_of, contracts, why):
+        return event(door("unreadable", {"venue": venue, "as_of": as_of.isoformat(),
+                                         "contracts": [wire(c) for c in contracts], "why": why}))
+
+    def confirm(ticket, before, positions, working, claimed):
+        r = door("confirm_ticket", {"ticket": ticket_doc(ticket), "before": pairs_doc(before),
+                                    "positions": pos_docs(positions), "working": work_doc(working),
+                                    "claimed": sorted(claimed)})
+        claimed.update(r["claimed"])
+        return r["status"], r["reason"]
+
+    monkeypatch.setattr(V, "reconcile", reconcile)
+    monkeypatch.setattr(V, "unreadable", unreadable)
+    monkeypatch.setattr(V, "confirm_ticket", confirm)
+    assert run_module_tests(V) >= 20
