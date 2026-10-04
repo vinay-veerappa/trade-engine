@@ -80,6 +80,16 @@ impl Ts {
         }
     }
 
+    /// Returns the instant as a chrono `DateTime<Utc>`.
+    pub fn to_utc_chrono(&self) -> R<chrono::DateTime<Utc>> {
+        let (secs, us) = self.key();
+        let unix = secs - 719_163 * 86_400;
+        match Utc.timestamp_opt(unix, us * 1000).single() {
+            Some(t) => Ok(t),
+            None => err("overflow", "date value out of range"),
+        }
+    }
+
     /// `+ timedelta(seconds=n)` on the wall clock, keeping the offset.
     pub fn add_seconds(&self, n: i64) -> R<Ts> {
         let total = self.dt.sod as i64 + n;
@@ -208,5 +218,16 @@ mod tests {
     fn rpartition_matches_python() {
         assert_eq!(rpartition("a:fill:3", ":fill:"), ("a", true, "3"));
         assert_eq!(rpartition("abc", ":fill:"), ("", false, "abc"));
+    }
+
+    #[test]
+    fn to_utc_chrono_matches_iso() {
+        let t = Ts::aware("2026-03-02T14:30:00+00:00", "x").unwrap();
+        let chrono_utc = t.to_utc_chrono().unwrap();
+        assert_eq!(chrono_utc.to_rfc3339(), "2026-03-02T14:30:00+00:00");
+
+        let t_offset = Ts::aware("2026-03-02T09:30:00-05:00", "x").unwrap();
+        let chrono_offset = t_offset.to_utc_chrono().unwrap();
+        assert_eq!(chrono_offset.to_rfc3339(), "2026-03-02T14:30:00+00:00");
     }
 }

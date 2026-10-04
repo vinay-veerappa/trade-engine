@@ -10,6 +10,15 @@ use chrono_tz::America::New_York;
 
 pub mod globex;
 
+/// The trading venue calendar governing a simulation book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VenueCalendar {
+    /// New York Stock Exchange (09:30-16:00 ET, early close 13:00 ET).
+    Xnys,
+    /// CME Globex equity indices (NQ, MNQ, ES, MES; Sunday 18:00 to Friday 17:00 ET, daily halt 17:00-18:00 ET).
+    Globex,
+}
+
 /// Why the calendar cannot answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalendarError {

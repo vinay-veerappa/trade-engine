@@ -520,6 +520,22 @@ pub fn is_open_at(t: DateTime<Utc>) -> Result<bool> {
     Ok(session_at(t)?.is_some())
 }
 
+/// Returns the trade date of the session active at instant `t`, or if `t` falls in a
+/// daily halt, weekend, or holiday closure, returns the trade date of the NEXT upcoming session.
+pub fn session_or_next(t: DateTime<Utc>) -> Result<NaiveDate> {
+    check_instant(t)?;
+    if let Some(td) = session_at(t)? {
+        return Ok(td);
+    }
+    let table = get_table();
+    let idx = table.sessions.partition_point(|s| s.open_utc <= t);
+    if idx < table.sessions.len() {
+        Ok(table.sessions[idx].trade_date)
+    } else {
+        Err(GlobexError::OutOfRangeInstant(t))
+    }
+}
+
 /// Returns the first trade date strictly after `d`.
 pub fn next_session(d: NaiveDate) -> Result<NaiveDate> {
     check_date(d)?;
@@ -784,5 +800,33 @@ mod tests {
             sessions_in_range(ymd(2024, 4, 16), ymd(2024, 4, 12)),
             Err(GlobexError::InvertedRange(_, _))
         ));
+    }
+
+    #[test]
+    fn test_session_or_next() {
+        // 1. Inside regular Monday session (Monday 2024-04-15 10:00 ET -> 14:00 UTC)
+        let t_session = ny_to_utc(ymd(2024, 4, 15), 10, 0);
+        assert_eq!(session_or_next(t_session).unwrap(), ymd(2024, 4, 15));
+
+        // 2. Daily halt (Monday 2024-04-15 17:30 ET -> 21:30 UTC): belongs to Tuesday 2024-04-16
+        let t_halt = ny_to_utc(ymd(2024, 4, 15), 17, 30);
+        assert_eq!(session_or_next(t_halt).unwrap(), ymd(2024, 4, 16));
+
+        // 3. Weekend (Saturday 2024-04-13 12:00 ET): belongs to Monday 2024-04-15
+        let t_weekend = ny_to_utc(ymd(2024, 4, 13), 12, 0);
+        assert_eq!(session_or_next(t_weekend).unwrap(), ymd(2024, 4, 15));
+
+        // 4. Closed day: Christmas 2023 (2023-12-25 closed all day)
+        // Monday 2023-12-25 at 12:00 ET -> belongs to Tuesday 2023-12-26 session (which reopens 18:00 ET)
+        let t_xmas = ny_to_utc(ymd(2023, 12, 25), 12, 0);
+        assert_eq!(session_or_next(t_xmas).unwrap(), ymd(2023, 12, 26));
+
+        // 5. Early halt day: Thanksgiving Friday 2020-11-27 (halt at 13:15 ET)
+        // Inside session at 11:00 ET -> 2020-11-27
+        let t_early_in = ny_to_utc(ymd(2020, 11, 27), 11, 0);
+        assert_eq!(session_or_next(t_early_in).unwrap(), ymd(2020, 11, 27));
+        // After early halt at 14:00 ET -> belongs to next session (Monday 2020-11-30)
+        let t_early_after = ny_to_utc(ymd(2020, 11, 27), 14, 0);
+        assert_eq!(session_or_next(t_early_after).unwrap(), ymd(2020, 11, 30));
     }
 }
