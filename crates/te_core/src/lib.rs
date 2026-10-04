@@ -11,3 +11,4 @@ pub mod risk;
 pub mod risk_options;
 pub mod sim;
 pub mod runtime;
+pub use sim::tick as futures;

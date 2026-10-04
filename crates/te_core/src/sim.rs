@@ -9,6 +9,7 @@
 
 pub mod broker;
 pub mod snapshot;
+pub mod tick;
 pub mod trailing;
 
 use chrono::{Datelike, NaiveDate, TimeZone, Utc};

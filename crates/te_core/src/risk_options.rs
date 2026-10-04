@@ -138,6 +138,7 @@ fn type_name(i: &Instrument) -> &'static str {
         Instrument::Equity(_) => "Equity",
         Instrument::Option(_) => "OptionContract",
         Instrument::Combo(_) => "Combo",
+        Instrument::Future(_) => "Future",
     }
 }
 
@@ -329,7 +330,8 @@ fn book(intent: &Intent, price: &Option<PyDec>, ctx: &Context<'_>) -> R<Book> {
 // -- margin (was `metrics.margin.account_margin`) -------------------------------------
 
 /// What the rules read off an `AccountMargin`.
-struct Margin {
+#[derive(Debug)]
+pub(crate) struct Margin {
     used: PyDec,
     /// (name, underlying, maintenance, cash_secured)
     strategies: Vec<(String, String, PyDec, Option<PyDec>)>,
@@ -353,7 +355,7 @@ fn mo_parse(s: &str) -> R<rust_decimal::Decimal> {
 
 /// `account_margin(state)` with no overrides and no underlying prices: the request the
 /// Python built, read back in the order the margin reader read it.
-fn margin_of(st: &AccountState) -> R<Margin> {
+pub(crate) fn margin_of(st: &AccountState) -> R<Margin> {
     struct WPos {
         symbol: String,
         kind: Kind,
@@ -387,6 +389,7 @@ fn margin_of(st: &AccountState) -> R<Margin> {
                 (Kind::Option, c.multiplier as i64, Some(at), Some(position.avg_cost.format_f()))
             }
             Instrument::Equity(_) => (Kind::Equity, 1, None, None),
+            Instrument::Future(_) => return err("unsupported", "futures not supported in margin calculation"),
         };
         wpos.push(WPos { symbol, kind, quantity, mark, multiplier: mult, flat, contract, avg_cost });
     }

@@ -140,15 +140,26 @@ fn allocate(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
 }
 
 /// `_validate_quantity`: an equity quantity is whole shares.
-pub fn validate_quantity(instrument: &Instrument, q: &PyDec) -> R<()> { quantity(equity(instrument), q) }
+pub fn validate_quantity(instrument: &Instrument, q: &PyDec) -> R<()> {
+    if matches!(instrument, Instrument::Future(_)) {
+        return err("unsupported", "futures not supported in OMS");
+    }
+    quantity(equity(instrument), q)
+}
 
 /// `_allocate_quantity`.
 pub fn allocate_quantity(q: &PyDec, w: &[PyDec], instrument: &Instrument) -> R<Vec<PyDec>> {
+    if matches!(instrument, Instrument::Future(_)) {
+        return err("unsupported", "futures not supported in OMS");
+    }
     allocate(q, w, equity(instrument))
 }
 
 /// `_split_quantity`: `count` equal weights, each portion positive.
 pub fn split_quantity(q: &PyDec, count: usize, instrument: &Instrument) -> R<Vec<PyDec>> {
+    if matches!(instrument, Instrument::Future(_)) {
+        return err("unsupported", "futures not supported in OMS");
+    }
     split(q, &vec![PyDec::from_i128(1); count], equity(instrument))
 }
 
@@ -166,6 +177,9 @@ fn split(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
 
 /// `_fraction_quantities`: each target's fraction, the remainder a runner.
 pub fn fraction_quantities(q: &PyDec, w: &[PyDec], instrument: &Instrument) -> R<Vec<PyDec>> {
+    if matches!(instrument, Instrument::Future(_)) {
+        return err("unsupported", "futures not supported in OMS");
+    }
     fractions(q, w, equity(instrument))
 }
 

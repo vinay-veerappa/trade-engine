@@ -43,6 +43,7 @@ pub fn is_structure(i: &Instrument) -> bool {
         Instrument::Option(_) => true,
         Instrument::Combo(legs) => legs.iter().all(|l| matches!(l.contract, Instrument::Option(_))),
         Instrument::Equity(_) => false,
+        Instrument::Future(_) => false,
     }
 }
 
@@ -77,6 +78,7 @@ pub fn multiplier(i: &Instrument) -> R<i128> {
             }
             multiplier(&legs[0].contract)
         }
+        Instrument::Future(_) => err("unsupported", "futures not supported in OMS multiplier"),
     }
 }
 

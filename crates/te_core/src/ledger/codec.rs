@@ -343,6 +343,7 @@ pub fn enc_instrument(i: &Instrument) -> R<Json> {
             }
             dc("Combo", vec![("legs", jtuple(items))])
         }
+        Instrument::Future(_) => return err("unsupported", "futures not supported in ledger codec"),
     })
 }
 

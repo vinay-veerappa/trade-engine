@@ -307,7 +307,7 @@ pub fn apply_trade_pub(
 
 // --- helpers -----------------------------------------------------------------------------------
 
-fn multiplier(i: &Instrument) -> R<i128> {
+pub(crate) fn multiplier(i: &Instrument) -> R<i128> {
     match i {
         Instrument::Equity(_) => Ok(1),
         Instrument::Option(c) => Ok(c.multiplier),
@@ -329,6 +329,7 @@ fn multiplier(i: &Instrument) -> R<i128> {
             }
             multiplier(&legs[0].contract)
         }
+        Instrument::Future(_) => fe("futures not supported in ledger fold (I6)"),
     }
 }
 

@@ -440,11 +440,72 @@ pub struct ComboLeg {
     pub side: Side,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContractMonth {
+    pub year: i32,
+    pub month: u32,
+}
+
+impl ContractMonth {
+    pub fn new(year: i32, month: u32) -> R<Self> {
+        if !(1..=12).contains(&month) {
+            return err("value", format!("Month must be 1..=12, got {month}"));
+        }
+        if !(1900..=2100).contains(&year) {
+            return err("value", format!("Year {year} out of range (1900..=2100)"));
+        }
+        Ok(Self { year, month })
+    }
+
+    pub fn month_code(&self) -> char {
+        match self.month {
+            1 => 'F',
+            2 => 'G',
+            3 => 'H',
+            4 => 'J',
+            5 => 'K',
+            6 => 'M',
+            7 => 'N',
+            8 => 'Q',
+            9 => 'U',
+            10 => 'V',
+            11 => 'X',
+            12 => 'Z',
+            _ => '?',
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FutureContract {
+    pub root: String,
+    pub contract_month: Option<ContractMonth>,
+    pub tick_size: PyDec,
+    pub point_value: PyDec,
+}
+
+impl FutureContract {
+    pub fn same(&self, o: &FutureContract) -> bool {
+        self.root == o.root
+            && self.contract_month == o.contract_month
+            && dec_eq(&self.tick_size, &o.tick_size)
+            && dec_eq(&self.point_value, &o.point_value)
+    }
+
+    pub fn symbol(&self) -> String {
+        match &self.contract_month {
+            None => self.root.clone(),
+            Some(cm) => format!("{}{}{:02}", self.root, cm.month_code(), cm.year.rem_euclid(100)),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Instrument {
     Equity(String),
     Option(OptionContract),
     Combo(Vec<ComboLeg>),
+    Future(FutureContract),
 }
 
 pub fn dec_eq(a: &PyDec, b: &PyDec) -> bool {
@@ -509,6 +570,7 @@ impl Instrument {
             (Instrument::Combo(a), Instrument::Combo(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.ratio == y.ratio && x.side == y.side && x.contract.same(&y.contract))
             }
+            (Instrument::Future(a), Instrument::Future(b)) => a.same(b),
             _ => false,
         }
     }
@@ -532,6 +594,19 @@ impl Instrument {
                 }
                 s
             }
+            Instrument::Future(f) => {
+                let m_str = match &f.contract_month {
+                    Some(m) => format!("{:04}-{:02}", m.year, m.month),
+                    None => String::new(),
+                };
+                format!(
+                    "F\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+                    f.root,
+                    m_str,
+                    f.tick_size.num_key(),
+                    f.point_value.num_key()
+                )
+            }
         }
     }
 
@@ -547,6 +622,7 @@ impl Instrument {
                 }
                 Ok(parts.join("/"))
             }
+            Instrument::Future(f) => Ok(f.symbol()),
         }
     }
 
@@ -555,6 +631,7 @@ impl Instrument {
             Instrument::Equity(_) => "Equity",
             Instrument::Option(_) => "OptionContract",
             Instrument::Combo(_) => "Combo",
+            Instrument::Future(_) => "Future",
         }
     }
 }
@@ -1091,6 +1168,10 @@ pub fn py_isdigit(s: &str) -> bool {
 
 pub fn make_equity(symbol: &str) -> R<Instrument> {
     options::equity_symbol(Some(symbol)).map(Instrument::Equity).map_err(oerr)
+}
+
+pub fn make_future(symbol: &str) -> R<Instrument> {
+    crate::sim::tick::parse_future(symbol)
 }
 
 pub fn make_option(
@@ -1906,11 +1987,12 @@ fn require_vertical(legs: &[ComboLeg], name: &str) -> R<()> {
 /// contract. This is the single line to relax when a mirror ticket may carry an `Equity`
 /// (branch `te/T2-follow`): add `Instrument::Equity(_)` to the accepted arms here, and
 /// make the matching one-line change in `events.py` `MirrorQueued.__post_init__`.
-fn check_mirror_instrument(instrument: &Instrument) -> R<()> {
+pub(crate) fn check_mirror_instrument(instrument: &Instrument) -> R<()> {
     match instrument {
         Instrument::Combo(legs) => require_vertical(legs, "MirrorQueued.instrument"),
         // every decodable instrument is legal now: Python's refusal reaches only non-instruments
         Instrument::Option(_) | Instrument::Equity(_) => Ok(()),
+        Instrument::Future(_) => err("payload", "MirrorQueued.instrument: futures not supported in mirror"),
     }
 }
 

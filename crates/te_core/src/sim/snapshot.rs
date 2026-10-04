@@ -105,6 +105,7 @@ pub fn underlying_of(instrument: &Instrument) -> R<String> {
             }
             Ok(found.pop().unwrap_or_default())
         }
+        Instrument::Future(_) => err("unsupported", "futures not supported in snapshot venue"),
     }
 }
 
@@ -492,6 +493,7 @@ impl Venue {
                 Ok(if pos_cmp(&price)?.is_gt() { Some(price) } else { None })
             }
             Instrument::Combo(_) => Ok(None),
+            Instrument::Future(_) => err("unsupported", "futures not supported in snapshot venue"),
         }
     }
 
