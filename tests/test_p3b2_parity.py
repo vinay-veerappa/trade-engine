@@ -30,7 +30,7 @@ from trade_engine.interfaces.broker import OrderChanges, VenueAck, VenueOrderSta
 from trade_engine.interfaces.market_data import Bar
 from trade_engine.ledger import Event, EventKind, Ledger, OrderStateChange, codec
 from trade_engine.market_data.chains import ChainSnapshot
-from trade_engine.oms.manager import OrderManager as Production
+from flow_p3b2b import FlowManager as Production  # the switched manager, plus the flow internals
 from trade_engine.sim import SimBroker, SnapshotVenue
 
 D = Decimal

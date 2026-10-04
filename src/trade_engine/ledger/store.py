@@ -270,6 +270,13 @@ class Ledger:
     def _load(self, account: str) -> None:
         self._fold.load(account, self._rows(account))
 
+    def fold_handle(self, account: str):
+        """The Rust fold holding ``account``'s committed state, loaded if absent: what
+        ``state(account)`` is built from, for Rust callers that need no Python carrier."""
+        if not self._fold.has(account):
+            self._load(account)
+        return self._fold.handle
+
     def _committed_state(self, account: str) -> AccountState:
         if not self._fold.has(account):
             self._load(account)

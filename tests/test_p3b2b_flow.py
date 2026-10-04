@@ -12,6 +12,7 @@ T1 submit, T2 replace, T3 cancel and fills, T4 emulation, T5 reconcile, T6 brack
 """
 from __future__ import annotations
 
+import json
 import sys
 from collections import Counter
 from dataclasses import replace
@@ -35,7 +36,6 @@ from trade_engine.interfaces.broker import OrderChanges, VenueFill, VenueOrderSt
 from trade_engine.interfaces.market_data import Bar
 from trade_engine.ledger import EventKind, OrderStateChange, OrderUpdated, codec
 from trade_engine.market_data.chains import ChainSnapshot
-from trade_engine.oms.manager import OrderManager as Production
 
 D = Decimal
 
@@ -98,6 +98,60 @@ class FlowPair:
         finally:
             self.o.ledger.close()
             self.p.ledger.close()
+
+
+PLANNED_GOLDEN = Path(__file__).resolve().parent / "frozen_p3b2b" / "planned_refusal.json"
+
+
+class RecordedPair:
+    """One world against a recorded reference: each step's result, events, outbox and
+    venue records, then the folded state. ``golden=None`` records instead of comparing."""
+
+    def __init__(self, root, tally, cls, golden=None, venue=lambda clock: FaultBroker()):
+        self.p = FlowWorld(root, cls, venue)
+        self.tally = tally
+        self.golden = None if golden is None else json.loads(golden.read_text(encoding="utf-8"))
+        self.steps = []
+
+    def do(self, label, fn):
+        result = run(fn, self.p)
+        step = json.loads(json.dumps([label, result, self.p.events(), self.p.outbox(), self.p.venue_records()]))
+        if self.golden is not None:
+            n = len(self.steps)
+            assert step == self.golden["steps"][n], (
+                f"{label} step {n + 1}\nrecorded: {self.golden['steps'][n]!r:.1500}\nflow:     {step!r:.1500}")
+        self.steps.append(step)
+        self.tally["steps"] += 1
+        self.tally[f"{label}:{result[0]}"] += 1
+        if result[0] == "raise":
+            self.tally[f"exception:{result[1]}"] += 1
+        return result
+
+    def both(self, fn):
+        fn(self.p)
+
+    def state(self):
+        return codec.text(codec.canon(self.p.ledger.state(ACC)))
+
+    def finish(self):
+        try:
+            if sys.exc_info()[1] is not None or self.golden is None:
+                return
+            assert len(self.steps) == len(self.golden["steps"])
+            assert self.state() == self.golden["state"]
+        finally:
+            self.p.ledger.close()
+
+
+def planned_refusal_steps(pair):
+    pair.both(lambda w: w.seed.create_bracket(intent(), D("7")))
+    for mode, values in (("child", {"parent": "bracket:entry"}), ("protective", {}), ("native", {}),
+                         ("limit", {}), ("trigger", {}), ("tif", {})):
+        for command in (None, "caller"):
+            pair.do("planned-refusal", lambda w, mode=mode, values=values, command=command:
+                    w.manager._planned_refusal(w.manager.get_order("bracket:stop"), mode, command_id=command, **values))
+    pair.do("planned-refusal-replay", lambda w: w.manager._planned_refusal(
+        w.manager.get_order("bracket:stop"), "tif"))
 
 
 def check(tally, expected):
@@ -222,17 +276,11 @@ def test_plumbing_append_refuse_and_planned_refusal(tmp_path):
     finally:
         pair.finish()
     # The frozen oracle has no _planned_refusal (P3b-2a factored it out of six inline
-    # refusals, each parity-tested there): here the P3b-2a manager is the reference.
-    pair = FlowPair(tmp_path / "planned", tally, oracle=Production)
+    # refusals, each parity-tested there). Its reference is the P3b-2a manager, recorded
+    # at 29bd759 before the switch deleted it (D3): tests/frozen_p3b2b/planned_refusal.json.
+    pair = RecordedPair(tmp_path / "planned", tally, FlowManager, golden=PLANNED_GOLDEN)
     try:
-        pair.both(lambda w: w.seed.create_bracket(intent(), D("7")))
-        for mode, values in (("child", {"parent": "bracket:entry"}), ("protective", {}), ("native", {}),
-                             ("limit", {}), ("trigger", {}), ("tif", {})):
-            for command in (None, "caller"):
-                pair.do("planned-refusal", lambda w, mode=mode, values=values, command=command:
-                        w.manager._planned_refusal(w.manager.get_order("bracket:stop"), mode, command_id=command, **values))
-        pair.do("planned-refusal-replay", lambda w: w.manager._planned_refusal(
-            w.manager.get_order("bracket:stop"), "tif"))
+        planned_refusal_steps(pair)
     finally:
         pair.finish()
     check(tally, (
@@ -664,9 +712,9 @@ def test_t6_brackets(tmp_path):
 
 def test_flow_refuses_unknown_operation_and_bad_request():
     """The door itself: an unknown operation and a malformed request are refusals."""
-    from flow_p3b2b import _FlowHost
+    from trade_engine.oms.manager import _Host
 
-    host = _FlowHost(FaultBroker(), None, None)
+    host = _Host(None, FaultBroker(), None, None)
     for op, request in (("no_such_operation", "{}"), ("get_order", "{}"), ("get_order", "not json")):
         try:
             trade_engine_rs.oms_flow(op, host, request)

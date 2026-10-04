@@ -10,13 +10,14 @@ use std::cell::RefCell;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use te_core::ledger::bridge as lb;
-use te_core::ledger::codec::{event_from_bytes, event_to_bytes};
+use te_core::ledger::codec::{enc_order, event_from_bytes, event_to_bytes};
 use te_core::ledger::fold::AccountState;
 use te_core::ledger::json::dumps;
-use te_core::ledger::model::{err, parse_datetime, DateTime, Event, EventKind, LErr, OrderState, OrderType, Side, Tif, R as LR};
+use te_core::ledger::model::{err, parse_datetime, DateTime, Event, EventKind, LErr, Order, OrderState, OrderType, Side, Tif, R as LR};
 use te_core::oms::flow::{self as fl, Capabilities, Host, Net, OrderChanges, VenueAck, VenueFill, VenueOrder, VenueOrderState};
 
 use crate::sim::{dec, instrument, refuse, Host as Stash};
+use crate::LedgerFold;
 
 /// The adapter, the exception it raised (kind `host`), and a broker call's failure.
 struct PyHost<'py> {
@@ -85,8 +86,16 @@ impl<'py> Host for PyHost<'py> {
         self.call("accounts", ())
     }
 
+    /// `state(account)` is the ledger's `LedgerFold` (read in place) or canonical text.
     fn account_state(&self, account: &str) -> LR<AccountState> {
-        lb::account_from_text(&self.call::<String>("state", (account,))?)
+        let held = self.adapter.call_method1("state", (account,)).map_err(|e| self.stash.fail(e))?;
+        if let Ok(fold) = held.downcast::<LedgerFold>() {
+            return match fold.borrow().state_of(account) {
+                Some(st) => Ok(st.clone()),
+                None => err("key", format!("'{account}'")),
+            };
+        }
+        lb::account_from_text(&held.extract::<String>().map_err(|e| self.stash.fail(e))?)
     }
 
     fn event_by_command(&self, command: &str) -> LR<Option<Event>> {
@@ -179,6 +188,13 @@ impl<'py> Host for PyHost<'py> {
             }
         };
         *self.cause.borrow_mut() = Some(held);
+    }
+
+    /// `self._send_reduce(reduce, command)` on the manager: an exception it raised (a
+    /// refusal of the nested flow call included) is re-raised as itself.
+    fn send_reduce(&self, reduce: &Order, command: &str) -> LR<Order> {
+        let text = self.call::<String>("send_reduce", (dumps(&enc_order(reduce)?), command))?;
+        fl::order_of(&lb::json_from_text(&text)?)
     }
 }
 

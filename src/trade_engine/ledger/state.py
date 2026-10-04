@@ -212,6 +212,11 @@ class IncrementalFold:
     def has(self, account: str) -> bool:
         return self._handle.has(account)
 
+    @property
+    def handle(self):
+        """The Rust fold itself, for Rust callers that read a state without a carrier."""
+        return self._handle
+
     def accounts(self) -> list[str]:
         return self._handle.accounts()
 

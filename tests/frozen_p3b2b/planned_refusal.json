@@ -1,0 +1,1051 @@
+{
+ "recorded_from": "src/trade_engine/oms/manager.py at 29bd759 (the P3b-2a manager)",
+ "steps": [
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "OrderManagementError",
+    "Child order 'bracket:stop' is held until its entry fills",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "OrderManagementError",
+    "Child order 'bracket:stop' is held until its entry fills",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "OrderManagementError",
+    "Cannot cancel protective stop 'bracket:stop' while its position is open",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "OrderManagementError",
+    "Cannot cancel protective stop 'bracket:stop' while its position is open",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Venue does not support order type STOP",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Venue does not support order type STOP",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     7,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Emulated STOP_LIMIT requires venue LIMIT support",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     7,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     8,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Emulated STOP_LIMIT requires venue LIMIT support",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     7,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     8,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     9,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Emulated stops require MARKET or LIMIT capability",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     7,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     8,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     9,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     10,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Emulated stops require MARKET or LIMIT capability",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     7,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     8,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     9,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     10,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     11,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Venue does not support time in force GTC",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     7,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     8,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     9,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     10,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     11,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     12,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-tif:GTC",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support time in force GTC\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Venue does not support time in force GTC",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     7,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     8,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     9,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     10,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     11,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     12,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-tif:GTC",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support time in force GTC\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     13,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-tif:GTC",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support time in force GTC\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ],
+  [
+   "planned-refusal-replay",
+   [
+    "raise",
+    "UnsupportedOrderCapabilityError",
+    "Venue does not support time in force GTC",
+    null
+   ],
+   [
+    [
+     1,
+     "P3B2",
+     "OrdersCreated",
+     "bracket",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrdersCreated\",\"f\":{\"orders\":{\"t\":[{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}},{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]},\"fingerprint\":\"c58ce2ebe3718c93e79c09ae7af75c071278dd30b10ab3847b98c920f68d1883\",\"reason\":\"Bracket created: \\u00e9vidence \\u6f22\"}}"
+    ],
+    [
+     2,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     3,
+     "P3B2",
+     "OrderRefused",
+     "caller:child-held",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Child held until parent 'bracket:entry' has a fill\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     4,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     5,
+     "P3B2",
+     "OrderRefused",
+     "caller:protective-stop-refused",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Cannot cancel the only protective stop while the bracket has open quantity\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     6,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     7,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-type",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support STOP; no native order was sent\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     8,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     9,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-stop-limit-fallback",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated STOP_LIMIT requires venue LIMIT support\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     10,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     11,
+     "P3B2",
+     "OrderRefused",
+     "caller:no-trigger-order",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Emulated stop requires venue MARKET or LIMIT support when triggered\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     12,
+     "P3B2",
+     "OrderRefused",
+     "bracket:stop:unsupported-tif:GTC",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support time in force GTC\",\"venue_order_id\":{\"n\":true}}}"
+    ],
+    [
+     13,
+     "P3B2",
+     "OrderRefused",
+     "caller:unsupported-tif:GTC",
+     "2026-09-23T13:30:00+00:00",
+     "{\"dc\":\"OrderStateChange\",\"f\":{\"order_id\":\"bracket:stop\",\"reason\":\"Venue does not support time in force GTC\",\"venue_order_id\":{\"n\":true}}}"
+    ]
+   ],
+   [],
+   [
+    [],
+    [],
+    []
+   ]
+  ]
+ ],
+ "state": "{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"P3B2\",\"cash\":{\"d\":\"0\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[[\"bracket:entry\",{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:entry\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"BUY\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:entry\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"100\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"DAY\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":{\"n\":true},\"oco_group\":{\"n\":true}}}],[\"bracket:stop\",{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:stop\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"STOP\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"7\"},\"command_id\":\"bracket:stop\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"n\":true},\"stop_price\":{\"d\":\"95\"},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}],[\"bracket:target:1\",{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:1\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"4\"},\"command_id\":\"bracket:target:1\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"105\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}],[\"bracket:target:2\",{\"dc\":\"Order\",\"f\":{\"order_id\":\"bracket:target:2\",\"account_id\":\"P3B2\",\"instrument\":{\"dc\":\"Equity\",\"f\":{\"symbol\":\"XYZ\"}},\"order_type\":{\"e\":\"OrderType\",\"v\":\"LIMIT\"},\"side\":{\"e\":\"Side\",\"v\":\"SELL\"},\"quantity\":{\"d\":\"3\"},\"command_id\":\"bracket:target:2\",\"created_at\":{\"T\":\"2026-09-23T13:30:00+00:00\"},\"limit_price\":{\"d\":\"110\"},\"stop_price\":{\"n\":true},\"trail_amount\":{\"n\":true},\"tif\":{\"e\":\"TimeInForce\",\"v\":\"GTC\"},\"state\":{\"e\":\"OrderState\",\"v\":\"NEW\"},\"parent_order_id\":\"bracket:entry\",\"oco_group\":\"bracket:exits\"}}]]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":12,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":13}}"
+}

@@ -569,7 +569,7 @@ impl FoldEntry {
 /// was (`FoldCache`); otherwise the refused account is dropped and its owner reloads it
 /// from the log (the store, whose transaction rolled back anyway).
 #[pyclass(module = "trade_engine_rs")]
-struct LedgerFold {
+pub(crate) struct LedgerFold {
     atomic: bool,
     entries: OMap<String, FoldEntry>,
 }
@@ -577,6 +577,11 @@ struct LedgerFold {
 type Row = (String, String, String, Option<String>, i64, Option<i64>);
 
 impl LedgerFold {
+    /// The account's folded state, read in place (the OMS flow's host, P3b-2b).
+    pub(crate) fn state_of(&self, account: &str) -> Option<&AccountState> {
+        self.entries.get(account).map(|e| &e.st)
+    }
+
     fn apply(&mut self, account: &str, ev: &Event) -> LR<()> {
         let created = !self.entries.contains(account);
         if created {

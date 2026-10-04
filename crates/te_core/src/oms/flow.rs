@@ -7,11 +7,8 @@
 //! returns the `broker_unknown` / `oco_unknown` refusal, which the host raises FROM the
 //! original exception.
 //!
-//! Ported so far: the plumbing helpers (`_utc_now`, `_append`, `_context`,
-//! `_planned_order`, `_refuse`, `_planned_refusal`, `_venue_order`, `_require_tif`,
-//! `_trigger_order_type`, `_bracket_from_orders`). Every other fn is a stub that
-//! refuses with kind `unported`; its doc comment names the Python method and the
-//! ordering rules the port must keep.
+//! Every `OrderManager` method is ported (P3b-2b); each fn's doc comment names the
+//! Python method it replaced and the ordering rules it keeps.
 //!
 //! Python names, as the flow spells them: an exception is a refusal kind (`key` KeyError,
 //! `value` ValueError, `order_management` OrderManagementError, `idempotency`
@@ -207,10 +204,14 @@ pub trait Host {
     /// `host` error is the exception the host already holds; any other is a refusal
     /// raised inside the guarded call (a `VenueOrder` construction, `_utc_now`).
     fn cause(&self, e: LErr);
-}
-
-fn unported<T>(name: &str) -> R<T> {
-    err("unported", format!("{name} not ported"))
+    /// `self._send_reduce(reduce, command)`: the seam `reduce_bracket` sends through, so a
+    /// host can wrap or replace it. The default is [`send_reduce`].
+    fn send_reduce(&self, reduce: &Order, command: &str) -> R<Order>
+    where
+        Self: Sized,
+    {
+        send_reduce(self, reduce, command)
+    }
 }
 
 /// The `__post_init__` checks of the payloads the manager constructs.
@@ -802,7 +803,7 @@ pub fn reduce_bracket<H: Host>(h: &H, entry: &str, fraction: &PyDec, command: &s
     if let Some(existing) = h.event_by_command(command)? {
         plan::created_replay(&plan::Prior::of(&existing), &entry_order.account_id, &fingerprint, command)?;
         let Obj::OrdersCreated(created) = &existing.payload else { unreachable!("created_replay admits only ORDERS_CREATED") };
-        return send_reduce(h, &get_order(h, &created.orders[0].order_id)?, command);
+        return h.send_reduce(&get_order(h, &created.orders[0].order_id)?, command);
     }
     let (stop, open_quantity) = open_bracket_stop(h, entry)?;
     let children = bracket_children(h, entry)?;
@@ -832,7 +833,7 @@ pub fn reduce_bracket<H: Host>(h: &H, entry: &str, fraction: &PyDec, command: &s
         reason: format!("Bracket reduce: {reason}"),
     };
     append(h, &reduce.account_id, EventKind::OrdersCreated, Obj::OrdersCreated(batch), command)?;
-    send_reduce(h, &reduce, command)
+    h.send_reduce(&reduce, command)
 }
 
 /// `_send_reduce`: cancel targets before submitting a reduce (the LIMIT children,
@@ -1631,7 +1632,7 @@ fn decs(j: &Json) -> R<Vec<PyDec>> {
 fn obj(j: &Json) -> R<Obj> {
     bridge::obj_from_text(&dumps(j))
 }
-fn order_of(j: &Json) -> R<Order> {
+pub fn order_of(j: &Json) -> R<Order> {
     match obj(j)? {
         Obj::Order(o) => Ok(o),
         _ => err("value", "flow request: expected an order"),

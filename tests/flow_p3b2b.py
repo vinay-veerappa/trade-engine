@@ -1,10 +1,10 @@
-"""P3b-2b, TEST ONLY: ``OrderManager``'s public API driven through the Rust command flow
-(``trade_engine_rs.oms_flow``, ``te_core::oms::flow``). Production ``oms/manager.py`` is
-not switched; this is what the parity tests drive against the frozen oracle.
+"""P3b-2b, TEST ONLY: the internals the parity tests reach, on the Rust command flow.
 
-``_FlowHost`` is the flow's host: every effect is one call to it, made where the flow
-makes it (the clock, the ledger, the broker). It decides nothing; values cross as plain
-JSON-ish data and codec trees. ``trade_engine_rs`` missing is an ImportError (D5).
+Production ``oms/manager.py`` is the flow (``trade_engine_rs.oms_flow``, ``te_core::oms::flow``):
+its public API and host are what ``FlowManager`` inherits. The flow's internal operations
+(``_submit_native``, ``_cancel_exits``, ...) have no production caller; this subclass reaches
+them so the parity tests can drive each one against the frozen oracle.
+``trade_engine_rs`` missing is an ImportError (D5).
 """
 from __future__ import annotations
 
@@ -14,127 +14,10 @@ from decimal import Decimal
 
 import trade_engine_rs as rs  # noqa: F401 - D5: missing is an error, never a skip
 
-from trade_engine.domain.instruments import Side
-from trade_engine.domain.orders import OrderType, TimeInForce
-from trade_engine.interfaces.broker import OrderChanges, VenueOrder, VenueOrderAllocation
+from trade_engine.domain.orders import OrderType
 from trade_engine.ledger import Event, EventKind, codec
 from trade_engine.oms import manager as production
-from trade_engine.oms.models import Bracket
-from trade_engine.sim import _rs
-
-
-def _dec(value):
-    return None if value is None else Decimal(value)
-
-
-class _FlowHost:
-    """The flow's effects, one call each."""
-
-    def __init__(self, broker, clock, ledger) -> None:
-        self._broker = broker
-        self._clock = clock
-        self._ledger = ledger
-
-    def now(self):
-        return self._clock.now_utc().isoformat()
-
-    def accounts(self):
-        return list(self._ledger.accounts())
-
-    def state(self, account):
-        return codec.text(codec.canon(self._ledger.state(account)))
-
-    def event_by_command(self, command_id):
-        event = self._ledger.event_by_command(command_id)
-        return None if event is None else codec.event_bytes(event)
-
-    def events_of_kind(self, kind):
-        return [codec.event_bytes(event) for event in self._ledger.events_of_kind(EventKind(kind))]
-
-    def append(self, text):
-        data = json.loads(text)
-        event = Event(
-            account=data["account"],
-            kind=EventKind(data["kind"]),
-            payload=codec.build(data["payload"]),
-            ts_utc=datetime.fromisoformat(data["ts_utc"]),
-            command_id=data["command_id"],
-        )
-        return codec.event_bytes(self._ledger.append(event))
-
-    def capabilities(self):
-        capabilities = self._broker.capabilities
-        return (
-            [item.value for item in capabilities.supported_order_types],
-            [item.value for item in capabilities.supported_tifs],
-            capabilities.supports_native_stops,
-        )
-
-    def env(self):
-        return self._broker.env
-
-    def venue_order(self, text):
-        data = json.loads(text)
-        return VenueOrder(
-            venue_order_id=data["venue_order_id"],
-            instrument=codec.build(data["instrument"]),
-            order_type=OrderType(data["order_type"]),
-            side=Side(data["side"]),
-            quantity=Decimal(data["quantity"]),
-            submitted_at=datetime.fromisoformat(data["submitted_at"]),
-            tif=TimeInForce(data["tif"]),
-            limit_price=_dec(data["limit_price"]),
-            stop_price=_dec(data["stop_price"]),
-            trail_amount=_dec(data["trail_amount"]),
-            allocations=tuple(
-                VenueOrderAllocation(item["strategy_order_id"], item["account_id"], Decimal(item["quantity"]))
-                for item in data["allocations"]
-            ),
-            parent_order_id=data["parent_order_id"],
-            oco_group=data["oco_group"],
-        )
-
-    @staticmethod
-    def _ack(ack):
-        return ack.venue_order_id, ack.status, ack.message
-
-    def submit(self, venue_order):
-        return self._ack(self._broker.submit(venue_order))
-
-    def cancel(self, venue_order_id):
-        return self._ack(self._broker.cancel(venue_order_id))
-
-    def replace(self, venue_order_id, text):
-        changes = {key: _dec(value) for key, value in json.loads(text).items()}
-        return self._ack(self._broker.replace(venue_order_id, OrderChanges(**changes)))
-
-    def orders(self, since):
-        return [
-            (item.venue_order_id, item.state.value, str(item.filled_quantity),
-             str(item.remaining_quantity), item.updated_at.isoformat())
-            for item in self._broker.orders(datetime.fromisoformat(since))
-        ]
-
-    def fills(self, since):
-        return [
-            (item.venue_fill_id, item.venue_order_id, codec.text(codec.encode_payload(item.instrument)),
-             str(item.quantity), str(item.price), item.filled_at.isoformat(), item.side.value,
-             str(item.fee), item.leg_id)
-            for item in self._broker.fills(datetime.fromisoformat(since))
-        ]
-
-    @staticmethod
-    def refusal(kind, message):
-        return _rs.refusal(kind, message)
-
-
-def _order(tree):
-    return codec.build(tree)
-
-
-def _bracket(tree):
-    entry, stop, targets = tree
-    return Bracket(_order(entry), _order(stop), tuple(_order(item) for item in targets))
+from trade_engine.oms.manager import _bracket, _changes, _order
 
 
 def _event(tree):
@@ -149,88 +32,12 @@ def _event(tree):
     )
 
 
-def _changes(changes: OrderChanges):
-    return {
-        "new_quantity": production._wire(changes.new_quantity),
-        "new_limit_price": production._wire(changes.new_limit_price),
-        "new_stop_price": production._wire(changes.new_stop_price),
-    }
-
-
 def _venue_order(tree):
-    return _FlowHost.venue_order(None, json.dumps(tree))
+    return production._Host.venue_order(None, json.dumps(tree))
 
 
-class FlowManager:
-    """``OrderManager``'s API (and the internals the parity tests reach) on the Rust flow."""
-
-    # The pure helpers did not move: they are the P3b-2a shims.
-    _bracket_fingerprint = staticmethod(production.OrderManager._bracket_fingerprint)
-    _reduce_fingerprint = staticmethod(production.OrderManager._reduce_fingerprint)
-    _fingerprint_order = staticmethod(production.OrderManager._fingerprint_order)
-    _validate_quantity = staticmethod(production.OrderManager._validate_quantity)
-    _allocate_quantity = staticmethod(production.OrderManager._allocate_quantity)
-    _split_quantity = production.OrderManager._split_quantity
-    _fraction_quantities = production.OrderManager._fraction_quantities
-    _is_reduce = staticmethod(production.OrderManager._is_reduce)
-    _replacement_terms = staticmethod(production.OrderManager._replacement_terms)
-
-    def __init__(self, broker, clock, ledger) -> None:
-        self._broker = broker
-        self._clock = clock
-        self._ledger = ledger
-        self._host = _FlowHost(broker, clock, ledger)
-
-    def _flow(self, operation: str, **request):
-        try:
-            out = rs.oms_flow(operation, self._host, codec.text(production._wire(request)))
-        except ValueError as err:
-            if type(err) is ValueError and len(err.args) == 2 and all(isinstance(a, str) for a in err.args):
-                raise _rs.refusal(*err.args) from err.__cause__
-            raise
-        return json.loads(out)
-
-    # --- public API ---------------------------------------------------------------------
-
-    def create_bracket(self, intent, quantity):
-        return _bracket(self._flow("create_bracket", intent=intent, quantity=quantity))
-
-    def get_order(self, order_id):
-        return _order(self._flow("get_order", order_id=order_id))
-
-    def submit(self, order):
-        return _order(self._flow("submit", order=order))
-
-    def submit_trailing(self, order):
-        return _order(self._flow("submit_trailing", order=order))
-
-    def update_trailing(self, order_id, market_price, *, command_id):
-        return _order(self._flow("update_trailing", order_id=order_id, price=market_price, command_id=command_id))
-
-    def update_emulated_order(self, order_id, market_price, *, command_id):
-        return _order(self._flow("update_emulated_order", order_id=order_id, price=market_price, command_id=command_id))
-
-    def record_fill(self, fill):
-        return _order(self._flow("record_fill", fill=fill))
-
-    def cancel(self, order_id, *, command_id):
-        return _order(self._flow("cancel", order_id=order_id, command_id=command_id))
-
-    def move_stop(self, entry_order_id, stop_price, *, command_id):
-        return _order(self._flow("move_stop", entry=entry_order_id, stop_price=stop_price, command_id=command_id))
-
-    def close_bracket(self, entry_order_id, *, command_id, reason):
-        return _order(self._flow("close_bracket", entry=entry_order_id, command_id=command_id, reason=reason))
-
-    def reduce_bracket(self, entry_order_id, fraction, *, command_id, reason):
-        return _order(self._flow("reduce_bracket", entry=entry_order_id, fraction=fraction,
-                                 command_id=command_id, reason=reason))
-
-    def replace(self, order_id, changes, *, command_id):
-        return _order(self._flow("replace", order_id=order_id, changes=_changes(changes), command_id=command_id))
-
-    def reconcile_order(self, order_id):
-        return _order(self._flow("reconcile_order", order_id=order_id))
+class FlowManager(production.OrderManager):
+    """Production ``OrderManager`` plus the flow internals the parity tests reach."""
 
     # --- internals the parity tests reach -------------------------------------------------
 
@@ -239,16 +46,6 @@ class FlowManager:
 
     def _cancel_emulated_siblings(self, order, command_id):
         self._flow("cancel_emulated_siblings", order=order, command_id=command_id)
-
-    def _send_reduce(self, reduce, command_id):
-        return _order(self._flow("send_reduce", order=reduce, command_id=command_id))
-
-    def _bracket_children(self, entry_order_id):
-        return [_order(item) for item in self._flow("bracket_children", entry=entry_order_id)]
-
-    def _open_bracket_stop(self, entry_order_id):
-        stop, open_quantity = self._flow("open_bracket_stop", entry=entry_order_id)
-        return _order(stop), Decimal(open_quantity)
 
     def _replace_emulated_stop(self, order, changes, command_id):
         return _order(self._flow("replace_emulated_stop", order=order, changes=_changes(changes),
