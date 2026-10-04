@@ -503,6 +503,203 @@ def test_p5_text_tables_are_pythons() -> None:
         assert got == want, [(hex(ord(c)), g, w) for c, g, w in zip(chars, got, want) if g != w][:5]
 
 
+# -- T3 slippage -----------------------------------------------------------------------------
+
+
+def fill_obj(fid, oid, inst, side, qty, price, env="sim") -> Fill:
+    return Fill(fill_id=fid, order_id=oid, account_id="OPT_CSP", instrument=inst, quantity=D(qty),
+                price=D(price), venue_env=env, filled_at=T, side=side)
+
+
+def sfill_doc(f) -> dict:
+    return {"fill_id": f.fill_id, "order_id": f.order_id, "instrument": wire(f.instrument), "side": f.side.value,
+            "quantity": str(f.quantity), "price": str(f.price)}
+
+
+def report_json(r) -> dict:
+    dec = lambda d: None if d is None else str(d)  # noqa: E731
+    return {"venue": r.venue, "as_of": r.as_of.isoformat(),
+            "pairs": [{"order_id": p.order_id, "instrument": p.instrument, "side": p.side.value,
+                       "quantity": str(p.quantity), "sim_price": str(p.sim_price),
+                       "venue_price": str(p.venue_price), "slippage_points": str(p.slippage_points),
+                       "slippage_bps": dec(p.slippage_bps)} for p in r.pairs],
+            "unmatched_sim": list(r.unmatched_sim), "unmatched_venue": list(r.unmatched_venue),
+            "refused": [list(x) for x in r.refused], "mean_slippage_bps": dec(r.mean_slippage_bps)}
+
+
+PRICE_POOL = ["1.00", "3.00", "3.10", "2.95", "0.05", "100.5", "0.0001", "1234.5678", "2.10", "1E+1"]
+QTY_POOL = ["1", "2", "3", "0.5", "10", "100", "1.5", "7"]
+SLIP_INSTS = [P200, P195, AAPL, C200]
+
+
+def report_step(label, venue, sims, venues) -> None:
+    step("slippage_report", label,
+         lambda: report_json(FS.slippage_report(venue, T, sims, venues)),
+         lambda: door("slippage_report", {"venue": venue, "as_of": T.isoformat(),
+                                          "sim_fills": [sfill_doc(f) for f in sims],
+                                          "venue_fills": [sfill_doc(f) for f in venues]}))
+
+
+def zero_price(f: Fill) -> Fill:
+    object.__setattr__(f, "price", D(0))     # Fill forbids it; the report must not divide anyway
+    return f
+
+
+def test_p5_t3_slippage_report_lockstep() -> None:
+    rng = random.Random(5007)
+    B, S = Side.BUY, Side.SELL
+    for side in (B, S):                               # the grid: one order, every price pairing
+        for sp in PRICE_POOL:
+            for vp in PRICE_POOL:
+                for q in ("1", "2", "0.5"):
+                    report_step((side, sp, vp, q), "TosPaperBroker",
+                                [fill_obj("s", "o", P200, side, q, sp)], [fill_obj("v", "o", P200, side, q, vp, "paper")])
+    for venue in ("tos", ""):                         # empty venue refuses the whole report, last
+        report_step(("venue", venue), venue, [fill_obj("s", "o", P200, B, "1", "1")], [])
+        report_step(("venue-empty", venue), venue, [], [])
+    for sp_zero in (True, False):                     # zero sim price: no bps, left out of the mean
+        sim = fill_obj("s", "z", P200, B, "1", "1")
+        if sp_zero:
+            zero_price(sim)
+        report_step(("zero", sp_zero), "tos", [sim, fill_obj("s2", "a", P200, B, "1", "1")],
+                    [fill_obj("v", "z", P200, B, "1", "0.05", "paper"), fill_obj("v2", "a", P200, B, "1", "1.01", "paper")])
+    zeroq = fill_obj("s", "q", P200, B, "1", "1")     # a zero quantity cannot pair (and cannot be a vwap)
+    object.__setattr__(zeroq, "quantity", D(0))
+    report_step("zero-qty", "tos", [zeroq], [zeroq])
+    dup = fill_obj("f-1", "o", P200, B, "1", "3")     # duplicate fill ids, sim then venue, across orders
+    report_step("dup-sim", "tos", [dup, dup, fill_obj("g", "p", P200, B, "1", "3")],
+                [fill_obj("v", "o", P200, B, "2", "3", "paper"), fill_obj("w", "p", P200, B, "1", "3", "paper")])
+    vd = fill_obj("v-1", "o", P200, B, "1", "3", "paper")
+    report_step("dup-venue", "tos", [fill_obj("s", "o", P200, B, "2", "3")], [vd, vd])
+    report_step("dup-across-orders", "tos", [fill_obj("same", "a", P200, B, "1", "1"), fill_obj("same", "b", P200, B, "1", "1")],
+                [fill_obj("v1", "a", P200, B, "1", "1", "paper"), fill_obj("v2", "b", P200, B, "1", "1", "paper")])
+    for n in range(2500):                             # seeded
+        orders = [f"o-{rng.randrange(6)}" for _ in range(rng.randrange(0, 5))]
+        sims, venues = [], []
+        k = 0
+        for env, bucket in (("sim", sims), ("paper", venues)):
+            for oid in orders + [f"o-{rng.randrange(6)}" for _ in range(rng.randrange(0, 3))]:
+                if rng.random() < 0.85:
+                    k += 1
+                    fid = f"{env}{rng.randrange(1, 4) if rng.random() < 0.12 else k}"
+                    f = fill_obj(fid, oid, rng.choice(SLIP_INSTS[:2] if rng.random() < 0.9 else SLIP_INSTS),
+                                 rng.choice([B, B, B, S]) if rng.random() < 0.9 else B, rng.choice(QTY_POOL),
+                                 rng.choice(PRICE_POOL), env)
+                    if rng.random() < 0.04:
+                        zero_price(f)
+                    bucket.append(f)
+        # make most orders pairable so pairs and means are exercised
+        if rng.random() < 0.6:
+            venues = [copy.copy(f) for f in sims if rng.random() < 0.9] + venues[:1]
+            for v in venues[:-1] if venues else ():
+                object.__setattr__(v, "venue_env", "paper")
+                object.__setattr__(v, "fill_id", "v" + v.fill_id)
+        report_step(n, rng.choice(["tos", "TosPaperBroker", "é"]), sims, venues)
+    settle("slippage_report", 2600, ["SlippageError: venue must be", "InvalidOperation"])
+
+
+def test_p5_t3_report_per_order_refusal_families() -> None:
+    """Each per-order refusal reason, seen refusing and the report still standing (not a raise)."""
+    B, S = Side.BUY, Side.SELL
+    cases = {
+        "sim: duplicate fill id": ([fill_obj("d", "o", P200, B, "1", "1")] * 2, [fill_obj("v", "o", P200, B, "2", "1", "paper")]),
+        "venue: duplicate fill id": ([fill_obj("s", "o", P200, B, "2", "1")], [fill_obj("d", "o", P200, B, "1", "1", "paper")] * 2),
+        "side mismatch": ([fill_obj("s", "o", P200, B, "1", "1")], [fill_obj("v", "o", P200, S, "1", "1", "paper")]),
+        "instrument mismatch": ([fill_obj("s", "o", P200, B, "1", "1")], [fill_obj("v", "o", P195, B, "1", "1", "paper")]),
+        "mirror drifted": ([fill_obj("s", "o", P200, B, "1", "1")], [fill_obj("v", "o", P200, B, "2", "1", "paper")]),
+    }
+    for name, (sims, venues) in cases.items():
+        a = outcome(lambda: report_json(FS.slippage_report("tos", T, sims, venues)))
+        assert a[0] == "ok" and name in json.dumps(a[1]["refused"]), (name, a)
+        report_step(name, "tos", sims, venues)
+    ok = ([fill_obj("s", "o", P200, B, "1", "1")], [fill_obj("v", "o", P200, B, "1", "1", "paper")])
+    assert outcome(lambda: report_json(FS.slippage_report("tos", T, *ok)))[1]["refused"] == []
+    report_step("paired", "tos", *ok)
+    report_step("empty-venue-name", "", *ok)
+    assert any(k != "ok" and k[0] == "SlippageError" for k in TALLY["slippage_report"])
+
+
+TICKET_QTYS = ["4", "3", "1", "1.5", "0.5", "2"]
+
+
+def vfill(qty, *, fid="vf-1", side=Side.SELL, inst=P200, fee="0", order="tos:t1", price="2.05") -> VenueFill:
+    return VenueFill(fid, order, inst, D(qty), D(price), T, side, fee=D(fee))
+
+
+def ticket_obj(allocs, *, qty=None, side=Side.SELL, inst=P200, order="tos:t1") -> SimpleNamespace:
+    allocations = tuple(VenueOrderAllocation(oid, f"ACC_{oid}", D(q)) for oid, q in allocs)
+    total = qty if qty is not None else sum((a.quantity for a in allocations), D(0))
+    return SimpleNamespace(venue_order_id=order, instrument=inst, side=side, quantity=D(total), allocations=allocations)
+
+
+def alloc_doc(fill, ticket, prior) -> dict:
+    return {"fill": {"venue_fill_id": fill.venue_fill_id, "venue_order_id": fill.venue_order_id,
+                     "instrument": wire(fill.instrument), "side": fill.side.value, "quantity": str(fill.quantity),
+                     "price": str(fill.price), "filled_at": fill.filled_at.isoformat(), "fee": str(fill.fee)},
+            "ticket": {"venue_order_id": ticket.venue_order_id, "instrument": wire(ticket.instrument),
+                       "side": ticket.side.value, "quantity": str(ticket.quantity),
+                       "allocations": [{"strategy_order_id": a.strategy_order_id, "account_id": a.account_id,
+                                        "quantity": str(a.quantity)} for a in ticket.allocations]},
+            "already_filled": None if prior is None else {k: str(v) for k, v in prior.items()}}
+
+
+def fills_json(fills) -> list:
+    return [{"fill_id": f.fill_id, "order_id": f.order_id, "account_id": f.account_id, "quantity": str(f.quantity),
+             "price": str(f.price), "venue_env": f.venue_env, "filled_at": f.filled_at.isoformat(),
+             "side": f.side.value, "fee": str(f.fee), "venue_order_id": f.venue_order_id,
+             "venue_execution_id": f.venue_execution_id} for f in fills]
+
+
+def alloc_step(label, fill, ticket, prior) -> None:
+    step("allocate_venue_fill", label,
+         lambda: fills_json(FS.allocate_venue_fill(fill, ticket, already_filled=prior)),
+         lambda: door("allocate_venue_fill", alloc_doc(fill, ticket, prior)))
+
+
+def test_p5_t3_allocation_lockstep() -> None:
+    rng = random.Random(5008)
+    # the edge grid: fractional shares and contracts, residue, drift, fees that do not split to the cent
+    shapes = [[("a", "1"), ("b", "3")], [("a", "1"), ("b", "1"), ("c", "1")], [("a", "2"), ("b", "1"), ("c", "2")],
+              [("a", "0.5"), ("b", "1.5")], [("a", "1")], [("a", "1"), ("b", "2"), ("c", "3")],
+              [("a", "100"), ("b", "250")], [("a", "0.3"), ("b", "0.3"), ("c", "0.4")]]
+    fees = ["0", "0.01", "1.00", "1.01", "0.02", "7.77", "0.005", "13.337", "100"]
+    for allocs in shapes:
+        ticket = ticket_obj(allocs)
+        total = sum((D(q) for _, q in allocs), D(0))
+        for qty in {str(total), "1", "2", "0.5", "0.3", str(total / 2), str(total + 1), "3", "4"}:
+            for fee in fees:
+                alloc_step((allocs, qty, fee), vfill(qty, fee=fee), ticket, None)
+        for prior in ({"a": allocs[0][1]}, {"a": "0"}, {"z": "1"}, {"a": "-1"}, {"a": str(D(allocs[0][1]) + 1)},
+                      {allocs[-1][0]: allocs[-1][1]}, {}):
+            for qty in ("1", "2", "0.5", str(total)):
+                alloc_step((allocs, "prior", prior, qty), vfill(qty, fee="1.01"), ticket,
+                           {k: D(v) for k, v in prior.items()})
+    one = ticket_obj([("a", "1"), ("b", "3")])
+    for label, fill in (("foreign", vfill("1", order="tos:other")), ("instrument", vfill("1", inst=P195)),
+                        ("equity", vfill("1", inst=AAPL)), ("side", vfill("1", side=Side.BUY)),
+                        ("price", vfill("4", price="0.0001")), ("big", vfill("4", fee="9999999.99", price="123456.789"))):
+        alloc_step(label, fill, one, None)
+    drift = ticket_obj([("a", "1"), ("b", "3")], qty="5")      # ticket quantity drifted from its allocations
+    for qty in ("1", "2", "4", "5"):
+        alloc_step(("drift", qty), vfill(qty), drift, None)
+    drift = ticket_obj([("a", "1"), ("b", "3")], qty="2")
+    for qty in ("1", "2", "3"):
+        alloc_step(("drift-low", qty), vfill(qty), drift, {"a": D(1)} if qty == "1" else None)
+    for n in range(2500):                                       # seeded
+        k = rng.randrange(1, 5)
+        allocs = [(f"o{i}", rng.choice(QTY_POOL)) for i in range(k)]
+        ticket = ticket_obj(allocs, qty=rng.choice([None, None, None, rng.choice(TICKET_QTYS)]))
+        prior = None
+        if rng.random() < 0.6:
+            prior = {f"o{i}": D(rng.choice(["0", "0", "1", "0.5", "2", "-1"])) for i in range(rng.randrange(0, k + 2))}
+        fill = vfill(rng.choice(QTY_POOL), fee=rng.choice(fees), price=rng.choice(PRICE_POOL),
+                     order=rng.choice(["tos:t1"] * 9 + ["x"]), side=rng.choice([Side.SELL] * 9 + [Side.BUY]),
+                     inst=rng.choice([P200] * 9 + [P195]))
+        alloc_step(n, fill, ticket, prior)
+    settle("allocate_venue_fill", 2700, ["SlippageError: fill # is for", "instrument does not match",
+                                         "SlippageError: fill # side", "takes the ticket to", "already_filled gives"])
+
+
 # -- the existing pure-data vectors, through the Rust door ------------------------------------
 
 
@@ -582,6 +779,34 @@ def test_p5_existing_normalize_vectors_through_the_door(monkeypatch) -> None:
     monkeypatch.setattr(V, "placed_order_id", lambda raw: door("placed_order_id", {"raw": raw})["order_id"])
     monkeypatch.setattr(V, "MirrorTicket", DoorTicket)
     assert run_module_tests(V) == 52
+
+
+def test_p5_existing_slippage_vectors_through_the_door(monkeypatch) -> None:
+    import test_tos_slippage as V
+
+    def report(venue, as_of, sims, venues):
+        r = door("slippage_report", {"venue": venue, "as_of": as_of.isoformat(),
+                                     "sim_fills": [sfill_doc(f) for f in sims],
+                                     "venue_fills": [sfill_doc(f) for f in venues]})
+        pairs = tuple(V.SlippagePair(p["order_id"], p["instrument"], Side(p["side"]), D(p["quantity"]),
+                                     D(p["sim_price"]), D(p["venue_price"]), D(p["slippage_points"]),
+                                     None if p["slippage_bps"] is None else D(p["slippage_bps"])) for p in r["pairs"])
+        return V.SlippageReport(r["venue"], datetime.fromisoformat(r["as_of"]), pairs, tuple(r["unmatched_sim"]),
+                                tuple(r["unmatched_venue"]), tuple(tuple(x) for x in r["refused"]),
+                                None if r["mean_slippage_bps"] is None else D(r["mean_slippage_bps"]))
+
+    def allocate(fill, ticket, *, already_filled=None):
+        out = door("allocate_venue_fill", alloc_doc(fill, ticket, already_filled))
+        return tuple(Fill(fill_id=f["fill_id"], order_id=f["order_id"], account_id=f["account_id"],
+                          instrument=fill.instrument, quantity=D(f["quantity"]), price=D(f["price"]),
+                          venue_env=f["venue_env"], filled_at=fill.filled_at, side=Side(f["side"]), fee=D(f["fee"]),
+                          venue_order_id=f["venue_order_id"], venue_execution_id=f["venue_execution_id"])
+                     for f in out)
+
+    monkeypatch.setattr(V, "slippage_report", report)
+    monkeypatch.setattr(V, "allocate_venue_fill", allocate)
+    # the pair/report dataclass tests build their own objects and never reach the door
+    assert run_module_tests(V) >= 15
 
 
 def test_p5_existing_ticket_vectors_through_the_door(monkeypatch) -> None:

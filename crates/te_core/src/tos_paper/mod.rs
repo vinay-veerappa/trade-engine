@@ -13,6 +13,7 @@ pub mod netting;
 pub mod normalize;
 pub mod pytables;
 pub mod pytext;
+pub mod slippage;
 pub mod transport;
 pub mod wire;
 
@@ -45,6 +46,8 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "book_state" => normalize::book_state_op(&doc)?,
         "order_fill" => normalize::order_fill(&doc)?,
         "position" => normalize::position(&doc)?,
+        "allocate_venue_fill" => slippage::allocate_venue_fill(&doc)?,
+        "slippage_report" => slippage::slippage_report(&doc)?,
         "text_probe" => wire::text_probe(&doc)?,
         _ => return err(WIRE, format!("unknown tos_paper op {op:?}")),
     };
