@@ -342,7 +342,7 @@ impl StoredRow {
 }
 
 /// Conversion/fold/effect adapters supplied by the one binding. The transaction
-/// algorithm is native; outbox business sequencing remains the T5 Python adapter.
+/// algorithm is native; codecs and effect callbacks are supplied by the binding.
 pub trait WriteHost {
     type Error: From<rusqlite::Error>;
     fn len(&self) -> usize;

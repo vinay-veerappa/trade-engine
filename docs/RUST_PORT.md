@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4)**; T1/T3/T4 scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4,T5)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -1101,6 +1101,133 @@ No push, merge, PR or later ticket was started.
   P2 makes the types native.
 - P4 is the one large switch (who owns the process); the side-by-side paper
   session exists to make it safe.
+
+#### P4C-T5 native outbox/meta checkpoint
+
+Branch `te/p4c-t5` starts from **unmerged T4** `92b8121`, not the root checkout
+or the concurrent P5/P6 branches. Its private `.venv` uses CPython 3.13.15;
+both the engine import and extension resolve inside this worktree. No root/client
+environment, job, task, listener, production writer or deployment was changed.
+
+The separate oracle commit is `f9dee71`: `tests/frozen_p4c/t5_store.py` is a
+verbatim copy of the pre-T5 facade. No import rewrite was needed: its dependencies
+are unchanged Python carriers/codecs and the inherited T4 event owner. Its
+outbox/meta SQL and delivery sequencing stay frozen; all earlier oracles and
+existing test files are unchanged.
+
+Ownership:
+
+- `te_host::outbox` owns event-timestamp lookup, insertion/defaults/constraints,
+  FIFO filtering, delivery/failure SQL and transactions, meta upsert/read, and
+  drain sequencing. These use T4's **same connection**, never another writer.
+- `te_py::outbox` converts bindings, validates inputs in oracle order, preserves
+  exact exception classes/messages/causes, invokes sink/clock effects, and builds
+  the unchanged `OutboxItem`/`DrainResult` carriers. JSON/ISO/`int`/`str` calls use
+  Python's existing codecs, including Unicode, non-UTC aware timestamps,
+  microseconds, arbitrary schema-version integers and malformed-row refusals.
+- Python's replaced SQL, transaction control and FIFO loop are deleted in the
+  port commit. Its remaining outbox/meta methods and `_outbox_items` are thin
+  calls. `_insert_outbox`, `_commit`, `_rollback` and delivery callbacks remain
+  real reentrant seams, not fake connections or fallback implementations.
+- Meta writes preserve autocommit and any caller-owned transaction; no new
+  schema or admission records were added. Snapshot ownership remains T4's native
+  fold. Money stays checked `PyDec`; no clock read was added to Rust.
+
+Proofs:
+
+- Unchanged pre-port outbox/ledger baseline: **103 passed**.
+- New parity suite: **94 tests**, including embedded-binary provenance.
+  Forty seeded worlds x 24 commands x 11 compared prefixes = **10,560** seeded
+  comparisons: **9,600 successes / 960 exact duplicate refusals**. Every prefix
+  compares values (Decimal strings), refusals (type/message/cause), event codec
+  bytes, all outbox/meta rows, transaction state and full folded state.
+- Focused cases additionally cover validation/unopened precedence, default
+  event timestamps, malformed rows, unsupported bindings, SQL constraints,
+  commit failure and BaseException rollback behavior, atomic event/outbox
+  failure/replay, retry, clock/truthiness/publisher exceptions, callback order,
+  nested reads/enqueue, uncommitted metadata and reopen. An asserted eight-family
+  tally gives destination, unknown-event, created/delivered-timezone, JSON,
+  duplicate, binding and constraint refusals **one success and one refusal each**.
+- Embedded release test forbids Python `sqlite3.connect`, runs append/enqueue,
+  failure/retry delivery, meta/schema and concurrent read-only access, and
+  requires one built-in module and **zero loaded extension copies**.
+- Workspace tests: **100 passed** (90 core, 7 host, 3 wasm); explicit
+  `--workspace --features te_py/extension-module` gate: **100 passed**.
+- Final `.venv\Scripts\python.exe -B tools\ci_local.py --include-uncommitted`:
+  **exit 0**, **2,132 passed / 12 warnings** (885.01 seconds for pytest).
+  It rebuilt the release executable and extension with the private interpreter.
+  The warnings are inherited frozen CPython 3.13 named-binding deprecations.
+- Authorized read-only `tools\ledger_parity.py`: **exit 0**, **14,105/14,105**
+  event codecs, **23/23** account states and **four** full folds identical.
+  This is codec/fold evidence, not delivery or runtime-session certification.
+
+Measured release artifact SHA256 (full CI's artifacts):
+
+| Artifact | SHA256 |
+|---|---|
+| `crates/target/release/te.exe` | `39ccfc54c9aac41bc851ae131acb125f8460a17b82e7ea455fafa8eac4b75c41` |
+| `crates/target/release/python313.dll` | `e820bf024efd2b56bb2b82791e6b6ddc7303f070f8e72cba7637482a8a906238` |
+| private installed `trade_engine_rs.cp313-win_amd64.pyd` | `5704a48fc9fd48add1257f4df965deccd0b0597284fd32bdff58404552d24d49` |
+
+Oracle Git object `a114bf2d0cb6a32c0012040e7ca2e516894f6721` matches the
+pre-T5 production file exactly. The final docs-only evidence update followed CI;
+no production source or test changed after the final full gate.
+
+Mutation campaign (`tools/mutate_p4c_t5.py`): **15/15 compiled and killed**, no
+survivor or invalid run. Each anchor matched once, each mutant rebuilt both
+artifacts, and each kill was a test-body AssertionError, not build/import failure.
+Original bytes were restored in `finally`; the unconditional rebuild and final
+selected gate passed. Baseline was **52 passed / 39 deselected**; three additive
+proofs were written during the campaign, so restoration was **55 passed / 39
+deselected**. No test was weakened.
+
+| Mutant | Kill |
+|---|---|
+| FIFO reversed | seeded prefix row/value parity |
+| failed filter lost | seeded pending parity |
+| attempts not incremented | seeded raw row parity |
+| failure error lost | seeded raw row parity |
+| delivery timestamp lost | successful drain row parity |
+| duplicate ignored | seeded exact refusal parity |
+| meta update lost | seeded meta parity |
+| rollback lost | seeded failed-enqueue transaction parity |
+| BaseException rolled back | KeyboardInterrupt commit failure |
+| FIFO failure skipped | first-unconfirmed delivery walk |
+| destination strip lost | seeded row/value parity |
+| JSON sort lost | seeded raw payload parity |
+| timestamp precision lost | seeded timestamp parity |
+| constraint wrapper lost | seeded refusal type/message/cause |
+| BaseException swallowed | interrupted publisher walk |
+
+Timing (`tools/time_p4c_t5.py`): nine independently populated synthetic paired
+books, alternating old/new order, each with **1,720 seed events** (three accounts,
+120 positions/orders per account) and **120 hot items**. Build/setup are excluded;
+SQL commits, serialization, carrier construction, sink/clock effects and nested
+state reads are included. Raw samples and maxima are printed by the enforcing
+tool; every measured median must be <= **1.25x**.
+
+| Path | Frozen median ms | Native median ms | Ratio | Frozen/native max ms |
+|---|---:|---:|---:|---:|
+| enqueue + meta upsert/read | 115.0208 | 117.0506 | 1.017647x | 127.2923 / 142.9903 |
+| pending row conversion | 0.7519 | 0.5068 | 0.674026x | 1.5793 / 0.9963 |
+| FIFO drain | 53.2965 | 51.9209 | 0.974190x | 56.5343 / 73.5312 |
+
+The **first implementation failed** the pending-row threshold at **1.306361x**
+(enqueue/meta 0.952403x, drain 1.033837x). The binding then eliminated repeated
+per-row codec/import lookups and an intermediate Python dictionary, using one
+codec adapter per read and direct carrier construction. The same fixture and
+threshold passed afterward; no timing assertion was relaxed. These are
+shared-machine measurements, not tail-latency certification or a resolution of
+T4's previously disclosed unstable hot-path performance.
+
+Scope/deviations: only T5 was implemented. No existing test changed, no data
+migration, no new dependency, no runtime loop/HTTP/client/factory/strategy port.
+The retained `_commit`/`_rollback` effect seams execute SQL on the native
+connection as required by T4 compatibility. Rollback is reverting the T5 port
+and rebuilding private T4 artifacts, with **no ledger rewrite**. Windows x86-64
+is tested; other OSes and recorded/live runtime equivalence remain unverified.
+Production Python `ledger/store.py`: **+12 / -165, net -153 lines** (515 to 362).
+The frozen oracle's 515 lines are test-only and were committed separately.
 
 ## Working rules
 

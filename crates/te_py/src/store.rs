@@ -28,7 +28,7 @@ fn exception(py: Python<'_>, name: &str, message: impl AsRef<str>) -> PyErr {
     }
 }
 
-fn sql_error(py: Python<'_>, error: sql::Error) -> PyErr {
+pub(crate) fn sql_error(py: Python<'_>, error: sql::Error) -> PyErr {
     let detail = match &error {
         sql::Error::SqliteFailure(code, message) => Some((code, message.as_deref())),
         sql::Error::SqlInputError {
@@ -136,7 +136,7 @@ impl From<PyErr> for HostError {
     }
 }
 
-fn value_from_python(value: &Bound<'_, PyAny>, index: usize) -> PyResult<Value> {
+pub(crate) fn value_from_python(value: &Bound<'_, PyAny>, index: usize) -> PyResult<Value> {
     let py = value.py();
     if value.is_none() {
         return Ok(Value::Null);
@@ -167,7 +167,7 @@ fn value_from_python(value: &Bound<'_, PyAny>, index: usize) -> PyResult<Value> 
     ))
 }
 
-fn value_to_python(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
+pub(crate) fn value_to_python(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     Ok(match value {
         Value::Null => py.None(),
         Value::Integer(v) => v.into_pyobject(py)?.into_any().unbind(),
@@ -1009,6 +1009,58 @@ impl LedgerStore {
             .collect()
     }
 
+    fn enqueue_outbox(
+        &self, py: Python<'_>, owner: &Bound<'_, PyAny>, seq: &Bound<'_, PyAny>,
+        destination: &Bound<'_, PyAny>, payload: &Bound<'_, PyAny>, created_at: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.check(py)?;
+        crate::outbox::enqueue(&self.store, owner, seq, destination, payload, created_at)
+    }
+    fn insert_outbox(
+        &self, py: Python<'_>, seq: &Bound<'_, PyAny>, destination: &Bound<'_, PyAny>,
+        payload: &Bound<'_, PyAny>, created_at: &Bound<'_, PyAny>,
+    ) -> PyResult<i64> {
+        self.check(py)?;
+        crate::outbox::insert(&self.store, seq, destination, payload, created_at)
+    }
+    fn pending_outbox(
+        &self, py: Python<'_>, destination: &Bound<'_, PyAny>, include_failed: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        self.check(py)?;
+        crate::outbox::pending(&self.store, destination, include_failed)
+    }
+    fn mark_outbox_delivered(
+        &self, py: Python<'_>, owner: &Bound<'_, PyAny>, id: &Bound<'_, PyAny>, at: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.check(py)?;
+        crate::outbox::delivered(&self.store, owner, id, at)
+    }
+    fn mark_outbox_failed(
+        &self, py: Python<'_>, owner: &Bound<'_, PyAny>, id: &Bound<'_, PyAny>, error: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.check(py)?;
+        crate::outbox::failed(&self.store, owner, id, error)
+    }
+    fn set_meta(&self, py: Python<'_>, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.check(py)?;
+        self.store.set_meta(value_from_python(key, 1)?, value_from_python(value, 2)?)
+            .map_err(|e| sql_error(py, e))
+    }
+    fn get_meta(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.check(py)?;
+        match self.store.get_meta(value_from_python(key, 1)?).map_err(|e| sql_error(py, e))? {
+            Some(value) => Ok(value_to_python(py, &value)?.bind(py).str()?.into_any().unbind()),
+            None => Ok(py.None()),
+        }
+    }
+    fn schema_version(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let key = "schema_version".into_pyobject(py)?.into_any();
+        let value = self.get_meta(py, &key)?;
+        let value = if value.is_none(py) {
+            te_core::ledger::model::SCHEMA_VERSION.into_pyobject(py)?.into_any().unbind()
+        } else { value };
+        Ok(py.get_type::<PyInt>().call1((value,))?.unbind())
+    }
     fn write(
         &self,
         py: Python<'_>,

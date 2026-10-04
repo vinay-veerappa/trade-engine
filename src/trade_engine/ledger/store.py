@@ -30,14 +30,13 @@ import json
 import os
 import weakref
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping, Sequence, TYPE_CHECKING
 
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import _rs, codec
-from trade_engine.ledger.events import SCHEMA_VERSION, Event, EventKind
+from trade_engine.ledger.events import Event, EventKind
 from trade_engine.ledger.lock import LedgerLockError
 from trade_engine.ledger.outbox import DrainResult, OutboxItem, OutboxStatus
 from trade_engine.ledger.state import AccountState, FoldCache, fold
@@ -284,59 +283,13 @@ class Ledger:
         created_at: datetime | None = None,
     ) -> OutboxItem:
         """Enqueue an outbox item for delivery to an external sink."""
-        if not destination or not destination.strip():
-            raise ValueError("Outbox destination must be non-empty string")
-        row = self.conn.execute("SELECT ts_utc FROM events WHERE seq = ?", (event_seq,)).fetchone()
-        if row is None:
-            raise ValueError(f"Unknown event sequence {event_seq}")
-        if created_at is None:
-            created_at = datetime.fromisoformat(row["ts_utc"])
-        elif created_at.tzinfo is None or created_at.tzinfo.utcoffset(created_at) is None:
-            raise ValueError("Outbox created_at must be timezone-aware UTC datetime (I7)")
-
-        conn = self.conn
-        in_transaction = False
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            in_transaction = True
-            outbox_id = self._insert_outbox(event_seq, destination, payload, created_at)
-            self._commit()
-            in_transaction = False
-        except sqlite3.IntegrityError as e:
-            if in_transaction:
-                self._rollback()
-            raise ValueError(f"Outbox entry violates constraint (e.g. duplicate or missing foreign key): {e}") from e
-        except Exception:
-            if in_transaction:
-                self._rollback()
-            raise
-
-        return OutboxItem(
-            id=outbox_id,
-            event_seq=event_seq,
-            destination=destination.strip(),
-            payload=payload,
-            status=OutboxStatus.PENDING,
-            attempts=0,
-            created_at=created_at,
-        )
+        return _rs.rs.ledger_outbox_enqueue(self, event_seq, destination, payload, created_at)
 
     def _insert_outbox(
         self, event_seq: int, destination: str, payload: dict[str, Any], created_at: datetime
     ) -> int:
         """INSERT one PENDING row; the caller owns the transaction."""
-        cursor = self.conn.execute(
-            "INSERT INTO outbox (event_seq, destination, payload_json, status, attempts, created_at) "
-            "VALUES (?, ?, ?, ?, 0, ?)",
-            (
-                event_seq,
-                destination.strip(),
-                json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                OutboxStatus.PENDING.value,
-                created_at.isoformat(),
-            ),
-        )
-        return int(cursor.lastrowid)
+        return self._store.insert_outbox(event_seq, destination, payload, created_at)
 
     def pending_outbox(
         self,
@@ -345,59 +298,15 @@ class Ledger:
         include_failed: bool = True,
     ) -> list[OutboxItem]:
         """Fetch undelivered outbox entries in strict FIFO order (id ASC)."""
-        sql = "SELECT * FROM outbox WHERE "
-        conditions: list[str] = []
-        params: list[Any] = []
-        if destination is not None:
-            conditions.append("destination = ?")
-            params.append(destination.strip())
-        if include_failed:
-            conditions.append("status != ?")
-            params.append(OutboxStatus.DELIVERED.value)
-        else:
-            conditions.append("status = ?")
-            params.append(OutboxStatus.PENDING.value)
-        sql += " AND ".join(conditions) + " ORDER BY id ASC"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [self._row_to_outbox(row) for row in rows]
+        return self._store.pending_outbox(destination, include_failed)
 
     def mark_outbox_delivered(self, outbox_id: int, delivered_at: datetime) -> None:
         """Mark an outbox item delivered with confirmation timestamp."""
-        if delivered_at.tzinfo is None or delivered_at.tzinfo.utcoffset(delivered_at) is None:
-            raise ValueError("delivered_at must be timezone-aware UTC datetime (I7)")
-        conn = self.conn
-        in_transaction = False
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            in_transaction = True
-            conn.execute(
-                "UPDATE outbox SET status = ?, delivered_at = ? WHERE id = ?",
-                (OutboxStatus.DELIVERED.value, delivered_at.isoformat(), outbox_id),
-            )
-            self._commit()
-            in_transaction = False
-        except Exception:
-            if in_transaction:
-                self._rollback()
-            raise
+        _rs.rs.ledger_outbox_delivered(self, outbox_id, delivered_at)
 
     def mark_outbox_failed(self, outbox_id: int, error: str) -> None:
         """Mark an outbox item failed and record error message."""
-        conn = self.conn
-        in_transaction = False
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            in_transaction = True
-            conn.execute(
-                "UPDATE outbox SET status = ?, attempts = attempts + 1, last_error = ? WHERE id = ?",
-                (OutboxStatus.FAILED.value, str(error), outbox_id),
-            )
-            self._commit()
-            in_transaction = False
-        except Exception:
-            if in_transaction:
-                self._rollback()
-            raise
+        self._store.mark_outbox_failed(self, outbox_id, error)
 
     def drain_outbox(
         self,
@@ -409,72 +318,19 @@ class Ledger:
 
         Stops at the very first failure (I12) so later items remain queued in order.
         """
-        pending = self.pending_outbox(destination=destination, include_failed=True)
-        drained_count = 0
-        failed_item: OutboxItem | None = None
-        error_msg: str | None = None
-
-        for item in pending:
-            try:
-                ok = publisher(item)
-                if ok:
-                    self.mark_outbox_delivered(item.id, clock.now_utc())
-                    drained_count += 1
-                else:
-                    error_msg = f"Delivery unconfirmed by sink {destination}"
-                    self.mark_outbox_failed(item.id, error_msg)
-                    failed_item = replace(
-                        item,
-                        status=OutboxStatus.FAILED,
-                        attempts=item.attempts + 1,
-                        last_error=error_msg,
-                    )
-                    break  # Stop immediately! Later events stay queued in order.
-            except Exception as exc:
-                error_msg = f"Sink {destination} raised: {exc}"
-                self.mark_outbox_failed(item.id, error_msg)
-                failed_item = replace(
-                    item,
-                    status=OutboxStatus.FAILED,
-                    attempts=item.attempts + 1,
-                    last_error=error_msg,
-                )
-                break  # Stop immediately!
-
-        remaining = len(self.pending_outbox(destination=destination, include_failed=True))
-        return DrainResult(
-            drained_count=drained_count,
-            failed_item=failed_item,
-            error=error_msg,
-            remaining_count=remaining,
-        )
+        return _rs.rs.ledger_outbox_drain(self, destination, publisher, clock)
 
     @staticmethod
     def _row_to_outbox(row: sqlite3.Row) -> OutboxItem:
-        return OutboxItem(
-            id=int(row["id"]),
-            event_seq=int(row["event_seq"]),
-            destination=str(row["destination"]),
-            payload=json.loads(row["payload_json"]),
-            status=OutboxStatus(str(row["status"])),
-            attempts=int(row["attempts"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            last_error=row["last_error"],
-            delivered_at=datetime.fromisoformat(row["delivered_at"]) if row["delivered_at"] else None,
-        )
+        return _rs.rs.ledger_outbox_row(row)
 
     # -- meta --------------------------------------------------------------------
 
     def set_meta(self, key: str, value: str) -> None:
-        self.conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
+        self._store.set_meta(key, value)
 
     def get_meta(self, key: str) -> str | None:
-        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-        return None if row is None else str(row["value"])
+        return self._store.get_meta(key)
 
     def has_command(self, command_id: str) -> bool:
         """Return whether a persisted event already claims this idempotency key (I3)."""
@@ -483,8 +339,7 @@ class Ledger:
         return self._store.has_command(command_id)
 
     def schema_version(self) -> int:
-        stored = self.get_meta("schema_version")
-        return int(stored) if stored is not None else SCHEMA_VERSION
+        return self._store.schema_version()
 
 
 def fold_events(events: Iterable[Event]) -> dict[str, AccountState]:
@@ -493,15 +348,7 @@ def fold_events(events: Iterable[Event]) -> dict[str, AccountState]:
 
 
 def _outbox_items(outbox: OutboxSpec | None) -> list[tuple[str, dict[str, Any]]]:
-    if not outbox:
-        return []
-    items = list(outbox.items()) if isinstance(outbox, Mapping) else list(outbox)
-    for destination, payload in items:
-        if not isinstance(destination, str) or not destination.strip():
-            raise ValueError("Outbox destination must be non-empty string")
-        if not isinstance(payload, dict):
-            raise ValueError(f"Outbox payload for '{destination}' must be a dict")
-    return items
+    return _rs.rs.ledger_outbox_items(outbox)
 
 
 __all__ = [
