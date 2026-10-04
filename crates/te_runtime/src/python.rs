@@ -117,6 +117,9 @@ pub fn proof(config: &Config) -> Result<Value, Value> {
         initialize(config)?;
     }
     Python::with_gil(|py| -> Result<Value, Value> {
+        if config.mode == "factory-proof" {
+            return crate::plugins::proof(py, config).map_err(|e| python_error(py, e));
+        }
         let locals = PyDict::new(py);
         let script = CString::new(include_str!("proof.py")).unwrap();
         let result: PyResult<String> = (|| {

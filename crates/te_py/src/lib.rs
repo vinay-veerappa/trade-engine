@@ -15,6 +15,8 @@ mod sim;
 mod lock;
 mod store;
 mod outbox;
+mod clock;
+pub mod plugins;
 
 /// The same module initializer is registered before custom CPython startup.
 #[cfg(feature = "embed")]
@@ -728,6 +730,8 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     lock::register(m)?;
     store::register(m)?;
     outbox::register(m)?;
+    clock::register(m)?;
+    plugins::register(m)?;
     sim::register(m)?;
     oms::register(m)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;

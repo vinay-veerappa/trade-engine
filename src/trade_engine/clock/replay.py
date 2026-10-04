@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-import math
+from datetime import datetime, timedelta
 from typing import Union
+
+import trade_engine_rs
 
 from trade_engine.interfaces.clock import Clock
 
@@ -17,47 +18,34 @@ class ReplayClock(Clock):
     """
 
     def __init__(self, initial_time: datetime) -> None:
-        if initial_time.tzinfo is None or initial_time.tzinfo.utcoffset(initial_time) is None:
-            raise ValueError("initial_time must be a timezone-aware UTC datetime (I7)")
-        self._current_time: datetime = initial_time.astimezone(timezone.utc)
+        self._native = trade_engine_rs.NativeReplayClock(initial_time)
+
+    @property
+    def _current_time(self) -> datetime:
+        return self._native.current
+
+    @_current_time.setter
+    def _current_time(self, value: datetime) -> None:
+        self._native.current = value
 
     def now_utc(self) -> datetime:
         """Return the current simulated time as a timezone-aware UTC datetime."""
-        return self._current_time
+        return self._native.now_utc()
 
     def advance_to(self, target: datetime) -> None:
         """Advance simulated time to target datetime.
 
         Refuses to move backwards (I5).
         """
-        if target.tzinfo is None or target.tzinfo.utcoffset(target) is None:
-            raise ValueError("target time must be a timezone-aware UTC datetime (I7)")
-        target_utc = target.astimezone(timezone.utc)
-        if target_utc < self._current_time:
-            raise ValueError(
-                f"Cannot advance clock backwards in time: target {target_utc.isoformat()} < current {self._current_time.isoformat()} (I5)"
-            )
-        self._current_time = target_utc
+        self._native.advance_to(target)
 
     def advance_by(self, duration: Union[timedelta, float, int]) -> None:
         """Advance simulated time by a timedelta or float/int seconds."""
-        if isinstance(duration, (float, int)) and not isinstance(duration, bool):
-            if not math.isfinite(duration) or duration < 0:
-                raise ValueError(f"Cannot advance clock by non-finite or negative duration: {duration!r}")
-            delta = timedelta(seconds=duration)
-        elif isinstance(duration, timedelta):
-            if duration.total_seconds() < 0:
-                raise ValueError(f"Cannot advance clock by negative duration: {duration}")
-            delta = duration
-        else:
-            raise TypeError(f"Expected timedelta, float or int, got {type(duration).__name__}")
-        self._current_time += delta
+        self._native.advance_by(duration)
 
     def sleep(self, seconds: float) -> None:
         """Simulate sleep by advancing the clock forward by seconds.
 
         In replay, sleep does not block wall-clock execution; it advances simulated time.
         """
-        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not math.isfinite(seconds) or seconds < 0:
-            raise ValueError(f"sleep seconds cannot be negative or non-finite, got: {seconds!r}")
-        self.advance_by(seconds)
+        trade_engine_rs.clock_replay_sleep(self, seconds)

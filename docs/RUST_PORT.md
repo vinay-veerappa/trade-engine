@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4,T5)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4,T5,T6)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -1228,6 +1228,202 @@ and rebuilding private T4 artifacts, with **no ledger rewrite**. Windows x86-64
 is tested; other OSes and recorded/live runtime equivalence remain unverified.
 Production Python `ledger/store.py`: **+12 / -165, net -153 lines** (515 to 362).
 The frozen oracle's 515 lines are test-only and were committed separately.
+
+#### P4C-T6 owner clocks and adapter factory seam
+
+T6 branches from **unmerged T5** (`1bec7f1d4aaf1aaac4c79bda8bfd613c9290e6bd`)
+on `te/p4c-t6`, retaining the T1/T3/T4 single-writer/embedding chain without
+importing independent P5/P6 branches. The private Python 3.13.15 interpreter,
+extension and editable engine resolve inside `.worktrees/p4c-t6`.
+
+The standalone oracle commit is **`0a5195e30f47cab73e6238f1c307ba489ca2e44d`**. Its `t6_replay.py` (63 lines)
+and `t6_wall.py` (27 lines) are byte-identical copies of the pre-port clocks,
+verified before the production edits. No existing test or frozen oracle changed.
+The factory protocol is new: there was no pre-existing owner factory to freeze.
+Its oracle is an explicitly authored fake factory invoked directly with the
+frozen clock and an independent synthetic ledger; old entry-point discovery
+remains unchanged Python host plumbing.
+
+| Pre-port responsibility | Classification | T6 destination |
+|---|---|---|
+| `ReplayClock.__init__` | validation + state ownership | native UTC normalization/awareness and replay state |
+| `ReplayClock.now_utc` | supplied-state read | native owner clock |
+| `ReplayClock.advance_to` | pure monotonic decision + state update | host sequencing, binding datetime comparison/refusal |
+| `ReplayClock.advance_by` | pure validation/arithmetic + state update | native duration classification, host update after successful addition |
+| `ReplayClock.sleep` | deterministic sequencing | native validation and overridable `advance_by` dispatch |
+| `WallClock.now_utc` | system-clock I/O | `te_host::clock::system_utc_microseconds` |
+| `WallClock.sleep` | validation + OS effect | native validation/zero-noop and CPython OS sleep primitive |
+| `discover_plugins` / `_load_group` | Python metadata discovery | unchanged, not a second owner-factory implementation |
+
+Rust owns `te_host/src/clock.rs`, `te_py/src/clock.rs`, the provenance/validation/
+factory invocation in `te_py/src/plugins.rs`, and the opt-in native composition
+proof in `te_runtime/src/plugins.rs`. Python clock methods are shims; their
+replaced decisions/state updates are deleted in this port. `_current_time`
+remains a native-backed compatibility property because unchanged fixtures reset
+it and replay subclasses depend on it. Replay sleep still invokes overrides
+without a native mutable borrow across the callback.
+
+The new `trade_engine.runtime` protocol is engine/client-independent:
+
+- `load_factory(module, factory, plugin_paths, ledger=..., clock=..., config=...)`
+  requires an already-open owner `Ledger`, an injected `Clock`, absolute plugin
+  directories and a mapping. Configured source provenance is checked **before**
+  module execution and again after import; cached outside-path modules refuse.
+- A factory receives a frozen native `FactoryContext` containing non-owning
+  store and clock views. The store exposes state/events/accounts/command/meta/
+  count/seq reads, **not** open/close/connection/write authority; the clock
+  delegates now/sleep to the same injected owner. No SQLite mutex spans callbacks.
+- `FactoryResult(config, strategies=(), adapters=None)` is a carrier, not a job
+  owner. Wrong shapes and directly returned owning ledgers/runners refuse.
+  Funding/holdings effect invocation belongs to later role-flow/composition
+  tickets; T6 only returns adapters and never starts a trading/provider job.
+- A scoped native, process-wide construction fence rejects any additional
+  **engine** writer, including import-time and joined-worker-thread opens.
+  RAII releases the fence on ordinary and BaseException failures. Existing
+  read-only readers and the already-open owner's handle remain available.
+- This is **trusted-plugin composition, not a Python/SQLite sandbox**. Deliberate
+  raw `sqlite3` access, forged imports or post-construction arbitrary code cannot
+  be made safe by a Python object facade. Plugins must obey the injected-handle
+  contract; same-ledger independent writers remain excluded by the OS guard.
+- The loader temporarily adds configured roots and restores the identical
+  `sys.path` object on return/refusal. A future long-lived interpreter retains
+  configured plugin roots via T3's explicit startup search path; there is no
+  client-specific import in the engine.
+
+`te --proof --config <absolute-path>` additionally accepts **`factory-proof`**
+with `owner: {ledger_path, clock, initial_time}`. The clock is `replay` (aware ISO
+initial time required) or `wall` (no initial time). The ledger and its resolved
+parent must remain inside the offline config directory; invalid clock input
+refuses before a writable open. This is an offline seam, **not** `serve`, a
+live job, an actor, readiness/cutover or the runtime flip. Existing T3
+`packaging-proof` behavior and config refusals remain unchanged.
+
+I7's CI scanner formerly prohibited clocks in *all* workspace crates. It now
+permits only the exact `te_host/src/clock.rs` path, retaining refusal in core,
+other host files, bindings/runtime and wasm. An additive negative test proves
+both core and sibling-host violations still fire. No checked PyDec behavior,
+schema, command ID, money spelling, dependency or calendar changes.
+
+Final measured evidence (directly run; no existing test changed):
+
+| Gate | Evidence |
+|---|---|
+| Pre-port clock tests | 8 passed unchanged |
+| New parity/contract tests | **173**, included in final green CI |
+| Clock/consumer focused gate | **278 passed**, including unchanged EOD/intraday service tests |
+| Clock lockstep | 40 seeds x 250 commands = 10,000 prefixes; 9,080 successes / 920 exact refusals; each also compares current time |
+| Factory walks | 100 append prefixes; callbacks during construction, after commit and from strategies; exact trace, codec bytes and full fold |
+| Asserted counterparts | eight clock families and ten factory-result/construction families; additional input/import/provenance counterparts |
+| Hand mutants | **12/12 compiled and killed** on final callback-safe source; baseline/restored each **134 passed / 39 deselected** |
+| Private full CI | **2,305 passed**, 12 inherited warnings, exit 0; pytest **600.46 seconds** |
+| Rust workspace | **102 passed**: 90 core, 9 host, 3 wasm |
+| Explicit extension-feature unification | **102 passed** |
+| Read-only real-ledger parity | **14,105 codecs / 23 states / four full folds identical**, exit 0 |
+| Native factory-mode provenance | one built-in module; **zero loaded extension copies**; Python SQLite opens forbidden |
+
+Full CI rebuilt both the native release executable and the installed extension
+with this worktree's private interpreter before pytest. Final artifact SHA256:
+
+- `te.exe`: `5eb6a466460adf69b4263e235978ed8dba946c247937ead2c0865b91746416b5`.
+- bundled `python313.dll`: `e820bf024efd2b56bb2b82791e6b6ddc7303f070f8e72cba7637482a8a906238`.
+- installed extension: `47c9ab700feec075d3b48a7a29857ad561ef8afe78ec2f1a37f87bd2beab594f`.
+
+All mutants were killed by assertion failures, not compile/import/collection
+errors. Sources were restored byte-for-byte in `finally`, followed by the
+unconditional binary/extension rebuild and green final run:
+
+| Mutant | Killing proof |
+|---|---|
+| backward movement allowed | one-microsecond backwards target |
+| duration advance lost | successful sleep changes time |
+| UTC normalization lost | non-UTC constructor preserves exact UTC result |
+| finite/negative duration check lost | exact numeric refusal |
+| bool duration accepted | bool type/message parity |
+| negative timedelta allowed | negative-duration refusal/current-time preservation |
+| overridden sleep advance bypassed | replay subclass callback/current time |
+| zero wall sleep called | zero/bool injected effect trace |
+| factory writer allowed | other-ledger open refusal and absent database |
+| source check moved after import | uncached outside-path source never executes |
+| factory result carrier unchecked | exact bad-result refusal |
+| offline path confinement lost | no writable open outside offline config directory |
+
+Restored Rust SHA256: host clock
+`30aedb5d9a456d78015a23a34f807fabbc8c812a2de3ad94213d67602a7107c1`;
+clock binding `f4e7d14ceaf5f0b991744886962783ca04825795d2115f16531c772ed13ec22f`;
+factory binding `e50da0af83bff7d8990fd915b178222f398a6fbfca22bed5a6a74510028b739c`;
+runtime config `dcea1f51399efaf622bce5d423f264ec864a792453d4c7a2bc55f4ff9ce8a8bc`.
+
+Timing: `tools/time_p4c_t6.py`, nine independent paired synthetic cash books in
+alternating order, three accounts, 360 observation/append ticks per book,
+120 quote calculations per provider observation. Fixture construction and build
+are excluded; clock reads/advances/sleep, fake provider work, native nested state
+reads, codec construction and SQL commits are included. Frozen median
+**235.8086 ms**, native **232.7046 ms**, **0.986837x** (<=1.25x); maxima
+**299.4080 / 310.9781 ms**. This is the callback-safe implementation's final
+measurement; the first-pass path had measured 1.010417x. Raw nine-pair samples are printed by the enforcing
+tool. This is a clock-bearing synthetic hot-path measurement, not full-role
+session/queue/strategy or tail-latency certification; T4's variability remains.
+
+Deviations/boundaries: CPython datetime, timedelta, `math.isfinite`, repr and
+in-place-add primitives remain binding codecs so subclasses, banker rounding,
+overflow/type errors and refusal text match exactly. Native wall sleep uses
+CPython's **OS primitive** to preserve signal interruption, bool/type conversion
+and the real `time.sleep` effect seam; Python validation/sequencing does not
+survive. Wall observations from independent real clocks are bracketed rather
+than claimed identical; injected observations compare exactly.
+
+Production clocks: `replay.py` **+16/-28, net -12** (63 to 51),
+`wall.py` **+9/-9, net 0** (27 to 27). The new generic runtime carrier/shim
+adds **45** Python lines; combined production Python net **+33**. The 90-line
+oracle is test-only. Native clock ownership removes logic even though preserving
+private compatibility seams and adding a genuinely new protocol costs lines.
+
+Port code/test/tool churn (documentation excluded; oracle committed separately):
+
+| File | Added | Deleted | Net |
+|---|---:|---:|---:|
+| `crates/te_host/src/clock.rs` | 83 | 0 | +83 |
+| `crates/te_host/src/lib.rs` | 1 | 0 | +1 |
+| `crates/te_py/src/clock.rs` | 245 | 0 | +245 |
+| `crates/te_py/src/lib.rs` | 4 | 0 | +4 |
+| `crates/te_py/src/plugins.rs` | 305 | 0 | +305 |
+| `crates/te_py/src/store.rs` | 3 | 0 | +3 |
+| `crates/te_runtime/src/config.rs` | 55 | 1 | +54 |
+| `crates/te_runtime/src/main.rs` | 3 | 1 | +2 |
+| `crates/te_runtime/src/plugins.rs` | 111 | 0 | +111 |
+| `crates/te_runtime/src/python.rs` | 3 | 0 | +3 |
+| `src/trade_engine/clock/replay.py` | 16 | 28 | -12 |
+| `src/trade_engine/clock/wall.py` | 9 | 9 | 0 |
+| `src/trade_engine/runtime/__init__.py` | 5 | 0 | +5 |
+| `src/trade_engine/runtime/plugins.py` | 40 | 0 | +40 |
+| `tests/test_p4c_clock.py` | 652 | 0 | +652 |
+| `tools/ci_local.py` | 3 | 1 | +2 |
+| `tools/mutate_p4c_t6.py` | 121 | 0 | +121 |
+| `tools/time_p4c_t6.py` | 79 | 0 | +79 |
+
+All Python in this port: **+925/-38, net +887**; including the separate 90-line
+oracle, **net +977**. No existing test file was edited.
+
+An additional datetime-subclass reentrancy probe found a real first-pass bug:
+`advance_by` held a native mutable borrow across `__iadd__`, so an oracle-valid
+nested `now_utc()` call refused with `Already mutably borrowed`. The first full
+CI run was stopped before completion, not counted as a pass. The binding now
+clones state under a short lock, performs timezone/comparison/arithmetic callbacks
+unlocked, and replaces/decrefs old state outside the lock. Additive tests cover
+reentrant arithmetic, timezone offsets and comparison mutations, including the
+oracle's post-comparison refusal message. Final mutation/timing/full gates
+cover this fix; their results supersede the earlier measured artifacts.
+The first callback-safe mutation rerun had 11 valid kills and one **invalid**
+run caused by a test that recreated a missing plugin without invalidating
+Python's directory cache. The test now explicitly invalidates that cache before
+its success counterpart. No assertion/mutant was weakened; a complete clean
+12-mutant campaign then compiled/killed all 12 and restored 134 green tests.
+
+Rollback is reverting this port and rebuilding the private T5 artifacts, without
+rewriting any ledger. No push/merge/PR, client environment change, live/paper job,
+scheduled-task action, server listener or deployment occurs. T0/T2, T7 onward,
+historical session evidence, fresh strategy ports and non-Windows execution are
+still outstanding.
 
 ## Working rules
 

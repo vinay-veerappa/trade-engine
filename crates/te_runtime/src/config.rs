@@ -19,6 +19,16 @@ pub struct Config {
     pub plugin_module: String,
     pub plugin_factory: String,
     pub plugin_config: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<OwnerConfig>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerConfig {
+    pub ledger_path: PathBuf,
+    pub clock: String,
+    pub initial_time: Option<String>,
 }
 
 fn directory(path: &Path, name: &str) -> Result<(), Value> {
@@ -52,11 +62,35 @@ impl Config {
         let config: Self = serde_json::from_slice(&bytes)
             .map_err(|e| error(format!("config parse failed: {e}")))?;
         config.validate()?;
+        if let Some(owner) = &config.owner {
+            let parent = owner
+                .ledger_path
+                .parent()
+                .ok_or_else(|| error("owner.ledger_path must be an absolute offline path"))?;
+            let actual = std::fs::canonicalize(parent)
+                .map_err(|_| error("owner.ledger_path parent must exist"))?;
+            let root =
+                std::fs::canonicalize(path.parent().unwrap()).map_err(|e| error(e.to_string()))?;
+            if !actual.starts_with(&root) {
+                return Err(error(
+                    "factory-proof ledger must be inside the offline config directory",
+                ));
+            }
+            if owner.ledger_path.exists() {
+                let ledger =
+                    std::fs::canonicalize(&owner.ledger_path).map_err(|e| error(e.to_string()))?;
+                if !ledger.starts_with(&root) {
+                    return Err(error(
+                        "factory-proof ledger must be inside the offline config directory",
+                    ));
+                }
+            }
+        }
         Ok(config)
     }
 
     fn validate(&self) -> Result<(), Value> {
-        if self.mode != "packaging-proof" {
+        if self.mode != "packaging-proof" && self.mode != "factory-proof" {
             return Err(error(format!("unsupported mode: {}", self.mode)));
         }
         directory(&self.python_home, "python_home")?;
@@ -126,6 +160,26 @@ impl Config {
         }
         if !self.plugin_config.is_object() {
             return Err(error("plugin_config must be an object"));
+        }
+        match (&self.owner, self.mode.as_str()) {
+            (None, "factory-proof") => return Err(error("factory-proof requires owner config")),
+            (Some(_), "packaging-proof") => {
+                return Err(error("packaging-proof cannot configure an owner"))
+            }
+            (Some(owner), "factory-proof") => {
+                if !owner.ledger_path.is_absolute() {
+                    return Err(error("owner.ledger_path must be an absolute offline path"));
+                }
+                match (owner.clock.as_str(), &owner.initial_time) {
+                    ("replay", Some(_)) | ("wall", None) => {}
+                    ("replay", None) => return Err(error("replay clock requires initial_time")),
+                    ("wall", Some(_)) => {
+                        return Err(error("wall clock cannot configure initial_time"))
+                    }
+                    _ => return Err(error("owner.clock must be replay or wall")),
+                }
+            }
+            _ => {}
         }
         Ok(())
     }

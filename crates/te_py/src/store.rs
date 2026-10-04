@@ -787,6 +787,9 @@ impl LedgerStore {
         pid: &str,
         reader_uri: Option<&str>,
     ) -> PyResult<Self> {
+        if reader_uri.is_none() {
+            crate::plugins::refuse_factory_writer()?;
+        }
         let path = crate::lock::path_from_python(path)?;
         let sidecar = crate::lock::path_from_python(sidecar)?;
         let store=match reader_uri {

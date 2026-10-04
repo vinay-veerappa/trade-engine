@@ -1,5 +1,7 @@
-//! Additive packaging proof. No clock, jobs, provider, store or server ownership.
+//! Offline packaging/composition proofs; no trading jobs or server ownership.
 mod config;
+#[cfg(windows)]
+mod plugins;
 #[cfg(windows)]
 mod python;
 
