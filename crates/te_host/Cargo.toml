@@ -1,0 +1,9 @@
+[package]
+name = "te_host"
+version = "0.1.0"
+edition = "2021"
+description = "Native OS infrastructure; no effects belong in te_core."
+license = "MIT"
+
+[dependencies]
+fd-lock = "4.0.4"

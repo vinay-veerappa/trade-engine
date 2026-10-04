@@ -12,6 +12,7 @@ use te_core::greeks as gk;
 mod flow;
 mod oms;
 mod sim;
+mod lock;
 
 fn date(iso: &str) -> PyResult<NaiveDate> {
     NaiveDate::parse_from_str(iso, "%Y-%m-%d")
@@ -712,6 +713,7 @@ impl LedgerFold {
 #[pymodule]
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    lock::register(m)?;
     sim::register(m)?;
     oms::register(m)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;

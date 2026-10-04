@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 te_core = { path = "../te_core" }
+te_host = { path = "../te_host" }
 chrono = { workspace = true }
 
 [dependencies.pyo3]

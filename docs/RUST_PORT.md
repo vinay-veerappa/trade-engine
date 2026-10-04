@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | pending; after P3b-2b |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1)**; OS lock checkpoint only, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -542,6 +542,137 @@ Remaining/out of scope: OMS orchestration, `eod`, `intraday`, server/axum, ledge
 lock, `tos_paper`, all process/connection ownership and the final P4 paper-session
 flip. Rollback is a checkout of the base branch with a rebuild of its private
 extension: **no ledger rewrite or decimal migration**.
+
+### P4c verification and boundary
+
+**P4C-T1 only**, based on `038045ac9f8e94c01fe9201e335f9404bff70ed7`.
+The standalone oracle commit is
+`4d8d505f63ea909c19ab1d217f0a6e062a4fca65`: only
+`tests/frozen_p4c/lock.py`, copied before production edits. Its Git blob
+`47a9deb5c145210fc4e8e8b03fa30a5579bf397e` is identical to the base's production
+lock. The oracle remains immutable; no pre-existing test was edited.
+
+Rust now owns parent-directory creation, sidecar open, nonblocking OS exclusion,
+PID write/truncate/flush, and the guard's native file lifetime, in the new
+`te_host::lock` infrastructure crate using **fd-lock 4.0.4**. The existing ONE
+`trade_engine_rs` module registers one small `LedgerLock` binding. `te_core` and
+`te_wasm` acquire no OS dependency or clock read. The fd-lock borrowed guard is
+transferred to the owned file's close without a self-reference, unsafe code, or
+a leaked descriptor; release and process teardown free the lock.
+
+Python's `ledger/lock.py` is now only path/PID conversion, the native handle,
+the unchanged `LedgerLockError` and exact refusal message, and context-manager
+plumbing. It shrinks **107 -> 42 lines, net -65** (Git diff: +8/-73).
+`_lock_file`, `_unlock_file`, msvcrt/fcntl calls and Python file operations are
+deleted. The existing store remains unchanged: acquire still precedes every
+writable SQLite open; failed opens release the guard. Python still owns SQLite,
+server, clocks, plugins and runtime loops. T1 adds **no runtime binary**; D5's
+mandatory extension import/build applies without an imaginary binary skip.
+
+Measured Windows/Python 3.13 proof (`tests/test_p4c_lock.py`, **23 tests**):
+
+- **8,000 seeded lockstep API steps**, asserting exact outcomes and held state:
+  **5,722 successes / 2,278 refusals**. Exception type names and messages match.
+  Only the two distinct synthetic root strings in generated refusal messages
+  are normalized; subprocess, path/open errors and all other text are exact.
+- **8 owner/contender process walks**: old Python/new Rust in both directions,
+  Rust/Rust and old/old, each with graceful release and forced process death.
+  All 8 contenders refuse; all 8 post-exit acquisitions succeed.
+- **24 simultaneous acquisition races** (8 each old/new, new/old, new/new):
+  exactly 24 winners and 24 matching refusals, followed by successful reacquire.
+- Same-process contention; relative/dot/dot-dot, hardlink and Windows case
+  aliases; stale PID files, PID capture/text, held-state/idempotent acquire and
+  release, context exit and garbage-collection close. A native unit test reads
+  PID text through the owning handle while held.
+- Five malformed/open-path refusals and one missing-directory success, plus
+  read-only-file PermissionError, null filename/parent error order, BMP,
+  non-BMP and unpaired-surrogate paths. A failed open does not poison the handle.
+  Windows held sidecars cannot be deleted or replaced to bypass exclusion.
+  The SQLite-open spy proves refusal occurs before any writable DB open.
+
+`tools/mutate_p4c_t1.py` uses the private interpreter, rebuilds every mutant,
+runs `python -B`, asserts one raw-source occurrence (preserving CRLF), restores
+original bytes in `finally`, and unconditionally rebuilds and checks restored
+green. An explicit pytest exception hook recognizes **AssertionError only**;
+compiler/import/collection failures never count. Final baseline and restored
+runs both pass **23 tests**; **12/12 compiling mutants killed**, no equivalents
+or survivors:
+
+| Mutant | Killing test |
+|---|---|
+| `guard-dropped-before-return` | generated lockstep |
+| `pid-not-truncated` | aliases/PID/stale/context |
+| `pid-prefix-lost` | aliases/PID/stale/context |
+| `held-file-delete-sharing` | held sidecar deletion/replacement |
+| `parent-creation-lost` | generated lockstep |
+| `truncate-before-lock` | aliases/PID/stale/context |
+| `contention-accepted` | generated lockstep |
+| `held-always-false` | generated lockstep |
+| `release-leaks-descriptor` | generated lockstep |
+| `reacquire-not-idempotent` | generated lockstep |
+| `pid-capture-ignored` | aliases/PID/stale/context |
+| `open-error-filename-lost` | exact invalid-path errors |
+
+Final gates (2026-10-03):
+
+- Pre-port existing locking baseline: **5 passed, 86 deselected**.
+- Restored focused lock + unchanged ledger suite: **114 passed**.
+- `cargo test --manifest-path crates/Cargo.toml --workspace`: **94 passed**:
+  90 core unit tests, 1 host unit test, 3 wasm integration tests; zero failures,
+  ignored tests or doctests. te_py and te_wasm unit targets also build.
+- Private `python -B tools/ci_local.py --include-uncommitted`: **exit 0**,
+  **1,969 Python tests passed in 795.04 s**; I7/version/extension gates green.
+- Read-only `tools/ledger_parity.py`: **exit 0**; mirror-PM-B 4,095 events,
+  0DTE 3,278, options 436, scan 6,296: **14,105 codec rows, 23 account states
+  and 4 folds identical**. All oracle folds succeed. This remains a codec/fold
+  gate (refusal kind only), not full runtime/tape certification.
+
+Timing (`tools/time_p4c_t1.py`): startup/open/close is **not a tick hot path**.
+Nine independent synthetic populated books per implementation, three accounts
+and 300 cash-flow events per book; identical unchanged store/schema/WAL/FULL
+lifecycle, 50 opens per sample, seeding/build outside the timer. No recorded
+session or trading fixture is claimed. Old/new median open/close:
+**2.655864 / 2.926010 ms**, ratio **1.101717** (<1.25); largest sample means
+**4.344502 / 4.027056 ms**. Lock-only median **0.576044 / 0.455764 ms**,
+ratio **0.791197**; tails **0.878112 / 0.821142 ms**.
+
+Compatibility details and discrepancies found, not silent library departures:
+
+- fd-lock's Windows LockFileEx range (byte zero, length one) actually excludes
+  the old msvcrt holder both ways. Native open explicitly shares read/write,
+  **not delete**, matching Python's CRT sharing flags. Write access (rather than
+  append-only access) is required for locked truncation on Windows.
+- The pinned PyO3 0.23 PathBuf extractor panics on non-BMP Windows filenames.
+  The binding uses a lossless UTF-16/surrogatepass conversion instead. OS errors
+  use Python's Windows/CRT errno and message formatting, preserving exact
+  mkdir-vs-open and embedded-null text. No dependency/version/design substitute
+  was made. Unix fd-lock/flock paths exist but were **not executed on this
+  Windows machine**; do not infer a separate Unix platform certification.
+- An unpinned Cargo workspace command initially discovered Python 3.14 and
+  refused it. Explicit `PYO3_PYTHON` set to the private 3.13 interpreter makes
+  the requested whole-workspace gate pass without changing PyO3 features.
+- Initial harness failures (Windows venv launcher PID versus actual child PID,
+  reused null-test roots, CRLF anchors and pytest's abbreviated assertion text)
+  were corrected. Death tests terminate the reported synthetic child's actual
+  PID. No invalid campaign was counted as a completed mutation gate.
+
+Isolation: branch `te/p4c-t1`, worktree
+`C:\Users\vinay\trade-engine\.worktrees\p4c-t1`, private `.venv` only. Package
+resolution is this worktree's `src`; the actual
+`trade_engine_rs.cp313-win_amd64.pyd` is under this private `.venv`.
+Cargo target is worktree-local `crates\target`. Full CI removes inherited
+`PYTEST_ADDOPTS` and sets TMPDIR/TEMP/TMP to `.ci-local\temp`, so nested pytest
+numbered roots coexist. Timing/native scratch files and probe processes are
+cleaned by their exact names. No root checkout, client, plan file, scheduled
+task, real writer, venue or trading job was changed or started.
+
+Only this documentation evidence/status was edited after the accepted full-tree
+gate; production, tests, build manifests and mutation sources remain unchanged.
+The documentation-only artifact is checked with `git diff --check`.
+Rollback is the retained base release plus its rebuilt private extension after
+the current guard closes: mixed-version handoff is tested, stale PID files need
+not be deleted, and **no ledger/schema/decimal rewrite** is required. No push,
+merge, PR, T0 or later-ticket work is part of this checkpoint.
 
 ### Costs of phasing (accepted)
 
