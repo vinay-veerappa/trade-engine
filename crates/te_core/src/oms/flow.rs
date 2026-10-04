@@ -27,7 +27,7 @@ use crate::ledger::fold::AccountState;
 use crate::ledger::json::{dumps, Json};
 use crate::ledger::model::{
     check_event, err, DateTime, EmulatedOrderState, Event, EventKind, Fill, Instrument, LErr, Obj, Order,
-    OrderState, OrderStateChange, OrderType, Side, Tif, R, SCHEMA_VERSION,
+    OrderState, OrderStateChange, OrderType, Side, Tif, R, SCHEMA_VERSION, validate_order_prices,
 };
 use crate::ledger::ops::{le, s, zero};
 use crate::ledger::pydec::PyDec;
@@ -495,29 +495,125 @@ pub fn submit_trailing<H: Host>(h: &H, order: &Order) -> R<Order> {
 
 /// `update_trailing`: the order, `trailing_check` against the venue's types (a native
 /// trail has no local trail), then `update_emulated_order`.
-pub fn update_trailing<H: Host>(_h: &H, _order_id: &str, _price: &PyDec, _command: &str) -> R<Order> {
-    unported("update_trailing")
+pub fn update_trailing<H: Host>(h: &H, order_id: &str, price: &PyDec, command: &str) -> R<Order> {
+    let order = get_order(h, order_id)?;
+    let caps = capabilities(h)?;
+    plan::trailing_check(order.order_type, "update_trailing", order_id, &caps.types)?;
+    update_emulated_order(h, order_id, price, command)
 }
 
 /// `update_emulated_order`. Refuse a bad price before the context; `emulation_check`;
 /// a replayed command id is checked (`observation_replay`) and routes a recorded
 /// trigger that has not been sent. A new observation is recorded (ORDER_EMULATION_UPDATED)
 /// BEFORE the trigger is routed, so a crash after the record re-routes on replay.
-pub fn update_emulated_order<H: Host>(_h: &H, _order_id: &str, _price: &PyDec, _command: &str) -> R<Order> {
-    unported("update_emulated_order")
+pub fn update_emulated_order<H: Host>(h: &H, order_id: &str, price: &PyDec, command: &str) -> R<Order> {
+    plan::check_price(price)?;
+    let ctx = context(h, order_id)?;
+    let order = ctx.order;
+    let emulation = ctx.emulation;
+    let caps = capabilities(h)?;
+    plan::emulation_check(order_id, order.order_type, emulation.is_some(), &caps.types, caps.native_stops)?;
+    if let Some(prior) = h.event_by_command(command)? {
+        let prior_obj = Prior::of(&prior);
+        plan::observation_replay(&prior_obj, &order.account_id, order_id, price, command)?;
+        let current = get_order(h, order_id)?;
+        let triggered = match &prior.payload {
+            Obj::Emulated(e) => e.triggered,
+            _ => false,
+        };
+        let action = plan::observed_action(triggered, current.state, order_id)?;
+        if action == plan::Observed::Route {
+            let observed_price = match &prior.payload {
+                Obj::Emulated(e) => e.observed_price.clone(),
+                _ => None,
+            };
+            return route_emulated_trigger(h, &order, observed_price.as_ref(), command);
+        }
+        return Ok(current);
+    }
+    let action = plan::observed_action(emulation.as_ref().map(|e| e.triggered).unwrap_or(false), order.state, order_id)?;
+    if action == plan::Observed::Route {
+        return route_emulated_trigger(h, &order, emulation.as_ref().and_then(|e| e.observed_price.as_ref()), command);
+    }
+    if action == plan::Observed::Return {
+        return Ok(order);
+    }
+    let (new_emulation, triggered) = if order.order_type == OrderType::Trail {
+        let amount = order.trail_amount.as_ref().cloned().unwrap_or_else(zero);
+        crate::sim::trailing::check_trail_amount(&amount)?;
+        let mut trail = crate::sim::trailing::Trail {
+            side: order.side,
+            trail_amount: amount,
+            extreme: emulation.as_ref().and_then(|e| e.extreme.clone()),
+            stop_price: emulation.as_ref().and_then(|e| e.stop_price.clone()),
+            triggered: emulation.as_ref().map(|e| e.triggered).unwrap_or(false),
+        };
+        let triggered = crate::sim::trailing::update(&mut trail, price)?;
+        (
+            EmulatedOrderState {
+                order_id: order_id.to_string(),
+                observed_price: Some(price.clone()),
+                extreme: trail.extreme.clone(),
+                stop_price: trail.stop_price.clone(),
+                triggered,
+                reason: plan::observation_reason(order.order_type, price, triggered),
+            },
+            triggered,
+        )
+    } else {
+        let (stop, triggered) = plan::stop_observation(&order, price)?;
+        (
+            EmulatedOrderState {
+                order_id: order_id.to_string(),
+                observed_price: Some(price.clone()),
+                extreme: None,
+                stop_price: Some(stop.clone()),
+                triggered,
+                reason: plan::observation_reason(order.order_type, price, triggered),
+            },
+            triggered,
+        )
+    };
+    append(
+        h,
+        &order.account_id,
+        EventKind::OrderEmulationUpdated,
+        Obj::Emulated(new_emulation),
+        command,
+    )?;
+    if triggered {
+        return route_emulated_trigger(h, &order, Some(price), command);
+    }
+    get_order(h, order_id)
 }
 
 /// `_route_emulated_trigger`: the venue type (a STOP_LIMIT at its limit, else
 /// `_trigger_order_type`), `_require_tif`, then the OCO siblings are cancelled BEFORE
 /// the triggered order is submitted (`_cancel_emulated_siblings`, then `_submit_emulated`).
-pub fn route_emulated_trigger<H: Host>(_h: &H, _order: &Order, _trigger_price: Option<&PyDec>, _command: &str) -> R<Order> {
-    unported("route_emulated_trigger")
+pub fn route_emulated_trigger<H: Host>(h: &H, order: &Order, trigger_price: Option<&PyDec>, command: &str) -> R<Order> {
+    let (venue_type, limit_price) = if plan::trigger_price(order, trigger_price)? {
+        (OrderType::Limit, order.limit_price.clone())
+    } else {
+        let t = trigger_order_type(h, order)?;
+        let limit = plan::route_limit(t, trigger_price);
+        (t, limit)
+    };
+    require_tif(h, order, Some(venue_type))?;
+    cancel_emulated_siblings(h, order, command)?;
+    submit_emulated(h, order, trigger_price, command, venue_type, limit_price.as_ref())
 }
 
 /// `_cancel_emulated_siblings`: the order's OCO siblings in folded-state order, through
 /// `_cancel_exits` under `{command}:{order_id}:trigger`.
-pub fn cancel_emulated_siblings<H: Host>(_h: &H, _order: &Order, _command: &str) -> R<()> {
-    unported("cancel_emulated_siblings")
+pub fn cancel_emulated_siblings<H: Host>(h: &H, order: &Order, command: &str) -> R<()> {
+    let state = h.account_state(&order.account_id)?;
+    let all: Vec<&Order> = state.orders.values().collect();
+    let ids = plan::siblings(order, &all);
+    let siblings: Vec<Order> = ids
+        .iter()
+        .filter_map(|id| state.orders.get(id).cloned())
+        .collect();
+    cancel_exits(h, &siblings, &format!("{}:{}:trigger", command, order.order_id))
 }
 
 /// `record_fill`. `fill_match` (account and venue env), validate the quantity, append
@@ -649,6 +745,7 @@ pub fn replace<H: Host>(h: &H, order_id: &str, changes: &OrderChanges, command: 
         changes.new_limit_price.as_ref(),
         changes.new_stop_price.as_ref(),
     );
+    validate_order_prices(updated.order_type, &updated.limit_price, &updated.stop_price, &updated.trail_amount)?;
     if noop {
         let payload = Obj::OrderUpdated(OrderUpdated {
             order: order.clone(),
@@ -712,8 +809,37 @@ pub fn replace<H: Host>(h: &H, order_id: &str, changes: &OrderChanges, command: 
 
 /// `_replace_emulated_stop`: a `:local` replay is checked (`replace_replay` mode
 /// local); otherwise `_replacement_terms` and ORDER_UPDATED under `{command}:local`.
-pub fn replace_emulated_stop<H: Host>(_h: &H, _order: &Order, _changes: &OrderChanges, _command: &str) -> R<Order> {
-    unported("replace_emulated_stop")
+pub fn replace_emulated_stop<H: Host>(h: &H, order: &Order, changes: &OrderChanges, command: &str) -> R<Order> {
+    use crate::ledger::model::OrderUpdated;
+    let reason = format!("Local emulated stop replaced: {}", changes.repr());
+    let local_command_id = format!("{}:local", command);
+    if let Some(prior) = h.event_by_command(&local_command_id)? {
+        let prior_obj = Prior::of(&prior);
+        plan::replace_replay(&prior_obj, plan::ReplayMode::Local, &order.order_id, &order.account_id, &reason, command, None)?;
+        return get_order(h, &order.order_id);
+    }
+    let ctx = context(h, &order.order_id)?;
+    let equity = matches!(order.instrument, Instrument::Equity(..));
+    plan::replace_quantity(changes.new_quantity.as_ref(), &ctx.filled, equity)?;
+    let (updated, _same) = plan::replace_terms(
+        order,
+        changes.new_quantity.as_ref(),
+        changes.new_limit_price.as_ref(),
+        changes.new_stop_price.as_ref(),
+    );
+    validate_order_prices(updated.order_type, &updated.limit_price, &updated.stop_price, &updated.trail_amount)?;
+    append(
+        h,
+        &order.account_id,
+        EventKind::OrderUpdated,
+        Obj::OrderUpdated(OrderUpdated {
+            order: updated,
+            reason,
+            venue_order_id: None,
+        }),
+        &local_command_id,
+    )?;
+    get_order(h, &order.order_id)
 }
 
 /// `reconcile_order`. Read back with `broker.orders(created_at)`, never resend. A
@@ -795,8 +921,42 @@ pub fn submit_native<H: Host>(h: &H, order: &Order) -> R<Order> {
 /// `_start_emulation`. `start_emulation` plans it (a pending order refuses; STOP_LIMIT
 /// without LIMIT is a recorded refusal), the trigger type is resolved and
 /// `_require_tif` checked BEFORE the first ORDER_EMULATION_UPDATED is recorded.
-pub fn start_emulation<H: Host>(_h: &H, _order: &Order) -> R<Order> {
-    unported("start_emulation")
+pub fn start_emulation<H: Host>(h: &H, order: &Order) -> R<Order> {
+    let caps = capabilities(h)?;
+    let action = plan::start_emulation(order, &caps.types)?;
+    if action == plan::Start::Return {
+        return Ok(order.clone());
+    }
+    if action == plan::Start::RefuseLimit {
+        planned_refusal(h, order, Refusal::Limit, None)?;
+    }
+    let trigger_type = if action == plan::Start::Limit {
+        OrderType::Limit
+    } else {
+        trigger_order_type(h, order)?
+    };
+    require_tif(h, order, Some(trigger_type))?;
+    let ctx = context(h, &order.order_id)?;
+    if ctx.emulation.is_none() {
+        append(
+            h,
+            &order.account_id,
+            EventKind::OrderEmulationUpdated,
+            Obj::Emulated(EmulatedOrderState {
+                order_id: order.order_id.clone(),
+                observed_price: None,
+                extreme: None,
+                stop_price: order.stop_price.clone(),
+                triggered: false,
+                reason: format!(
+                    "Emulated {} working; awaiting live prices",
+                    order.order_type.value()
+                ),
+            }),
+            &format!("{}:emulation-start", order.command_id),
+        )?;
+    }
+    get_order(h, &order.order_id)
 }
 
 /// `_submit_emulated`. The current order; `submit_emulated`; `_require_tif`; then
@@ -804,14 +964,54 @@ pub fn start_emulation<H: Host>(_h: &H, _order: &Order) -> R<Order> {
 /// sent (durable before network). The venue order is built OUTSIDE the guard; only
 /// `broker.submit` raising is BrokerOutcomeUnknownError. Then `_record_submit_ack`.
 pub fn submit_emulated<H: Host>(
-    _h: &H,
-    _order: &Order,
-    _trigger_price: Option<&PyDec>,
-    _command: &str,
-    _venue_type: OrderType,
-    _limit_price: Option<&PyDec>,
+    h: &H,
+    order: &Order,
+    trigger_price: Option<&PyDec>,
+    command: &str,
+    venue_type: OrderType,
+    limit_price: Option<&PyDec>,
 ) -> R<Order> {
-    unported("submit_emulated")
+    use crate::ledger::model::OrderUpdated;
+    let current = get_order(h, &order.order_id)?;
+    if !plan::submit_emulated(&current)? {
+        return Ok(current);
+    }
+    require_tif(h, &current, Some(venue_type))?;
+    let submitted = Order { state: OrderState::Submitted, ..current.clone() };
+    append(
+        h,
+        &current.account_id,
+        EventKind::OrderUpdated,
+        Obj::OrderUpdated(OrderUpdated {
+            order: submitted.clone(),
+            reason: format!("Emulated {} submission requested", current.order_type.value()),
+            venue_order_id: None,
+        }),
+        &format!("{}:emulated-submit", current.command_id),
+    )?;
+    mark_pending(
+        h,
+        &submitted,
+        &format!(
+            "Emulated {} triggered at {} by {}",
+            current.order_type.value(),
+            trigger_price.map(s).unwrap_or_default(),
+            command
+        ),
+        &format!("{}:emulated-pending", current.command_id),
+    )?;
+    let (_terms, venue) = venue_order(h, &current, Some((venue_type, limit_price.cloned())))?;
+    let ack = match h.submit(&venue)? {
+        Net::Ok(a) => a,
+        Net::Failed => {
+            return err(
+                "broker_unknown",
+                format!("Emulated order '{}' submit outcome is unknown", current.order_id),
+            )
+        }
+    };
+    record_submit_ack(h, &current, &ack, &format!("{}:emulated-result", current.command_id))?;
+    get_order(h, &current.order_id)
 }
 
 /// `_record_submit_ack`: `submit_ack` names the event and reason; an unrecognized
