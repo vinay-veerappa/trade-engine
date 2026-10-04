@@ -50,7 +50,9 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-1 OMS core, non-manager half** | `oms/reconcile.py`, `oms/restore.py`, the remaining decision logic of `oms/options.py` | ~0.9k | a FROZEN copy of the pre-port Python (`tests/frozen_p3b/`) and the production shims are driven in lockstep (two worlds, each with its own ledger, clock and `SnapshotVenue`); every step agrees on the return value (Decimals by `str`), or on the refusal (type name AND message), and after every step on the ledger events and the outbox; folded state byte for byte at the end of a walk | **done**: `te_core::oms::reconcile` (which venue orders `reconcile_after` re-reads; the unknown-order refusal (I5); the journal payload of one fill, its asset class, multiplier, bracket stop and target, the missing-event refusal (I1)), `te_core::oms::restore` (which orders, brackets, fills and positions rebuild a venue; what a PENDING_UNKNOWN order becomes in `refuse` and `resolve` mode; the pending-request classification; the refusals), `te_core::oms::options` (intent and order fingerprints with an in-crate SHA-256, replay and fingerprint conflicts, `plan_open` duplicate (C4) and uncovered (C3) refusals, `plan_close` incl. the out-of-ratio refusal and the `:close:N` numbering, `plan_holding`, and the `sync` plan), reached through 15 `trade_engine_rs.oms_*` functions (`oms_orders_to_read`, `oms_restorable`, ...) and the one door `sim/_rs.py` (refusal kinds `reconcile`, `restore`, `option`, `duplicate`, `uncovered`, `closed`, `idempotency`). Ledger reads and writes and venue I/O stay Python and cross as callbacks (`restorable` makes its two ledger reads in the order Python did). Deleted from Python in the same commit as the shims (D3): 197+48+83 lines, 86+36+77 added (net -129). Gates: `tests/test_p3b_parity.py`, 7 tests: 631 random folded books (5,747 compared steps: open new/replayed/conflicting, close incl. bogus ids and reused commands, `close_holding`, `sync`, `restorable`/`restorable_positions` in both pending modes and with malformed modes, journal fills recorded or not, ORDER_PENDING events injected), 220 flow walks (10,277 compared steps over real `SnapshotVenue` sessions: entries with and without targets, snapshots that fill them, `reconcile_after` with and without the journal, `sync`, closes, requests left pending, restarts that rebuild the venue in `refuse` and `resolve` mode, a venue order the ledger never knew, orders whose parent the ledger lacks), `reconcile_after` re-read order over 631 books with NEW, working, terminal and unknown venue orders, and the import check (`trade_engine_rs` is imported unconditionally: missing is an ERROR, D5). Coverage asserted on the tally: every refusal kind both happens and succeeds (reconcile, restore, key, option, duplicate, uncovered, closed, idempotency). Full suite 1903 passed (1896 pre-existing, unchanged; plus 7); `cargo test -p te_core` 79 passed. 16 hand mutants (`tools/mutate_p3b.py`: rebuilt each time, `python -B`, original bytes restored in `finally`, final restore + rebuild, baseline run first), all 16 KILLED: restore keeping NEW children, a cancel-pending order restored as ACCEPTED, the pending-cancel test ignoring the reason, a forgotten earlier-unresolved order, a combo target on every leg of the journal, `reconcile_after` re-reading NEW orders, the latest fill read as the earliest, `sync` cancelling a non-target on a settled leg, `sync` ignoring a terminal entry, `close_holding` skipping the cover check, the over-close test on the signed holding, duplicate protection counting flat positions, duplicate protection counting terminal entries, a `close` replay of any target, `:close:N` numbering from 0, and the out-of-ratio check off. Two first SURVIVED and were strengthened: `reconcile_after` re-reading NEW orders (books never held a NEW order, so a direct test appends NEW children and has the venue list every order) and the latest-fill tie rule (an equivalent mutant: on a tie both choices read the same timestamp, so the mutant became the earliest-fill one, which the flows kill). Deviations: the order fingerprint takes its UTC offset from the order's own `created_at` rather than the zone at year 1 (identical for the UTC clocks every runner uses); the non-str `pending` guard stays in the shim (same message); a non-ASCII, surrogate or overflowing value refuses as in P3a; `restorable` scans `ledger.events` once, and only when a PENDING_UNKNOWN order exists in `resolve` mode; `close_holding` raises its held/uncovered refusals before reading the clock, so a naive clock together with a refusal now raises the refusal; `enqueue_journal_fill` looks the ledger event up before the order lookups (the I1 refusal still comes after them); pyo3 reaches the shims only through `trade_engine.sim._rs`, there is no `oms/_rs.py`. |
 | **P3b-2a OMS manager decisions** | Pure validation, allocation, fingerprints, classification and command plans in `te_core::oms::manager`; one binding in `trade_engine_rs` | 1,668 pre-port | Frozen-manager lockstep, refusal counters, Rust hand mutants, unchanged tests and real-ledger parity | **done**: `tests/test_p3b2_parity.py`, `tools/mutate_p3b2.py`; measured evidence and boundaries below |
 | **P3b-2b OMS manager orchestration** | Remaining ledger/clock/venue I/O in `oms/manager.py`; move process ownership without changing sequencing | remaining host orchestration | Preserve durable-before-network ordering and exact callbacks/read-back behavior | **pending**; P3b-2a does not move storage, clocks or broker transports |
-| **P4 Runtime flip** | `eod`, `intraday`, `lifecycle`, `sinks`, `server` (axum). The Rust process owns the single-instance lock; Python callers become clients | ~3.9k | a paper session run side by side with the Python engine produces the same ledger | after P3b |
+| **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
+| **P4b After-close & sink decisions** | After-close lifecycle and journal-sink decisions: `lifecycle/after_close.py`, `lifecycle/sources.py` validation, `sinks/journal.py` mapping | ~1.0k | Frozen-oracle lockstep, refusal parity, hand mutants | **in progress**; P4a pattern |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | pending; after P3b-2b |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -183,6 +185,150 @@ Re-verified independently before commit (2026-10-03): `ci_local.py` 1,913 passed
 `ledger_parity.py` exit 0. Known leftovers for P3b-2b: the decision ops
 `kind_is`, `replay` and `unresolved` have no caller, and the OMS tests run about 35%
 slower than pre-port (one JSON round trip per decision; 87 call sites).
+
+### P4a verification and boundary
+
+The oracle is `tests/frozen_p4a/` (`runner.py`, `service.py`, `options_routing.py`),
+frozen from clean `88affb4` (commit `17aa252`) before the production edits. Its bytes
+match that pre-port runtime apart from the import rewrites to the frozen copies.
+The original tests were not edited.
+
+Rust owns:
+
+- EOD configuration and session boundary validation (`te_core::runtime::eod`):
+  validating non-empty `job_name`, broker presence, positive bar max age, and
+  non-negative settlement delay; verifying trading session dates (I5), pass names
+  (`morning`, `midday`, `late`), timezone-aware `through` datetime stamps (I7),
+  in-session pass boundaries (`pass_boundary` inside the session), monotonic pass resume
+  ordering (I7), and pass cutoff (`now <= cutoff`).
+- EOD replay validation, order classification and MTM decisions: replay clock not
+  past session open (I7); barring non-equity instruments from bar replay (I5);
+  validating one-minute bar series completeness (starts at session open, ends at final
+  minute, I5); rehydrating venue working orders against ledger state (I5); classifying
+  bracket children into stop (`STOP`) and target (`LIMIT`) lists; classifying terminal
+  (`FILLED`, `CANCELLED`, `EXPIRED`, `REJECTED`) and working (`SUBMITTED`, `ACCEPTED`,
+  `PARTIALLY_FILLED`, `PENDING_UNKNOWN`) orders; requiring regular-session bars for open
+  positions to mark (I5); validating options chain snapshot coverage (I5) and
+  requiring a lifecycle pass configuration when holding options (I9).
+- Exact portfolio and dividend arithmetic: `_derive_risk_context` equity
+  (`cash + sum(q * mark)`), gross position value (`sum(|q| * mark)`), active position
+  count, and string-based cash truncation supporting arbitrary-scale decimals and
+  unbounded integers; pre-open dividend qualification (`now < session_open`) and
+  dividend credit calculation (`sum(per_share) * quantity`). All money arithmetic
+  uses checked `PyDec` under D6's approved exception (2026-10-03).
+- Official close and settlement verification: official PM settlement identity (I5),
+  prevention of look-ahead settlement timestamps (I7), verifying close timestamps
+  occur at or after session close (I9), and verifying sink publish capability (I5).
+- Intraday configuration and timing decisions (`te_core::runtime::intraday`):
+  validating non-empty identity fields (`job_name`, `account_id`, `underlying`,
+  `eod_job_name`), positive rates and TTLs; enforcing wall-clock ordering
+  (`entry_end <= flat_at`) and early-close parameters (`0 < flat_before_close <= entry_before_close`);
+  deadlines calculation determining `flat = min(flat_at, close - flat_before_close)`
+  and `entry = min(entry_end, close - entry_before_close, flat)` while returning the
+  governing branch index; tick state evaluation (`flat_due`, `can_enter`).
+- Intraday snapshot freshness and position reconciliation: chain snapshot identity (I5),
+  underlying quote timestamp presence and max-age check (`underlying_age <= max_quote_age_seconds`,
+  I5), held leg presence and freshness (I5); held open structure and flatten classification;
+  generating flatten command IDs (`intraday:flat:...`); close sequence numbering (`:close:N`);
+  restart action classification (`ignore`, `cancel`, `submit`); venue vs ledger
+  position drift detection using `PyDec::eq_num` (I11); heartbeat freshness verification
+  (`heartbeat_ttl_seconds`, C4); and previous session completed EOD marker check (I3).
+- Options routing decisions (`te_core::runtime::routing`): routing phase selection
+  (`snapshot` vs `close`); intent target account verification (I8); options risk engine
+  requirement for entry intents (I5); risk verdict evaluation and resize detection via
+  `PyDec::eq_num`; idempotency check (`taken`) verifying whether an entry or close action
+  was claimed in the ledger; tally accumulation (`RoutingTally + RoutingTally`) using
+  arbitrary-precision integer arithmetic (`BigInt`); and runaway strategy loop detection
+  (`rounds`).
+
+Python retains host observations, effects, sequencing, and boundary plumbing:
+
+- Reading clocks and provider I/O: reading injected clocks (`Clock.now_utc()`,
+  `ReplayClock`, `SettableClock`); timestamps cross the boundary as integer
+  microseconds since Unix epoch UTC (`micros()`) or ISO strings. No clock is read
+  inside `te_core` (I7). Calling data providers (`MarketData.bars()`, `chain_snapshots()`,
+  `settlements`, `lifecycle`, `dividends`), and reading heartbeat JSON files from disk.
+- Querying state and ledger: reading cached accounts, querying ledger states
+  (`ledger.state()`), scanning events (`ledger.events()`), checking command existence
+  (`ledger.has_command()`), and inspecting venue orders, positions and fills.
+- Executing effects and mutations: appending events to the ledger (`EodRun`, `Mark`,
+  `CashFlow`, `VenueReconcile`); submitting, cancelling, and reconciling orders on
+  brokers; publishing outbox messages to external sinks; and writing heartbeat files
+  atomically to disk.
+- Orchestration and loop sequencing: the bar-by-bar EOD replay loop advancing the
+  clock and reconciling after every bar; the intraday tick-by-tick loop stepping from
+  open to close and sleeping `tick_seconds`; in-session pass sequencing (`run_morning`,
+  `run_pass`, after-close run); alert wrapping (`IntradayServiceAlert`) and process
+  error handling.
+- Deleted from Python in the same commit as the shims (D3): 478 lines deleted, 289
+  added (net -189) across `src/trade_engine/eod/runner.py` (-291/+147),
+  `src/trade_engine/eod/options_routing.py` (-53/+42),
+  `src/trade_engine/intraday/service.py` (-134/+81), and the new transport shim
+  `src/trade_engine/eod/_runtime.py` (+19).
+
+The extension is mandatory (D5). Decisions cross pyo3 through a single function
+`trade_engine_rs.runtime_decide`, called by `eod._runtime.decide` / `flag`. Refusals
+cross as `ValueError((kind, message))` and are mapped by `trade_engine.sim._rs.call`
+to the exact Python exception types registered via `register()`: `runtime_eod`
+(`EodRunnerError`), `runtime_incomplete` (`SessionIncompleteError`), `runtime_replay`
+(`ReplayDataError`), `runtime_intraday` (`IntradayServiceError`), and `runtime_stale`
+(`StaleDataError`).
+
+Measured parity (8 tests in `tests/test_p4a_parity.py`, 102,221 lockstep comparisons):
+
+| Campaign | Checked steps/cases |
+|---|---:|
+| Dense runtime campaign (45k risk contexts, 20k deadlines, 25k snapshot views, 32 config, 10k tallies, 4 unbounded risk, 1 unbounded tally, 32 taken) | 100,069 |
+| Refusal kinds and succeeding counterparts (all 5 refusal families exercised) | 10 |
+| Pre-open dividend timing boundary (-1us, 0, +1us) and exact cash flow amount | 3 |
+| EOD options lockstep sessions (3 sessions x 4 passes: morning, midday, late, full) | 12 |
+| Equity replay idempotency across sessions | 2 |
+| Intraday tick walks and restarts (4 failure modes x 31 minutes with restart at minute 20) | 124 |
+| Ordered intraday configuration validation (8 refusals + 1 success) | 9 |
+| Full intraday sessions with resume (6 calendar sessions incl. early closes: 12 outer steps + 1,980 tick frames) | 1,992 |
+| **Total lockstep parity comparisons** | **102,221** |
+
+Every step compares return values, exact refusal type names and error messages, and
+ledger events; full sessions assert identical canonical folded ledger state at the close.
+Gates reported: `python tools/ci_local.py` exit 0 with all **1,929 Python tests passed**
+(1,913 pre-existing unchanged + 16 parity tests); **88 Rust tests passed** (89 passed
+when re-verified with `cargo test -p te_core -q`).
+
+`tools/mutate_p4a.py` runs against the parity suite, building each mutant, running
+pytest under `-B`, restoring source bytes in `finally`, and unconditionally checking
+restored green baseline parity. All **9/9** compiling hand mutants are killed:
+
+| Mutant | File | Mutated behavior | Killing parity test |
+|---|---|---|---|
+| `pass-cutoff-exclusive` | `eod.rs` | Pass cutoff `<=` changed to `<` | `test_eod_options_lockstep_sessions_and_passes` |
+| `stale-boundary-exclusive` | `intraday.rs` | Max quote age `>` changed to `>=` | `test_dense_runtime_campaign` (fresh view) |
+| `preopen-inclusive` | `eod.rs` | Pre-open dividend boundary `<` changed to `<=` | `test_preopen_dividend_boundary_and_amount` |
+| `dividend-double-amount` | `eod.rs` | Dividend credit amount multiplied by 2 | `test_preopen_dividend_boundary_and_amount` |
+| `early-close-ignored` | `intraday.rs` | Early-close delay ignored in flat deadline | `test_dense_runtime_campaign` (deadlines) |
+| `heartbeat-exclusive` | `intraday.rs` | Heartbeat freshness age `<=` changed to `<` | `test_runtime_refusal_kinds_and_counterparts` (heartbeat) |
+| `tally-subtraction` | `routing.rs` | `RoutingTally` addition replaced with subtraction | `test_dense_runtime_campaign` (tally) |
+| `taken-forgets-entry-risk` | `routing.rs` | `taken` ignores entry risk command check | `test_dense_runtime_campaign` (taken) |
+| `previous-session-disabled` | `eod.rs` | Previous session completion check disabled | `test_runtime_refusal_kinds_and_counterparts` (previous) |
+
+Deviations and boundary choices:
+
+- Money and decimal arithmetic use `PyDec` (from `te_core::ledger::pydec::PyDec`)
+  under D6's exception, approved by the owner on 2026-10-03, crossing the boundary as
+  strings. This preserves Python decimal scale, precision and exact formatting for
+  portfolio equity, gross value, and dividend credits until P7.
+- Cash truncation uses arbitrary-precision integers (`BigUint`), preserving exact
+  integer conversion for numbers with huge exponents.
+- `RoutingTally` arithmetic uses `BigInt`, matching Python's unbounded integer arithmetic.
+- Microsecond integer timestamps (`micros`): datetimes cross into Rust as integer
+  microseconds since Unix epoch UTC. Timezone-aware datetimes are strictly enforced (I7).
+- Plain-value pyo3 transport: no domain structs cross pyo3; data crosses as flat vectors
+  of strings, 64-bit integers, booleans, and floats. Domain object extraction and assembly
+  remain entirely in Python shims.
+- Five runtime refusal error kinds (`runtime_eod`, `runtime_incomplete`, `runtime_replay`,
+  `runtime_intraday`, `runtime_stale`) registered through `trade_engine.sim._rs` preserve
+  exact Python exception hierarchy and message strings.
+
+Timing: reported stable timing at **1.073x** the pre-port baseline.
 
 ### Costs of phasing (accepted)
 
