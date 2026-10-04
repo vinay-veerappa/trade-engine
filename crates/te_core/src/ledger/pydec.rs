@@ -551,7 +551,8 @@ impl PyDec {
     pub fn to_integral(&self, mode: Round) -> DecResult<PyDec> {
         match self.kind {
             DKind::Inf => return Ok(self.clone()),
-            DKind::QNan | DKind::SNan => return Err(DecErr::Unsupported("to_integral_value of a NaN")),
+            DKind::QNan => return Ok(self.clone()),
+            DKind::SNan => return Err(DecErr::InvalidOperation),
             DKind::Finite => {}
         }
         if self.exp >= 0 {
@@ -592,6 +593,11 @@ impl PyDec {
     /// `d.quantize(Decimal(f"1E{exp}"))` under the default context (half-even): a result
     /// over 28 digits, or an infinite operand, raises `InvalidOperation`.
     pub fn quantize(&self, exp: i64) -> DecResult<PyDec> {
+        self.quantize_round(exp, Round::HalfEven)
+    }
+
+    /// `d.quantize(Decimal(f"1E{exp}"), rounding=...)`: as [`PyDec::quantize`], rounding as asked.
+    pub fn quantize_round(&self, exp: i64, mode: Round) -> DecResult<PyDec> {
         match self.kind {
             DKind::Inf => return Err(DecErr::InvalidOperation),
             DKind::QNan | DKind::SNan => return Err(DecErr::Unsupported("quantize of a NaN")),
@@ -614,7 +620,7 @@ impl PyDec {
             if drop > 4_000_000 {
                 return Err(DecErr::Unsupported("quantize of a tiny exponent"));
             }
-            shift_round(&self.coef, drop, self.neg, Round::HalfEven)
+            shift_round(&self.coef, drop, self.neg, mode)
         };
         if ndigits(&coef) > PREC || (!coef.is_zero() && exp + ndigits(&coef) as i64 - 1 > EMAX) {
             return Err(DecErr::InvalidOperation);
