@@ -11,6 +11,7 @@
 
 pub mod cover;
 pub mod exits;
+pub mod follow;
 pub mod netting;
 pub mod normalize;
 pub mod pytables;
@@ -80,6 +81,9 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "exit_flip" => exits::flip_op(&doc)?,
         "exit_open_on" => exits::open_on_op(&doc)?,
         "exit_sim_orders" => exits::sim_orders_op(&doc)?,
+        "follow_entries" => follow::follow_entries_op(&doc)?,
+        "pass_name" => follow::pass_name_op(&doc)?,
+        "follow_flat" => follow::flat_op(&doc)?,
         "text_probe" => wire::text_probe(&doc)?,
         _ => return err(WIRE, format!("unknown tos_paper op {op:?}")),
     };

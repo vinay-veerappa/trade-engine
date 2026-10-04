@@ -2209,6 +2209,32 @@ def test_p5_t7_helpers_lockstep() -> None:
     assert SEEN["exit_open"][(True, False)] > 20 and SEEN["exit_open"][(False, True)] > 20, SEEN["exit_open"]
 
 
+def door_plan_exits(ledger, binding, session, *, name, price, at):
+    mirror = PE.mirror_of(ledger, binding.venue_account)
+    accounts = {a: ledger.state(a) for a in binding.mirrored_accounts}
+    asked = [c for (_, c) in mirror.book]
+    for t in mirror.tickets.values():
+        asked.append(t.queued.instrument)
+        if isinstance(t.queued.instrument, Combo):
+            asked.append(FE._flip(t.queued.instrument))
+    quotes = {}
+    for c in asked:
+        for side in (Side.BUY, Side.SELL):
+            quotes[(c, side)] = price(c, side)
+    if hasattr(price, "seen"):
+        price.seen.clear()
+    r = door("plan_exits", xdoc(mirror, accounts, binding.mirrored_accounts, session, name, quotes, at))
+    for w, side in r["priced"]:
+        price(inst_back(w), Side(side))
+    orders = tuple(Order(order_id=o["order_id"], account_id=o["account_id"], instrument=inst_back(o["instrument"]),
+                         order_type=OrderType(o["order_type"]), side=Side(o["side"]), quantity=D(o["quantity"]),
+                         command_id=o["command_id"], created_at=datetime.fromisoformat(o["created_at"]),
+                         limit_price=None if o["limit_price"] is None else D(o["limit_price"]),
+                         tif=TimeInForce(o["tif"])) for o in r["orders"])
+    return PE.ExitPlan(cancel=tuple(r["cancel"]), orders=orders, refused=tuple(tuple(x) for x in r["refused"]),
+                       waits=tuple(tuple(x) for x in r["waits"]))
+
+
 def run_module_with_ledger(module, tmp_path, only=None) -> int:
     """``run_module_tests`` for a module whose tests take the ``ledger`` fixture (a fresh one each)."""
     from trade_engine.ledger import Ledger
@@ -2217,13 +2243,22 @@ def run_module_with_ledger(module, tmp_path, only=None) -> int:
     for name, fn in sorted(vars(module).items()):
         if not name.startswith("test_") or not inspect.isfunction(fn) or (only and name not in only):
             continue
-        fixtures = [p for p in inspect.signature(fn).parameters if p in ("ledger", "tmp_path")]
-        assert fixtures in ([], ["ledger"], ["tmp_path"]), (name, fixtures)
+        fixtures = [p for p in inspect.signature(fn).parameters if p in ("ledger", "tmp_path", "books")]
+        assert fixtures in ([], ["ledger"], ["tmp_path"], ["books"]), (name, fixtures)
         for args in parametrized(fn):
             ran += 1
             if fixtures == ["ledger"]:
                 with Ledger(tmp_path / f"{ran}.db") as lg:
                     fn(lg, *args)
+            elif fixtures == ["books"]:      # test_tos_follow's: the sim, the split view, the follower's own
+                d = tmp_path / str(ran)
+                d.mkdir()
+                with Ledger(d / "sim.db") as sim, Ledger(d / "mirror.db") as own:
+                    reader = module.LedgerReader(d / "sim.db").open()
+                    try:
+                        fn((sim, module.SplitLedger(reader, own, module.ACCOUNTS), own), *args)
+                    finally:
+                        reader.close()
             elif fixtures == ["tmp_path"]:
                 (tmp_path / str(ran)).mkdir()
                 fn(tmp_path / str(ran), *args)
@@ -2235,32 +2270,197 @@ def run_module_with_ledger(module, tmp_path, only=None) -> int:
 def test_p5_existing_exits_vectors_through_the_door(monkeypatch, tmp_path) -> None:
     import test_tos_mirror_exits as V
 
-    def door_plan(ledger, binding, session, *, name, price, at):
-        mirror = PE.mirror_of(ledger, binding.venue_account)
-        accounts = {a: ledger.state(a) for a in binding.mirrored_accounts}
-        asked = [c for (_, c) in mirror.book]
-        for t in mirror.tickets.values():
-            asked.append(t.queued.instrument)
-            if isinstance(t.queued.instrument, Combo):
-                asked.append(FE._flip(t.queued.instrument))
-        quotes = {}
-        for c in asked:
-            for side in (Side.BUY, Side.SELL):
-                quotes[(c, side)] = price(c, side)
-        if hasattr(price, "seen"):
-            price.seen.clear()
-        r = door("plan_exits", xdoc(mirror, accounts, binding.mirrored_accounts, session, name, quotes, at))
-        for w, side in r["priced"]:
-            price(inst_back(w), Side(side))
-        orders = tuple(Order(order_id=o["order_id"], account_id=o["account_id"], instrument=inst_back(o["instrument"]),
-                             order_type=OrderType(o["order_type"]), side=Side(o["side"]), quantity=D(o["quantity"]),
-                             command_id=o["command_id"], created_at=datetime.fromisoformat(o["created_at"]),
-                             limit_price=None if o["limit_price"] is None else D(o["limit_price"]),
-                             tif=TimeInForce(o["tif"])) for o in r["orders"])
-        return PE.ExitPlan(cancel=tuple(r["cancel"]), orders=orders, refused=tuple(tuple(x) for x in r["refused"]),
-                           waits=tuple(tuple(x) for x in r["waits"]))
-
-    monkeypatch.setattr(V, "plan_exits", door_plan)
-    monkeypatch.setattr(PE, "plan_exits", door_plan)
+    monkeypatch.setattr(V, "plan_exits", door_plan_exits)
+    monkeypatch.setattr(PE, "plan_exits", door_plan_exits)
     ran = run_module_with_ledger(V, tmp_path)
     assert ran >= 30, ran
+
+
+# -- T8 follow -------------------------------------------------------------------------------
+
+from frozen_p5 import follow as FF  # noqa: E402
+from trade_engine.tos_paper import follow as PF  # noqa: E402
+
+FMIRROR = (CCA, PMA)
+FBASE = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
+FOPEN = FBASE - timedelta(hours=1)
+FAGES = [300_000_000, 300_000_000, 0, 1_000_000, 60_500_000, 300_000_001, 299_999_999, -1_500_000, 10 ** 12, 301_999_999]
+FTZ = [UTC, UTC, timezone(timedelta(hours=-4)), timezone(timedelta(hours=5, minutes=30)),
+       timezone(timedelta(hours=-5, seconds=-17))]
+
+
+def us(n):
+    return timedelta(microseconds=n)
+
+
+def forder(oid, account, instrument, side, qty="1", state=OrderState.ACCEPTED, parent=None, at=FBASE):
+    return Order(order_id=oid, account_id=account, instrument=instrument, order_type=OrderType.LIMIT, side=side,
+                 quantity=D(qty), command_id=oid, created_at=at, limit_price=D("1.00"), tif=TimeInForce.DAY,
+                 state=state, parent_order_id=parent)
+
+
+def fdoc(mirror, states, now, session_open, max_age, mirrored=FMIRROR) -> dict:
+    return {"mirror": LCODEC.canon(mirror), "accounts": [[a, LCODEC.canon(s)] for a, s in states.items()],
+            "mirrored": list(mirrored), "now": now.isoformat(), "session_open": session_open.isoformat(),
+            "max_age_us": max_age // timedelta(microseconds=1)}
+
+
+def check_follow(label, mirror, states, now, session_open=FOPEN, max_age=timedelta(minutes=5), mirrored=FMIRROR):
+    def oracle():
+        FF.mirror_of = lambda ledger, venue: ledger.mirror
+        send, refused = FF.follow_entries(XLedger(mirror, states), MirrorBinding(VENUE, "margin", tuple(mirrored), D("1000")),
+                                          session_open=session_open, now=now, max_age=max_age)
+        return {"send": [[o.account_id, o.order_id] for o in send], "refused": [list(r) for r in refused]}
+
+    got = step("follow", label, oracle,
+               lambda: door("follow_entries", fdoc(mirror, states, now, session_open, max_age, mirrored)))
+    if got[0] == "ok":
+        if got[1]["send"]:
+            seen("follow", "sent")
+        for _, _, reason in got[1]["refused"]:
+            for tag in ("a late copy", "did not arrive within", "opened and closed"):
+                if tag in reason:
+                    seen("follow", tag)
+    return got
+
+
+def f_case(rng):
+    now = FBASE.astimezone(rng.choice(FTZ)) + us(rng.choice([0, 0, 123456, 999999]))
+    max_age = us(rng.choice(FAGES[:8] + [300_000_000]))
+    books, tickets, positions, orders = [], [], {a: [] for a in FMIRROR}, {a: [] for a in FMIRROR}
+    queued, refused = [], []
+    c210, c215, leaps = ccall("210"), ccall("215"), ccall("200", DEC)
+    pool = [AAPL, c210, c210, c215, leaps, MSFT, ccall("400", und="MSFT"), P200, XVERTS[0], XVERTS[1], combo((c210, 1, Side.SELL), (c215, 1, Side.BUY))]
+    for account in FMIRROR:
+        if rng.random() < 0.7:
+            books.append((account, AAPL, rng.choice(["0", "50", "100", "200", "99", "-100"])))
+        if rng.random() < 0.3:
+            books.append((account, c210, rng.choice(["-1", "1", "-2"])))
+        if rng.random() < 0.2:
+            books.append((account, leaps, "1"))
+        for k in range(rng.choice([0, 1, 2, 2, 3, 4])):
+            inst = rng.choice(pool)
+            base = max_age if rng.random() < 0.6 else us(rng.choice(FAGES))
+            delta = base + us(rng.choice([0, 0, -1, 1, 1_000_000, -1_000_000, 0]))
+            if rng.random() < 0.1:
+                delta = timedelta(hours=2)               # before the session open
+            created = (now - delta).astimezone(rng.choice(FTZ))
+            order = forder(f"o{k}", account, inst, rng.choice([Side.SELL] * 3 + [Side.BUY]),
+                           qty=rng.choice(["1", "1", "2", "100", "0.5"]),
+                           state=rng.choice([OrderState.ACCEPTED] * 2 + XSTATES),
+                           parent="p" if rng.random() < 0.1 else None, at=created)
+            orders[account].append(order)
+            if rng.random() < 0.7:
+                held = rng.choice(["0", "1", "2", "-1", "100", "0.0"])
+                if isinstance(inst, Combo):
+                    positions[account] += [(c, D(held) * l.ratio * (1 if l.side is Side.BUY else -1))
+                                           for l in inst.legs for c in [l.contract]]
+                else:
+                    positions[account].append((inst, held))
+            if rng.random() < 0.12:
+                (queued if rng.random() < 0.6 else refused).append(order.order_id)
+        if rng.random() < 0.3:
+            tickets.append(tstate(AAPL, Side.BUY, "100", key=f"tos:{account}", account=account))
+    mirror = xmirror(books, tickets, queued, refused)
+    states = {a: xstate(a, positions[a], orders[a]) for a in FMIRROR if rng.random() < 0.95}
+    return mirror, states, now, max_age
+
+
+def test_p5_t8_follow_entries_lockstep() -> None:
+    rng = random.Random(8001)
+    csp, ps = "OPT_CSP", "OPT_PUT_SPREAD"
+    c210 = ccall("210")
+    S, B = Side.SELL, Side.BUY
+    # the edge grid: the max_age boundary to the microsecond, the session open, every ended state
+    for edge in (0, 1, -1, 999_999, 1_000_000, -1_000_000):
+        order = forder("o1", CCA, AAPL, B, at=FBASE - us(300_000_000 + edge))
+        check_follow(f"age-{edge}", xmirror(), {CCA: xstate(CCA, [], [order])}, FBASE)
+    check_follow("age-zero-max", xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, B)])}, FBASE, max_age=us(0))
+    check_follow("age-negative-max", xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, B, at=FBASE - us(2_000_000))])},
+                 FBASE, max_age=us(-1_500_000))
+    check_follow("age-huge", xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, B, at=FBASE - timedelta(days=400))])}, FBASE)
+    check_follow("future-order", xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, B, at=FBASE + us(5))])}, FBASE)
+    check_follow("open-boundary", xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, B, at=FOPEN),
+                                                                       forder("o2", CCA, AAPL, B, at=FOPEN - us(1))])},
+                 FBASE, session_open=FOPEN, max_age=timedelta(days=1))
+    for state in OrderState:
+        check_follow("state-" + state.value, xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, B, state=state)])}, FBASE)
+    check_follow("child", xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, B, parent="p")])}, FBASE)
+    check_follow("handled", xmirror(queued=["o1"], refused=["o2"]),
+                 {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, B), forder("o2", CCA, AAPL, B), forder("o3", CCA, AAPL, B)])}, FBASE)
+    check_follow("sorted", xmirror(), {CCA: xstate(CCA, [], [forder("b", CCA, AAPL, B), forder("a", CCA, AAPL, B)]),
+                                       PMA: xstate(PMA, [], [forder("a", PMA, AAPL, B)])}, FBASE)
+    check_follow("no-state", xmirror(), {}, FBASE)
+    check_follow("unmirrored", xmirror(), {"OPT_X": xstate("OPT_X", [], [forder("a", "OPT_X", AAPL, B)])}, FBASE)
+    # flat: a filled entry with no position, with one, a vertical by its spreads, a legged vertical
+    spread = XVERTS[0]
+    for label, positions in (("none", []), ("held", [(AAPL, "100")]), ("zero", [(AAPL, "0")]), ("neg-zero", [(AAPL, "-0")])):
+        check_follow("flat-" + label, xmirror(), {CCA: xstate(CCA, positions, [forder("o1", CCA, AAPL, B, state=OrderState.FILLED)])}, FBASE)
+    for label, positions in (("none", []), ("held", xleg_units(spread, "2")), ("closed", xleg_units(spread, "0")),
+                             ("legged", [(P200, "-2"), (P195, "1")]), ("one-leg", [(P200, "-2")])):
+        check_follow("vflat-" + label, xmirror(),
+                     {CCA: xstate(CCA, positions, [forder("o1", CCA, spread, S, state=OrderState.FILLED)])}, FBASE)
+    # the late entry's own reason: what the cover lacked
+    late = FBASE - timedelta(minutes=10)
+    check_follow("late-bare-call", xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, c210, S, at=late)])}, FBASE)
+    check_follow("late-covered-call", xmirror([(CCA, AAPL, "100")]), {CCA: xstate(CCA, [], [forder("o1", CCA, c210, S, at=late)])}, FBASE)
+    check_follow("late-put", xmirror(), {CCA: xstate(CCA, [], [forder("o1", CCA, P200, S, at=late)])}, FBASE)
+    check_follow("late-shares", xmirror([(CCA, AAPL, "100"), (CCA, c210, "-1")]),
+                 {CCA: xstate(CCA, [], [forder("o1", CCA, AAPL, S, "100", at=late)])}, FBASE)
+    for n in range(2600):                                    # seeded
+        mirror, states, now, max_age = f_case(rng)
+        check_follow(n, mirror, states, now, max_age=max_age)
+    c = SEEN["follow"]
+    for want in ("sent", "a late copy", "did not arrive within", "opened and closed"):
+        assert c[want] > 40, (want, sorted(c.items()))
+    settle("follow", 2600, [])
+
+
+def test_p5_t8_pass_name_and_flat_lockstep() -> None:
+    rng = random.Random(8002)
+    edges = [datetime(2026, 3, 8, 6, 59, 59, tzinfo=UTC), datetime(2026, 3, 8, 7, 0, tzinfo=UTC),
+             datetime(2026, 11, 1, 5, 59, 59, tzinfo=UTC), datetime(2026, 11, 1, 6, 0, tzinfo=UTC),
+             datetime(2026, 11, 1, 5, 30, tzinfo=UTC), datetime(2026, 11, 1, 6, 30, tzinfo=UTC),
+             datetime(2026, 12, 31, 23, 59, 59, 999999, tzinfo=UTC), datetime(1, 1, 1, 12, tzinfo=UTC),
+             datetime(9999, 12, 31, 12, tzinfo=UTC), datetime(2026, 9, 28, 13, 30, tzinfo=UTC)]
+    for n in range(1200):
+        base = datetime(2024, 1, 1, tzinfo=UTC) + timedelta(seconds=rng.randrange(0, 3 * 365 * 86400),
+                                                              microseconds=rng.choice([0, 999999, 5]))
+        now = (edges[n] if n < len(edges) else base).astimezone(rng.choice(FTZ))
+        got = step("pass_name", n, lambda: FF.pass_name(now), lambda: door("pass_name", {"now": now.isoformat()})["name"])
+    settle("pass_name", 1200, [])
+    with pytest.raises(Exception) as caught:                  # a naive clock is a host bug, refused at the door
+        door("pass_name", {"now": "2026-09-28T16:35:00"})
+    assert "timezone-aware" in str(caught.value)
+    for n in range(1500):
+        mirror, states, now, max_age = f_case(rng)
+        for account, state in states.items():
+            for order in state.orders.values():
+                step("flat", (n, order.order_id), lambda: FF._flat(state, order),
+                     lambda: door("follow_flat", {"account": LCODEC.canon(state), "order_id": order.order_id})["flat"])
+                seen("flat", FF._flat(state, order) if not isinstance(order.instrument, Combo) else "combo-" + str(FF._flat(state, order)))
+    c = SEEN["flat"]
+    assert c[True] > 100 and c[False] > 100 and c["combo-True"] > 20 and c["combo-False"] > 20, c
+    settle("flat", 1500, [])
+
+
+def test_p5_existing_follow_vectors_through_the_door(monkeypatch, tmp_path) -> None:
+    import test_tos_follow as V
+
+    def follow_entries(ledger, binding, *, session_open, now, max_age=PF.MAX_AGE):
+        mirror = PE.mirror_of(ledger, binding.venue_account)
+        states = {a: ledger.state(a) for a in binding.mirrored_accounts}
+        r = door("follow_entries", fdoc(mirror, states, now, session_open, max_age, binding.mirrored_accounts))
+        send = tuple(states[a].orders[o] for a, o in r["send"])
+        return send, tuple(tuple(x) for x in r["refused"])
+
+    def pass_name(now):
+        return door("pass_name", {"now": now.isoformat()})["name"]
+
+    monkeypatch.setattr(V, "follow_entries", follow_entries)
+    monkeypatch.setattr(V, "pass_name", pass_name)
+    monkeypatch.setattr(PF, "follow_entries", follow_entries)
+    monkeypatch.setattr(PF, "pass_name", pass_name)
+    monkeypatch.setattr(PE, "plan_exits", door_plan_exits)
+    ran = run_module_with_ledger(V, tmp_path)
+    assert ran >= 20, ran
