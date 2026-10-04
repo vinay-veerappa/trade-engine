@@ -290,6 +290,219 @@ def test_p5_t1_ticket_validation_lockstep() -> None:
         "ValueError: a vertical ticket is LMT", "ValueError: price_effect must be"])
 
 
+# -- T2 normalize ----------------------------------------------------------------------------
+
+OCCS = ["AAPL  261016P00200000", "AAPL261016P00200000", "SPX   261016C05000000", "AAPL  261016C00200500",
+        "AAPL", "", "AAPL  261016X00200000", "AAPL  261316P00200000", "aapl  261016P00200000",
+        "AAPL  261016P0020000", "AAPL  261016P00200000 ", None, 5, "AAPL  261016P00000000"]
+STOCKS = ["AAPL", "BRK.B", "aapl", "", None, 5, "AAPL  261016P00200000", " AAPL"]
+KINDS = [None, "stock", "option", "bond", 5, "STOCK"]
+STATUSES = ["SENT", "sent", " Sent ", "ſent", "DRY_RUN", "REFUSED", "rejected", "INELIGIBLE", "MISMATCH", "FILLED",
+            "ACCEPTED", "UNKNOWN", "WORKING", "OPEN", "QUEUED", "PARTIAL", "CANCELED", "CANCELLED", "EXPIRED",
+            "triggered?", "", None, 5, True, 1.5, ["SENT"], {"a": 1}, 0, "ß"]
+REASONS = ["not eligible", "", None, 0, "é\n", 5, [], "x'y", {"k": None}, 1.5e-7, 10 ** 20, 1e22, True]
+NUMS = ["2", "2.5", "0", "-1", "1e2", "1E+2", "NaN", "Infinity", "x", "", "  3 ", "٣", "1_0", "0x1", 1, 2.0, None, True,
+        10 ** 30, "1.00", "-0", "9" * 30, "0.0000001", [1], {"a": 1}]
+PRICES = [None, "", "1.25", "0", "-1", "x", 1.5, 0, " 2 ", "NaN", "1e3", "٣", "1" * 30, False]
+OIDS = ["5403527317", "", "12x", 5403527317, None, "٣", "²", "½", "0", "00", " 1", True]
+
+
+def sample(rng, pool):
+    return rng.choice(pool)
+
+
+def place_raw(rng):
+    if rng.random() < 0.15:
+        return rng.choice([None, "x", 5, [], [1], 1.5, True, "SENT", {}, ""])
+    raw = {}
+    for key, pool in (("status", STATUSES), ("reason", REASONS), ("order_id", OIDS + ["5403527317"] * 3),
+                      ("book_status", STATUSES + ["WORKING", "UNKNOWN"]), ("note", REASONS), ("echo", [{}, None])):
+        if rng.random() < 0.7:
+            raw[key] = sample(rng, pool)
+    return raw
+
+
+def ack_json(a: VenueAck) -> dict:
+    return {"status": a.status, "message": a.message}
+
+
+def raw_edge_rows() -> list:
+    rows = [None, "x", 5, [], {}, True, 1.5, float("nan"), float("inf")]
+    for s in STATUSES:
+        for extra in ({}, {"reason": "r"}, {"order_id": "5403527317", "book_status": "WORKING"},
+                      {"order_id": "5403527317", "book_status": "UNKNOWN"}, {"order_id": "5403527317"},
+                      {"note": "n", "order_id": "9"}, {"order_id": 7, "book_status": "w"}):
+            rows.append({"status": s, **extra})
+    return rows
+
+
+def test_p5_t2_place_and_cancel_lockstep() -> None:
+    rng = random.Random(5003)
+    rows = raw_edge_rows() + [place_raw(rng) for _ in range(3000)]
+    for n, raw in enumerate(rows):
+        step("place_result", (n, raw), lambda: ack_json(FN.normalize_place_result(raw, "k", T)),
+             lambda: door("place_result", {"raw": raw}))
+        step("cancel_result", (n, raw), lambda: ack_json(FN.normalize_cancel_result(raw, "k", T)),
+             lambda: door("cancel_result", {"raw": raw}))
+        step("placed_order_id", (n, raw), lambda: {"order_id": FN.placed_order_id(raw)},
+             lambda: door("placed_order_id", {"raw": raw}))
+    said = {FN.normalize_place_result(r, "k", T).message.split(":")[0].split(" ")[0] for r in rows}
+    assert {"unreadable", "unknown", "venue", "dry", "sent;"} <= said, said
+    assert {"ok"} == set(TALLY["place_result"]) and sum(TALLY["place_result"].values()) >= 3000
+    assert {"ok"} == set(TALLY["cancel_result"])
+    assert {"ok"} == set(TALLY["placed_order_id"])
+
+
+class Boom(Exception):
+    pass
+
+
+class RefusedSub(FT.TransportRefused):
+    pass
+
+
+def test_p5_t2_exceptions_lockstep() -> None:
+    texts = ["echo mismatch", "", "é\n'q'", "key used", "x" * 200]
+    excs = []
+    for text in texts:
+        excs += [FT.TransportRefused(text), RefusedSub(text), FT.TransportReplay(text), TimeoutError(text),
+                 ValueError(text), Boom(text), KeyError(text), OSError(2, text), FT.TransportUnavailable(text)]
+    excs += [Boom(), Boom(1, 2), KeyError("a"), RuntimeError(None)]
+    for exc in excs:
+        kind = "refused" if isinstance(exc, FT.TransportRefused) else "replay" if isinstance(exc, FT.TransportReplay) else "other"
+        e = {"class": kind, "type": type(exc).__name__, "text": str(exc)}
+        step("place_exception", repr(exc), lambda: ack_json(FN.normalize_place_exception(exc, "k", T)),
+             lambda: door("place_exception", {"exc": e}))
+        step("cancel_exception", repr(exc), lambda: ack_json(FN.normalize_cancel_exception(exc, "k", T)),
+             lambda: door("cancel_exception", {"exc": e}))
+    assert {"ok"} == set(TALLY["place_exception"]) and sum(TALLY["place_exception"].values()) >= 45
+    assert sum(TALLY["cancel_exception"].values()) >= 45
+
+
+def row_json(w) -> dict:
+    return {"instrument": wire(w.instrument), "side": w.side.value, "quantity": str(w.quantity),
+            "filled": str(w.filled), "order_type": w.order_type.value,
+            "limit_price": None if w.limit_price is None else str(w.limit_price), "state": w.state.value}
+
+
+def working_raw(rng):
+    raw = {}
+    if rng.random() < 0.6:
+        raw["symbol"] = sample(rng, OCCS)
+    else:
+        raw["kind"] = sample(rng, KINDS)
+        raw["symbol"] = sample(rng, STOCKS + OCCS)
+    for key, pool in (("side", SIDES + ["BUY", "SELL", " sell "] * 2), ("order_type", TYPES + ["MKT", "LMT"] * 2),
+                      ("quantity", NUMS + ["2", "3", "100"] * 3), ("filled", NUMS + ["0", "1"] * 3),
+                      ("limit_price", PRICES), ("status", STATUSES + ["WORKING", "PARTIAL", "FILLED"] * 2)):
+        if rng.random() < 0.85:
+            raw[key] = sample(rng, pool)
+    return raw
+
+
+def test_p5_t2_working_order_lockstep() -> None:
+    rng = random.Random(5004)
+    rows = [working_raw(rng) for _ in range(6000)]
+    good = {"symbol": OCCS[0], "side": "SELL", "quantity": "2", "filled": "0", "order_type": "LMT",
+            "limit_price": "2.00", "status": "WORKING"}
+    for key, pool in (("symbol", OCCS), ("side", SIDES), ("order_type", TYPES), ("quantity", NUMS),
+                      ("filled", NUMS), ("limit_price", PRICES), ("status", STATUSES)):
+        rows += [dict(good, **{key: v}) for v in pool]
+    stock = {"kind": "stock", "symbol": "AAPL", "side": "BUY", "quantity": "100", "filled": "0", "order_type": "LMT",
+             "limit_price": "150.25", "status": "WORKING"}
+    for key, pool in (("symbol", STOCKS), ("kind", KINDS), ("quantity", NUMS), ("filled", NUMS)):
+        rows += [dict(stock, **{key: v}) for v in pool]
+    rows += [dict(good, quantity="1", filled="1"), dict(good, quantity="1", filled="1.5"),
+             {k: v for k, v in good.items() if k != "filled"}, {k: v for k, v in good.items() if k != "limit_price"}]
+    for n, raw in enumerate(rows):
+        step("working_order", (n, raw), lambda: row_json(FN.normalize_working_order(raw)),
+             lambda: door("working_order", {"raw": raw}))
+    settle("working_order", 6000, [
+        "NormalizeError: working order side", "NormalizeError: working order type",
+        "NormalizeError: quantity must be a decimal", "NormalizeError: quantity is not a number",
+        "NormalizeError: quantity must be finite", "NormalizeError: working order quantity",
+        "NormalizeError: not a mirrored option symbol", "NormalizeError: not a mirrored stock symbol",
+        "NormalizeError: row kind", "NormalizeError: stock quantity", "NormalizeError: stock filled"])
+
+
+def test_p5_t2_book_state_lockstep() -> None:
+    for s in STATUSES + [" working ", "Canceled", [], 0.0, " open ", "OPEN\t"]:
+        step("book_state", s, lambda: {"state": FN.book_state(s).value}, lambda: door("book_state", {"status": s}))
+    assert sum(TALLY["book_state"].values()) >= 30 and set(TALLY["book_state"]) == {"ok"}
+
+
+def fill_raw(rng):
+    raw = {}
+    for key, pool in (("order_id", OIDS + ["5403527317"] * 4), ("filled", NUMS + ["0", "1", "2"] * 3),
+                      ("avg_price", PRICES + ["1.05"] * 3), ("status", STATUSES + ["FILLED", "WORKING"] * 3)):
+        if rng.random() < 0.88:
+            raw[key] = sample(rng, pool)
+    return raw
+
+
+def test_p5_t2_order_fill_lockstep() -> None:
+    rng = random.Random(5005)
+    rows = [fill_raw(rng) for _ in range(6000)]
+    good = {"order_id": "5403527317", "filled": "1", "avg_price": "1.05", "status": "FILLED"}
+    for key, pool in (("order_id", OIDS), ("filled", NUMS), ("avg_price", PRICES), ("status", STATUSES)):
+        rows += [dict(good, **{key: v}) for v in pool]
+    rows += [dict(good, filled="0", status="FILLED"), dict(good, filled="0", avg_price=None, status="WORKING"),
+             dict(good, filled="0", avg_price="9", status="WORKING"), dict(good, filled="2.0")]
+    for n, raw in enumerate(rows):
+        step("order_fill", (n, raw),
+             lambda: (lambda f: {"order_id": f.order_id, "filled": str(f.filled),
+                                 "avg_price": None if f.avg_price is None else str(f.avg_price),
+                                 "state": f.state.value})(FN.normalize_order_fill(raw)),
+             lambda: door("order_fill", {"raw": raw}))
+    settle("order_fill", 6000, [
+        "NormalizeError: order fill row names", "NormalizeError: filled must be a decimal",
+        "NormalizeError: filled is not a number", "NormalizeError: filled must be finite", "not a whole non-negative",
+        "with no positive average price", "reads FILLED with nothing filled", "NormalizeError: avg_price"])
+
+
+def position_raw(rng):
+    raw = {}
+    if rng.random() < 0.6:
+        raw["symbol"] = sample(rng, OCCS)
+    else:
+        raw["kind"] = sample(rng, KINDS)
+        raw["symbol"] = sample(rng, STOCKS + OCCS)
+    for key, pool in (("quantity", NUMS + ["-1", "100"] * 3), ("avg_price", NUMS + ["2.10", "150.25"] * 3)):
+        if rng.random() < 0.9:
+            raw[key] = sample(rng, pool)
+    return raw
+
+
+def test_p5_t2_position_lockstep() -> None:
+    rng = random.Random(5006)
+    rows = [position_raw(rng) for _ in range(6000)]
+    good = {"symbol": OCCS[0], "quantity": "-1", "avg_price": "2.10"}
+    for key, pool in (("symbol", OCCS), ("quantity", NUMS), ("avg_price", NUMS)):
+        rows += [dict(good, **{key: v}) for v in pool]
+    stock = {"kind": "stock", "symbol": "AAPL", "quantity": "100", "avg_price": "150.25"}
+    for key, pool in (("symbol", STOCKS), ("kind", KINDS), ("quantity", NUMS), ("avg_price", NUMS + ["-0.01"])):
+        rows += [dict(stock, **{key: v}) for v in pool]
+    for n, raw in enumerate(rows):
+        step("position", (n, raw),
+             lambda: (lambda p: {"instrument": wire(p.instrument), "quantity": str(p.quantity),
+                                 "avg_price": str(p.avg_price)})(FN.normalize_position(raw, T)),
+             lambda: door("position", {"raw": raw}))
+    settle("position", 6000, [
+        "NormalizeError: quantity must be a decimal", "NormalizeError: not a mirrored option symbol",
+        "NormalizeError: not a mirrored stock symbol", "NormalizeError: row kind",
+        "NormalizeError: stock quantity", "NormalizeError: stock avg_price"])
+
+
+def test_p5_text_tables_are_pythons() -> None:
+    """The generated Unicode tables (pytables.rs) against the running interpreter, every code point."""
+    codes = [c for c in range(0x110000) if not 0xD800 <= c <= 0xDFFF]
+    for start in range(0, len(codes), 120_000):
+        chars = "".join(map(chr, codes[start:start + 120_000]))
+        got = door("text_probe", {"chars": chars})
+        want = [[c.isdigit(), c.isprintable(), c.isspace()] for c in chars]
+        assert got == want, [(hex(ord(c)), g, w) for c, g, w in zip(chars, got, want) if g != w][:5]
+
+
 # -- the existing pure-data vectors, through the Rust door ------------------------------------
 
 
@@ -319,6 +532,56 @@ def instrument_of(w: dict):
         return Equity(w["symbol"])
     return OptionContract(underlying=w["underlying"], expiry=date.fromisoformat(w["expiry"]),
                           strike=D(w["strike"]), right=OptionRight(w["right"]), multiplier=w["multiplier"])
+
+
+def test_p5_existing_normalize_vectors_through_the_door(monkeypatch) -> None:
+    import test_tos_normalize as V
+
+    def place(raw, vid, at):
+        r = door("place_result", {"raw": raw})
+        return VenueAck(vid, r["status"], at, r["message"])
+
+    def cancel(raw, vid, at):
+        r = door("cancel_result", {"raw": raw})
+        return VenueAck(vid, r["status"], at, r["message"])
+
+    def exc_doc(exc):
+        kind = "refused" if isinstance(exc, V.TransportRefused) else "replay" if isinstance(exc, V.TransportReplay) else "other"
+        return {"exc": {"class": kind, "type": type(exc).__name__, "text": str(exc)}}
+
+    def place_exc(exc, vid, at):
+        r = door("place_exception", exc_doc(exc))
+        return VenueAck(vid, r["status"], at, r["message"])
+
+    def cancel_exc(exc, vid, at):
+        r = door("cancel_exception", exc_doc(exc))
+        return VenueAck(vid, r["status"], at, r["message"])
+
+    def working(raw):
+        r = door("working_order", {"raw": raw})
+        return V.WorkingOrder(instrument_of(r["instrument"]), Side(r["side"]), D(r["quantity"]), D(r["filled"]),
+                              OrderType(r["order_type"]), None if r["limit_price"] is None else D(r["limit_price"]),
+                              OrderState(r["state"]))
+
+    def position(raw, at):
+        r = door("position", {"raw": raw})
+        return VenuePosition(instrument_of(r["instrument"]), D(r["quantity"]), D(r["avg_price"]), at)
+
+    class DoorTicket(V.MirrorTicket):
+        def __post_init__(self) -> None:
+            door("ticket_validate", {"kind": "option", "side": self.side, "quantity": self.quantity,
+                                     "order_type": self.order_type, "tif": self.tif,
+                                     "limit_price": None if self.limit_price is None else str(self.limit_price)})
+
+    monkeypatch.setattr(V, "normalize_place_result", place)
+    monkeypatch.setattr(V, "normalize_cancel_result", cancel)
+    monkeypatch.setattr(V, "normalize_place_exception", place_exc)
+    monkeypatch.setattr(V, "normalize_cancel_exception", cancel_exc)
+    monkeypatch.setattr(V, "normalize_working_order", working)
+    monkeypatch.setattr(V, "normalize_position", position)
+    monkeypatch.setattr(V, "placed_order_id", lambda raw: door("placed_order_id", {"raw": raw})["order_id"])
+    monkeypatch.setattr(V, "MirrorTicket", DoorTicket)
+    assert run_module_tests(V) == 52
 
 
 def test_p5_existing_ticket_vectors_through_the_door(monkeypatch) -> None:

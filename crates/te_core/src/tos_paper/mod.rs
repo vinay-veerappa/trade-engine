@@ -10,6 +10,7 @@
 //! decimal kinds), its message exactly the Python's.
 
 pub mod netting;
+pub mod normalize;
 pub mod pytables;
 pub mod pytext;
 pub mod transport;
@@ -35,6 +36,15 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "ticket_validate" => transport::ticket_validate(&doc)?,
         "ticket_for" => transport::ticket_for(&doc)?,
         "vertical_reason" => netting::vertical_reason_op(&doc)?,
+        "place_result" => normalize::place_result(&doc)?,
+        "place_exception" => normalize::place_exception(&doc)?,
+        "placed_order_id" => normalize::placed_order_id(&doc)?,
+        "cancel_result" => normalize::cancel_result(&doc)?,
+        "cancel_exception" => normalize::cancel_exception(&doc)?,
+        "working_order" => normalize::working_order(&doc)?,
+        "book_state" => normalize::book_state_op(&doc)?,
+        "order_fill" => normalize::order_fill(&doc)?,
+        "position" => normalize::position(&doc)?,
         "text_probe" => wire::text_probe(&doc)?,
         _ => return err(WIRE, format!("unknown tos_paper op {op:?}")),
     };
