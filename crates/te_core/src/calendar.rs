@@ -8,6 +8,8 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::America::New_York;
 
+pub mod globex;
+
 /// Why the calendar cannot answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalendarError {
@@ -186,13 +188,22 @@ pub fn is_early_close(d: NaiveDate) -> Result<bool> {
     Ok(early_close_unchecked(d))
 }
 
-fn ny_to_utc(d: NaiveDate, hour: u32, minute: u32) -> DateTime<Utc> {
-    let local = d.and_time(NaiveTime::from_hms_opt(hour, minute, 0).expect("valid time"));
+pub(crate) fn ny_time_to_utc(d: NaiveDate, t: NaiveTime) -> DateTime<Utc> {
+    let local = d.and_time(t);
     New_York
         .from_local_datetime(&local)
         .single()
-        .expect("09:30 and 13:00/16:00 New York are never in a DST gap or overlap")
+        .expect("market times in New York are never in a DST gap or overlap")
         .with_timezone(&Utc)
+}
+
+pub(crate) fn ny_to_utc(d: NaiveDate, hour: u32, minute: u32) -> DateTime<Utc> {
+    let t = NaiveTime::from_hms_opt(hour, minute, 0).expect("valid time");
+    ny_time_to_utc(d, t)
+}
+
+pub(crate) fn utc_to_ny(t: DateTime<Utc>) -> DateTime<chrono_tz::Tz> {
+    t.with_timezone(&New_York)
 }
 
 /// The session's open, in UTC. A non-session refuses (I5).
