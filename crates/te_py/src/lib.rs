@@ -14,6 +14,16 @@ mod oms;
 mod sim;
 mod lock;
 
+/// The same module initializer is registered before custom CPython startup.
+#[cfg(feature = "embed")]
+pub fn register_embedded_module() -> Result<(), &'static str> {
+    if unsafe { pyo3::ffi::Py_IsInitialized() } != 0 {
+        return Err("module registration requires an uninitialized interpreter");
+    }
+    pyo3::append_to_inittab!(trade_engine_rs);
+    Ok(())
+}
+
 fn date(iso: &str) -> PyResult<NaiveDate> {
     NaiveDate::parse_from_str(iso, "%Y-%m-%d")
         .map_err(|_| PyValueError::new_err(format!("Invalid date string format: {iso:?}")))

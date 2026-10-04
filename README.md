@@ -2,6 +2,17 @@
 
 Generic trading engine: event-sourced ledger, OMS, risk layer, simulator, and venue adapters.
 
+## Offline embedded-host packaging proof
+
+P4C-T3 adds an opt-in Windows `te --proof --config <absolute JSON path>`
+executable, **not** a trading owner or a `serve` command. It embeds the existing
+`trade_engine_rs` initializer and loads only an explicitly configured synthetic
+plugin. Python still owns the existing jobs, SQLite, clocks and loops.
+Private CPython 3.13 setup, bundle/configuration requirements, proof commands,
+refusals and rollback are documented in
+[the P4c boundary](docs/RUST_PORT.md#p4c-verification-and-boundary).
+No production launcher, task, client or ledger is changed.
+
 ## Architecture & Invariants
 
 This engine is designed around strict invariants (I1–I13):

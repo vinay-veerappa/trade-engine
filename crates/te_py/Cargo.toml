@@ -7,7 +7,12 @@ license = "MIT"
 
 [lib]
 name = "trade_engine_rs"
-crate-type = ["cdylib"]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+embed = []
 
 [dependencies]
 te_core = { path = "../te_core" }
@@ -15,5 +20,4 @@ te_host = { path = "../te_host" }
 chrono = { workspace = true }
 
 [dependencies.pyo3]
-version = "0.23"
-features = ["extension-module"]
+version = "=0.23.5"

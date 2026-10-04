@@ -671,6 +671,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "te_runtime"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "pyo3-build-config",
+ "serde",
+ "serde_json",
+ "te_py",
+]
+
+[[package]]
 name = "te_wasm"
 version = "0.1.0"
 dependencies = [

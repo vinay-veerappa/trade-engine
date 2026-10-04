@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1)**; OS lock checkpoint only, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3)**; OS lock and additive embedded packaging checkpoints only, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -674,6 +674,264 @@ the current guard closes: mixed-version handoff is tested, stale PID files need
 not be deleted, and **no ledger/schema/decimal rewrite** is required. No push,
 merge, PR, T0 or later-ticket work is part of this checkpoint.
 
+#### P4C-T3 additive embedded-host packaging
+
+Branch `te/p4c-t3` starts from the **unmerged prerequisite**
+`te/p4c-t1` at `7f20078d32eff8598e0a9e9847c62046e58b5fd9`. T1's oracle
+`4d8d505f63ea909c19ab1d217f0a6e062a4fca65` and all existing frozen oracles
+remain immutable. T3 replaces **no pre-existing Python responsibility**: there
+was no engine Rust executable/bootstrap to freeze. A standalone frozen-oracle
+commit is therefore **not applicable**, not omitted parity or an invented old
+runtime. Existing production Python and pre-existing tests are unchanged.
+
+The new `te_runtime` executable is **only**
+`te --proof --config <absolute JSON path>`, with mode `packaging-proof`.
+It owns its native process and interpreter startup, registers the **same**
+`trade_engine_rs` module before CPython initialization, discovers a configured
+fake plugin/factory, reports provenance and exits. It does not acquire a real
+ledger, start a server, import SCAN strategies/providers, or run any job.
+No clock/store/loop/job/client responsibility moved. Temporary embedding is
+approved; new Rust strategy implementations and embedding retirement remain
+separate future tickets, not presumed available crates or fixtures.
+
+PyO3 remains pinned to **0.23.5**, CPython **3.13**, without an ABI/version
+substitution. `te_py` emits an rlib and cdylib; its default feature set is empty,
+`embed` exposes the existing initializer registration, and only maturin enables
+`extension-module` for ordinary Python installations. There is still **one**
+`#[pymodule]` in this repository. No second dynamic `.pyd` or module alias is
+loaded by `te`. `te_core` and `te_wasm` retain their pure boundary.
+
+Private build/proof, from the worktree (never the root/client environment):
+
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e ".[test]"
+$env:PATH = "C:\Users\vinay\.cargo\bin;" + $env:PATH
+$env:PYO3_PYTHON = "$PWD\.venv\Scripts\python.exe"
+$env:CARGO_TARGET_DIR = "$PWD\crates\target"
+Remove-Item Env:PYTEST_ADDOPTS -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force .ci-local\temp | Out-Null
+$env:TMPDIR = "$PWD\.ci-local\temp"
+$env:TEMP = $env:TMPDIR
+$env:TMP = $env:TMPDIR
+.venv\Scripts\python.exe -B tools\build_p4c_t3.py
+cargo test --manifest-path crates\Cargo.toml --workspace
+.venv\Scripts\python.exe -B -m pytest tests\test_p4c_embed.py -q
+```
+
+The build tool assembles `crates\target\release\te.exe` and its colocated
+`python313.dll`, then installs the ordinary extension into the private venv.
+`ci_local.py` now also builds the release bundle and runs the whole Rust
+workspace, pinning its resolved Python and worktree-local Cargo target. Missing
+binary, DLL or extension fails; none of these gates is skipped.
+
+The JSON configuration has **all fields required**, rejects unknown fields,
+relative/missing paths and every mode except `packaging-proof`:
+
+```json
+{
+  "mode": "packaging-proof",
+  "python_home": "C:\\absolute\\Python313",
+  "python_dll": "C:\\absolute\\worktree\\crates\\target\\release\\python313.dll",
+  "python_executable": "C:\\absolute\\worktree\\.venv\\Scripts\\python.exe",
+  "site_packages": "C:\\absolute\\worktree\\.venv\\Lib\\site-packages",
+  "engine_source": "C:\\absolute\\worktree\\src",
+  "plugin_paths": ["C:\\absolute\\synthetic plugins"],
+  "plugin_module": "fake_plugin",
+  "plugin_factory": "probe",
+  "plugin_config": {"tag": "synthetic packaging only"}
+}
+```
+
+The venv's `pyvenv.cfg` must identify the configured home and Python 3.13;
+site-packages must be that venv's directory. The DLL must be beside `te.exe`,
+byte-identical to the configured home's DLL, and actually loaded from that
+configured location. Home must contain the standard library/encodings and DLLs;
+source must contain `trade_engine`. The plugin is a plain module identifier,
+not an engine alias, and its resolved `.py` must lie on the explicit plugin
+roots **before its code executes**. This is trusted plugin plumbing, not a
+sandbox for malicious Python code.
+
+`PyConfig_InitIsolatedConfig` plus explicit home/executable/search paths disables
+environment discovery, user-site/site startup, `.pth` processing, bytecode writes
+and signal-handler installation. Search paths are exactly home `Lib`, home
+`DLLs`, private site-packages, engine source and explicit plugin roots. An
+unrelated cwd or poisoned PYTHONHOME/PYTHONPATH cannot change them. CPython 3.13
+with explicit home and disabled site reports `sys.prefix == sys.base_prefix ==
+home`, just as the standalone `-I -S` baseline does; the private venv paths and
+configured executable are separately verified, not fabricated prefix values.
+The host does not launch Python as a worker. Reinitialization in the same
+process explicitly refuses; imports retain identity; CPython lives until native
+process exit (no unsafe finalize/reinitialize cycle).
+
+Windows loader constraint, measured rather than hidden:
+MSVC refuses `/DELAYLOAD:python313.dll` with **LNK1194** because pinned PyO3
+imports data (`__imp_PyBaseObject_Type`) as well as functions. The successful
+design is the conventional colocated private DLL bundle, not delay loading,
+another PyO3 version, a worker, or a fallback. Missing/malformed **configured**
+paths produce JSON `RuntimeConfigError` on stderr and exit 2. Missing/corrupt
+**native bundle dependencies** fail before Rust entry with Windows loader
+statuses **0xC0000135 / 0xC000012F**, respectively; no JSON can be emitted before
+entry. Copied synthetic bundles prove both failures with Python absent from
+PATH and loader dialogs disabled. A mismatched loaded DLL refuses rather than
+using PATH's Python. Plugin/import exceptions retain their exact type/message
+and exit 2.
+
+Standalone comparison is the private interpreter, `-I -S -B`, using the same
+explicit discovery paths and fake-plugin inputs. It is not an invented frozen
+runtime owner or a recorded trading session. The deliberate packaging-only
+differences are explicit: a built-in module is not a package, so attempted
+`trade_engine_rs.<alias>` raises the built-in's exact "not a package" message;
+the ordinary installed extension retains its existing package wrapper.
+A non-callable configured factory has the host's explicit TypeError message;
+ordinary Python calling an integer gives its usual "'int' object is not
+callable". No existing test was edited to accommodate either difference.
+
+Focused proof: **34 packaging tests**, no skips. They exercise the real optimized
+executable, not a mocked initializer: one registered built-in entry, one loaded
+mandatory module identity, zero `trade_engine_rs` `.pyd` mappings (measured with
+Windows `EnumProcessModules`), correct private source/extension paths and CPython
+version. Imports and second initialization are repeated in-process. Both native
+and ordinary extension bindings acquire/refuse/release a synthetic lock sidecar;
+no SQLite book is needed or created. The native process continues to load its
+built-in with the installed `.pyd` missing **and** corrupt, while ordinary
+extension imports explicitly refuse both cases.
+
+The five applicable plugin refusal pairs compare **exact exception type name and
+message** against standalone Python: missing module, syntax error, missing
+factory, Unicode/non-BMP ValueError and SystemExit. The non-callable/alias
+differences above are pinned explicitly. Configuration tests cover unsupported
+mode, absent/corrupt/unknown-field config, relative/missing interpreter/DLL/home/
+source/site/plugin paths, wrong private-venv home/version, reserved/invalid module
+and factory names, non-object plugin configuration, unconfigured stdlib/source
+fallback and refusal before plugin execution. Space/BMP/non-BMP paths cover the
+native executable, home, private executable/site-packages, source, config and
+plugin roots; unrelated cwd, poisoned environment and a PATH without Python are
+also exercised. All fixtures are labelled synthetic; none is a strategy tape.
+
+`tools/mutate_p4c_t3.py` builds both release binary/DLL bundle and installed
+extension before a green **34-test** baseline, rebuilds both for every mutant,
+runs Python with `-B`, requires exactly one raw-source occurrence, recognizes
+only pytest call-stage **AssertionError** kills, and restores original bytes
+in `finally`. An unconditional final rebuild and **34-test** green run prove
+restoration. The final campaign kills **15/15 compiling mutants** with zero
+invalid builds, collection/import-error kills, survivors or equivalents:
+
+| Mutant | Killing packaging test |
+|---|---|
+| Live mode allowed | mode configuration refusal |
+| Home standard-library check lost | wrong home/DLL/venv |
+| Bundled DLL path check lost | wrong home/DLL/venv |
+| Private site-packages check lost | wrong home/DLL/venv |
+| Venv version check lost | wrong venv home/version |
+| Reserved mandatory module accepted as plugin | reserved-module configuration refusal |
+| Non-object plugin config accepted | plugin-config object refusal |
+| Environment isolation lost | private built-in/path/repeat smoke |
+| Site startup enabled | private built-in/path/repeat smoke |
+| Bytecode writes enabled | private built-in/path/repeat smoke |
+| Plugin search path omitted | private built-in/path/repeat smoke |
+| Built-in registration omitted | private built-in/path/repeat smoke |
+| Built-in version wrong | private built-in/path/repeat smoke |
+| Reinitialization guard lost | private built-in/path/repeat smoke |
+| Plugin provenance guard lost | unconfigured plugin refused before execution |
+
+An earlier 14-mutant run also killed every mutant; the final run adds the
+wrong-version initializer and reruns all 15 after the final provenance/lock/
+missing-and-corrupt-extension checks. No mutant was weakened. Baseline/restored
+focused timings were **4.10 / 4.22 seconds** (not performance gates).
+
+Startup timing (`tools/time_p4c_t3.py`): **nine independently configured synthetic
+plugin roots**, two untimed warmups and five measured fresh processes per path,
+alternating standalone/native order. Both paths include interpreter startup,
+explicit config/path setup, mandatory module import, fake-plugin discovery/
+invocation and provenance serialization; construction/build are excluded.
+Standalone uses its real private venv launcher, `-I -S -B`, and the ordinary
+extension. Native includes its additional preflight checks. Median sample
+medians: **48.262400 ms Python / 42.663700 ms native**, ratio **0.883995**;
+largest sample medians **50.925500 / 45.597300 ms**. This is a fair bootstrap
+comparison, **not a tick/strategy/runtime hot-path or recorded-session gate**.
+
+Final Windows gates:
+
+- Pre-edit private CI baseline: **1,969 Python tests passed in 687.30 s**,
+  exit 0, with the original T1 source/extension; no pre-existing test edited.
+- Whole Rust workspace: **94 passed** (90 core, 1 host, 3 wasm integration;
+  te_py and runtime targets link/build; zero failures/ignored tests).
+- Final private `python -B tools\ci_local.py --include-uncommitted`:
+  **exit 0, 2,003 Python tests passed in 585.13 s** (1,969 unchanged + 34 new);
+  invariant/version/whole-workspace/release-bundle/normal-extension gates green.
+  The inherited `PYTEST_ADDOPTS` was removed; TMPDIR/TEMP/TMP used the private
+  `.ci-local\temp` parent so nested numbered pytest roots coexist.
+- Explicit feature-unification gate:
+  `cargo test --manifest-path crates\Cargo.toml --workspace
+  --features te_py/extension-module`: **94 passed**. This actually unifies
+  extension and embed features; it is not a `te_core` substitute or a skip.
+- Normal private extension install/import and optimized native executable/
+  built-in/fake-plugin smoke coexist; every mutation rebuilds both artifacts.
+- Authorized read-only `tools/ledger_parity.py`: **exit 0**, mirror-PM-B 4,095,
+  0DTE 3,278, options 436, scan 6,296 events: **14,105 codec rows, 23 account
+  states and 4 folds identical**. This remains the existing codec/fold gate
+  (refusal kind only), not new runtime/session certification.
+- Toolchain: **rustc 1.98.1**, **cargo 1.98.1**, **PyO3 0.23.5**,
+  private **CPython 3.13.15, AMD64 / MSC 1944**.
+
+Tested provenance:
+
+- Worktree: `C:\Users\vinay\trade-engine\.worktrees\p4c-t3`.
+- Interpreter: this worktree's `.venv\Scripts\python.exe`; home is
+  `C:\Users\vinay\AppData\Local\Programs\Python\Python313`.
+- Engine import: this worktree's `src\trade_engine\__init__.py`.
+- Normal extension: this worktree's
+  `.venv\Lib\site-packages\trade_engine_rs\trade_engine_rs.cp313-win_amd64.pyd`.
+- Native entry: this worktree's `crates\target\release\te.exe`; its report
+  identifies the real executable, the configured/loaded private DLL and exactly
+  one `trade_engine_rs` built-in entry, with no module file or dynamic alias.
+
+Final tested artifact SHA-256 (build outputs remain ignored, never committed):
+
+| Artifact | SHA-256 |
+|---|---|
+| `te.exe` | `6620134ce8756c82708d3873480d945792713be584f609e7eb5f2edf4dd5e301` |
+| Bundled `python313.dll` | `e820bf024efd2b56bb2b82791e6b6ddc7303f070f8e72cba7637482a8a906238` |
+| Private normal `.pyd` | `be05aeb45d1ae872b789aa997e0fa39fa75de4c87b0fc2201e0b8b59db9d40df` |
+
+Changed-path inventory against T1 (Git additions/deletions; no Python logic
+deleted because no existing responsibility moved):
+
+| Path | Added | Deleted | Net |
+|---|---:|---:|---:|
+| `README.md` | 11 | 0 | +11 |
+| `crates/Cargo.lock` | 11 | 0 | +11 |
+| `crates/Cargo.toml` | 1 | 1 | 0 |
+| `crates/te_py/Cargo.toml` | 7 | 3 | +4 |
+| `crates/te_py/pyproject.toml` | 1 | 0 | +1 |
+| `crates/te_py/src/lib.rs` | 10 | 0 | +10 |
+| `crates/te_runtime/Cargo.toml` | 19 | 0 | +19 |
+| `crates/te_runtime/build.rs` | 12 | 0 | +12 |
+| `crates/te_runtime/src/config.rs` | 156 | 0 | +156 |
+| `crates/te_runtime/src/main.rs` | 39 | 0 | +39 |
+| `crates/te_runtime/src/proof.py` | 53 | 0 | +53 |
+| `crates/te_runtime/src/python.rs` | 137 | 0 | +137 |
+| `docs/RUST_PORT.md` | 264 | 4 | +260 |
+| `tests/test_p4c_embed.py` | 400 | 0 | +400 |
+| `tools/build_p4c_t3.py` | 41 | 0 | +41 |
+| `tools/ci_local.py` | 20 | 3 | +17 |
+| `tools/mutate_p4c_t3.py` | 135 | 0 | +135 |
+| `tools/time_p4c_t3.py` | 73 | 0 | +73 |
+| **Total (18 paths)** | **1,390** | **11** | **+1,379** |
+
+After the accepted full-tree gate, only this documentation evidence was updated;
+`git diff --check` verifies it. Production/test/build/mutation bytes stayed
+unchanged. Synthetic scratch was cleaned; private venv, release artifacts and
+ignored gate logs remain worktree-local. Root checkout, client, plan files,
+scheduled tasks, real writers and trading jobs were never changed or started.
+
+Rollback: retain T1's release/private extension and stop using the opt-in proof
+binary. No task selector, writer handoff, ledger/schema/Decimal rewrite, live
+rollout, push, merge or PR exists in T3. Windows x86-64 alone is certified here;
+Unix/macOS embedding and deployment, real plugin dependency packaging,
+recorded-session parity and all later P4c tickets remain unverified.
+
 ### Costs of phasing (accepted)
 
 - Until P4 Python calls Rust across pyo3 with plain values or JSON; most of that
@@ -689,9 +947,11 @@ merge, PR, T0 or later-ticket work is part of this checkpoint.
   (maturin backend via `crates/te_py/pyproject.toml`; `tools/ci_local.py` does this).
   `crates/te_py/pyproject.toml` must exist: without it maturin reads the root
   pyproject and replaces the `trade-engine` editable install.
-- Rust tests: `cargo test --manifest-path crates/Cargo.toml -p te_core` (also run by
-  `ci_local.py`). Not the whole workspace: `te_py` links pyo3, which refuses a
-  Python newer than it supports.
+- Rust tests: `cargo test --manifest-path crates\Cargo.toml --workspace` (also run
+  by `ci_local.py`). Explicitly pin `PYO3_PYTHON` to the private Python 3.13 and
+  `CARGO_TARGET_DIR` to this worktree's `crates\target`. Maturin enables
+  `te_py/extension-module`; ordinary workspace tests use linkable embedding
+  features. Do not let Cargo discover the unsupported global Python 3.14.
 - Each phase is one commit series: Rust + oracle test, then the shim and the
   deletion of the Python logic, then this table's status. A row turns **done**
   only in the commit that adds the enforcing test, which the row names.

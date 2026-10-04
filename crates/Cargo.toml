@@ -2,7 +2,7 @@
 # Python; te_py is the ONE pyo3 module (`trade_engine_rs`) Python reaches it by.
 [workspace]
 resolver = "2"
-members = ["te_core", "te_host", "te_py", "te_wasm"]
+members = ["te_core", "te_host", "te_py", "te_wasm", "te_runtime"]
 
 [workspace.dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }

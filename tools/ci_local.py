@@ -6,6 +6,7 @@ Runs the same checks as GitHub Actions on this machine before pushing.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -125,14 +126,27 @@ def check_rust_invariants() -> bool:
 
 
 def run_rust_tests() -> bool:
-    # te_core only: te_py is an extension module (it links Python at import, not
-    # at build), so build_extension below is what proves it compiles.
-    code, out = run_command(["cargo", "test", "--manifest-path", str(RUST_WORKSPACE / "Cargo.toml"), "-p", "te_core", "-q"])
+    # Default features link embedding normally; maturin alone enables extension mode.
+    os.environ["PYO3_PYTHON"] = resolve_python()
+    os.environ["CARGO_TARGET_DIR"] = str(RUST_WORKSPACE / "target")
+    code, out = run_command(["cargo", "test", "--manifest-path", str(RUST_WORKSPACE / "Cargo.toml"), "--workspace", "-q"])
     print(out.strip()[-2000:])
     if code != 0:
         say(f"FAIL: cargo test returned exit code {code}")
         return False
     say("Rust tests passed.")
+    return True
+
+
+def build_runtime() -> bool:
+    """Missing release binary or its private DLL is an error, never a test skip."""
+    code, out = run_command([resolve_python(), "-B", str(REPO_ROOT / "tools" / "build_p4c_t3.py"),
+                             "--native-only"])
+    print(out.strip()[-4000:])
+    if code != 0:
+        say("FAIL: building the embedded release runtime failed")
+        return False
+    say("Embedded release runtime built.")
     return True
 
 
@@ -196,6 +210,9 @@ def main() -> int:
         return 1
 
     if not run_rust_tests():
+        return 1
+
+    if not build_runtime():
         return 1
 
     if not build_extension():
