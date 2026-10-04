@@ -49,7 +49,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3a Fill & option-risk rules** | `sim/broker.py`, `sim/snapshot_venue.py`, `oms/trailing.py`, `risk_options.py` (and the structure reading in `oms/options.py` they share) | ~2.0k | a FROZEN copy of the pre-port Python (`tests/frozen_p3a/`) and the production shims are driven in lockstep by seeded generators; every step agrees on the return value (Decimals by `str`) or on the refusal (type name AND message) | **done**: `te_core::sim` (`broker`: the one-minute-bar equity book, bar sequencing, MARKET/LIMIT/STOP/STOP_LIMIT matching, gaps, slippage, brackets, OCO and target priority, the late-exit and inside-entry-bar stop rules, DAY/OPG expiry, restore; `snapshot`: the chain-snapshot book, model price, combo shading, fees, stale quotes, DAY expiry, restore; `trailing`), `te_core::oms::structures` (`open_structures`, `uncovered_calls`) and `te_core::risk_options` (every option rule from `regime` to `covered_calls`, entry-quote gates included, recorded without short-circuit), reached through `trade_engine_rs.SimBook` / `SnapBook` / `trail_update` / `oms_open_structures` / `oms_uncovered_calls` / `option_risk_evaluate` (one door `sim/_rs.py`: a refusal crosses as `ValueError(kind, message)` and is raised as the pre-port type). Deleted from Python (D3, same commit as the shims): 1,742 lines, 640 added (net -1,102) across `broker.py` (-732/+213), `snapshot_venue.py` (-380/+214), `risk_options.py` (-513/+105), `oms/options.py` (-98/+29), `trailing.py` (-19/+36) and the new `sim/_rs.py` (43). The duplicate-protection and persistent kill-switch checks and the rules' config validation stay Python (they read the ledger/config, not the book). Gates: `tests/test_p3a_parity.py`, 8 tests, 614,180 compared steps per run: `SimBroker` 900 seeded walks (513,514 steps: 13 sessions incl. both DST regimes, early closes and holiday eves; every order type and TIF, both sides, gaps, bars touching or one cent short of a working price, brackets sent right after their entry fills, replaces, cancels, clock jumps, reads exactly at the close, nine kinds of malformed bar, restore 25% of walks, a third of them perturbed), `SnapshotVenue` 2,000 walks (73,847 steps: singles, shares, 2-4 leg combos, limits on the model net, stale/zero/look-ahead quotes, DAY expiry, restore with leg perturbations, invalid constructor arguments), `underlying_of` 331 instruments, trailing 1,500 seeds (18,920 updates incl. 0, negative, NaN, Inf), `open_structures`/`uncovered_calls` over 1,000 folded books (2,703 calls; entries working, partial, filled, cancelled, targets, closes, expiries), and 4,865 `OptionRiskEngine.evaluate` verdicts against random rules (every optional rule on and off, every entry gate) where each of the 24 rule names both passes and fails (`entry_quote.vertical` at least evaluates). Full suite 1896 passed (1888 pre-existing, unchanged: no existing test edited, plus the 8 parity tests); `cargo test -p te_core` 78 passed. 11 hand mutants of the Rust, each rebuilt, run under `python -B`, restored in `try/finally` with an unconditional final restore + rebuild + green parity run: all 11 KILLED: buy-stop gap fill at the stop instead of the open, buy limit needing `low < limit`, sell stop read on the high, DAY expiring strictly after the close, slippage sign, venue fee per order instead of per contract, snapshot sell limit needing `price > limit`, trailing sell trigger `<`, `min_short_bid` as `>=`, margin no longer passing when the entry reduces it, and an early return after a failed `regime` (the rule short-circuit). The DAY-expiry mutant first SURVIVED: a read with the clock exactly at the close was too rare, so the walk gained `to_close` (simulate through the last regular bar, read AT the close); then killed. Deviations: one production defect found by the generator and fixed before commit (a `SnapshotVenue.restore` refused part-way left Rust holding restored positions the shim had not recorded, so `positions()` raised `IndexError`; the shim now records them before the call); datetimes cross as ISO strings and come back via `fromisoformat` (the fold/DST semantics of the pre-port `astimezone` are reproduced, not shared); `SnapshotVenue` accepts only the XNYS calendar; `max_quote_age_seconds` crosses as f64; a fill number or leg id with non-ASCII digits, or a fill number beyond u128, refuses (`unsupported`) where Python would parse it; restore consumes its iterables eagerly; `is_structure`/`legs_of` exist in both languages (the Python ones are domain helpers other modules use); the Reg-T margin request for the risk book is built in Rust, duplicating `metrics/option_margin.py`'s input shape until P3b; snapshot quotes are precomputed eagerly in Python; `equity_marks` parse errors are reported in insertion order; earnings dates cross as ISO strings and `regime_of` must return `str` or `None`; the new pyfunction is `option_risk_evaluate` (P1's `risk_evaluate` keeps its name). |
 | **P3b-1 OMS core, non-manager half** | `oms/reconcile.py`, `oms/restore.py`, the remaining decision logic of `oms/options.py` | ~0.9k | a FROZEN copy of the pre-port Python (`tests/frozen_p3b/`) and the production shims are driven in lockstep (two worlds, each with its own ledger, clock and `SnapshotVenue`); every step agrees on the return value (Decimals by `str`), or on the refusal (type name AND message), and after every step on the ledger events and the outbox; folded state byte for byte at the end of a walk | **done**: `te_core::oms::reconcile` (which venue orders `reconcile_after` re-reads; the unknown-order refusal (I5); the journal payload of one fill, its asset class, multiplier, bracket stop and target, the missing-event refusal (I1)), `te_core::oms::restore` (which orders, brackets, fills and positions rebuild a venue; what a PENDING_UNKNOWN order becomes in `refuse` and `resolve` mode; the pending-request classification; the refusals), `te_core::oms::options` (intent and order fingerprints with an in-crate SHA-256, replay and fingerprint conflicts, `plan_open` duplicate (C4) and uncovered (C3) refusals, `plan_close` incl. the out-of-ratio refusal and the `:close:N` numbering, `plan_holding`, and the `sync` plan), reached through 15 `trade_engine_rs.oms_*` functions (`oms_orders_to_read`, `oms_restorable`, ...) and the one door `sim/_rs.py` (refusal kinds `reconcile`, `restore`, `option`, `duplicate`, `uncovered`, `closed`, `idempotency`). Ledger reads and writes and venue I/O stay Python and cross as callbacks (`restorable` makes its two ledger reads in the order Python did). Deleted from Python in the same commit as the shims (D3): 197+48+83 lines, 86+36+77 added (net -129). Gates: `tests/test_p3b_parity.py`, 7 tests: 631 random folded books (5,747 compared steps: open new/replayed/conflicting, close incl. bogus ids and reused commands, `close_holding`, `sync`, `restorable`/`restorable_positions` in both pending modes and with malformed modes, journal fills recorded or not, ORDER_PENDING events injected), 220 flow walks (10,277 compared steps over real `SnapshotVenue` sessions: entries with and without targets, snapshots that fill them, `reconcile_after` with and without the journal, `sync`, closes, requests left pending, restarts that rebuild the venue in `refuse` and `resolve` mode, a venue order the ledger never knew, orders whose parent the ledger lacks), `reconcile_after` re-read order over 631 books with NEW, working, terminal and unknown venue orders, and the import check (`trade_engine_rs` is imported unconditionally: missing is an ERROR, D5). Coverage asserted on the tally: every refusal kind both happens and succeeds (reconcile, restore, key, option, duplicate, uncovered, closed, idempotency). Full suite 1903 passed (1896 pre-existing, unchanged; plus 7); `cargo test -p te_core` 79 passed. 16 hand mutants (`tools/mutate_p3b.py`: rebuilt each time, `python -B`, original bytes restored in `finally`, final restore + rebuild, baseline run first), all 16 KILLED: restore keeping NEW children, a cancel-pending order restored as ACCEPTED, the pending-cancel test ignoring the reason, a forgotten earlier-unresolved order, a combo target on every leg of the journal, `reconcile_after` re-reading NEW orders, the latest fill read as the earliest, `sync` cancelling a non-target on a settled leg, `sync` ignoring a terminal entry, `close_holding` skipping the cover check, the over-close test on the signed holding, duplicate protection counting flat positions, duplicate protection counting terminal entries, a `close` replay of any target, `:close:N` numbering from 0, and the out-of-ratio check off. Two first SURVIVED and were strengthened: `reconcile_after` re-reading NEW orders (books never held a NEW order, so a direct test appends NEW children and has the venue list every order) and the latest-fill tie rule (an equivalent mutant: on a tie both choices read the same timestamp, so the mutant became the earliest-fill one, which the flows kill). Deviations: the order fingerprint takes its UTC offset from the order's own `created_at` rather than the zone at year 1 (identical for the UTC clocks every runner uses); the non-str `pending` guard stays in the shim (same message); a non-ASCII, surrogate or overflowing value refuses as in P3a; `restorable` scans `ledger.events` once, and only when a PENDING_UNKNOWN order exists in `resolve` mode; `close_holding` raises its held/uncovered refusals before reading the clock, so a naive clock together with a refusal now raises the refusal; `enqueue_journal_fill` looks the ledger event up before the order lookups (the I1 refusal still comes after them); pyo3 reaches the shims only through `trade_engine.sim._rs`, there is no `oms/_rs.py`. |
 | **P3b-2a OMS manager decisions** | Pure validation, allocation, fingerprints, classification and command plans in `te_core::oms::manager`; one binding in `trade_engine_rs` | 1,668 pre-port | Frozen-manager lockstep, refusal counters, Rust hand mutants, unchanged tests and real-ledger parity | **done**: `tests/test_p3b2_parity.py`, `tools/mutate_p3b2.py`; measured evidence and boundaries below |
-| **P3b-2b OMS manager orchestration** | Remaining ledger/clock/venue I/O in `oms/manager.py`; move process ownership without changing sequencing | remaining host orchestration | Preserve durable-before-network ordering and exact callbacks/read-back behavior | **pending**; P3b-2a does not move storage, clocks or broker transports |
+| **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b After-close & sink decisions** | After-close lifecycle and journal-sink decisions: `lifecycle/after_close.py`, `lifecycle/sources.py` validation, `sinks/journal.py` mapping | ~1.0k | Frozen-oracle lockstep, refusal parity, hand mutants | **in progress**; P4a pattern |
 | **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | pending; after P3b-2b |
@@ -182,9 +182,106 @@ Preserved pre-existing behavior/defects, not silently repaired:
   behavior.
 
 Re-verified independently before commit (2026-10-03): `ci_local.py` 1,913 passed,
-`ledger_parity.py` exit 0. Known leftovers for P3b-2b: the decision ops
-`kind_is`, `replay` and `unresolved` have no caller, and the OMS tests run about 35%
-slower than pre-port (one JSON round trip per decision; 87 call sites).
+`ledger_parity.py` exit 0. Its leftovers (the uncalled decision ops and the ~35%
+OMS slowdown) were closed by P3b-2b.
+
+### P3b-2b verification and boundary
+
+`OrderManager` is now a shell: every public method is one `trade_engine_rs.oms_flow`
+call, and `_Host` performs the effects the flow asks for, one call each, where the
+flow makes them. It decides nothing. The Python command flow is deleted (D3).
+
+Rust owns (`te_core::oms::flow`, driven through `crates/te_py/src/flow.rs`):
+
+- every command: `create_bracket`, `submit`, `submit_trailing`, `update_trailing`,
+  `update_emulated_order`, `record_fill`, `cancel`, `move_stop`, `close_bracket`,
+  `reduce_bracket`, `replace`, `reconcile_order`, and the bracket helpers;
+- the ordering: each ORDER_PENDING / ORDERS_CREATED append precedes its venue call,
+  replays read the persisted command, and a read-back never resends.
+
+Python keeps: the clock, the ledger (append, reads, the fold handle), the broker
+(submit, cancel, replace, orders, fills, capabilities), and the error classes. The
+pure helpers (`_validate_quantity`, `_split_quantity`, fingerprints and the others)
+stay the P3b-2a shims; they are the only 10 decide ops left. The 71 decide arms the
+switched manager no longer calls were removed from `te_core::oms::manager`.
+
+Seam: `Host::send_reduce`. `reduce_bracket` sends its reduce through the host, so a
+caller that patches `OrderManager._send_reduce` (the `test_oms` crash test) still
+takes effect.
+
+Gates:
+
+- `tests/test_oms.py` unchanged and green.
+- `tests/test_p3b2b_flow.py`: the flow against the frozen c878969 manager, by ticket
+  family (T1-T6 and plumbing).
+- `tests/test_p3b2_parity.py`: the frozen oracle against the switched manager.
+- Hand mutants (`tools/mutate_p3b2b.py`, replacing `tools/mutate_p3b2.py`, whose
+  targets were the deleted dispatcher): **25 of 25 killed**. One survived the first run
+  and was closed by a lockstep step, not by weakening it (below).
+
+| Mutant | Killing test |
+|---|---|
+| ORDERS_CREATED append skipped | `test_t6_brackets` |
+| submit ORDER_PENDING marker skipped | `test_t1_submit_native_and_acks` |
+| replace ORDER_PENDING before `broker.replace` skipped | `test_t2_replace` |
+| cancel pending marker before `broker.cancel` skipped | `test_t3_cancel_and_fills` |
+| submit replay sends the caller's NEW order, not the stored one | `test_t1_submit_native_and_acks` |
+| unknown submit ack becomes ACCEPTED | `test_t1_submit_native_and_acks` |
+| PENDING replace ack treated as accepted | `test_t2_replace` |
+| emulated-stop replace persists the old order | `test_t4_emulation` |
+| OCO siblings not cancelled before the triggered order | `test_t4_emulation` |
+| failed OCO venue cancel raises the plain broker-unknown error | `test_t3_cancel_and_fills` (after the addition) |
+| replayed fill gets a fresh command id | `test_t3_cancel_and_fills` |
+| bracket synchronization skipped after a fill | `test_t3_cancel_and_fills` |
+| stop touch exclusive instead of inclusive | `test_t4_emulation` |
+| trigger prefers LIMIT over MARKET | `test_plumbing_context_planned_and_venue_order` |
+| native-stop capability flag ignored | `test_native_stops_flag_independent_of_advertised_types` |
+| read-back resends the order | `test_t5_reconcile` |
+| terminal (CANCELLED) read-back not recorded | `test_t5_reconcile` |
+| pending-replace gate dropped in reconcile | `test_t5_reconcile` |
+| reduce submitted before the targets are cancelled | `test_t6_brackets` |
+| close replay ignores the stored close | `test_t6_brackets` |
+| reduce rounds half-even instead of floor | `test_t6_brackets` |
+| runner weight zero in synchronization | `test_t3_cancel_and_fills` |
+| targets re-budgeted before the entry is terminal | `test_t3_cancel_and_fills` |
+| `utc_now` accepts a naive clock | `test_plumbing_context_planned_and_venue_order` |
+| `append_replay` ignores a payload mismatch | `test_plumbing_append_refuse_and_planned_refusal` |
+
+  The survivor: the only OCO-unknown step ran after the order was already pending,
+  so it stopped at the "already pending" refusal. A new `oco-network` pair in
+  `test_t3_cancel_and_fills` (T3 steps 104 -> 106) cancels a working OCO sibling
+  whose venue cancel raises. Not equivalent: the host maps `oco_unknown` to
+  `OCOOutcomeUnknownError`. The P3b-2a JSON-only mutants (fingerprint, allocation,
+  TIF check) were dropped with their code; their 16/16 campaign is recorded above.
+- Final gates at `fd9a851` plus these docs (2026-10-03): `python tools/ci_local.py
+  --include-uncommitted` **exit 0**, invariant/version/extension checks green,
+  **1,938 Python tests passed**, te_core **88 passed**. Read-only
+  `python tools/ledger_parity.py` **exit 0**: mirror-PM-B 4,095 events, options-0dte
+  3,278, options 436, scan 6,296; all **14,105** codec rows, **23 account states**
+  and four folds identical.
+
+Test scaffolding changed by the switch (reported, not silent):
+
+- `tests/flow_p3b2b.py`: `FlowManager` now subclasses production and adds only the
+  wrappers for the internal ops the lockstep steps call.
+- `tests/test_p3b2_parity.py` drives that subclass.
+- The planned-refusal comparison's reference was the deleted Python manager. Its 13
+  results were recorded from the P3b-2a manager at 29bd759 into
+  `tests/frozen_p3b2b/planned_refusal.json`, and the test now compares against that.
+
+Performance: the first switch was 5x the pre-port oracle. The host serialised the
+whole AccountState to canon JSON on every read (about four per command), and Rust
+parsed it back. Now the host hands across the ledger's Rust fold
+(`Ledger.fold_handle`), and the flow clones the AccountState in place. On 48 seeded
+`bracket_walk`s, best of 3, run alone: the oracle takes **2.30 s**, the switched
+flow **2.55 s** (1.11x); before the fast path the flow took 10.0 s. Both raise the
+same exceptions by type (144 idempotency, 661 order management, 78 value, 119
+reconciliation).
+
+Found along the way: `codec.canon` wrote a frozenset in iteration order. A carrier's
+set grows by `old | new` deltas, so equal states could print apart, depending on how
+often the state had been read. `canon` now sorts a set's members by their text; Rust
+already sorted on read.
 
 ### P4a verification and boundary
 
