@@ -51,7 +51,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2a OMS manager decisions** | Pure validation, allocation, fingerprints, classification and command plans in `te_core::oms::manager`; one binding in `trade_engine_rs` | 1,668 pre-port | Frozen-manager lockstep, refusal counters, Rust hand mutants, unchanged tests and real-ledger parity | **done**: `tests/test_p3b2_parity.py`, `tools/mutate_p3b2.py`; measured evidence and boundaries below |
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
-| **P4b After-close & sink decisions** | After-close lifecycle and journal-sink decisions: `lifecycle/after_close.py`, `lifecycle/sources.py` validation, `sinks/journal.py` mapping | ~1.0k | Frozen-oracle lockstep, refusal parity, hand mutants | **in progress**; P4a pattern |
+| **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
 | **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | pending; after P3b-2b |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
@@ -426,6 +426,122 @@ Deviations and boundary choices:
   exact Python exception hierarchy and message strings.
 
 Timing: reported stable timing at **1.073x** the pre-port baseline.
+
+### P4b verification and boundary
+
+The standalone oracle commit is `a8769dd70ceb394c20692befce366377da6b5fd1`:
+only the three pre-port modules in `tests/frozen_p4b/` were committed, with
+`after_close` importing its frozen `sources`. Those files are immutable thereafter.
+No existing test, protected Python directory, ledger lock or user ledger was edited.
+
+Rust owns the new decisions in `te_core::runtime::{lifecycle,journal}`:
+
+- Session/close guards, account and held-option ordering, position side/absolute
+  quantity and expiry classification, overdue refusal, settlement identity and
+  chronology, expiry kind/reason, dividend eligibility/source/chronology, summed
+  dividends, quote requirements/look-ahead, early-assignment reason and event
+  fields/command-id suffix.
+- Settlement/dividend positive finite Decimal, required provenance and timezone
+  validation; corporate-action amount usability. The existing P1 option intrinsic,
+  exercise-style, settlement-instant and dividend-exercise rules are **reused**,
+  not copied or expanded. This preserves P1's numeric-range refusals, including
+  `1E+50`, rather than silently accepting values P1 refused.
+- Required journal fields and mapping shape; timestamp seq residue; tag-source
+  precedence and append rule; account guard, derivative/multiplier action, HTTP
+  insert acknowledgement, trade selection, numeric read-back tolerances and
+  annotation fields. `crates/te_py/src/lifecycle_sinks.rs` converts Python carriers,
+  performs rich datetime comparisons and uses the existing stdlib ISO/JSON codecs
+  and `str`/`int`/`float` conversions. These preserve Unicode, unbounded event seq,
+  accepted ISO syntax, decimal spellings and conversion exception text; there is
+  no second Python implementation of these mappings.
+
+The **one new Python door** is `trade_engine._lifecycle_runtime`, outside the
+protected `eod/` and `intraday/` directories. It unconditionally imports the mandatory
+extension through the established refusal bridge (D5). New P4b arithmetic uses
+string-carried `ledger::pydec::PyDec` (D6's exception); only the journal's existing
+HTTP float fields/tolerances use floats. No Rust clock read was introduced.
+
+Python retains the clock, ordered ledger reads and one final append, settlement/
+dividend/quote callbacks, carrier construction, source/store adapters and HTTP,
+auth/error handling/retries. A whole lifecycle plan is still decided before any
+write, including a later-account refusal. Source max-age calculation belongs to
+the existing chain store/market-data provider; P4b passes the identical age and
+instant and preserves its stale refusal rather than moving that adapter.
+
+Measured parity: **8 tests, 12,711 compared steps/cases**:
+
+| Generator | Comparisons |
+|---|---:|
+| 100 seeded lifecycle worlds: first pass, recovery counterpart and replay | 300 |
+| Source value grid and explicit refusal counterparts | 4,422 |
+| Journal timestamp/ISO/tag/payload grid and refusal counterparts | 4,832 |
+| 26 journal HTTP modes, 8 seeds, refusal/success counterparts | 416 |
+| Expiry/dividend threshold helper grid | 2,400 |
+| Journal read-back tolerances and annotation/tag combinations | 89 |
+| Corporate-action and snapshot source adapters | 19 |
+| Inherited option-money, naive-clock and time boundaries | 233 |
+
+Every lifecycle step compares return or exception **type name and exact message**,
+the complete ledger rows and ordered ledger/source observations; each world also
+compares folded states. Journal worlds compare every ordered HTTP callback/body.
+Decimal comparisons use `str`, including scale. Fifteen lifecycle refusal families
+each refuse five times and have five successful counterparts: session, pre-close,
+overdue, invalid expiry, missing/wrong/future/pre-instant settlement, missing/
+unknown/future dividend, missing quote source and missing/stale/future quote.
+The main lifecycle campaign records 50 `LifecycleError` and 25 `StaleDataError`.
+Journal delivery records 24 initial successes, 184 initial refusals, and 208
+successful counterparts. Source and mapping refusals are separately asserted;
+all nine required journal fields have individual missing-field cases.
+
+`tools/mutate_p4b.py` builds a green baseline, rebuilds each mutant, runs `python -B`,
+accepts **only assertion failures** as kills, restores original source bytes in
+`finally`, and unconditionally restores/rebuilds/checks green at the end.
+The final campaign kills **14/14 compiling mutants**:
+
+| Mutant | Killing parity test |
+|---|---|
+| Before-close pass allowed | lifecycle seeded worlds |
+| Settlement identity ignored | lifecycle seeded worlds |
+| Pre-instant settlement allowed | lifecycle seeded worlds |
+| Exact exercise threshold expires | lifecycle seeded worlds |
+| Dividend/extrinsic tie assigns | lifecycle seeded worlds |
+| Dividend sum doubled | lifecycle seeded worlds |
+| Long call assigned early | lifecycle seeded worlds |
+| Early command suffix dropped | lifecycle seeded worlds |
+| Zero source price accepted | source value grid |
+| Journal seq residue dropped | journal mapping grid |
+| Skipped insert accepted | journal HTTP worlds |
+| Cross-account delivery accepted | journal HTTP worlds |
+| List tags ignored | journal mapping grid |
+| Quantity tolerance inclusive | journal read-back boundaries |
+
+There were **no initial survivors**. The campaign was rerun after preserving the
+inherited P1 monetary boundary and naive-datetime comparison error wording; no
+mutant was weakened. Build/import/collection failures never count as kills.
+
+Realistic-book timing (`tools/time_p4b.py`), nine independently seeded real SQLite
+ledgers, 3 trading accounts plus the cash-only fixture account, 120 option positions
+(96 expiring, 24 future short calls),
+AAPL/SPXW/SPX, both rights/sides, quantities 1..4: pre-port median **44.1154 ms**,
+post-port median **31.2000 ms**, ratio **0.7072**, below the **1.25** limit.
+Construction/seeding are outside the timer; source reads, plan, append and fold
+are inside. Each sample appends exactly 96 lifecycle events; no live/paper job
+or user ledger is used.
+
+Final gates: `cargo test --manifest-path crates/Cargo.toml -p te_core` **91 passed**;
+the private Python 3.13 full `tools/ci_local.py` gate is recorded in the final
+P4b report. Existing lifecycle/journal tests pass unchanged (**64**), alongside
+the eight new parity tests. The extension and package paths were verified inside
+this worktree/private `.venv`; all cargo output stays in `crates/target`.
+
+Deviations: **no new accepted business-rule deviation**. ISO/JSON parsing and
+dynamic scalar conversion deliberately use Python's stdlib from the Rust binding
+to preserve the oracle's accepted syntax and exceptions. P1 option-money boundaries
+and the journal's zero-fee replacement/NaN tolerance behavior remain unchanged.
+Remaining/out of scope: OMS orchestration, `eod`, `intraday`, server/axum, ledger
+lock, `tos_paper`, all process/connection ownership and the final P4 paper-session
+flip. Rollback is a checkout of the base branch with a rebuild of its private
+extension: **no ledger rewrite or decimal migration**.
 
 ### Costs of phasing (accepted)
 

@@ -27,29 +27,21 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from trade_engine.domain.instruments import OptionContract, OptionRight, Side
-from trade_engine.domain.option_lifecycle import (
-    EXERCISE_THRESHOLD,
-    Outcome,
-    can_exercise_early,
-    exercised_for_dividend,
-    expiry_outcome,
-    intrinsic,
-)
+from trade_engine.domain.instruments import OptionContract, OptionRight, Side, money
+from trade_engine.domain.option_lifecycle import can_exercise_early
 from trade_engine.domain.option_roots import SettleTime, option_style, settlement_instant
 from trade_engine.interfaces.market_data import StaleDataError
 from trade_engine.ledger import Event, EventKind, Ledger, OptionLifecycle
 from trade_engine.lifecycle.sources import Dividends, OptionQuotes, SettlementPrice, Settlements
-
-_KIND = {
-    Outcome.EXPIRE: EventKind.EXPIRY,
-    Outcome.EXERCISE: EventKind.EXERCISE,
-    Outcome.ASSIGN: EventKind.ASSIGNMENT,
-}
+from trade_engine._lifecycle_runtime import decide, flag, journal, register
 
 
 class LifecycleError(RuntimeError):
     """The pass refuses to settle a session (I5, I9)."""
+
+
+register("lifecycle", LifecycleError)
+register("stale", StaleDataError)
 
 
 @dataclass(frozen=True)
@@ -59,7 +51,7 @@ class LifecycleResult:
 
 
 def _compact(contract: OptionContract) -> str:
-    return contract.occ.replace(" ", "")
+    return decide("compact", [contract.occ])[0][0]
 
 
 class LifecyclePass:
@@ -83,16 +75,12 @@ class LifecyclePass:
         self._quotes = quotes
 
     def run(self, session: date, accounts: Iterable[str] | None = None) -> LifecycleResult:
-        if not self._calendar.is_session(session):
-            raise LifecycleError(f"{session.isoformat()} is not a session (I5)")
+        decide("session", [session.isoformat()], flags=[self._calendar.is_session(session)])
         now = self._clock.now_utc()
         close = self._calendar.session_close(session)
-        if now < close:
-            raise LifecycleError(
-                f"The clock reads {now.isoformat()}, before the {session.isoformat()} close "
-                f"{close.isoformat()}; expiry and assignment are decided after the close (I9)"
-            )
-        names = sorted(accounts) if accounts is not None else sorted(self._ledger.accounts())
+        decide("close", [now.isoformat(), session.isoformat(), close.isoformat()],
+               [-int(journal("before", now, close))])
+        names = decide("accounts", list(accounts) if accounts is not None else self._ledger.accounts())[0]
         # Every account is decided before anything is written, so one refusal leaves the
         # ledger as it was and the re-run starts clean (I2).
         events = [event for account in names for event in self._account(account, session, now)]
@@ -103,26 +91,22 @@ class LifecyclePass:
 
     def _account(self, account: str, session: date, now: datetime) -> list[Event]:
         state = self._ledger.state(account)
-        held = sorted(
-            (
-                (instrument, position)
-                for instrument, position in state.positions.items()
-                if isinstance(instrument, OptionContract) and position.quantity != 0
-            ),
-            key=lambda item: item[0].occ,
-        )
+        rows = list(state.positions.items())
+        indices = decide("held",
+            [v for instrument, position in rows for v in
+             (instrument.occ if isinstance(instrument, OptionContract) else "", str(position.quantity))],
+            flags=[isinstance(instrument, OptionContract) for instrument, _ in rows])[1]
+        held = [rows[i] for i in indices]
         events: list[Event] = []
         for contract, position in held:
-            side = Side.BUY if position.quantity > 0 else Side.SELL
-            quantity = abs(position.quantity)
-            if contract.expiry <= session:
+            text, _, flags = decide("position", [str(position.quantity)],
+                                    [(contract.expiry - session).days])
+            side = Side.BUY if flags[0] else Side.SELL
+            quantity = Decimal(text[0])
+            if flags[1]:
                 self._instant(contract)  # refuses a contract whose expiry is not a session
-                if contract.expiry < session:
-                    raise LifecycleError(
-                        f"{contract.occ.strip()} in '{account}' expired on "
-                        f"{contract.expiry.isoformat()} and was never settled; run the "
-                        f"lifecycle pass for that session first (I9)"
-                    )
+                decide("overdue", [contract.occ.strip(), account, contract.expiry.isoformat()],
+                       [(contract.expiry - session).days])
                 events.append(self._expiry(account, contract, side, quantity, session, now))
                 continue
             early = self._early_assignment(account, contract, side, quantity, session, now)
@@ -140,21 +124,12 @@ class LifecyclePass:
         self, underlying: str, session: date, settle_time: SettleTime, settled_at: datetime, now: datetime
     ) -> SettlementPrice:
         price = self._settlements.settlement(underlying, session, settle_time)
-        if (price.underlying, price.session, price.settle_time) != (underlying, session, settle_time):
-            raise LifecycleError(
-                f"Asked for the {settle_time.value} settlement of {underlying} on {session}, got "
-                f"{price.settle_time.value} {price.underlying} on {price.session} (I5)"
-            )
-        if price.as_of > now:
-            raise LifecycleError(
-                f"{underlying} settlement is stamped {price.as_of.isoformat()}, after the clock "
-                f"{now.isoformat()}: look-ahead (I7)"
-            )
-        if price.as_of < settled_at:
-            raise LifecycleError(
-                f"{underlying} settlement is stamped {price.as_of.isoformat()}, before the "
-                f"settlement instant {settled_at.isoformat()}; it cannot be the official price (I9)"
-            )
+        text = [settle_time.value, underlying, str(session), price.settle_time.value,
+                price.underlying, str(price.session)]
+        decide("price_identity", text)
+        text.extend([price.as_of.isoformat(), now.isoformat(), settled_at.isoformat()])
+        decide("price_clock", text, [int(journal("after", price.as_of, now))])
+        decide("price_known", text, [-int(journal("before", price.as_of, settled_at))])
         return price
 
     def _expiry(
@@ -162,56 +137,43 @@ class LifecyclePass:
     ) -> Event:
         style = option_style(contract.underlying)
         price = self._price(style.underlying, session, style.settle_time, self._instant(contract), now)
-        outcome = expiry_outcome(contract, side, price.price)
-        value = intrinsic(contract, price.price)
-        reason = (
-            f"expired worthless: {value} in the money at the {style.settle_time.value} settlement "
-            f"{price.price}, under the {EXERCISE_THRESHOLD} exercise threshold"
-            if outcome is Outcome.EXPIRE
-            else f"{'exercised' if outcome is Outcome.EXERCISE else 'assigned'} at expiry: {value} in "
-            f"the money at the {style.settle_time.value} settlement {price.price}"
-        )
-        return self._event(account, contract, side, quantity, price, now, _KIND[outcome], reason, session)
+        text = decide("expiry", [money(contract.strike), money(price.price), style.settle_time.value, contract.underlying],
+                      [contract.expiry.year, contract.expiry.month, contract.expiry.day],
+                      flags=[contract.right is OptionRight.CALL, side is Side.BUY])[0]
+        return self._event(account, contract, side, quantity, price, now, EventKind(text[0]), text[1], session)
 
     def _early_assignment(
         self, account: str, contract: OptionContract, side: Side, quantity, session: date, now: datetime
     ) -> Event | None:
-        if side is not Side.SELL or contract.right is not OptionRight.CALL or not can_exercise_early(contract):
+        if not flag("eligible", flags=[side is Side.SELL, contract.right is OptionRight.CALL,
+                    can_exercise_early(contract)]):
             return None
         underlying = option_style(contract.underlying).underlying
         ex_date = self._calendar.next_session(session)
-        if self._dividends is None:
-            raise LifecycleError(
-                f"'{account}' is short the American call {contract.occ.strip()} and no dividend "
-                f"source is configured, so its early assignment cannot be decided (I5)"
-            )
+        decide("dividend_source", [account, contract.occ.strip()], flags=[self._dividends is not None])
         dividends = self._dividends.dividends(underlying, ex_date)
         for dividend in dividends:
-            if dividend.as_of > now:
-                raise LifecycleError(f"{underlying} dividend record is from after the clock: look-ahead (I7)")
-        if not dividends:
+            decide("dividend_time", [underlying], [int(journal("after", dividend.as_of, now))])
+        summed = decide("sum", [str(d.amount) for d in dividends])
+        if not summed[2][0]:
             return None
-        amount = sum((d.amount for d in dividends), Decimal("0"))
+        amount = Decimal(summed[0][0])
         close = self._price(underlying, session, SettleTime.PM, self._calendar.session_close(session), now)
-        if intrinsic(contract, close.price) < EXERCISE_THRESHOLD:
+        if not flag("itm", [money(contract.strike), money(close.price), contract.underlying],
+                    [contract.expiry.year, contract.expiry.month, contract.expiry.day],
+                    flags=[contract.right is OptionRight.CALL]):
             return None
-        if self._quotes is None:
-            raise LifecycleError(
-                f"{contract.occ.strip()} in '{account}' is in the money before a {amount} dividend "
-                f"and no option quote source is configured (I5)"
-            )
+        decide("quote_source", [contract.occ.strip(), account, str(amount)],
+               flags=[self._quotes is not None])
         quote = self._quotes.quote(contract, now)
-        if quote.as_of > now:
-            raise StaleDataError(f"{contract.occ.strip()} quote is from after the clock: look-ahead (I7)")
-        if not exercised_for_dividend(contract, close.price, quote.bid, amount):
+        decide("quote_time", [contract.occ.strip()], [int(journal("after", quote.as_of, now))])
+        plan = decide("early", [money(contract.strike), money(close.price), money(quote.bid),
+                               money(amount), ex_date.isoformat(), contract.underlying],
+                      [contract.expiry.year, contract.expiry.month, contract.expiry.day])
+        if not plan[2][0]:
             return None
-        extrinsic = quote.bid - intrinsic(contract, close.price)
-        reason = (
-            f"assigned early: goes ex a {amount} dividend on {ex_date.isoformat()}, more than the "
-            f"call's extrinsic value {extrinsic} (bid {quote.bid}, close {close.price})"
-        )
         return self._event(
-            account, contract, side, quantity, close, now, EventKind.ASSIGNMENT, reason, session, early=True
+            account, contract, side, quantity, close, now, EventKind.ASSIGNMENT, plan[0][0], session, early=True
         )
 
     def _event(
@@ -228,21 +190,22 @@ class LifecyclePass:
         *,
         early: bool = False,
     ) -> Event:
-        suffix = ":early" if early else ""
+        text, _, flags = decide("event", [account, contract.occ, str(quantity), str(price.price),
+                                         price.source, session.isoformat()], flags=[early])
         return Event(
-            account=account,
+            account=text[0],
             kind=kind,
             payload=OptionLifecycle(
-                account_id=account,
+                account_id=text[0],
                 contract=contract,
-                quantity=quantity,
+                quantity=Decimal(text[2]),
                 held=side,
-                underlying_price=price.price,
-                price_source=price.source,
+                underlying_price=Decimal(text[3]),
+                price_source=text[4],
                 as_of=now,
                 reason=reason,
-                early=early,
+                early=flags[0],
             ),
             ts_utc=now,
-            command_id=f"lifecycle:{account}:{_compact(contract)}:{session.isoformat()}{suffix}",
+            command_id=text[5],
         )

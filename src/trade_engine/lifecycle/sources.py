@@ -26,11 +26,13 @@ from trade_engine.domain.instruments import OptionContract
 from trade_engine.domain.option_roots import SettleTime, option_style
 from trade_engine.interfaces.market_data import OptionQuote, StaleDataError
 from trade_engine.market_data.chains import ChainSnapshotStore
+from trade_engine._lifecycle_runtime import aware, decide, journal, register
+
+register("stale", StaleDataError)
 
 
 def _aware(stamp: datetime, what: str) -> None:
-    if stamp.tzinfo is None or stamp.tzinfo.utcoffset(stamp) is None:
-        raise ValueError(f"{what} must be timezone-aware UTC (I7)")
+    aware(stamp, what)
 
 
 @dataclass(frozen=True)
@@ -45,13 +47,10 @@ class SettlementPrice:
     as_of: datetime
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "underlying", self.underlying.strip().upper())
-        if not self.underlying:
-            raise ValueError("SettlementPrice.underlying must be non-empty")
-        if not isinstance(self.price, Decimal) or not self.price.is_finite() or self.price <= 0:
-            raise ValueError(f"SettlementPrice.price must be a positive Decimal, got {self.price!r} (I5)")
-        if not self.source:
-            raise ValueError("SettlementPrice.source must be non-empty (I11)")
+        object.__setattr__(self, "underlying", journal("symbol", self.underlying))
+        decide("value", [self.underlying and "_", str(self.price) if isinstance(self.price, Decimal) else "",
+                         "SettlementPrice", repr(self.price)],
+               flags=[True, isinstance(self.price, Decimal), bool(self.source)])
         _aware(self.as_of, "SettlementPrice.as_of")
 
 
@@ -95,11 +94,10 @@ class Dividend:
     as_of: datetime
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "symbol", self.symbol.strip().upper())
-        if not isinstance(self.amount, Decimal) or not self.amount.is_finite() or self.amount <= 0:
-            raise ValueError(f"Dividend.amount must be a positive Decimal, got {self.amount!r} (I5)")
-        if not self.source:
-            raise ValueError("Dividend.source must be non-empty (I11)")
+        object.__setattr__(self, "symbol", journal("symbol", self.symbol))
+        decide("value", [self.symbol and "_", str(self.amount) if isinstance(self.amount, Decimal) else "",
+                         "Dividend", repr(self.amount)],
+               flags=[False, isinstance(self.amount, Decimal), bool(self.source)])
         _aware(self.as_of, "Dividend.as_of")
 
 
@@ -146,8 +144,8 @@ class CorporateActionDividends:
                 amount = Decimal(str(raw)) if raw is not None else None
             except (InvalidOperation, ValueError):
                 amount = None
-            if amount is None or not amount.is_finite() or amount <= 0:
-                raise StaleDataError(f"{symbol} dividend going ex {ex_date} has no usable amount: {raw!r} (I5)")
+            decide("action_amount", [str(amount), symbol, str(ex_date), repr(raw)],
+                   flags=[amount is not None])
             found.append(Dividend(symbol, ex_date, amount, "corporate_actions", action.as_of))
         return tuple(found)
 

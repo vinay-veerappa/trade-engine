@@ -2,6 +2,8 @@
 pub mod eod;
 pub mod intraday;
 pub mod routing;
+pub mod lifecycle;
+pub mod journal;
 
 use crate::ledger::model::{err, R};
 
@@ -16,6 +18,7 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
         Some(("eod", op)) => eod::decide(op, s, n, b, f),
         Some(("routing", op)) => routing::decide(op, s, n, b),
         Some(("intraday", op)) => intraday::decide(op, s, n, b, f),
+        Some(("lifecycle", op)) => lifecycle::decide(op, s, n, b, f),
         _ => err("value", format!("Unknown runtime decision {op}")),
     }
 }

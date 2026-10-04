@@ -1,6 +1,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+#[path = "lifecycle_sinks.rs"]
+mod lifecycle_sinks;
 #[pyfunction]
 fn runtime_decide(op: &str, text: Vec<String>, numbers: Vec<i64>, flags: Vec<bool>, floats: Vec<f64>) -> PyResult<(Vec<String>,Vec<i64>,Vec<bool>)> {
     let p = te_core::runtime::decide(op,&text,&numbers,&flags,&floats)
@@ -9,5 +11,6 @@ fn runtime_decide(op: &str, text: Vec<String>, numbers: Vec<i64>, flags: Vec<boo
 }
 pub fn register(m: &Bound<'_,PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(runtime_decide,m)?)?;
+    lifecycle_sinks::register(m)?;
     Ok(())
 }
