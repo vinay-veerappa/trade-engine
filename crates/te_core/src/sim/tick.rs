@@ -311,9 +311,10 @@ pub fn round_to_tick(price: &PyDec, tick: &PyDec, mode: RoundMode) -> R<PyDec> {
 /// - A sell down `n * tick`.
 ///
 /// Slipped prices are snapped to the tick grid (matching `replay-sim.ts::applySlippage`).
+/// `n == 0` returns the price untouched, unsnapped, as `applySlippage`'s `if (!ticks) return price`.
 pub fn slip_ticks(price: &PyDec, side: Side, n: u32, tick: &PyDec) -> R<PyDec> {
     if n == 0 {
-        return round_to_tick(price, tick, RoundMode::Nearest);
+        return Ok(price.clone());
     }
     let delta = d(tick.mul_i128(n as i128))?;
     let raw = match side {
@@ -599,8 +600,9 @@ mod tests {
         assert_eq!(slip_ticks(&base, Side::Buy, 0, &tick).unwrap().to_py_string(), "20000.25");
         assert_eq!(slip_ticks(&base, Side::Sell, 0, &tick).unwrap().to_py_string(), "20000.25");
 
-        // Unaligned price gets snapped on slippage
+        // Unaligned price gets snapped on slippage, but not when n = 0 (applySlippage returns it as is)
         let unaligned = p("20000.10");
+        assert_eq!(slip_ticks(&unaligned, Side::Buy, 0, &tick).unwrap().to_py_string(), "20000.10");
         assert_eq!(slip_ticks(&unaligned, Side::Buy, 1, &tick).unwrap().to_py_string(), "20000.25");
         assert_eq!(slip_ticks(&unaligned, Side::Sell, 1, &tick).unwrap().to_py_string(), "19999.75");
     }
