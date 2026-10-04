@@ -1140,8 +1140,8 @@ impl Book {
     fn check_bar_sequence_futures(&self, bar: &Bar) -> R<()> {
         let sym = bar.instr.symbol()?;
         let t_utc = bar.ts.to_utc_chrono()?;
-        let session = match crate::calendar::globex::session_at(t_utc) {
-            Ok(Some(td)) => td,
+        match crate::calendar::globex::session_at(t_utc) {
+            Ok(Some(_)) => {}
             Ok(None) => {
                 return err(
                     "missing_bar",
@@ -1161,23 +1161,11 @@ impl Book {
         if bar.ts.lt(&previous.ts) {
             return err("value", format!("Out-of-order bar for {sym}: {} follows {}", bar.ts.iso, previous.ts.iso));
         }
-        let prev_t_utc = previous.ts.to_utc_chrono()?;
-        let prev_session = match crate::calendar::globex::session_at(prev_t_utc) {
-            Ok(Some(td)) => td,
-            Ok(None) => return err("sim", format!("Previous bar for {sym} at {} had no session", previous.ts.iso)),
-            Err(e) => return Err(gerr(e)),
-        };
-        if session == prev_session {
-            // In-session gaps accepted (§0.4)
-            return Ok(());
-        }
-        let next_td = crate::calendar::globex::next_session(prev_session).map_err(gerr)?;
-        if session != next_td {
-            return err(
-                "missing_bar",
-                format!("Missing session bars for {sym}: expected {}, received {}", date_str(&next_td), date_str(&session)),
-            );
-        }
+        // In-session gaps are accepted (§0.4), and so is a jump to any later
+        // session: a whole session missing from the data (a feed hole, or a
+        // CME closure the published table could not source, e.g. Good Friday
+        // 2023) is the data audit's concern, not the book's. Working orders
+        // wait through it; Day orders still expire by instant in expire_due.
         Ok(())
     }
 
@@ -1457,13 +1445,13 @@ mod tests {
         assert_eq!(e.kind, "missing_bar");
         assert!(e.msg.contains("is not inside a Globex session (halt, weekend or closure)"));
 
-        // Skipped session: Friday 2020-11-20 followed by Tuesday 2020-11-24 (skipping Monday 2020-11-23)
+        // Skipped session: Friday 2020-11-20 followed by Tuesday 2020-11-24 (Monday 2020-11-23
+        // missing from the data) is accepted - whole-session data holes are the data audit's
+        // concern (§0.4), and Good Friday 2023 is closed at CME but absent from the table.
         let mut b_skip = Book::new_futures("A", 0).unwrap();
         b_skip.connect(&mut || Ok("2020-11-20T21:00:00+00:00".to_string())).unwrap();
         b_skip.process_bar(Some(f_bar("NQ", "2020-11-20T21:59:00+00:00", "11900", "11905", "11895", "11900"))).unwrap();
-        let e = b_skip.process_bar(Some(f_bar("NQ", "2020-11-23T23:00:00+00:00", "11910", "11915", "11905", "11910"))).unwrap_err();
-        assert_eq!(e.kind, "missing_bar");
-        assert_eq!(e.msg, "Missing session bars for NQ: expected 2020-11-23, received 2020-11-24");
+        b_skip.process_bar(Some(f_bar("NQ", "2020-11-23T23:00:00+00:00", "11910", "11915", "11905", "11910"))).unwrap();
     }
 
     #[test]
