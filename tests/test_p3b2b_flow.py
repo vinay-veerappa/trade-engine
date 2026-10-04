@@ -452,7 +452,17 @@ def test_t3_cancel_and_fills(tmp_path):
         pair.do("network-pending", lambda w: w.manager.replace("standalone", OrderChanges(new_quantity=D("5")), command_id="other"))
     finally:
         pair.finish()
+    # A venue cancel that raises for an OCO sibling is OCOOutcomeUnknownError, not the plain
+    # BrokerOutcomeUnknownError (the order is still working: not the already-pending path).
+    pair = FlowPair(tmp_path / "oco-network", tally)
+    try:
+        pair.do("oco-network-setup", lambda w: w.manager.submit(w.standalone(limit_price=D("100"))))
+        pair.both(lambda w: setattr(w.broker, "cancel_error", OSError("socket lost")))
+        pair.do("oco-network-unknown", lambda w: w.manager._cancel_exits([w.manager.get_order("standalone")], "oco"))
+    finally:
+        pair.finish()
     check(tally, (
+        ("oco-network-setup", 1, 0), ("oco-network-unknown", 0, 1),
         ("cancel-submit", 4, 0), ("partial-fill", 4, 0), ("fill-replay", 4, 0), ("fill-conflict", 0, 4),
         ("fill-environment", 0, 4), ("fill-account", 0, 4), ("fill-unknown", 0, 4),
         ("cancel-result", 2, 2), ("cancel-replay", 4, 0), ("oco-pending", 1, 3), ("cancel-missing", 0, 4),
@@ -463,7 +473,7 @@ def test_t3_cancel_and_fills(tmp_path):
         ("child-resize", 1, 3), ("target-fill", 1, 3), ("stop-fill", 2, 2), ("exit-cancel", 4, 0),
         ("entry-cancel", 2, 2),
     ))
-    assert_steps(tally, 104)
+    assert_steps(tally, 106)
     print("\nT3 tally:", dict(sorted(tally.items())))
 
 
