@@ -847,14 +847,79 @@ pub fn replace_emulated_stop<H: Host>(h: &H, order: &Order, changes: &OrderChang
 /// Fills before terminal state: missing fills are ingested BEFORE the state event,
 /// because the ledger refuses a fill on a cancelled order (I1). Then the state event
 /// (command id quoting `updated_at.isoformat()`) and `_synchronize_bracket`.
-pub fn reconcile_order<H: Host>(_h: &H, _order_id: &str) -> R<Order> {
-    unported("reconcile_order")
+pub fn reconcile_order<H: Host>(h: &H, order_id: &str) -> R<Order> {
+    use crate::ledger::model::OrderUpdated;
+    let ctx = context(h, order_id)?;
+    let order = ctx.order;
+    let states = h.orders(&order.created_at)?;
+    let venue_id = ctx.venue_order_id.as_deref().unwrap_or(order_id);
+    let index = plan::reconcile_find(order_id, venue_id, &states.iter().map(|s| s.venue_order_id.clone()).collect::<Vec<_>>(), order.state)?;
+    let found = states[index].clone();
+    if plan::pending_state(order.state) {
+        plan::reconcile_replace(order_id, found.state, has_unresolved_replace(h, order_id)?)?;
+    }
+    if plan::reconcile_fills(&found.filled_quantity, &ctx.filled)? {
+        ingest_venue_fills(h, &order, &found)?;
+    }
+    let order = get_order(h, order_id)?;
+    let action = plan::reconcile_result(found.state, order.state, order_id)?;
+    if action == plan::Resolution::Return {
+        return Ok(order);
+    }
+    if action == plan::Resolution::Updated {
+        let mut updated = order.clone();
+        updated.state = OrderState::Submitted;
+        append(h, &order.account_id, EventKind::OrderUpdated, Obj::OrderUpdated(OrderUpdated {
+            order: updated,
+            reason: "Venue reconciliation confirmed SUBMITTED".to_string(),
+            venue_order_id: Some(found.venue_order_id.clone()),
+        }), &format!("{}:reconcile:{}:SUBMITTED", order.command_id, found.updated_at))?;
+        let resolved = get_order(h, order_id)?;
+        synchronize_bracket(h, &resolved, &format!("{order_id}:reconcile-submitted"))?;
+        return Ok(resolved);
+    }
+    let kind = match action {
+        plan::Resolution::Record(k) => k,
+        _ => unreachable!(),
+    };
+    append(h, &order.account_id, kind, Obj::StateChange(OrderStateChange {
+        order_id: order_id.to_string(),
+        reason: Some(format!("Venue reconciliation confirmed {}", found.state.value())),
+        venue_order_id: Some(found.venue_order_id.clone()),
+    }), &format!("{}:reconcile:{}:{}", order.command_id, found.updated_at, found.state.value()))?;
+    let resolved = get_order(h, order_id)?;
+    synchronize_bracket(h, &resolved, &format!("{order_id}:reconcile-{}", found.state.value()))?;
+    Ok(resolved)
 }
 
 /// `_ingest_venue_fills`: `broker.fills(created_at)`, the fills with the found venue id
 /// recorded in venue order through `record_fill`, then `ingest_check`.
-pub fn ingest_venue_fills<H: Host>(_h: &H, _order: &Order, _found: &VenueOrderState) -> R<()> {
-    unported("ingest_venue_fills")
+pub fn ingest_venue_fills<H: Host>(h: &H, order: &Order, found: &VenueOrderState) -> R<()> {
+    let fills = h.fills(&order.created_at)?;
+    let indices = plan::matching_ids(&fills.iter().map(|f| f.venue_order_id.clone()).collect::<Vec<_>>(), &found.venue_order_id);
+    let venue_env = h.env()?;
+    for item in indices.into_iter().map(|i| &fills[i]) {
+        record_fill(h, &Fill {
+            fill_id: item.venue_fill_id.clone(),
+            order_id: order.order_id.clone(),
+            account_id: order.account_id.clone(),
+            instrument: item.instrument.clone(),
+            quantity: item.quantity.clone(),
+            price: item.price.clone(),
+            venue_env: venue_env.clone(),
+            filled_at: item.filled_at.clone(),
+            side: item.side,
+            fee: item.fee.clone(),
+            leg_id: item.leg_id.clone(),
+            venue_order_id: Some(item.venue_order_id.clone()),
+            venue_execution_id: Some(item.venue_fill_id.clone()),
+        })?;
+    }
+    let recorded = context(h, &order.order_id)?.filled;
+    if plan::reconcile_fills(&found.filled_quantity, &recorded)? {
+        plan::ingest_check(&found.filled_quantity, &recorded, &order.order_id, get_order(h, &order.order_id)?.state)?;
+    }
+    Ok(())
 }
 
 /// `_submit_native`. Not NEW returns the order. Unsupported type, then time in force,
@@ -1319,8 +1384,25 @@ pub fn ensure_stored<H: Host>(h: &H, order: &Order) -> R<()> {
 
 /// `_has_unresolved_replace`: an ORDER_PENDING replace request whose `:accepted` and
 /// `:rejected` commands are both absent.
-pub fn has_unresolved_replace<H: Host>(_h: &H, _order_id: &str) -> R<bool> {
-    unported("has_unresolved_replace")
+pub fn has_unresolved_replace<H: Host>(h: &H, order_id: &str) -> R<bool> {
+    for event in h.events_of_kind(EventKind::OrderPending)? {
+        let payload_order_id = match &event.payload {
+            Obj::StateChange(sc) => sc.order_id.clone(),
+            _ => continue,
+        };
+        let reason = match &event.payload {
+            Obj::StateChange(sc) => sc.reason.clone(),
+            _ => None,
+        };
+        let command_id = event.command_id.clone();
+        let command_id = plan::pending_candidate(order_id, true, &payload_order_id, reason.as_deref(), command_id.as_deref());
+        if let Some(command_id) = command_id {
+            if h.event_by_command(&format!("{command_id}:accepted"))?.is_none() && h.event_by_command(&format!("{command_id}:rejected"))?.is_none() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 // --- the door the host calls -------------------------------------------------------------
