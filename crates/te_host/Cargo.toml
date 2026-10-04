@@ -7,3 +7,4 @@ license = "MIT"
 
 [dependencies]
 fd-lock = "4.0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }

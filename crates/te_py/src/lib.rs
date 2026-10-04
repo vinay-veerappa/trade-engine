@@ -13,6 +13,7 @@ mod flow;
 mod oms;
 mod sim;
 mod lock;
+mod store;
 
 /// The same module initializer is registered before custom CPython startup.
 #[cfg(feature = "embed")]
@@ -561,7 +562,7 @@ fn ledger_ticket_contracts(queued: &str, units: &str) -> PyResult<Vec<u8>> {
     run().map_err(refuse_ledger)
 }
 
-struct FoldEntry {
+pub(crate) struct FoldEntry {
     st: AccountState,
     /// Fills the Python carrier holds (the delta appends the rest).
     fills_held: usize,
@@ -615,7 +616,7 @@ impl LedgerFold {
         }
     }
 
-    fn apply_row(&mut self, account: &str, row: &Row) -> LR<()> {
+    pub(crate) fn apply_row(&mut self, account: &str, row: &Row) -> LR<()> {
         let (kind, payload, ts, cmd, sv, seq) = row;
         match lb::event_from_row(account, kind, payload, ts, cmd.as_deref(), *sv as i128, seq.map(i128::from)) {
             Ok(ev) => self.apply(account, &ev),
@@ -633,11 +634,11 @@ impl LedgerFold {
 impl LedgerFold {
     #[new]
     #[pyo3(signature = (atomic=false))]
-    fn new(atomic: bool) -> Self {
+    pub(crate) fn new(atomic: bool) -> Self {
         LedgerFold { atomic, entries: OMap::new() }
     }
 
-    fn has(&self, account: &str) -> bool {
+    pub(crate) fn has(&self, account: &str) -> bool {
         self.entries.contains(account)
     }
 
@@ -646,11 +647,11 @@ impl LedgerFold {
         self.entries.iter().map(|(k, _)| k.clone()).collect()
     }
 
-    fn drop(&mut self, account: &str) {
+    pub(crate) fn drop(&mut self, account: &str) {
         self.entries.remove(account);
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries = OMap::new();
     }
 
@@ -664,14 +665,14 @@ impl LedgerFold {
 
     /// Start (or restart) an account from its stored rows, in seq order:
     /// `(kind, payload_json, ts_utc, command_id, schema_version, seq)`.
-    fn load(&mut self, account: &str, rows: Vec<Row>) -> PyResult<()> {
+    pub(crate) fn load(&mut self, account: &str, rows: Vec<Row>) -> PyResult<()> {
         self.entries.remove(account);
         self.entries.put(account, FoldEntry::fresh(AccountState::new(account)));
         self.apply_rows(account, rows)
     }
 
     /// Apply stored rows to an account (created empty if absent); a refusal drops it.
-    fn apply_rows(&mut self, account: &str, rows: Vec<Row>) -> PyResult<()> {
+    pub(crate) fn apply_rows(&mut self, account: &str, rows: Vec<Row>) -> PyResult<()> {
         for row in &rows {
             if let Err(e) = self.apply_row(account, row) {
                 self.entries.remove(account);
@@ -707,7 +708,7 @@ impl LedgerFold {
     /// The account's state for Python: `(True, whole canonical state)` the first time (or
     /// when `full`), else `(False, patch since the last export)`.
     #[pyo3(signature = (account, full=false))]
-    fn export(&mut self, account: &str, full: bool) -> PyResult<(bool, Vec<u8>)> {
+    pub(crate) fn export(&mut self, account: &str, full: bool) -> PyResult<(bool, Vec<u8>)> {
         let Some(entry) = self.entries.get_mut(account) else {
             return Err(refuse_ledger(LErr { kind: "key", msg: format!("'{account}'") }));
         };
@@ -724,6 +725,7 @@ impl LedgerFold {
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     lock::register(m)?;
+    store::register(m)?;
     sim::register(m)?;
     oms::register(m)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;

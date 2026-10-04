@@ -27,54 +27,38 @@ Snapshots are a cache: `snapshot(account)` must equal `fold(events())[account]`,
 from __future__ import annotations
 
 import json
+import os
+import weakref
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, TYPE_CHECKING
 
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import codec
+from trade_engine.ledger import _rs, codec
 from trade_engine.ledger.events import SCHEMA_VERSION, Event, EventKind
-from trade_engine.ledger.lock import LedgerLockError, SingleInstanceLock
+from trade_engine.ledger.lock import LedgerLockError
 from trade_engine.ledger.outbox import DrainResult, OutboxItem, OutboxStatus
-from trade_engine.ledger.state import AccountState, FoldCache, IncrementalFold, fold
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
-    seq            INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts_utc         TEXT    NOT NULL,
-    account        TEXT    NOT NULL,
-    kind           TEXT    NOT NULL,
-    command_id     TEXT,
-    payload_json   TEXT    NOT NULL,
-    schema_version INTEGER NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_events_command_id
-    ON events(command_id) WHERE command_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS ix_events_account_seq ON events(account, seq);
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS outbox (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_seq    INTEGER NOT NULL,
-    destination  TEXT    NOT NULL,
-    payload_json TEXT    NOT NULL,
-    status       TEXT    NOT NULL,
-    attempts     INTEGER NOT NULL DEFAULT 0,
-    last_error   TEXT,
-    created_at   TEXT    NOT NULL,
-    delivered_at TEXT,
-    FOREIGN KEY(event_seq) REFERENCES events(seq),
-    UNIQUE(event_seq, destination)
-);
-CREATE INDEX IF NOT EXISTS ix_outbox_dest_status_id
-    ON outbox(destination, status, id);
-"""
+from trade_engine.ledger.state import AccountState, FoldCache, fold
 
 OutboxSpec = Mapping[str, dict[str, Any]] | Sequence[tuple[str, dict[str, Any]]]
+
+if TYPE_CHECKING:
+    from trade_engine_rs import LedgerStore, SqlConnection
+
+
+class _LockView:
+    """Non-owning compatibility view of the store's actual native guard."""
+
+    def __init__(self, ledger: Ledger) -> None:
+        self._ledger = weakref.ref(ledger)
+
+    @property
+    def held(self) -> bool:
+        ledger = self._ledger()
+        native = None if ledger is None else ledger._native
+        return native is not None and native.held
 
 
 class Ledger:
@@ -83,13 +67,10 @@ class Ledger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Always locked: there is no unlocked writer, or I4 is only a convention.
-        self._lock = SingleInstanceLock(self.path)
-        self._lock_held = False
-        self._conn: sqlite3.Connection | None = None
-        # Folded state per account as of the last commit (in Rust); the base append()
-        # validates against. Safe to hold because this instance is the only writer (I4).
-        self._fold = IncrementalFold(atomic=False)
+        self._native: LedgerStore | None = None
+        self._lock = _LockView(self)
+        self._conn: SqlConnection | None = None
+        self._carriers: dict[str, tuple[int, AccountState]] = {}
         self._listeners: list[Callable[[Event], None]] = []
 
     def add_listener(self, callback: Callable[[Event], None]) -> None:
@@ -117,33 +98,17 @@ class Ledger:
         """Acquire the single-instance lock (I4) and open the database."""
         if self._conn is not None:
             return self
-        self._lock.acquire()
-        self._lock_held = True
-        self._fold.clear()
-        try:
-            conn = sqlite3.connect(str(self.path), isolation_level=None)
-            conn.row_factory = sqlite3.Row
-            # synchronous=FULL, so a committed row is durable and an interrupted write
-            # rolls back rather than half-applying (I2).
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=FULL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript(_SCHEMA)
-            self._conn = conn
-        except Exception:
-            if self._lock_held:
-                self._lock.release()
-                self._lock_held = False
-            raise
+        sidecar = self.path.with_name(self.path.name + ".lock")
+        self._native = _rs.rs.LedgerStore(str(self.path), str(sidecar), str(os.getpid()))
+        self._conn = self._native.connection()
+        self._carriers.clear()
         return self
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
+        if self._native is not None:
+            self._native.close()
+            self._native = None
             self._conn = None
-        if self._lock_held:
-            self._lock.release()
-            self._lock_held = False
 
     def __enter__(self) -> Ledger:
         return self.open()
@@ -152,10 +117,16 @@ class Ledger:
         self.close()
 
     @property
-    def conn(self) -> sqlite3.Connection:
+    def conn(self) -> SqlConnection:
         if self._conn is None:
             raise RuntimeError("Ledger is not open; use `with Ledger(path):`")
         return self._conn
+
+    @property
+    def _store(self) -> LedgerStore:
+        self.conn  # Preserve the public unopened-ledger refusal.
+        assert self._native is not None
+        return self._native
 
     def _commit(self) -> None:
         """Commit the open transaction.
@@ -189,148 +160,52 @@ class Ledger:
     def _write(
         self, entries: Sequence[tuple[Event, Sequence[tuple[str, dict[str, Any]]]]]
     ) -> list[Event]:
-        batch = [event for event, _ in entries]
-        for event in batch:
-            if event.seq is not None:
-                raise ValueError("Event.seq is assigned by the ledger; pass seq=None to append")
-
-        conn = self.conn
-        touched: set[str] = set()
-        written: list[Event] = []
-        new_events: list[Event] = []
-        in_transaction = False
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            in_transaction = True
-            for event, outbox_items in entries:
-                if event.command_id is not None:
-                    existing = conn.execute(
-                        "SELECT * FROM events WHERE command_id = ?", (event.command_id,)
-                    ).fetchone()
-                    if existing is not None:
-                        # Decode inside the transaction so a malformed stored row surfaces
-                        # before anything commits.
-                        written.append(self._row_to_event(existing))
-                        continue
-
-                # Load the base state before the INSERT, which would otherwise be folded in.
-                if not self._fold.has(event.account):
-                    self._load(event.account)
-                touched.add(event.account)
-                payload_json = codec.payload_text(event.payload)
-                ts_utc = event.ts_utc.isoformat()
-                cursor = conn.execute(
-                    "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        ts_utc,
-                        event.account,
-                        event.kind.value,
-                        event.command_id,
-                        payload_json,
-                        event.schema_version,
-                    ),
-                )
-                seq = int(cursor.lastrowid)
-                # The row as stored, applied once: what a reload from the log will fold.
-                self._fold.apply_row(
-                    event.account, event.kind.value, payload_json, ts_utc, event.command_id, event.schema_version, seq
-                )
-                appended = replace(event, seq=seq)
-                written.append(appended)
-                new_events.append(appended)
-                for destination, payload in outbox_items:
-                    self._insert_outbox(int(cursor.lastrowid), destination, payload, event.ts_utc)
-            self._commit()
-            in_transaction = False
-        except BaseException as exc:
-            # Nothing committed: the touched accounts hold uncommitted events, so they
-            # are dropped and reload from the log on their next read.
-            for account in touched:
-                self._fold.drop(account)
-            if in_transaction and isinstance(exc, Exception):
-                self._rollback()
-            raise
+        written, new_events = _rs.call(_rs.rs.ledger_store_write, self._native, entries, self)
         self._notify_listeners(new_events)
         return written
 
     def _rows(self, account: str, after: int | None = None) -> list[tuple]:
         """The account's stored rows as the Rust fold reads them, in seq order."""
-        cursor = self.conn.cursor()
-        cursor.row_factory = None
-        sql = (
-            "SELECT kind, payload_json, ts_utc, command_id, schema_version, seq FROM events WHERE account = ?"
-        )
-        params: list[Any] = [account]
-        if after is not None:
-            sql += " AND seq > ?"
-            params.append(after)
-        return cursor.execute(sql + " ORDER BY seq ASC", params).fetchall()
-
-    def _load(self, account: str) -> None:
-        self._fold.load(account, self._rows(account))
+        return _rs.call(self._store.rows, account, after)
 
     def fold_handle(self, account: str):
         """The Rust fold holding ``account``'s committed state, loaded if absent: what
         ``state(account)`` is built from, for Rust callers that need no Python carrier."""
-        if not self._fold.has(account):
-            self._load(account)
-        return self._fold.handle
+        return _rs.call(self._store.fold_handle, account)
 
     def _committed_state(self, account: str) -> AccountState:
-        if not self._fold.has(account):
-            self._load(account)
-        return self._fold.state(account)
+        revision = _rs.call(self._store.revision, account)
+        previous = self._carriers.get(account)
+        if previous is not None and previous[0] == revision:
+            return previous[1]
+        whole, data = _rs.call(self._store.export, account, previous is None)
+        tree = json.loads(data)
+        carrier = codec.build(tree) if whole else codec.patch(previous[1], tree)
+        self._carriers[account] = (revision, carrier)
+        return carrier
 
     # -- read --------------------------------------------------------------------
 
     def next_seq(self) -> int:
-        row = self.conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM events").fetchone()
-        return int(row["n"])
+        return self._store.next_seq()
 
     def count(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
-        return int(row["n"])
+        return self._store.count()
 
     def events(self, *, after: int | None = None, account: str | None = None) -> list[Event]:
-        sql = "SELECT * FROM events"
-        clauses: list[str] = []
-        params: list[Any] = []
-        if after is not None:
-            clauses.append("seq > ?")
-            params.append(after)
-        if account is not None:
-            clauses.append("account = ?")
-            params.append(account)
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY seq ASC"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return _rs.call(self._store.events, after, account)
 
     def events_of_kind(self, kind: EventKind, *, account: str | None = None) -> list[Event]:
         """Events of one kind in append order, filtered in SQL: a scan for one kind
         does not decode the rest of the log."""
-        sql = "SELECT * FROM events WHERE kind = ?"
-        params: list[Any] = [kind.value]
-        if account is not None:
-            sql += " AND account = ?"
-            params.append(account)
-        rows = self.conn.execute(sql + " ORDER BY seq ASC", params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return _rs.call(self._store.events, None, account, kind.value)
 
     def accounts(self) -> list[str]:
         """Every account with events, in order of its first event."""
-        rows = self.conn.execute(
-            "SELECT account FROM events GROUP BY account ORDER BY MIN(seq)"
-        ).fetchall()
-        return [row["account"] for row in rows]
+        return self._store.accounts()
 
     def event_by_command(self, command_id: str) -> Event | None:
-        row = self.conn.execute(
-            "SELECT * FROM events WHERE command_id = ?", (command_id,)
-        ).fetchone()
-        return None if row is None else self._row_to_event(row)
+        return _rs.call(self._store.event_by_command, command_id)
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> Event:
@@ -348,7 +223,7 @@ class Ledger:
 
     def fold(self) -> dict[str, AccountState]:
         """Full fold of every event. Pure over the log (I2)."""
-        return fold(self.events())
+        return {account: codec.build_text(state) for account, state in _rs.call(self._store.fold)}
 
     def state(self, account: str) -> AccountState:
         """Folded state of one account, from that account's events only (I8).
@@ -361,11 +236,7 @@ class Ledger:
 
     def snapshot(self, account: str, *, at_seq: int | None = None) -> AccountState:
         """Folded state for one account, with `last_seq` pinned to the snapshot point."""
-        events = self.events(account=account)
-        if at_seq is not None:
-            events = [e for e in events if e.seq is not None and e.seq <= at_seq]
-        state = self._fold_events(events, account)
-        return state
+        return codec.build_text(_rs.call(self._store.snapshot, account, at_seq))
 
     @staticmethod
     def _fold_events(events: Sequence[Event], account: str) -> AccountState:
@@ -609,10 +480,7 @@ class Ledger:
         """Return whether a persisted event already claims this idempotency key (I3)."""
         if not command_id:
             raise ValueError("command_id must be non-empty")
-        row = self.conn.execute(
-            "SELECT 1 FROM events WHERE command_id = ? LIMIT 1", (command_id,)
-        ).fetchone()
-        return row is not None
+        return self._store.has_command(command_id)
 
     def schema_version(self) -> int:
         stored = self.get_meta("schema_version")

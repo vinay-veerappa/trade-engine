@@ -238,6 +238,8 @@ def test_invalid_paths_exact_errors(tmp_path):
 
 
 def test_refusal_precedes_any_writable_db_open(tmp_path, monkeypatch):
+    from frozen_p4c.store import Ledger as OldLedger
+
     path = tmp_path / "book.db"
     owner = OldLock(path)
     owner.acquire()
@@ -246,16 +248,35 @@ def test_refusal_precedes_any_writable_db_open(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         calls.append(args)
         raise AssertionError("writable sqlite open before lock")
-    monkeypatch.setattr("trade_engine.ledger.store.sqlite3.connect", forbidden)
+    with monkeypatch.context() as patch:
+        patch.setattr("trade_engine.ledger.store.sqlite3.connect", forbidden)
+        try:
+            assert outcome(ledger.open) == tuple(refused(path))
+            assert calls == []
+            assert not path.exists()
+            assert not ledger._lock.held
+        finally:
+            ledger.close()
+            owner.release()
+    path.mkdir()  # Real SQLite-open failure after guard acquisition, not an injection seam.
+    oracle = OldLedger(path)
     try:
-        assert outcome(ledger.open) == tuple(refused(path))
-        assert calls == []
-        assert not path.exists()
+        expected = outcome(oracle.open)
+        assert expected == ("err", "OperationalError", "unable to open database file")
+        assert outcome(ledger.open) == expected
         assert not ledger._lock.held
+        assert not oracle._lock.held
+        with OldLock(path) as old:
+            assert old.held
+        with NewLock(path) as new:
+            assert new.held
     finally:
         ledger.close()
-        owner.release()
-    assert outcome(ledger.open) == ("err", "AssertionError", "writable sqlite open before lock")
+        oracle.close()
+        path.rmdir()
+    with ledger:
+        assert ledger._lock.held
+        assert path.is_file()
     assert not ledger._lock.held
 
 

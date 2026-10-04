@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use std::path::{Path, PathBuf};
 use te_host::lock::{LockError, SingleInstanceGuard};
 
-fn io_error(py: Python<'_>, error: std::io::Error, path: &Path, mkdir: bool) -> PyResult<PyErr> {
+pub(crate) fn io_error(py: Python<'_>, error: std::io::Error, path: &Path, mkdir: bool) -> PyResult<PyErr> {
     let name = path.into_pyobject(py)?;
     let raw = error.raw_os_error().unwrap_or(5);
     #[cfg(windows)]
@@ -32,6 +32,19 @@ fn io_error(py: Python<'_>, error: std::io::Error, path: &Path, mkdir: bool) -> 
 #[pyclass]
 struct LedgerLock {
     guard: Option<SingleInstanceGuard>,
+}
+
+pub(crate) fn path_from_python(path: &Bound<'_, PyAny>) -> PyResult<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let bytes: Vec<u8> = path.call_method1("encode", ("utf-16-le", "surrogatepass"))?.extract()?;
+        let wide: Vec<u16> = bytes.chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+    }
+    #[cfg(not(windows))]
+    path.extract()
 }
 
 #[pymethods]
