@@ -9,6 +9,7 @@
 //! `tos_unsupported` -> `UnsupportedCapability`, `value` -> `ValueError`, and the
 //! decimal kinds), its message exactly the Python's.
 
+pub mod cover;
 pub mod netting;
 pub mod normalize;
 pub mod pytables;
@@ -54,6 +55,12 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "unreadable" => reconcile::unreadable_op(&doc)?,
         "confirm_ticket" => reconcile::confirm_ticket_op(&doc)?,
         "ticket_contracts" => reconcile::ticket_contracts_op(&doc)?,
+        "covers" => cover::covers_op(&doc)?,
+        "bare" => cover::bare_op(&doc)?,
+        "uncovered" => cover::uncovered_op(&doc)?,
+        "holdings" => cover::holdings_op(&doc)?,
+        "sold" => cover::sold_op(&doc)?,
+        "cover_reason" => cover::cover_reason_op(&doc)?,
         "text_probe" => wire::text_probe(&doc)?,
         _ => return err(WIRE, format!("unknown tos_paper op {op:?}")),
     };

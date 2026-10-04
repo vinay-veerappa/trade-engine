@@ -1175,3 +1175,282 @@ def test_p5_existing_reconcile_vectors_through_the_door(monkeypatch) -> None:
     monkeypatch.setattr(V, "unreadable", unreadable)
     monkeypatch.setattr(V, "confirm_ticket", confirm)
     assert run_module_tests(V) >= 20
+
+
+# -- T5 cover --------------------------------------------------------------------------------
+
+from types import MappingProxyType  # noqa: E402
+
+from frozen_p5 import cover as FC  # noqa: E402
+from trade_engine.domain.orders import Order  # noqa: E402
+from trade_engine.ledger import codec as LCODEC  # noqa: E402
+from trade_engine.ledger.events import MirrorAllocation, MirrorQueued  # noqa: E402
+from trade_engine.ledger.mirror import MirrorState, MirrorTicketState  # noqa: E402
+
+OCT, NOV, DEC, JAN27 = date(2026, 10, 16), date(2026, 11, 20), date(2026, 12, 18), date(2027, 1, 15)
+CCA, PMA, WHL = "OPT_COVERED_CALL", "OPT_PMCC", "OPT_WHEEL"
+MSFT = Equity("MSFT")
+
+
+def ccall(strike="210", expiry=OCT, und="AAPL", right="C", multiplier=100):
+    return opt(und, expiry, strike, right, multiplier)
+
+
+def queued(instrument, side, qty, key, account=CCA) -> MirrorQueued:
+    return MirrorQueued(
+        venue=VENUE, ticket_key=key, instrument=instrument, side=side, quantity=D(qty), order_type=OrderType.LIMIT,
+        limit_price=D("1.00"), tif=TimeInForce.DAY, allocations=(MirrorAllocation("so-" + key, account, D(qty)),), at=T)
+
+
+def tstate(instrument, side, qty, key="tos:a", filled="0", closed=False, account=CCA) -> MirrorTicketState:
+    return MirrorTicketState(queued=queued(instrument, side, qty, key, account), filled=D(filled), closed=closed)
+
+
+def mstate(book=None, tickets=()) -> MirrorState:
+    return MirrorState(venue=VENUE, tickets=MappingProxyType({t.key: t for t in tickets}),
+                       book=MappingProxyType({k: D(v) for k, v in (book or {}).items()}))
+
+
+def corder(instrument, side, qty="1", oid="so-1", account=CCA) -> Order:
+    return Order(order_id=oid, account_id=account, instrument=instrument, order_type=OrderType.LIMIT, side=side,
+                 quantity=D(qty), command_id=oid, created_at=T, limit_price=D("1.00"), tif=TimeInForce.DAY)
+
+
+def corder_doc(o) -> dict:
+    return {"instrument": wire(o.instrument), "side": o.side.value, "quantity": str(o.quantity)}
+
+
+def found_doc(found) -> list:
+    return [[u, str(c)] for u, c in found.items()]
+
+
+def check_uncovered(label, held) -> dict:
+    got = step("uncovered", label, lambda: found_doc(FC.uncovered(held)),
+               lambda: door("uncovered", {"held": pairs_doc(held)}))
+    if got[0] == "ok":
+        seen("uncovered", len(got[1]))
+    return got
+
+
+def check_cover(label, mirror, order, accepted=()) -> None:
+    canon = LCODEC.canon(mirror)
+    step("holdings", label, lambda: pairs_doc(FC.holdings(mirror)), lambda: door("holdings", {"mirror": canon}))
+    got = step("cover_reason", label, lambda: FC.cover_reason(mirror, order, list(accepted)),
+               lambda: door("cover_reason", {"mirror": canon, "order": corder_doc(order),
+                                             "accepted": [corder_doc(a) for a in accepted]})["reason"])
+    if got[0] == "ok":
+        seen("cover_reason", got[1] is None)
+    step("sold", label, lambda: (lambda r: None if r is None else [wire(r[0]), str(r[1])])(FC._sold(order)),
+         lambda: door("sold", {"order": corder_doc(order)}))
+
+
+def check_bare(label, longs, shorts) -> list:
+    got = step("bare", label, lambda: [wire(c) for c in FC._bare(longs, shorts)],
+               lambda: door("bare", {"longs": [wire(c) for c in longs], "shorts": [wire(c) for c in shorts]})["left"])
+    return got
+
+
+def greedy_bare(longs, shorts):
+    """What a greedy matcher would leave bare: the first free long that covers, never handed on."""
+    taken, left = set(), []
+    for short in shorts:
+        for index, long in enumerate(longs):
+            if index not in taken and FC.covers(long, short):
+                taken.add(index)
+                break
+        else:
+            left.append(short)
+    return left
+
+
+STRIKES = ["190", "200", "200.0", "205", "210", "215", "1E+2", "0.5"]
+EXPIRIES = [OCT, NOV, DEC, JAN27]
+CALLS = [ccall(k, e, u, r, m) for k in ("200", "205", "210", "215") for e in (OCT, NOV, DEC)
+         for u in ("AAPL", "MSFT") for r in ("C",) for m in (100,)] + [
+    ccall("200", DEC, multiplier=10), ccall("210", OCT, multiplier=10), ccall("205", NOV, multiplier=50),
+    ccall("210", OCT, right="P"), ccall("200", DEC, right="P"), ccall("200.0", DEC), ccall("210.0", OCT)]
+
+
+def test_p5_t5_covers_lockstep() -> None:
+    grid = CALLS + [ccall(k, e) for k in STRIKES for e in EXPIRIES]
+    n = 0
+    for long in grid:
+        for short in grid:
+            got = step("covers", n, lambda: FC.covers(long, short),
+                       lambda: door("covers", {"long": wire(long), "short": wire(short)})["result"])
+            seen("covers", got[1])
+            n += 1
+    c = SEEN["covers"]
+    assert c[True] > 200 and c[False] > 2000, c
+    assert sum(TALLY["covers"].values()) == n >= 3900
+
+
+def uncovered_case(rng) -> dict:
+    held = {}
+    for _ in range(rng.randint(0, 7)):
+        und = rng.choice(["AAPL", "AAPL", "AAPL", "MSFT"])
+        if rng.random() < 0.25:
+            held[Equity(und)] = D(rng.choice(["50", "100", "200", "250", "99", "-100", "0", "300", "10", "1E+2"]))
+        else:
+            call = ccall(rng.choice(["200", "205", "210", "215"]), rng.choice([OCT, NOV, DEC]), und,
+                         rng.choice(["C", "C", "C", "P"]), rng.choice([100, 100, 100, 10, 50]))
+            held[call] = D(rng.choice(["1", "2", "3", "-1", "-2", "-3", "-1", "0", "1.5", "-1.5", "-2.0", "0.5", "-0.5"]))
+    return held
+
+
+def test_p5_t5_uncovered_and_bare_lockstep() -> None:
+    rng = random.Random(5201)
+    l1, l2 = ccall("200", DEC), ccall("205", OCT)
+    s1, s2 = ccall("210", OCT), ccall("210", NOV)
+    # the hand grid
+    check_uncovered("nothing", {})
+    check_uncovered("bare-short", {ccall(): D(-1)})
+    check_uncovered("debit-diagonal", {ccall("200", DEC): D(1), ccall(): D(-1)})
+    check_uncovered("credit-diagonal", {ccall("215", DEC): D(1), ccall(): D(-1)})
+    check_uncovered("shorter-long", {ccall("200", OCT): D(1), ccall("210", NOV): D(-1)})
+    check_uncovered("mixed-multipliers", {AAPL: D(100), ccall(): D(-1), ccall("215", multiplier=50): D(-2)})
+    check_uncovered("mixed-10-100", {AAPL: D(100), ccall(multiplier=10): D(-3), ccall("215"): D(-1)})
+    check_uncovered("mixed-longs", {ccall("200", DEC, multiplier=10): D(1), ccall(): D(-1)})
+    check_uncovered("wide-narrow", {l1: D(1), l2: D(1), s1: D(-1), s2: D(-1)})
+    check_uncovered("short-shares", {AAPL: D(-100), ccall(): D(-1)})
+    check_uncovered("a-put", {ccall(right="P"): D(-1), AAPL: D(0)})
+    check_uncovered("fraction", {ccall(): D("-1.5"), AAPL: D(100)})
+    check_uncovered("half", {ccall(): D("-0.5")})
+    check_uncovered("infinity", {ccall(): D("-Infinity")})
+    check_uncovered("infinity-long", {ccall(): D("Infinity"), ccall("215"): D(-1)})
+    check_uncovered("nan-short", {ccall(): D("NaN")})
+    check_uncovered("nan-shares", {AAPL: D("NaN"), ccall(): D(-1)})
+    for n in range(2500):                                   # seeded
+        check_uncovered(n, uncovered_case(rng))
+    c = SEEN["uncovered"]
+    assert c[0] > 300 and c[1] > 300 and c[2] > 100, c
+    # the matcher: a maximum matching, never a greedy one
+    differs = 0
+    for n in range(2500):
+        shorts = [rng.choice(CALLS[:24] + [ccall("210.0", OCT)]) for _ in range(rng.randint(0, 6))]
+        longs = [rng.choice(CALLS[:24] + [ccall("205.0", NOV)]) for _ in range(rng.randint(0, 6))]
+        got = check_bare(n, longs, shorts)
+        assert got[0] == "ok"
+        if got[1] != [wire(c) for c in greedy_bare(longs, shorts)]:
+            differs += 1
+    assert differs > 40, differs                            # the generator would catch a greedy matcher
+    assert check_bare("wide-narrow", [l1, l2], [s1, s2])[1] == []
+    assert len(greedy_bare([l1, l2], [s1, s2])) == 1     # greedy strands the November short
+    check_bare("empty", [], [])
+    settle("uncovered", 2500, ["OverflowError: cannot convert Infinity to integer", "InvalidOperation"])
+    settle("bare", 2500, [])
+
+
+def cover_case(rng):
+    """A mirror book with resting tickets, an order, and the batch already let through."""
+    def shares(und):
+        return Equity(und)
+
+    def pick():
+        und = rng.choice(["AAPL", "AAPL", "AAPL", "MSFT"])
+        kind = rng.random()
+        if kind < 0.3:
+            return shares(und)
+        if kind < 0.45:
+            return ccall(rng.choice(["200", "205", "210", "215"]), rng.choice([OCT, NOV, DEC]), und, "P")
+        return ccall(rng.choice(["200", "205", "210", "215", "210.0"]), rng.choice([OCT, NOV, DEC]), und, "C",
+                     rng.choice([100, 100, 100, 10]))
+
+    book = {}
+    for _ in range(rng.randint(0, 6)):
+        instrument = pick()
+        qty = rng.choice(["100", "200", "50", "-100"]) if isinstance(instrument, Equity) else \
+            rng.choice(["1", "2", "-1", "-2", "3", "-3", "0", "1.5"])
+        book[(rng.choice([CCA, PMA, WHL]), instrument)] = qty
+    tickets = []
+    for t in range(rng.randint(0, 3)):
+        instrument = pick()
+        if rng.random() < 0.15:
+            instrument = combo((ccall("210"), 1, Side.SELL), (ccall("215"), 1, Side.BUY))
+        qty = rng.choice(["100", "200", "50"]) if isinstance(instrument, Equity) else rng.choice(["1", "2", "3"])
+        filled = rng.choice(["0", "0", "0", str(int(qty) // 2), qty])
+        tickets.append(tstate(instrument, rng.choice(list(Side)), qty, key=f"tos:{t}", filled=filled,
+                              closed=rng.random() < 0.1, account=rng.choice([CCA, PMA])))
+    state = mstate(book, tickets)
+
+    def order(oid):
+        instrument = pick()
+        if rng.random() < 0.08:
+            instrument = combo((ccall("210"), 1, Side.SELL), (ccall("215"), 1, Side.BUY))
+        qty = rng.choice(["100", "50", "99", "101", "200", "0.5"]) if isinstance(instrument, Equity) else \
+            rng.choice(["1", "2", "3", "0.5"])
+        return corder(instrument, rng.choice([Side.SELL, Side.SELL, Side.SELL, Side.BUY]), qty, oid)
+
+    accepted = [order(f"so-a{i}") for i in range(rng.randint(0, 3))]
+    return state, order("so-x"), accepted
+
+
+def test_p5_t5_cover_reason_lockstep() -> None:
+    rng = random.Random(5202)
+    c210, c215, leaps, mini = ccall("210"), ccall("215"), ccall("200", DEC), ccall("215", multiplier=10)
+    S, B = Side.SELL, Side.BUY
+    # the edge grid: a short call with nothing behind it; shares; debit and credit diagonals; mixed multipliers
+    check_cover("bare-short", mstate(), corder(c210, S))
+    check_cover("lot", mstate({(CCA, AAPL): 100}), corder(c210, S))
+    check_cover("99", mstate({(CCA, AAPL): 99}), corder(c210, S))
+    check_cover("two-in-batch", mstate({(CCA, AAPL): 100}), corder(c210, S, oid="so-2"),
+                [corder(c210, S, oid="so-1")])
+    check_cover("two-lots", mstate({(CCA, AAPL): 200}), corder(c210, S, oid="so-2"), [corder(c210, S, oid="so-1")])
+    check_cover("debit", mstate({(PMA, leaps): 1}), corder(c210, S, account=PMA))
+    check_cover("credit", mstate({(PMA, ccall("215", DEC)): 1}), corder(c210, S, account=PMA))
+    check_cover("sell-shares-under-short", mstate({(CCA, AAPL): 100, (CCA, c210): -1}), corder(AAPL, S, "100"))
+    check_cover("sell-spare-shares", mstate({(CCA, AAPL): 200, (CCA, c210): -1}), corder(AAPL, S, "101"))
+    check_cover("sell-long-under-short", mstate({(PMA, leaps): 1, (PMA, c210): -1}), corder(leaps, S, account=PMA))
+    check_cover("mixed-multipliers", mstate({(CCA, AAPL): 100, (CCA, mini): -2}), corder(c210, S))
+    check_cover("mixed-multipliers-after", mstate({(CCA, AAPL): 100, (CCA, c210): -1}), corder(mini, S))
+    check_cover("resting-buy", mstate({}, [tstate(AAPL, B, "100")]), corder(c210, S))
+    check_cover("resting-sell", mstate({(CCA, AAPL): 100}, [tstate(AAPL, S, "100")]), corder(c210, S))
+    check_cover("resting-short", mstate({(CCA, AAPL): 100}, [tstate(c210, S, "1")]), corder(c210, S, oid="so-2"))
+    check_cover("resting-vertical", mstate({}, [tstate(combo((c210, 1, S), (c215, 1, B)), S, "1")]),
+                corder(c210, S))
+    check_cover("buy-to-close", mstate({(CCA, AAPL): 100, (CCA, c210): -1}), corder(c210, B))
+    check_cover("a-put", mstate(), corder(ccall(right="P"), S))
+    check_cover("a-vertical", mstate(), corder(combo((c210, 1, S), (c215, 1, B)), S))
+    check_cover("short-shares", mstate({(CCA, AAPL): -100}), corder(c210, S))
+    check_cover("other-underlying", mstate({(CCA, AAPL): 100}), corder(ccall("400", und="MSFT"), S))
+    check_cover("equal-spellings", mstate({(CCA, ccall("210.0")): -1, (PMA, c210): -1, (CCA, AAPL): 100}),
+                corder(AAPL, S, "100"))
+    check_cover("fraction", mstate({(CCA, AAPL): 100}), corder(c210, S, "0.5"))
+    check_cover("fraction-shares", mstate({(CCA, AAPL): 100, (CCA, c210): -1}), corder(AAPL, S, "0.5"))
+    for n in range(2200):                                   # seeded
+        state, order, accepted = cover_case(rng)
+        check_cover(n, state, order, accepted)
+    c = SEEN["cover_reason"]
+    assert c[True] > 300 and c[False] > 300, c
+    settle("cover_reason", 2200, [])
+    settle("holdings", 2200, [])
+    settle("sold", 2200, [])
+
+
+def test_p5_existing_cover_vectors_through_the_door(monkeypatch) -> None:
+    import test_tos_cover as V
+
+    def instrument_back(w):
+        return instrument_of(w)
+
+    def held_back(doc):
+        return {instrument_back(i): D(q) for i, q in doc}
+
+    def covers(long, short):
+        return door("covers", {"long": wire(long), "short": wire(short)})["result"]
+
+    def uncovered(held):
+        return {u: D(c) for u, c in door("uncovered", {"held": pairs_doc(held)})}
+
+    def holdings(mirror):
+        return held_back(door("holdings", {"mirror": LCODEC.canon(mirror)}))
+
+    def cover_reason(mirror, order, accepted=()):
+        return door("cover_reason", {"mirror": LCODEC.canon(mirror), "order": corder_doc(order),
+                                     "accepted": [corder_doc(a) for a in accepted]})["reason"]
+
+    monkeypatch.setattr(V, "covers", covers)
+    monkeypatch.setattr(V, "uncovered", uncovered)
+    monkeypatch.setattr(V, "holdings", holdings)
+    monkeypatch.setattr(V, "cover_reason", cover_reason)
+    assert run_module_tests(V) >= 40
