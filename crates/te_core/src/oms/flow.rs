@@ -27,7 +27,7 @@ use crate::ledger::fold::AccountState;
 use crate::ledger::json::{dumps, Json};
 use crate::ledger::model::{
     check_event, err, DateTime, EmulatedOrderState, Event, EventKind, Fill, Instrument, LErr, Obj, Order,
-    OrderState, OrderStateChange, OrderType, Side, Tif, R, SCHEMA_VERSION, validate_order_prices,
+    OrderState, OrderStateChange, OrderType, Side, Tif, R, SCHEMA_VERSION, validate_order_prices, OrdersCreated,
 };
 use crate::ledger::ops::{le, s, zero};
 use crate::ledger::pydec::PyDec;
@@ -458,8 +458,84 @@ pub fn bracket_from_orders<H: Host>(h: &H, orders: &[Order]) -> R<Bracket> {
 /// Otherwise the clock is read once (`created_at` of every order), the quantity is
 /// validated, targets are split or fractioned, and ONE ORDERS_CREATED event persists
 /// entry, stop and targets (durable before any venue call).
-pub fn create_bracket<H: Host>(_h: &H, _intent: &Intent, _quantity: &PyDec) -> R<Bracket> {
-    unported("create_bracket")
+pub fn create_bracket<H: Host>(h: &H, intent: &Intent, quantity: &PyDec) -> R<Bracket> {
+    plan::positive_quantity(quantity)?;
+    let caps = capabilities(h)?;
+    plan::bracket_capabilities(intent.entry_type, intent.entry_tif, intent.exit_tif, &caps.types, &caps.tifs, caps.native_stops)?;
+    let fingerprint = plan::bracket_fingerprint(&intent.wire, quantity)?;
+    if let Some(existing) = h.event_by_command(&intent.command_id)? {
+        plan::created_replay(&plan::Prior::of(&existing), &intent.account_id, &fingerprint, &intent.command_id)?;
+        let Obj::OrdersCreated(created) = &existing.payload else { unreachable!("created_replay admits only ORDERS_CREATED") };
+        return bracket_from_orders(h, &created.orders);
+    }
+    let now = utc_now(h)?;
+    let prefix = &intent.command_id;
+    let (limit, stop_price, exit_side) = plan::entry_terms(intent.entry_type, intent.side, &intent.entry_price, intent.entry_limit_price.as_ref());
+    let entry = Order {
+        order_id: format!("{prefix}:entry"),
+        account_id: intent.account_id.clone(),
+        instrument: intent.instrument.clone(),
+        order_type: intent.entry_type,
+        side: intent.side,
+        quantity: quantity.clone(),
+        command_id: format!("{prefix}:entry"),
+        created_at: now.clone(),
+        limit_price: limit,
+        stop_price: stop_price,
+        trail_amount: None,
+        tif: intent.entry_tif,
+        state: OrderState::New,
+        parent_order_id: None,
+        oco_group: None,
+    };
+    let stop = Order {
+        order_id: format!("{prefix}:stop"),
+        account_id: intent.account_id.clone(),
+        instrument: intent.instrument.clone(),
+        order_type: OrderType::Stop,
+        side: exit_side,
+        quantity: quantity.clone(),
+        command_id: format!("{prefix}:stop"),
+        created_at: now.clone(),
+        limit_price: None,
+        stop_price: Some(intent.stop_loss.clone()),
+        trail_amount: None,
+        tif: intent.exit_tif,
+        state: OrderState::New,
+        parent_order_id: Some(entry.order_id.clone()),
+        oco_group: Some(format!("{prefix}:exits")),
+    };
+    plan::validate_quantity(&intent.instrument, quantity)?;
+    let target_quantities = match &intent.target_fractions {
+        None => plan::split_quantity(quantity, intent.profit_targets.len(), &intent.instrument)?,
+        Some(fractions) => plan::fraction_quantities(quantity, fractions, &intent.instrument)?,
+    };
+    let targets: Vec<Order> = intent.profit_targets.iter().zip(target_quantities.iter()).enumerate().map(|(idx, (price, qty))| Order {
+        order_id: format!("{prefix}:target:{}", idx + 1),
+        account_id: intent.account_id.clone(),
+        instrument: intent.instrument.clone(),
+        order_type: OrderType::Limit,
+        side: exit_side,
+        quantity: qty.clone(),
+        command_id: format!("{prefix}:target:{}", idx + 1),
+        created_at: now.clone(),
+        limit_price: Some(price.clone()),
+        stop_price: None,
+        trail_amount: None,
+        tif: intent.exit_tif,
+        state: OrderState::New,
+        parent_order_id: Some(entry.order_id.clone()),
+        oco_group: Some(format!("{prefix}:exits")),
+    }).collect();
+    let mut orders = vec![entry, stop];
+    orders.extend(targets);
+    let batch = OrdersCreated {
+        orders: orders.clone(),
+        fingerprint,
+        reason: format!("Bracket created: {}", intent.reason),
+    };
+    append(h, &intent.account_id, EventKind::OrdersCreated, Obj::OrdersCreated(batch), &intent.command_id)?;
+    bracket_from_orders(h, &orders)
 }
 
 /// `submit`. `_ensure_stored` first (validate the quantity, persist a standalone order
@@ -653,38 +729,140 @@ pub fn cancel<H: Host>(h: &H, order_id: &str, command: &str) -> R<Order> {
 
 /// `move_stop`: `_open_bracket_stop`, then `move_stop` (stops only tighten; an
 /// unchanged price returns the stop), then `replace` with the new stop price.
-pub fn move_stop<H: Host>(_h: &H, _entry: &str, _stop_price: &PyDec, _command: &str) -> R<Order> {
-    unported("move_stop")
+pub fn move_stop<H: Host>(h: &H, entry: &str, stop_price: &PyDec, command: &str) -> R<Order> {
+    let (stop, _open) = open_bracket_stop(h, entry)?;
+    if !plan::move_stop(&stop, stop_price)? {
+        return Ok(stop);
+    }
+    replace(h, &stop.order_id, &OrderChanges { new_stop_price: Some(stop_price.clone()), ..Default::default() }, command)
 }
 
 /// `close_bracket`. An existing close order is a replay (`close_replay`) or a conflict;
 /// then `_open_bracket_stop`; a new close is guarded (`close_guard`), persisted as
 /// ORDERS_CREATED (durable before network), then submitted.
-pub fn close_bracket<H: Host>(_h: &H, _entry: &str, _command: &str, _reason: &str) -> R<Order> {
-    unported("close_bracket")
+pub fn close_bracket<H: Host>(h: &H, entry: &str, command: &str, reason: &str) -> R<Order> {
+    let close_id = format!("{entry}:close");
+    let existing = match get_order(h, &close_id) {
+        Ok(o) => Some(o),
+        Err(e) if e.kind == "key" => None,
+        Err(e) => return Err(e),
+    };
+    let is_new = existing.is_none();
+    if let Some(ref existing) = existing {
+        if plan::close_replay(existing, entry, command)? {
+            return Ok(existing.clone());
+        }
+    }
+    let (stop, open_quantity) = open_bracket_stop(h, entry)?;
+    let close = match existing {
+        Some(existing) => existing,
+        None => {
+            let children = bracket_children(h, entry)?;
+            let children_refs: Vec<&Order> = children.iter().collect();
+            plan::close_guard(entry, &children_refs)?;
+            let now = utc_now(h)?;
+            Order {
+                order_id: close_id.clone(),
+                account_id: stop.account_id.clone(),
+                instrument: stop.instrument.clone(),
+                order_type: OrderType::Market,
+                side: stop.side,
+                quantity: open_quantity,
+                command_id: command.to_string(),
+                created_at: now,
+                limit_price: None,
+                stop_price: None,
+                trail_amount: None,
+                tif: Tif::Day,
+                state: OrderState::New,
+                parent_order_id: Some(entry.to_string()),
+                oco_group: stop.oco_group.clone(),
+            }
+        }
+    };
+    if is_new {
+        let fingerprint = plan::fingerprint_order(&close)?;
+        let batch = OrdersCreated {
+            orders: vec![close.clone()],
+            fingerprint,
+            reason: format!("Bracket close: {reason}"),
+        };
+        append(h, &close.account_id, EventKind::OrdersCreated, Obj::OrdersCreated(batch), command)?;
+    }
+    submit(h, &close)
 }
 
 /// `reduce_bracket`. Refuse a bad fraction, read the entry, fingerprint, then a replay
 /// resumes `_send_reduce` on the stored reduce. Otherwise `_open_bracket_stop`, the
 /// planned `reduce` size and id, ORDERS_CREATED (durable before network), `_send_reduce`.
-pub fn reduce_bracket<H: Host>(_h: &H, _entry: &str, _fraction: &PyDec, _command: &str, _reason: &str) -> R<Order> {
-    unported("reduce_bracket")
+pub fn reduce_bracket<H: Host>(h: &H, entry: &str, fraction: &PyDec, command: &str, reason: &str) -> R<Order> {
+    plan::check_fraction(fraction)?;
+    let entry_order = get_order(h, entry)?;
+    let fingerprint = plan::reduce_fingerprint(entry, fraction, reason);
+    if let Some(existing) = h.event_by_command(command)? {
+        plan::created_replay(&plan::Prior::of(&existing), &entry_order.account_id, &fingerprint, command)?;
+        let Obj::OrdersCreated(created) = &existing.payload else { unreachable!("created_replay admits only ORDERS_CREATED") };
+        return send_reduce(h, &get_order(h, &created.orders[0].order_id)?, command);
+    }
+    let (stop, open_quantity) = open_bracket_stop(h, entry)?;
+    let children = bracket_children(h, entry)?;
+    let children_refs: Vec<&Order> = children.iter().collect();
+    let (quantity, reduce_id) = plan::reduce(entry, &children_refs, &open_quantity, fraction)?;
+    let now = utc_now(h)?;
+    let reduce = Order {
+        order_id: reduce_id.clone(),
+        account_id: stop.account_id.clone(),
+        instrument: stop.instrument.clone(),
+        order_type: OrderType::Market,
+        side: stop.side,
+        quantity,
+        command_id: command.to_string(),
+        created_at: now,
+        limit_price: None,
+        stop_price: None,
+        trail_amount: None,
+        tif: Tif::Day,
+        state: OrderState::New,
+        parent_order_id: Some(entry.to_string()),
+        oco_group: stop.oco_group.clone(),
+    };
+    let batch = OrdersCreated {
+        orders: vec![reduce.clone()],
+        fingerprint,
+        reason: format!("Bracket reduce: {reason}"),
+    };
+    append(h, &reduce.account_id, EventKind::OrdersCreated, Obj::OrdersCreated(batch), command)?;
+    send_reduce(h, &reduce, command)
 }
 
 /// `_send_reduce`: cancel targets before submitting a reduce (the LIMIT children,
 /// through `_cancel_exits` under `{command}:replaces-targets`), then `submit`.
-pub fn send_reduce<H: Host>(_h: &H, _reduce: &Order, _command: &str) -> R<Order> {
-    unported("send_reduce")
+pub fn send_reduce<H: Host>(h: &H, reduce: &Order, command: &str) -> R<Order> {
+    let parent = reduce.parent_order_id.as_deref().expect("a reduce order is a child of its bracket entry");
+    let targets: Vec<Order> = bracket_children(h, parent)?
+        .into_iter()
+        .filter(|o| o.order_type == OrderType::Limit)
+        .collect();
+    cancel_exits(h, &targets, &format!("{command}:replaces-targets"))?;
+    submit(h, reduce)
 }
 
 /// `_bracket_children`: the entry's children, in folded-state order.
-pub fn bracket_children<H: Host>(_h: &H, _entry: &str) -> R<Vec<Order>> {
-    unported("bracket_children")
+pub fn bracket_children<H: Host>(h: &H, entry: &str) -> R<Vec<Order>> {
+    let entry_order = get_order(h, entry)?;
+    let state = h.account_state(&entry_order.account_id)?;
+    let all: Vec<&Order> = state.orders.values().collect();
+    let ids = plan::children(entry, &all);
+    Ok(ids.iter().filter_map(|id| state.orders.get(id).cloned()).collect())
 }
 
 /// `_open_bracket_stop`: the entry, its account state, then `open_stop`.
-pub fn open_bracket_stop<H: Host>(_h: &H, _entry: &str) -> R<(Order, PyDec)> {
-    unported("open_bracket_stop")
+pub fn open_bracket_stop<H: Host>(h: &H, entry: &str) -> R<(Order, PyDec)> {
+    let entry_order = get_order(h, entry)?;
+    let state = h.account_state(&entry_order.account_id)?;
+    let (stop_id, open) = plan::open_stop(&state, &entry_order)?;
+    let stop = state.orders.get(&stop_id).cloned().expect("open_stop names a folded order");
+    Ok((stop, open))
 }
 
 /// `replace`. A NEW emulated stop is replaced locally. Replays: the `:pending` request
