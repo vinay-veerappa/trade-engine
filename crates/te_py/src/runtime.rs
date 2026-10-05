@@ -9,6 +9,8 @@ mod eod_flow;
 mod options_flow;
 #[path = "equity_flow.rs"]
 mod equity_flow;
+#[path = "intraday_flow.rs"]
+mod intraday_flow;
 
 pub(super) fn flow_refusal(error: te_core::ledger::model::LErr) -> PyErr {
     Python::with_gil(|py| {
@@ -31,5 +33,6 @@ pub fn register(m: &Bound<'_,PyModule>) -> PyResult<()> {
     eod_flow::register(m)?;
     options_flow::register(m)?;
     equity_flow::register(m)?;
+    intraday_flow::register(m)?;
     Ok(())
 }

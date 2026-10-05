@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4,T5,T6,T7)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4,T5,T6,T7,T8)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -1558,6 +1558,156 @@ without rewriting any ledger. No push/merge/PR, deployment, scheduled-task
 operation, client environment change, server listener or live trading job
 occurred. T8's flow prerequisites are now present locally; T0/T2 and later
 actor/client/recorded-session/strategy tickets remain pending.
+
+### P4C-T8 native intraday flow and heartbeat
+
+**T8 only**, on `te/p4c-t8`, based on unmerged T7
+`57629ba3e96b95596b1d71d03b57534c7ab10857`. The separate frozen-oracle commit is
+`3d89a0b42a3d0b89c57cba2e41e08a26fdab43ed`. The
+`tests/frozen_p4c/t8/service.py` Git blob is identical to the pre-port service:
+`cb00e098c0c9a7a318dc4ad867b6f7b418c9da0e`; its SHA256 is
+`03aad7a69bac0fe99e2c805a383d66a2ffd8839ddbdeeed7c224254ea31cef38`.
+All existing tests and previous frozen oracles remain unchanged.
+
+Rust owns the session/tick/wait sequencing in
+`te_core::runtime::intraday_flow`, driven by the effect host in
+`crates/te_py/src/intraday_flow.rs`:
+
+- Session validation, settled-session exit, live-heartbeat and previous-EOD
+  admission, starting beat, venue connect/restore, open/close observations,
+  optional start advance, pre-open waiting, ticks, pacing and stop boundary.
+- The post-fetch clock reread, stale-quote cancellation/flatten/refusal, recovery,
+  deadline-driven cancellation and flatten before strategy management, the entry
+  gate, shared T7 routing, reconciliation and tick heartbeat ordering.
+- Restore/reconcile of a lost venue book, pending resolution and session-long
+  entry barring; cancellation of unsent orphan entries and submission/read-back
+  of unsent closes. Existing OMS restore algorithms are reused, not redesigned.
+- Close mark idempotency/order, the durable session snapshot count/marker, and
+  final exited beat only after the loop has ended. Emergency fresh-quote proof,
+  cancellation/flatten attempts, alert text/cause and exited/refusing semantics.
+- Heartbeat filesystem reads, complete temporary-file writes and atomic replace
+  in `te_host::heartbeat`, with native I/O errors carrying the original filenames.
+  The public/private Python methods are callable facades, including override seams
+  for `_tick`, `_wait_until`, `_write_heartbeat`, `_flatten` and `_rehydrate`.
+
+Python retains carriers/configuration, strategy/provider/venue adapters, quote
+filtering and held-contract assembly over existing native decisions, close-price
+plan assembly, the single position-check event adapter, and return/identifier
+codecs. The binding uses the existing Python JSON, date/datetime, UTF-8 and
+dataclass codecs to preserve bytes and malformed-input refusals; it does not
+delegate filesystem I/O or a trading loop to Python. Python's one-call sleep
+adapter and the existing T7 native router remain in use. No actor/control API,
+client migration, restart supervisor, schema, dependency or Decimal change was
+added. `te_core` never reads a clock; supplied observations remain the authority.
+
+Two first-pass boundaries were fixed before certification. Invalid UTF-8 must
+be wrapped as `IntradayServiceError` with the decoding exception as cause, just
+like malformed JSON. A clock `ValueError` **before** fetching is unexpected and
+must alert; the same exception on the **post-fetch** reread is inside the
+oracle's stale-quote refusal boundary. Exact counterparts prove both. The first
+full CI attempt was deliberately stopped for the latter fix; the complete
+mutation campaign and final CI were rerun on restored final source. An initial
+direct call to a nonexistent `RoutingTally.__iadd__` was also corrected to Python's
+normal augmented-add dispatch, without changing the tally or existing tests.
+
+Final directly run gates (private Python 3.13.15 / PyO3 0.23.5):
+
+| Gate | Evidence |
+|---|---|
+| Pre-port unchanged affected baseline | **107 passed** |
+| Full affected lockstep/baseline run before the final two clock probes | **156 passed** |
+| New T8 tests, included in final CI | **55 passed** |
+| T8 lockstep outer steps | **80**, 56 successes / 24 exact refusals |
+| Refusal outcomes | IntradayServiceAlert 7, IntradayServiceError 13, FileNotFoundError 1, PermissionError 2, RuntimeError 1 |
+| Effect boundaries | **3,977** event-byte/full-fold/outbox/meta prefix observations; **124,632** ordered callbacks; **6,799** heartbeat observations |
+| Hand mutants | **15/15 compiled and killed**, no invalid runs; baseline/restored each **45 passed / 10 deselected** |
+| Private `tools/ci_local.py --include-uncommitted` | **2,407 passed**, 12 inherited warnings, exit 0; pytest **1,117.60 seconds** |
+| `cargo test --manifest-path crates/Cargo.toml --workspace` | **106 passed**: 94 core, 9 host, 3 wasm |
+| Explicit `te_py/extension-module,te_py/embed` feature unification | **106 passed** |
+| Authorized read-only `tools/ledger_parity.py` | **14,105 codec rows / 23 account states / four full folds identical**, exit 0 |
+| Native release execution | Synthetic early-close intraday session through one built-in module, zero dynamic extension copies |
+
+The CI invocation uses `PYTEST_ADDOPTS=-s` only to retain measurable lockstep
+summaries. Nine seeded full-session/replay worlds span both DST regimes and
+early closes. Additional worlds prove wall-like pre-open waits and fresh-fetch
+clock changes, working-entry cancellation and dropped late entries, early-close
+sweeps, stop/restore/resume, orphan and pending closes, unresolved-request
+barring, emergency failures, malformed/unreadable heartbeats, Unicode bytes,
+atomic replacement, and an absent optional heartbeat. BaseException process
+death is not converted to an alert or a false exited beat. Synthetic caller
+probes retain the existing 0/1/2 catch order; the actual client/launcher was read
+only, not run or changed.
+
+Every outer step compares return carriers and Decimal strings, refusal
+type/message/cause, ordered clock/source/strategy/risk/venue/heartbeat callbacks,
+full event codec bytes, folded states, and every outbox/meta row. All worlds
+use separate temporary ledgers and forbid network connections. The shared T7
+journal/outbox routing is unchanged and its existing gates remain in full CI.
+Callback and heartbeat counts are observations, **not** 100,000 runtime steps
+or a historical recorded-session corpus.
+
+`tools/mutate_p4c_t8.py` uses exact-single-match edits, a compiling rebuild per
+mutant and assertion-only kills. It restores every original byte in `finally`,
+then unconditionally rebuilds and reruns the green baseline:
+
+| Mutant | Killing lockstep proof |
+|---|---|
+| admission omitted | fresh-heartbeat refusal/success counterpart |
+| settled session re-driven | settled-session admission world |
+| starting heartbeat marked exited early | admission counterpart heartbeat bytes |
+| pre-open wait omitted | admission counterpart clock/callback order |
+| post-fetch clock not reread | admission counterpart clock/callback order |
+| flatten deadline ignored | bounded early-close sweep |
+| working-entry cancellation omitted | full-day late-entry gate |
+| entry gate reversed | full-day late-entry gate |
+| tick reconciliation omitted | admission counterpart event/fold prefixes |
+| stop boundary ignored | admission counterpart result and heartbeat |
+| stale refusal not latched | post-fetch clock-error counterpart |
+| lost venue book not restored | orphan close restart |
+| unsent orphan entry not cancelled | orphan entry restart |
+| emergency fresh proof omitted | stale emergency quote |
+| heartbeat copied instead of atomically replaced | Unicode heartbeat/temp-file proof |
+
+Restored source SHA256:
+
+- Core flow: `a1e99ce3ed4b43a8ed34ff950f7d2df90c9d846133c0208adb071c9b634c079c`.
+- Binding: `ec25ec8c35c8ffe23f1086d47594e4533c55c0eb90597f525d9adb37dd737267`.
+- Heartbeat host: `60c93768e5d8b0eab8202eb36113de01505e491afe0e2277d256032d744c4ee2`.
+
+Final CI-built artifact SHA256:
+
+- `te.exe`: `bbc672c16bf557853224215f2d04a2ae5dbf0a2b3d171f90c3ce6e00ef5ab354`.
+- Bundled `python313.dll`: `e820bf024efd2b56bb2b82791e6b6ddc7303f070f8e72cba7637482a8a906238`.
+- Installed extension: `aed0115f67bc8f22069bb4a39b8e1bc6fb737686e266a1066f9dee398055cea4`.
+
+Final post-CI `tools/time_p4c_t8.py` alternates execution order over **nine
+independent paired books per role** and enforces median <=1.25x. Fixtures/build
+are excluded; full sessions, providers, native decisions, venue effects,
+writes/folds, heartbeat I/O and the restart path are included:
+
+| Role | Frozen/native median | Ratio | Frozen/native maximum |
+|---|---|---|---|
+| Full intraday session | 2.755438 / 2.837678 s | **1.029847x** | 3.068810 / 3.140707 s |
+| Stop/restore/resume | 2.763260 / 2.703141 s | **0.978243x** | 3.313255 / 3.598218 s |
+
+An earlier valid campaign passed at 1.022901x / 1.036220x; no threshold or
+fixture was weakened. These are service-path measurements, not later
+actor/client queue or live-runtime performance certification. T4's disclosed
+timing variability is not resolved by this ticket.
+
+Production Python deletion (oracle excluded):
+
+| File | Added | Deleted | Net |
+|---|---:|---:|---:|
+| `src/trade_engine/intraday/service.py` | 23 | 251 | **-228** |
+
+No accepted business-rule deviation. Rollback is the prior T7 checkpoint with
+a private extension rebuild; no ledger rewrite is required. No push, merge,
+PR, deployment, live job, scheduled-task operation, listener, live heartbeat
+write or client-environment modification occurred. Historical recordings and
+non-Windows execution remain unverified. T8 supplies the intraday prerequisite
+for T9; T0/T2 remain pending and block the full actor/control ticket. Later
+client, recorded-session, rollout and strategy retirement work is not certified.
 
 ## Working rules
 

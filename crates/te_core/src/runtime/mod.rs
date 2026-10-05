@@ -2,6 +2,7 @@
 pub mod eod;
 pub mod eod_flow;
 pub mod intraday;
+pub mod intraday_flow;
 pub mod routing;
 pub mod lifecycle;
 pub mod journal;
