@@ -1845,6 +1845,10 @@ Final SHA256 identities:
 - Rule/contract identity: `2f8b188b828486d5d2839acea7c8df6e46ba2ffc5a4f2c7d5ad8bde819984b93`.
 - Aggregate configuration: `8515524320a053ad00919342fcb8379271a2e19322b7fdaf28615550b1e059f7`.
 
+The fixture directory's `.gitattributes` pins JSON to LF so Git's Windows
+checkout conversion preserves the recorded golden byte hash. Git's filtered
+checkout bytes were independently checked against the manifest hash above.
+
 Reproduce from this worktree's private environment:
 
 ```powershell
