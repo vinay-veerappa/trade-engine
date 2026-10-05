@@ -1,5 +1,6 @@
 //! Runtime decisions only. All observations and effects belong to the host.
 pub mod eod;
+pub mod eod_flow;
 pub mod intraday;
 pub mod routing;
 pub mod lifecycle;

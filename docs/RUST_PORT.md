@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4,T5,T6)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4,T5,T6,T7)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -1424,6 +1424,140 @@ rewriting any ledger. No push/merge/PR, client environment change, live/paper jo
 scheduled-task action, server listener or deployment occurs. T0/T2, T7 onward,
 historical session evidence, fresh strategy ports and non-Windows execution are
 still outstanding.
+
+#### P4C-T7 native EOD/pass and options routing flow
+
+T7 branches from **unmerged T6** (`9e7797e44a7eb9e99643c1e8c7c4bd6f145f469c`)
+on `te/p4c-t7`, in its own worktree/private Python 3.13 environment. No independent
+P5/P6 changes were imported. The standalone frozen-oracle commit is
+**`f1d48ff3eae35f31ef7e349d1309105a447f594b`**: the starting `runner.py` and
+`options_routing.py`, with only their two intra-oracle imports retargeted. The
+1,496 oracle/package lines were committed before production edits; provenance
+tests enforce immutable SHA256 values. Existing tests and earlier oracles are
+unchanged.
+
+Rust now owns the finite flow in `te_core::runtime::eod_flow`:
+
+- Run/pass validation and pending-account admission, resume checks before venue
+  preparation, preparation before fill baselines, and snapshots before replay.
+- One ordered timeline across equity/options accounts; clock advancement before
+  effects, snapshot-before-bar ties, immediate reconciliation after each bar,
+  and remembered-but-not-rematched snapshots at or before each prior pass.
+- Equity completion at market close, then the delayed options lifecycle pass,
+  reconcile/sync/dividend/mark/manage/entry/marker ordering, result assembly and
+  final outbox draining. Completed accounts are not re-driven.
+- Match-before-manage, bounded repeated options actions, short-circuit idempotency
+  checks, action routing, risk-verdict-before-order, refused entries and resizing.
+- Lazy signal/intent iteration, signal recording before generation, equity
+  verdict/bracket/submit/reconcile ordering, and move/close/reduce exit dispatch.
+
+`te_py/src/{eod_flow,equity_flow,options_flow}.rs` implements the effect/carrier
+hosts through the existing single extension. Python public methods are direct
+native facades; their replaced sequencing was deleted. Python still supplies
+providers, strategies, configuration and domain carriers, price/dividend/mark
+assembly, existing restoration/reconciliation adapters and sink callbacks.
+Previously ported calendar, risk, lifecycle, OMS, codec/fold/store decisions are
+reused, not reimplemented. Intraday service loops, job actors and external clients
+remain later tickets, although intraday already uses the same native router.
+
+Rich datetime sorting, repr, dataclass replacement and Python iterable primitives
+remain binding codecs to preserve object behavior and stable timeline ties.
+Time observations come from the injected clock, never a core clock read; money
+uses the existing string-carried checked PyDec rules. No whole-account JSON
+roundtrip, dependency, schema, identifier or Decimal-backend change was added.
+Private replay/finish and router helper methods remain callable facades.
+
+An additional regression probe found a real first-pass boundary bug: wrapping
+the whole flow in the generic tuple-refusal bridge reclassified a plugin's
+`ValueError("runtime_eod", "host exception must remain itself")`. The native
+bindings now convert **only their own rule refusals** using the existing exception
+registry; host PyErr values propagate untouched. Venue, strategy and risk
+counterparts, plus partially consumed signal/intent failures, prove exact type,
+message and cause preservation. No host exception is silently swallowed.
+
+Final directly run gates:
+
+| Gate | Evidence |
+|---|---|
+| Pre-port unchanged EOD/options/intraday baseline | **156 passed** |
+| New T7 contract/parity tests | **47 passed**, all included in final CI |
+| Exact lockstep outer commands | **231**: 192 successes / 39 refusals |
+| Refusal outcomes | EodRunnerError 30, ReplayDataError 1, SessionIncompleteError 1, TypeError 2, ValueError 5 |
+| Effect-boundary proof | **510** unique event-byte/full-fold/outbox/meta prefixes; **20,857** ordered callback observations |
+| Worlds | nine seeded pass/close/resume worlds, six DST/early-close dates, equity entry/exit/replay, mixed-account ties, assignment/dividends, streamed failures, risk refusal/resize and sink recovery |
+| Hand mutants | **15/15 compiled and killed**; baseline/restored each **39 passed / 8 deselected** |
+| Private full CI | **2,352 passed**, 12 inherited warnings, exit 0; pytest **773.65 seconds** |
+| Rust workspace | **104 passed**: 92 core, 9 host, 3 wasm |
+| Explicit extension-feature unification | **104 passed** |
+| Authorized read-only ledger parity | **14,105 codec rows / 23 account states / four full folds identical**, exit 0 |
+| Native release execution | EOD plus idempotent rerun through one built-in module; zero dynamic extension copies |
+
+Synthetic tests forbid network connections and use separate temporary books.
+Both sides compare return carriers, Decimal spellings, refusal type/message/cause,
+callback order, full event codec bytes, folded state and every outbox/meta field.
+Fresh clock positioning models separate pass invocations; it does not silently
+change the existing refusal for replaying with a clock past session open.
+These are **synthetic**, not historical recordings or live paper sessions.
+
+All mutants were assertion kills, not compile/import/collection failures.
+`tools/mutate_p4c_t7.py` reuses the established private artifact builder and
+failure reporter, checks exact-single-match edits, restores original bytes in
+`finally`, then unconditionally rebuilds and reruns:
+
+| Mutant | Killing proof |
+|---|---|
+| validation omitted | pass boundary/refusal counterparts |
+| completed account re-driven | seeded pass replay |
+| resume guard omitted | equal-through refused / later-through succeeds |
+| settlement wait omitted | seeded close chronology/callbacks |
+| lifecycle omitted | seeded options lifecycle callback order |
+| timeline clock not advanced | seeded snapshot clock/effect order |
+| covered snapshot rematched | seeded pass-to-close resume |
+| marks omitted | seeded close event/state prefixes |
+| marker before entries | seeded close marker/callback prefixes |
+| match after actions omitted | seeded same-snapshot fills |
+| first action not tested for idempotency | seeded snapshot entry |
+| risk refusal ignored | refused-entry counterpart |
+| resize ignored | approved quantity 1 versus requested quantity 2 |
+| signal not recorded | equity entry's signal prefix |
+| entry acknowledgement not reconciled | equity entry venue/ledger state |
+
+Restored core-flow SHA256:
+`22b3af3f3f96ff779535c820f054a99be79d4a278ab040939353eace152cf8d2`.
+Final CI-built artifact SHA256:
+
+- `te.exe`: `82472ae88f6bf6c5049d0232d750eea882c4a3c4efdd0a05679b2d5ced9d060b`.
+- bundled `python313.dll`: `e820bf024efd2b56bb2b82791e6b6ddc7303f070f8e72cba7637482a8a906238`.
+- installed extension: `b9a751e8e432abc0ae6efae9fd6d3802249f69314d2eb2664a027d379eb1198f`.
+
+Final post-CI `tools/time_p4c_t7.py` enforces <=1.25x on **nine independently
+constructed paired books per role**, in alternating execution order. Build and
+fixture creation are excluded; providers, native decisions, ledger writes/folds,
+equity bars, successful options passes, close and replay are included:
+
+| Role | Frozen/native median | Ratio | Frozen/native maximum |
+|---|---|---|---|
+| Equity | 152.1971 / 155.4297 ms | **1.021240x** | 177.1623 / 168.8008 ms |
+| Options/pass | 86.1308 / 92.7767 ms | **1.077161x** | 98.4273 / 105.8006 ms |
+
+The first valid nine-pair campaign measured 1.009638x / 1.005140x; the unchanged
+final gate also passed without adjusting thresholds or fixtures. This does not
+resolve T4 timing variability or certify future actor/client queue overhead,
+historical sessions, other platforms or a live runtime.
+
+Production Python deletion in this port (oracle excluded):
+
+| File | Added | Deleted | Net |
+|---|---:|---:|---:|
+| `src/trade_engine/eod/runner.py` | 9 | 295 | **-286** |
+| `src/trade_engine/eod/options_routing.py` | 4 | 78 | **-74** |
+| Total | 13 | 373 | **-360** |
+
+Rollback is the prior T6/frozen-flow checkpoint and a private extension rebuild,
+without rewriting any ledger. No push/merge/PR, deployment, scheduled-task
+operation, client environment change, server listener or live trading job
+occurred. T8's flow prerequisites are now present locally; T0/T2 and later
+actor/client/recorded-session/strategy tickets remain pending.
 
 ## Working rules
 

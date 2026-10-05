@@ -93,7 +93,7 @@ from trade_engine.oms.reconcile import ReconcileError
 from trade_engine.oms.restore import RestoreError
 from trade_engine.risk import RiskContext, RiskEngine
 from trade_engine.sim import SimBroker, SnapshotVenue, underlying_of
-from trade_engine.sim._rs import register
+from trade_engine.sim._rs import register, rs
 from trade_engine.eod._runtime import decide, flag, micros
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
@@ -249,57 +249,7 @@ class EodRunner:
     # -- entry -------------------------------------------------------------------
 
     def run(self, session: date) -> EodRunResult:
-        decide("eod:session_type", (type(session).__name__,), flags=(isinstance(session, date) and not isinstance(session, datetime),))
-        decide("eod:session", (session.isoformat(), self._calendar.exchange), flags=(self._calendar.is_session(session),))
-        self._require_previous_session_complete(session)
-
-        pending = [
-            account_id
-            for account_id in sorted(self._config.brokers)
-            # A completed account is never re-driven through the venue: idempotency is
-            # the contract, and everything this run could derive is already recorded.
-            if self._ledger.event_by_command(self._run_command(account_id, session)) is None
-        ]
-        replays = {account_id: self._prepare_account(account_id) for account_id in pending}
-        tallies = {
-            account_id: _Tally(fills_before=self._fill_count(account_id))
-            for account_id in pending
-        }
-        options = [account_id for account_id in pending if self._is_options(account_id)]
-        snapshots = self._session_snapshots(session, options)
-        mornings = {
-            account_id: through
-            for account_id in options
-            if (through := self._passes_through(account_id, session)) is not None
-        }
-        self._replay_session(session, replays, tallies, snapshots, options, mornings)
-
-        # The session is over before anything is marked or entered: a DAY entry for D+1
-        # submitted while the clock still read 15:59 would belong to *this* session and
-        # expire at the next open without ever working.
-        close = self._calendar.session_close(session)
-        self._advance_clock(close)
-        results: dict[str, AccountRunResult] = {}
-        for account_id in sorted(self._config.brokers):
-            if account_id not in replays:
-                results[account_id] = AccountRunResult(account_id=account_id)
-            elif account_id not in options:
-                results[account_id] = self._finish_account(
-                    account_id, session, replays[account_id], tallies[account_id]
-                )
-        if options:
-            # After-close work waits for the official close (I9).
-            self._advance_clock(close + self._config.settle_delay)
-            self._settle_options(session, options)
-            for account_id in options:
-                results[account_id] = self._finish_options_account(
-                    account_id, session, tallies[account_id]
-                )
-        self._drain_outbox()
-        return EodRunResult(
-            session=session,
-            accounts=tuple(results[account_id] for account_id in sorted(self._config.brokers)),
-        )
+        return rs.eod_run(self, session)
 
     def run_morning(self, session: date, through: datetime) -> EodRunResult:
         """The morning pass of ``session`` (``run_pass`` with ``"morning"``)."""
@@ -315,61 +265,7 @@ class EodRunner:
         underlying with no snapshot yet is not refused: nothing is marked in a pass, and
         its orders work at a later one.
         """
-        decide("eod:pass_name", (name, repr(name)))
-        decide("eod:session_type", (type(session).__name__,), flags=(isinstance(session, date) and not isinstance(session, datetime),))
-        decide("eod:session", (session.isoformat(), self._calendar.exchange), flags=(self._calendar.is_session(session),))
-        decide("eod:through", (repr(through),), flags=(isinstance(through, datetime) and through.tzinfo is not None and through.utcoffset() is not None,))
-        session_open = self._calendar.session_open(session)
-        session_close = self._calendar.session_close(session)
-        decide("eod:pass_boundary", (name, session.isoformat(), session_open.isoformat(), session_close.isoformat(), through.isoformat()),
-            numbers=(micros(session_open), micros(through), micros(session_close)))
-        self._require_previous_session_complete(session)
-        options = [
-            account_id
-            for account_id in sorted(self._config.brokers)
-            if self._is_options(account_id)
-            and self._ledger.event_by_command(self._run_command(account_id, session)) is None
-            and self._ledger.event_by_command(self._pass_command(account_id, session, name)) is None
-        ]
-        earlier = {
-            account_id: since
-            for account_id in options
-            if (since := self._passes_through(account_id, session)) is not None
-        }
-        for account_id, since in sorted(earlier.items()):
-            decide("eod:resume", (name, session.isoformat(), account_id, since.isoformat(), through.isoformat()),
-                numbers=(micros(through), micros(since)))
-        replays = {account_id: self._prepare_account(account_id) for account_id in options}
-        tallies = {account_id: _Tally(fills_before=self._fill_count(account_id)) for account_id in options}
-        snapshots = [
-            snapshot
-            for snapshot in self._session_snapshots(session, options, covered=False)
-            if flag("eod:cutoff", numbers=(micros(snapshot.as_of), micros(through)))
-        ]
-        self._replay_session(session, replays, tallies, snapshots, options, earlier)
-        self._advance_clock(through)  # the marker's at_close: where the next run resumes
-        results: dict[str, AccountRunResult] = {}
-        for account_id in sorted(self._config.brokers):
-            tally = tallies.get(account_id)
-            if tally is None:
-                results[account_id] = AccountRunResult(account_id=account_id)
-                continue
-            self._append_run_marker(
-                account_id, session, 0, job=self._pass_job(name),
-                command_id=self._pass_command(account_id, session, name),
-            )
-            results[account_id] = AccountRunResult(
-                account_id=account_id,
-                fills_recorded=decide("eod:difference", numbers=(self._fill_count(account_id), tally.fills_before))[1][0],
-                orders_submitted=tally.orders_submitted,
-                exit_actions=tally.exit_actions,
-                snapshots_processed=tally.snapshots_processed,
-            )
-        self._drain_outbox()
-        return EodRunResult(
-            session=session,
-            accounts=tuple(results[account_id] for account_id in sorted(self._config.brokers)),
-        )
+        return rs.eod_pass(self, session, through, name)
 
     def _pass_job(self, name: str) -> str:
         return decide("eod:pass_job", (self._config.job_name, name))[0][0]
@@ -448,46 +344,7 @@ class EodRunner:
         pass already matched (``mornings``: when that pass stopped) is not matched again:
         it only stands as the newest quote of its underlying.
         """
-        mornings = mornings or {}
-        holders: dict[Instrument, list[str]] = {}
-        for account_id, instruments in replays.items():
-            for instrument in instruments:
-                holders.setdefault(instrument, []).append(account_id)
-        if not holders and not snapshots:
-            return
-        session_open = self._calendar.session_open(session)
-        session_close = self._calendar.session_close(session)
-        clock_read = self._clock.now_utc()
-        if flag("eod:after", numbers=(micros(clock_read), micros(session_open))):
-            decide("eod:replay_clock", (session.isoformat(), self._clock.now_utc().isoformat(), session_open.isoformat()),
-                numbers=(micros(clock_read), micros(session_open)))
-        timeline = []
-        for instrument in sorted(holders, key=lambda value: value.symbol):
-            for bar, is_regular in self._load_bars(instrument, session_open, session_close):
-                timeline.append((bar.timestamp, 1, instrument.symbol, bar, is_regular))
-        for snapshot in snapshots:
-            timeline.append((snapshot.as_of, 0, snapshot.underlying, snapshot, False))
-        timeline.sort(key=lambda item: (item[0], item[1], item[2]))
-        for timestamp, kind, _, item, is_regular in timeline:
-            self._advance_clock(timestamp)
-            if kind == 0:
-                for account_id in options:
-                    if account_id in mornings and flag("eod:cutoff", numbers=(micros(item.as_of), micros(mornings[account_id]))):
-                        tallies[account_id].snapshots[item.underlying] = item
-                        continue
-                    self._options_at_snapshot(account_id, session, item, tallies[account_id])
-                continue
-            bar = item
-            for account_id in sorted(holders[bar.instrument]):
-                broker = self._config.brokers[account_id]
-                tally = tallies[account_id]
-                broker.process_bar(bar)
-                if is_regular:
-                    tally.last_regular_closes[bar.instrument] = bar.close
-                self._reconcile_after_bar(
-                    account_id, broker, self._manager_for(account_id, broker), timestamp
-                )
-                tally.bars_processed = decide("routing:increment", numbers=(tally.bars_processed, 1))[1][0]
+        rs.eod_replay(self, session, replays, tallies, snapshots, options, mornings)
 
     def _finish_account(
         self,
@@ -496,27 +353,7 @@ class EodRunner:
         instruments: tuple[Instrument, ...],
         tally: "_Tally",
     ) -> AccountRunResult:
-        broker = self._config.brokers[account_id]
-        if instruments:
-            # A closing sweep with no bar: confirms every terminal state the venue
-            # reached during the session (DAY expiry at the close, cancelled exits).
-            self._reconcile_after_bar(
-                account_id, broker, self._manager_for(account_id, broker), None
-            )
-        self._mark_positions(account_id, tally.last_regular_closes, session)
-        exit_actions = self._manage_positions(account_id, session, tally.last_regular_closes)
-        orders_submitted = self._submit_new_orders(account_id, session)
-        self._append_run_marker(account_id, session, tally.bars_processed)
-        return AccountRunResult(
-            account_id=account_id,
-            bars_processed=tally.bars_processed,
-            # Counted from the ledger: the OMS records some fills itself, such as a
-            # stop filled inside its entry's bar while the entry fill is recorded.
-            fills_recorded=decide("eod:difference", numbers=(self._fill_count(account_id), tally.fills_before))[1][0],
-            marks_appended=self._marks_appended(account_id, session),
-            orders_submitted=orders_submitted,
-            exit_actions=exit_actions,
-        )
+        return rs.eod_finish(self, account_id, session, instruments, tally, False)
 
     def _fill_count(self, account_id: str) -> int:
         return decide("eod:count_events", (EventKind.FILL.value, "", *(value
@@ -733,41 +570,7 @@ class EodRunner:
         through the OMS, which refuses a stop that would loosen (I5); a refused action
         fails the run loudly rather than leaving a position managed by half its rules.
         """
-        strategy = self._config.strategies.get(account_id)
-        manage = getattr(strategy, "manage_positions", None)
-        if not callable(manage):
-            return 0
-        brackets = self._open_brackets(account_id, session, last_regular_closes)
-        if not brackets:
-            return 0
-        actions = list(manage(brackets, {"session": session, "account_id": account_id}))
-        by_entry = {bracket.entry_order_id: bracket for bracket in brackets}
-        manager = self._manager_for(account_id, self._config.brokers[account_id])
-        applied = 0
-        for action in actions:
-            decide("eod:exit_action", (action.command_id, action.entry_order_id, account_id, type(action).__name__),
-                flags=(action.entry_order_id in by_entry, isinstance(action, (MoveStop, ClosePosition, ReducePosition))))
-            if isinstance(action, MoveStop):
-                manager.move_stop(
-                    action.entry_order_id, action.stop_price, command_id=action.command_id
-                )
-            elif isinstance(action, ClosePosition):
-                order = manager.close_bracket(
-                    action.entry_order_id, command_id=action.command_id, reason=action.reason
-                )
-                if not flag("eod:terminal", (order.state.value,)):
-                    manager.reconcile_order(order.order_id)
-            elif isinstance(action, ReducePosition):
-                order = manager.reduce_bracket(
-                    action.entry_order_id,
-                    action.fraction,
-                    command_id=action.command_id,
-                    reason=action.reason,
-                )
-                if not flag("eod:terminal", (order.state.value,)):
-                    manager.reconcile_order(order.order_id)
-            applied = decide("routing:increment", numbers=(applied, 1))[1][0]
-        return applied
+        return rs.eod_manage_positions(self, account_id, session, last_regular_closes)
 
     def _open_brackets(
         self,
@@ -833,41 +636,7 @@ class EodRunner:
     # -- entries for D+1 ---------------------------------------------------------
 
     def _submit_new_orders(self, account_id: str, session: date) -> int:
-        adapter = self._config.signal_adapters.get(account_id)
-        strategy = self._config.strategies.get(account_id)
-        risk_engine = self._config.risk_engines.get(account_id)
-        if adapter is None or strategy is None or risk_engine is None:
-            return 0
-        broker = self._config.brokers[account_id]
-        manager = self._manager_for(account_id, broker)
-        signals = adapter.read_signals(session)
-        for signal in signals:
-            self._record_signal(account_id, signal)
-        intents = strategy.generate_intents(
-            signals, {"session": session, "account_id": account_id}
-        )
-        submitted = 0
-        for intent in intents:
-            decide("eod:intent", (intent.account_id, account_id, intent.intent_id))
-            state = self._ledger.state(account_id)
-            builder = self._config.context_builder
-            context = (
-                builder(intent, state, session)
-                if builder is not None
-                else self._derive_risk_context(intent, state)
-            )
-            verdict = risk_engine.evaluate(intent, context)
-            self._record_verdict(account_id, intent, verdict)
-            if not flag("eod:equity_approved", flags=(verdict.accepted, verdict.approved_quantity is not None)):
-                continue
-            bracket = manager.create_bracket(intent, verdict.approved_quantity)
-            submitted_entry = manager.submit(bracket.entry)
-            if not flag("eod:terminal", (submitted_entry.state.value,)):
-                # Confirm the venue ack in the same run, so a re-run derives the same
-                # reconcile command and changes nothing the second time.
-                manager.reconcile_order(bracket.entry.order_id)
-            submitted = decide("routing:increment", numbers=(submitted, 1))[1][0]
-        return submitted
+        return rs.eod_entries(self, account_id, session, None, False)
 
     def _record_signal(self, account_id: str, signal: Signal) -> None:
         now = self._clock.now_utc()
@@ -1009,46 +778,7 @@ class EodRunner:
     def _finish_options_account(
         self, account_id: str, session: date, tally: "_Tally"
     ) -> AccountRunResult:
-        broker = self._config.brokers[account_id]
-        manager = self._option_manager(account_id)
-        # A closing sweep: DAY orders lapsed at the close, settled structures' exits.
-        self._reconcile_after_bar(account_id, broker, manager.orders, None)
-        manager.sync(
-            account_id, f"eod:{self._config.job_name}:{account_id}:{session.isoformat()}:settled"
-        )
-        self._credit_dividends(account_id, session)
-        self._mark_options_account(account_id, session, tally)
-        router = self._router(account_id)
-        manage = getattr(self._config.strategies.get(account_id), "manage_options", None)
-        if callable(manage):
-            actions = list(
-                manage(
-                    router.context(
-                        account_id,
-                        session,
-                        self._clock.now_utc(),
-                        open_structures(self._ledger.state(account_id)),
-                        snapshots=tally.snapshots,
-                    )
-                )
-            )
-            tallied = router.apply(
-                account_id, session, actions, None, tally.snapshots,
-                f"eod:{self._config.job_name}:{account_id}:{session.isoformat()}:close",
-            )
-            tally.orders_submitted, tally.exit_actions, _ = (int(v) for v in decide("routing:tally", text=tuple(str(v) for v in (
-                tally.orders_submitted, tally.exit_actions, 0,
-                tallied.orders_submitted, tallied.exit_actions, 0)))[0])
-        self._submit_new_option_entries(account_id, session, tally)
-        self._append_run_marker(account_id, session, tally.bars_processed)
-        return AccountRunResult(
-            account_id=account_id,
-            fills_recorded=decide("eod:difference", numbers=(self._fill_count(account_id), tally.fills_before))[1][0],
-            marks_appended=self._marks_appended(account_id, session),
-            orders_submitted=tally.orders_submitted,
-            exit_actions=tally.exit_actions,
-            snapshots_processed=tally.snapshots_processed,
-        )
+        return rs.eod_finish(self, account_id, session, (), tally, True)
 
     def _enter_option(
         self,
@@ -1065,23 +795,7 @@ class EodRunner:
         )
 
     def _submit_new_option_entries(self, account_id: str, session: date, tally: "_Tally") -> None:
-        adapter = self._config.signal_adapters.get(account_id)
-        strategy = self._config.strategies.get(account_id)
-        if adapter is None or strategy is None:
-            return
-        signals = adapter.read_signals(session)
-        for signal in signals:
-            self._record_signal(account_id, signal)
-        context = self._router(account_id).context(
-            account_id,
-            session,
-            self._clock.now_utc(),
-            open_structures(self._ledger.state(account_id)),
-            snapshots=tally.snapshots,
-        )
-        for intent in strategy.generate_intents(signals, context):
-            submitted = self._enter_option(account_id, session, intent, tally, None)
-            tally.orders_submitted = decide("routing:increment", numbers=(tally.orders_submitted, submitted))[1][0]
+        rs.eod_entries(self, account_id, session, tally, True)
 
     def _credit_dividends(self, account_id: str, session: date) -> None:
         """Credit (or charge) today's ex-dividends on the shares held at the open.
