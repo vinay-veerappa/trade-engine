@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T1,T3,T4,T5,T6,T7,T8)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T3,T4,T5,T6,T7,T8)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -1708,6 +1708,170 @@ write or client-environment modification occurred. Historical recordings and
 non-Windows execution remain unverified. T8 supplies the intraday prerequisite
 for T9; T0/T2 remain pending and block the full actor/control ticket. Later
 client, recorded-session, rollout and strategy retirement work is not certified.
+
+### P4C-T0 contract and synthetic corpus infrastructure
+
+**T0 only**, on `te/p4c-t0`, using the unmerged T8 integration checkpoint
+`3a15124fa38b8059f90ba88324a5c5c44fb66116` to retain completed tickets and reuse
+the mandatory private native packaging gates. T0 itself has no architectural
+prerequisite; this integration-base choice does not transfer another owner or
+make synthetic probes a release certification.
+
+The separate oracle commit is `a3dead113206e66a39b12135e8ac5947f427cc4d`.
+`tests/frozen_p4c/http.py` is byte-identical to the starting production HTTP
+implementation and the inspected main: Git blob
+`aaff2b56ccf8585cd919cb2f52fb3045755a5bb6`, SHA256
+`46750715e7fec7df147f3ac9decc0fe90d13f38c5ebf6c2760dbeb05b1228d33`.
+The existing immutable T1 legacy lock oracle is reused rather than duplicated:
+blob `47a9deb5c145210fc4e8e8b03fa30a5579bf397e`, SHA256
+`caef2fe01a151792ce1afeb17231992d0e19789de8204b6e3c11252c13d760e0`.
+Both identities and the starting release are pinned in
+`tests/frozen_p4c/t0_oracles.json`.
+
+Added, outside production:
+
+- `tools/p4c_corpus.py`: versioned manifest validation, explicit carrier/exception
+  transport, ordered record/replay adapters, source/plugin/rule/config identities,
+  engine-surface inventory assertions, mandatory binary/import checks and CLI.
+- `tools/p4c_corpus_worlds.py`: freshly authored closed synthetic providers,
+  venue, strategy, sink and heartbeat DTO probes, using separately seeded
+  temporary native ledgers and the frozen clock/HTTP producers.
+- `tests/fixtures/p4c/synthetic-adapter-v1.json`: immutable authored inputs,
+  initial codec rows, clock/provider/venue/strategy/sink/heartbeat observations,
+  exact refusals and causes, event/fold/outbox/meta checkpoints and HTTP bytes.
+- `tests/test_p4c_corpus.py` and `tools/mutate_p4c_t0.py`: fixture-contract,
+  isolation, strict replay, refusal counterpart and mutation proofs.
+
+**Nothing moved out of production; production Python and Rust churn is zero.**
+No existing test, native rule, prior oracle, writer, HTTP implementation or job
+loop changed. The fixture transport reuses the existing ledger payload codec
+for its allowlisted domain carriers; it does not invent another money/fold
+interpreter. Money keeps exact Decimal strings, floats retain hex spelling,
+and dates, datetime zone/offset/fold, bytes, tuple/list/set distinctions,
+mapping keys, enums, dataclasses and exception arguments/message/cause survive.
+No new clock read is added by a recording hook.
+
+The version-1 manifest declares `synthetic` provenance, an exact source
+release, producer/rule/config hashes, pinned oracles and engine/HTTP inventory.
+Every fixture has an ID, `adapter-probe` kind, role, ISO date, seed, authored
+inputs, contiguous initial ledger rows, contiguous observation sequence,
+checkpoints and request/response/error bytes. An observation declares its
+actor/method, typed arguments/kwargs and exactly one return or refusal.
+Unknown fields/versions/types, duplicate JSON keys, non-finite raw JSON,
+torn data, clock reversal, missing/extra requests and configuration drift refuse.
+Replay has no underlying provider or network fallback. Source constructors
+and arbitrary imports are never taken from manifest data.
+
+Inventory assertions cover **11 engine lifecycle families / 15 source files**,
+including module/CLI aliases, EOD/router/service doors, HTTP lifecycle,
+store/outbox/meta, lock, both clocks, plugin discovery and finite sim/metrics
+helpers. This is an engine-symbol census, not a fresh verification of the
+external client's 150-import census. No plan-vs-code architectural discrepancy
+was found; an initially mistyped inventory symbol was caught and corrected to
+the actual `OptionRouter.apply`, not accepted through a fallback.
+
+The HTTP oracle runs through its real stdlib handler on an in-memory socket,
+without starting a listener. The raw fixtures retain HTTP version, Server
+identity, header order, projection JSON, error bodies, retry/event frames,
+query-before-header validation and header precedence. Only Date is replaced
+in this driver; there is no bound port or packet segmentation to normalize.
+Cases include origin/Host checks, OPTIONS, unsupported POST/unknown GET,
+Arabic query digits and digit-but-`int`-invalid input. The existing real
+loopback-server tests remain unchanged and pass.
+
+Final directly run gates (private Python 3.13.15 / PyO3 0.23.5):
+
+| Gate | Evidence |
+|---|---|
+| Unchanged HTTP and lock baseline | **36 passed** |
+| New T0 tests | **106 passed**, included in final CI |
+| Combined T0 / unchanged HTTP / lock proof | **142 passed** |
+| Authored synthetic corpus | **6 role-tagged adapter probes**, 114 observations: 102 successes / 12 exact refusals |
+| Comparison paths | frozen recapture, native-clock producer and backend-free replay |
+| Effect comparison per path | **36** full event-byte/fold/outbox/meta checkpoints; **60** raw HTTP outcomes |
+| Hand mutants | **15/15 compiled and killed**; baseline/restored each **106 passed**, final invalid count zero |
+| Private `tools/ci_local.py --include-uncommitted` | **2,513 passed**, 12 inherited warnings, exit 0; pytest **1,200.00 seconds** |
+| Rust workspace, run by the authoritative CI gate | **106 passed**: 94 core, 9 host, 3 wasm |
+| Mandatory artifacts | private extension and real native executable built; missing binary/import is an error, never a skip |
+| Authorized read-only ledger parity | **14,105 codec rows / 23 account states / four full folds identical**, exit 0 |
+| Persisted CLI fixture validation | exit 0; explicitly reports zero recordings/role walks and `release_certified=false` |
+
+The six probes exercise clock/source/venue/strategy/sink/heartbeat boundaries,
+typed requests and answers, a missing-source refusal with successful
+counterparts, failed journal delivery/cause followed by recovery, native outbox
+rows and meta, and HTTP observations. Dates span both DST regimes and two
+early closes, but these are **not full trading sessions**. The same authored
+inputs are rerun through frozen producers before comparing the stored tape;
+changing a provider response unused by the final fold still fails recapture.
+A golden is not its own oracle.
+
+`tools/mutate_p4c_t0.py` compiles every Python tooling mutation with `compile`,
+rebuilds the private native artifacts for every case, runs `python -B`,
+checks exact-single-match edits, restores original bytes in `finally`, then
+unconditionally rebuilds and proves green:
+
+| Mutant | Killing contract proof |
+|---|---|
+| unknown version accepted | version refusal/counterpart |
+| synthetic relabelled recorded | provenance refusal |
+| source release ignored | source checkpoint identity |
+| producer hash ignored | producer identity refusal |
+| fixture configuration ignored | fixture hash with independently valid aggregate hash |
+| observation sequence ignored | duplicate sequence refusal |
+| argument/method divergence accepted | strict replay request mismatch |
+| host refusal returned as success | frozen/native/replay result contract |
+| backwards clock allowed | clock chronology refusal |
+| missing observations accepted | final tape exhaustion check |
+| existing golden overwritten | create-only output proof |
+| output-root confinement omitted | private-root refusal |
+| unallowlisted method accepted | forbidden adapter method |
+| Decimal spelling normalized | stored golden/producer comparison |
+| inventory discrepancy ignored | altered temporary source census |
+
+The first reporter classified pytest's `DID NOT RAISE` expectation failures
+as non-assertions because its `Failed` type is not `AssertionError`. The
+T0 reporter now recognizes only that specific unmet-exception assertion,
+in addition to ordinary `AssertionError`. Other runtime errors, build,
+import and collection failures remain invalid. The complete campaign was
+rerun without weakened tests or mutants; no invalid run counts toward 15/15.
+These are **Python fixture-tooling mutants**, not new Rust business-rule
+mutants, because T0 changes no production responsibility.
+
+Final SHA256 identities:
+
+- Corpus tool: `b99e17256475a26b30c39ae6e3d733295f2eb0b00a55bfceab1e774b0e51b0f2`.
+- Authored producer: `561621a54a38dec5aacf3dcf87d955da6e2b705dbf03545fe8ab616674908b8f`.
+- Golden manifest, 414,179 bytes: `5cd66cdb627883a8c84dc9203809a3c6752b6fc582172668f2af367db46934ad`.
+- Rule/contract identity: `2f8b188b828486d5d2839acea7c8df6e46ba2ffc5a4f2c7d5ad8bde819984b93`.
+- Aggregate configuration: `8515524320a053ad00919342fcb8379271a2e19322b7fdaf28615550b1e059f7`.
+
+Reproduce from this worktree's private environment:
+
+```powershell
+.venv\Scripts\python.exe -B tools\p4c_corpus.py validate tests\fixtures\p4c\synthetic-adapter-v1.json
+.venv\Scripts\python.exe -B -m pytest -q tests\test_p4c_corpus.py
+.venv\Scripts\python.exe -B tools\mutate_p4c_t0.py
+```
+
+`capture --output <new-path>` permits only a new file under this worktree's
+`tests/fixtures/p4c`; existing goldens are never overwritten. Recording and
+replay forbid network connect/connect_ex/bind and confine ledgers to newly
+created temporary roots. No real-ledger fixture was collected.
+
+Timing is not applicable: no production hot path changed. Historical
+acquisition remains explicitly unsupported without separate authorization.
+Version 1 records one adapter-boundary layer; nested recording is refused
+explicitly and requires a separate adapter-level tape, rather than silently
+flattening or losing observations. More complete service/plugin integration,
+mirror tapes, full restart/cut-point walks and the 20 recorded-session /
+60-role-walk / 100,000-runtime-step gate remain T13 work. Non-Windows execution
+and T4 timing variability remain unresolved. These limitations are not
+represented by a success-shaped release report.
+
+Rollback removes the offline tooling/fixtures or returns to T8; no native
+runtime, schema, ledger or client installation needs switching. No push,
+merge, PR, deployment, live job, scheduled-task operation or live heartbeat
+write occurred. T0 unblocks the next scoped ticket, T2; T9 still awaits T2.
 
 ## Working rules
 
