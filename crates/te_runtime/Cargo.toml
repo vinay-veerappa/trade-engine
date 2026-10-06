@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 trade_engine_rs = { package = "te_py", path = "../te_py", default-features = false, features = ["embed"] }
+te_host = { path = "../te_host" }
+te_core = { path = "../te_core" }
 pyo3 = { version = "=0.23.5" }
 serde = { workspace = true }
 serde_json = { workspace = true }

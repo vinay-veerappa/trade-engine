@@ -706,7 +706,7 @@ fn event_carrier(py: Python<'_>, event: &StoredRow) -> PyResult<Py<PyAny>> {
 }
 
 #[pyclass(module = "trade_engine_rs", name = "LedgerStore")]
-struct LedgerStore {
+pub(crate) struct LedgerStore {
     store: Store,
     fold: Py<LedgerFold>,
     revision: Arc<Mutex<BTreeMap<String, u64>>>,
@@ -715,6 +715,11 @@ struct LedgerStore {
     thread: u64,
 }
 impl LedgerStore {
+    /// The shared owner connection for same-crate native composition; never
+    /// exposed to Python.
+    pub(crate) fn store_connection(&self) -> SharedConnection {
+        self.store.connection.clone()
+    }
     fn check(&self, py: Python<'_>) -> PyResult<()> {
         ConnectionRef {
             connection: self.store.connection.clone(),

@@ -18,7 +18,7 @@ use te_core::ledger::{
     pydec::PyDec,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::{mpsc, watch},
     task::JoinSet,
@@ -213,6 +213,34 @@ struct Api {
     errors: Mutex<Vec<String>>,
     stop: watch::Sender<bool>,
     backlog_paused: watch::Sender<bool>,
+    control: Mutex<Option<Arc<dyn Control>>>,
+}
+
+/// The versioned runtime control surface, separate from the legacy GET API.
+/// Implementations authorize capability/generation and never self-RPC.
+pub trait Control: Send + Sync + 'static {
+    /// POST /v1/runtime/jobs: authorize then admit. Returns the record JSON
+    /// plus whether this admission inserted a new record.
+    fn submit(&self, body: &[u8], capability: Option<&str>) -> Result<(Json, bool), ControlError>;
+    /// GET /v1/runtime/jobs/<id>
+    fn job(&self, id: &str) -> Result<Json, ControlError>;
+    /// GET /v1/runtime/status
+    fn status(&self) -> Result<Json, ControlError>;
+}
+
+/// Exact control refusals; the wire layer preserves type and message.
+#[derive(Clone, Debug)]
+pub struct ControlError {
+    pub kind: &'static str,
+    pub message: String,
+}
+impl ControlError {
+    pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
 }
 impl Api {
     fn failure(&self, error: impl Into<String>) {
@@ -295,6 +323,7 @@ impl Server {
             errors: Mutex::new(Vec::new()),
             stop,
             backlog_paused,
+            control: Mutex::new(None),
         });
         let owner = api.clone();
         let thread = thread::Builder::new().name("engine-http".into()).spawn(move || {
@@ -371,6 +400,11 @@ impl Server {
             .expect("errors mutex poisoned")
             .clone()
     }
+    /// Attach the versioned runtime control surface. Without it every
+    /// /v1/runtime route keeps the legacy 404/501 outcomes.
+    pub fn attach_control(&self, control: Arc<dyn Control>) {
+        *self.api.control.lock().expect("control mutex poisoned") = Some(control);
+    }
     pub fn pause_backlog(&self, paused: bool) {
         self.api.backlog_paused.send_replace(paused);
     }
@@ -398,6 +432,7 @@ struct Raw {
     target: Target,
     headers: Vec<(String, String)>,
     http09: bool,
+    body: Vec<u8>,
 }
 impl Raw {
     fn header(&self, name: &str) -> Option<&str> {
@@ -440,6 +475,29 @@ fn cors(api: &Api, raw: &Raw) -> Option<String> {
         .filter(|origin| api.origin.is_match(origin))
         .map(str::to_owned)
 }
+
+/// Control replies preserve the exact refusal type and message as JSON.
+fn control_reply(code: u16, failure: &ControlError) -> Reply {
+    let body = object(vec![(
+        "error",
+        object(vec![
+            ("type", string(failure.kind)),
+            ("message", string(&failure.message)),
+        ]),
+    )]);
+    let body = json::dumps(&body).into_bytes();
+    Reply {
+        code,
+        reason: if code == 400 { "Bad Request" } else { "Forbidden" }.into(),
+        headers: vec![
+            ("Connection".into(), "close".into()),
+            ("Content-Type".into(), "application/json".into()),
+            ("Content-Length".into(), body.len().to_string()),
+        ],
+        body,
+        stream: None,
+    }
+}
 async fn route(State(api): State<Arc<Api>>, Extension(raw): Extension<Raw>) -> Response {
     let result = handle(&api, &raw);
     let mut response = Response::new(Body::empty());
@@ -454,6 +512,68 @@ async fn route(State(api): State<Arc<Api>>, Extension(raw): Extension<Raw>) -> R
     response
 }
 fn handle(api: &Api, raw: &Raw) -> Result<Reply, String> {
+    // The versioned control surface is separate from the legacy GET API:
+    // it accepts POST, refuses cross-origin and never serves legacy bytes.
+    if let Some(control) = api.control.lock().expect("control mutex poisoned").clone() {
+        if let Some(target) = raw.target.as_ref().ok() {
+            if target.0.starts_with("/v1/runtime") {
+                let host = raw
+                    .header("Host")
+                    .unwrap_or("")
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(whitespace)
+                    .to_lowercase();
+                if !matches!(host.as_str(), "127.0.0.1" | "localhost") {
+                    return Ok(error(
+                        403,
+                        "Forbidden: Invalid Host header".into(),
+                        "Request forbidden -- authorization will not help",
+                        false,
+                    ));
+                }
+                if let Some(origin) = raw.header("Origin") {
+                    if !api.origin.is_match(origin.trim_matches(whitespace)) {
+                        return Ok(control_reply(
+                            403,
+                            &ControlError::new(
+                                "RuntimeOriginError",
+                                "control requests cannot be cross-origin",
+                            ),
+                        ));
+                    }
+                }
+                let path = target.0.as_str();
+                let path = path.strip_prefix("/v1/runtime").unwrap_or(path);
+                let outcome = match (raw.method.as_str(), path) {
+                    ("POST", "/jobs") => control
+                        .submit(&raw.body, raw.header("X-TE-Capability"))
+                        .map(|(record, inserted)| (201u16, inserted, record)),
+                    ("GET", path) if path == "/status" => {
+                        control.status().map(|status| (200u16, false, status))
+                    }
+                    ("GET", path) if let Some(id) = path.strip_prefix("/jobs/") => {
+                        control.job(id).map(|job| (200u16, false, job))
+                    }
+                    _ => Err(ControlError::new(
+                        "RuntimeRouteError",
+                        "unsupported runtime route or method",
+                    )),
+                };
+                return match outcome {
+                    Ok((code, _inserted, body)) => Ok(Reply {
+                        code,
+                        reason: if code == 201 { "Created" } else { "OK" }.into(),
+                        headers: vec![("Content-Type".into(), "application/json".into())],
+                        body: json::dumps(&body).into_bytes(),
+                        stream: None,
+                    }),
+                    Err(failure) => Ok(control_reply(400, &failure)),
+                };
+            }
+        }
+    }
     if !matches!(raw.method.as_str(), "GET" | "OPTIONS") {
         return Ok(error(
             501,
@@ -778,6 +898,7 @@ async fn parse(reader: &mut BufReader<TcpStream>, text: &dyn Text) -> io::Result
         target: converted.target,
         headers: converted.headers,
         http09,
+        body: Vec::new(),
     }))
 }
 fn date() -> io::Result<String> {
@@ -825,7 +946,28 @@ async fn connection(socket: TcpStream, router: Router, api: Arc<Api>) -> io::Res
             write_reply(&mut reader, &api, &reply, true).await?;
             return Ok(());
         }
-        Parsed::Request(raw) => raw,
+        Parsed::Request(mut raw) => {
+            // The control surface is the only POST consumer; read its body.
+            // A bounded length refuses oversize submissions instead of
+            // buffering unbounded input.
+            if raw.method == "POST" {
+                const MAX_CONTROL_BODY: usize = 1 << 20;
+                if let Some(length) = raw.header("Content-Length") {
+                    let length: usize = length.trim().parse().map_err(|_| {
+                        io::Error::other("RuntimeRequestError: invalid Content-Length")
+                    })?;
+                    if length > MAX_CONTROL_BODY {
+                        return Err(io::Error::other(
+                            "RuntimeRequestError: control request body exceeds 1 MiB",
+                        ));
+                    }
+                    let mut body = vec![0u8; length];
+                    reader.read_exact(&mut body).await?;
+                    raw.body = body;
+                }
+            }
+            raw
+        }
     };
     let http09 = raw.http09;
     let request = Request::builder()
@@ -942,5 +1084,165 @@ mod tests {
         assert!(String::from_utf8(reply.body)
             .unwrap()
             .contains("Unsupported method ('&lt;x&gt;')"));
+    }
+
+    struct SyntheticControl {
+        expected: &'static str,
+        refuse: bool,
+    }
+    impl Control for SyntheticControl {
+        fn submit(&self, body: &[u8], capability: Option<&str>) -> Result<(Json, bool), ControlError> {
+            if capability != Some(self.expected) {
+                return Err(ControlError::new(
+                    "RuntimeCapabilityError",
+                    "control capability does not match the owner",
+                ));
+            }
+            if self.refuse {
+                return Err(ControlError::new("RuntimeJobError", "configured refusal"));
+            }
+            let payload: Json = json::parse(std::str::from_utf8(body).unwrap()).unwrap();
+            Ok((payload, true))
+        }
+        fn job(&self, id: &str) -> Result<Json, ControlError> {
+            Ok(object(vec![("request_id", string(id))]))
+        }
+        fn status(&self) -> Result<Json, ControlError> {
+            Ok(object(vec![("role", string("eod"))]))
+        }
+    }
+    fn raw_request(method: &str, target: &str, headers: &[(&str, &str)], body: Vec<u8>) -> Raw {
+        Raw {
+            method: method.to_owned(),
+            target: Ok((target.to_owned(), None)),
+            headers: headers
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            http09: false,
+            body,
+        }
+    }
+    fn test_api(control: Option<SyntheticControl>) -> Api {
+        Api {
+            path: "unused".into(),
+            identity: "test".into(),
+            text: Arc::new(DecimalText),
+            origin: Regex::new(r"(?i)^https?://(localhost|127\.0\.0\.1)(:\d+)?$").unwrap(),
+            ping: 15.0,
+            subscribers: Mutex::new(BTreeMap::new()),
+            serial: Mutex::new(0),
+            errors: Mutex::new(Vec::new()),
+            stop: watch::channel(false).0,
+            backlog_paused: watch::channel(false).0,
+            control: Mutex::new(control.map(|c| Arc::new(c) as Arc<dyn Control>)),
+        }
+    }
+
+    #[test]
+    fn control_routes_authorize_and_preserve_exact_refusals() {
+        let api = test_api(Some(SyntheticControl {
+            expected: "synthetic",
+            refuse: false,
+        }));
+        // POST /v1/runtime/jobs with the matching capability is admitted.
+        let reply = handle(
+            &api,
+            &raw_request(
+                "POST",
+                "/v1/runtime/jobs",
+                &[("Host", "localhost"), ("X-TE-Capability", "synthetic")],
+                br#"{"request_id":"one"}"#.to_vec(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 201);
+        assert_eq!(String::from_utf8(reply.body).unwrap(), r#"{"request_id":"one"}"#);
+        // A wrong capability refuses with the exact type and message.
+        let reply = handle(
+            &api,
+            &raw_request(
+                "POST",
+                "/v1/runtime/jobs",
+                &[("Host", "localhost"), ("X-TE-Capability", "wrong")],
+                b"{}".to_vec(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 400);
+        // The reduced codec preserves Python's json.dumps(sort_keys=True) order.
+        assert_eq!(
+            String::from_utf8(reply.body).unwrap(),
+            r#"{"error":{"message":"control capability does not match the owner","type":"RuntimeCapabilityError"}}"#
+        );
+        // GET status and job lookups are authorized reads.
+        let reply = handle(
+            &api,
+            &raw_request("GET", "/v1/runtime/status", &[("Host", "127.0.0.1")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 200);
+        assert_eq!(String::from_utf8(reply.body).unwrap(), r#"{"role":"eod"}"#);
+        let reply = handle(
+            &api,
+            &raw_request("GET", "/v1/runtime/jobs/one", &[("Host", "localhost")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(reply.body).unwrap(),
+            r#"{"request_id":"one"}"#
+        );
+        // Unsupported control routes/methods refuse explicitly.
+        let reply = handle(
+            &api,
+            &raw_request("POST", "/v1/runtime/status", &[("Host", "localhost")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 400);
+        assert!(String::from_utf8(reply.body)
+            .unwrap()
+            .contains("RuntimeRouteError"));
+        // A cross-origin control request never reaches the control surface.
+        let reply = handle(
+            &api,
+            &raw_request(
+                "GET",
+                "/v1/runtime/status",
+                &[("Host", "localhost"), ("Origin", "http://attacker.test")],
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 403);
+        assert!(String::from_utf8(reply.body)
+            .unwrap()
+            .contains("RuntimeOriginError"));
+        // A non-local Host keeps the legacy 403 outcome.
+        let reply = handle(
+            &api,
+            &raw_request("GET", "/v1/runtime/status", &[("Host", "attacker.test")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 403);
+        assert!(String::from_utf8(reply.body).unwrap().contains("Invalid Host"));
+    }
+
+    #[test]
+    fn without_control_the_legacy_outcomes_are_unchanged() {
+        let api = test_api(None);
+        // POST /v1/runtime/jobs without an attached control keeps 501.
+        let reply = handle(
+            &api,
+            &raw_request("POST", "/v1/runtime/jobs", &[("Host", "localhost")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 501);
+        // GET /v1/runtime/status keeps the legacy 404.
+        let reply = handle(
+            &api,
+            &raw_request("GET", "/v1/runtime/status", &[("Host", "localhost")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 404);
     }
 }

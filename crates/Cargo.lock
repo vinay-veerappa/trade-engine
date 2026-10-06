@@ -1115,6 +1115,8 @@ dependencies = [
  "fd-lock",
  "regex",
  "rusqlite",
+ "serde",
+ "serde_json",
  "te_core",
  "tokio",
  "tower",
@@ -1126,6 +1128,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "pyo3",
+ "serde_json",
  "te_core",
  "te_host",
 ]
@@ -1138,6 +1141,8 @@ dependencies = [
  "pyo3-build-config",
  "serde",
  "serde_json",
+ "te_core",
+ "te_host",
  "te_py",
 ]
 

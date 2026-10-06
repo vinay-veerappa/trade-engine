@@ -2023,6 +2023,147 @@ recorded-session release evidence, client deployment and later tickets remain
 unverified. No push, merge, PR, deployment, live job, scheduled-task operation
 or real-ledger write occurred.
 
+### P4C-T9 durable journal checkpoint - owner/control wiring pending
+
+T9 is **in progress, not certified**. The new private `te/p4c-t9` worktree
+branches from verified T2 `429bc683d46b8bc226c63d88329e042dfecddd29`.
+Oracle commit `9c5705a32fe28fbca85719097c0681864dac6bc2` preceded all
+production edits. It freezes the CLI ownership/plugin behavior, preserving
+exact LF-normalized EOD bytes and changing only the main CLI's EOD import to
+its frozen peer. Source/frozen hashes and Git blobs are pinned in
+`tests/frozen_p4c/t9_oracle.json`; `.gitattributes` preserves checkout bytes.
+The newly declared actor protocol is explicitly a **new contract**, not an
+existing Python implementation or historical recording.
+
+Owner decisions: preserve existing EOD flags/refusals/counts through a thin
+client to a native one-shot actor, alongside an explicit remote-owner path
+for `te serve`; at a configured durable-record limit, **refuse new admissions
+without evicting or archiving history**.
+
+The uncommitted first native component is `te_host::jobs::Journal`. It accepts
+the owner's existing `SharedConnection` and cannot open a writer or acquire
+another guard. Namespaced version-1 `meta` records persist full original
+payloads, exact result/failure information and observed/committed sequences.
+Duplicate requests return their record; payload conflicts refuse, including
+omitted versus explicit-null fields. A configured limit preserves old
+duplicate/conflict lookups while refusing new IDs. Queued/running records
+become uncertain/resume-required across restart rather than being re-executed.
+Unknown versions make recovery fail atomically.
+
+Control writes refuse explicitly while the owner's business transaction is
+active; they never join, commit or acknowledge metadata inside an uncommitted
+job batch. The actor/control layer resolves this not-attempted condition
+without fabricating admission or losing idempotency: `submit` is refused with
+`RuntimeAdmissionBusyError` and no acknowledgment is produced.
+
+**Second checkpoint (uncommitted): execution-thread actor, runtime owner and
+versioned control routes.**
+
+- `te_host::actor` (new, SHA below): the per-ledger serialized job actor.
+  `Actor::start` composes the pinned `Journal` plus the owner `Store` on a
+  dedicated `te-runtime-actor` thread; `run_once` is the one-shot CLI path.
+  Exactly one job runs at a time; admission is durable before any
+  acknowledgment; client disconnect never cancels or resends; a duplicate
+  reports the persisted record and never re-executes; a hung host makes
+  `stop` report blocked while the record stays durable; a foreign
+  incomplete record becomes uncertain across restart before new work; a
+  panicking host records `RuntimeHostPanic` failure without poisoning the
+  owner. Stop checks `stopping` before dequeuing, lets the active job finish
+  within the configured bound, closes the store and releases the guard last.
+- `te_runtime` gains `runtime-owner` mode plus `te serve --config <abs>`:
+  `Config` extends with an optional `runtime` section (role, allowlisted
+  jobs, record limit, stop timeout, capability path, port) validated with
+  the same deny-unknown-fields discipline; `Owner::open` acquires the guard
+  before the writable open, builds the journal and recovers foreign
+  incomplete records before admission; the serve composition check runs one
+  authorized submission end to end (capability, generation, admission,
+  synthetic execution, terminal durable record) and stops cleanly.
+- `te_host::http` gains the versioned `/v1/runtime` control surface behind a
+  `Control` trait: loopback-Host and same-origin enforced, capability
+  matched exactly, POST `/v1/runtime/jobs` (201, body <= 1 MiB), GET
+  `/v1/runtime/jobs/<id>` and GET `/v1/runtime/status`, exact
+  type+message JSON refusals in the reduced codec's sorted-key bytes.
+  Without an attached control every legacy outcome is unchanged (POST stays
+  501, unknown paths stay 404); `/health`, `/snapshot`, `/events` bodies
+  and all frozen wire bytes are untouched.
+- `te_runtime::routes::RuntimeControl` bridges the trait to the actor with
+  capability/generation authorization; `te_runtime::control::Dispatcher`
+  translates one admitted record into one allowlisted executor call on the
+  dedicated execution thread. No submitted Python, import, SQL or arbitrary
+  write path exists; reads are direct, never self-HTTP.
+
+**Third checkpoint (uncommitted): CLI one-shot client and serve HTTP loop.**
+
+- `te_py::eod_once(ledger, runner, session, request_id)` - the native one-shot
+  EOD actor client for the CLI. It reuses the open owner `LedgerStore`'s single
+  shared connection (a crate-internal accessor, never exposed to Python),
+  builds the pinned journal over it, and runs `run_once`: recover foreign
+  incomplete records, admit durably, execute the existing `EodRunner.run`
+  flow exactly once, record the terminal state. The `EodRunnerError` family
+  is classified as a refusal with its exact message; every other exception is
+  a recorded host failure. The record returns as its wire JSON via the
+  stdlib decoder.
+- `src/trade_engine/eod/cli.py` is now the thin client: it still resolves the
+  I7 clock and I5 market data, refuses with the pre-port messages and flags,
+  and routes the one session through `eod_once` (each invocation a distinct
+  request id; re-run semantics stay the runner's own command-id machinery,
+  verified identical against the frozen peer). Exact stdout counter lines,
+  `eod: refused:` text, exit codes 0/2 and crash propagation are preserved;
+  `tests/test_p4c_t9_cli.py` proves flag/refusal/count parity against the
+  frozen oracle and that both one-shot admissions persist durably.
+- `te serve --config <abs>` with `runtime.port` configured now binds the
+  loopback HTTP host with the control attached: the embedded interpreter
+  initializes, `te_py::http::stdlib_text` supplies header/URL conversions
+  (the native host keeps every socket/task/reader), `/v1/runtime/*` serves
+  POST jobs / GET status / GET job, legacy `/health` keeps its exact bytes.
+  The owner stops when stdin closes: admission stops, the HTTP listener
+  drains, the active job finishes within the configured bound, the store
+  closes and the guard releases last; the wire test proves legacy bytes,
+  capability refusal, authorized 201 admission, status read, clean stop and
+  the durable completed record. Without a port, serve keeps the one-shot
+  composition proof from the second checkpoint.
+
+Checkpoint proof, not ticket completion:
+
+- Unchanged CLI/HTTP/factory/embedding/corpus baseline: **333 passed**.
+- Native journal tests: **6 passed**; new native actor tests: **7 passed**;
+  new native control-route tests: **2 passed**.
+- Rust workspace and explicit extension/embed feature unification:
+  **124 passed each** (94 core, 27 host, three runtime).
+- `tests/test_p4c_runtime.py`: **14 passed** - serve composition, wire-loop
+  admission/authorization/stop, recovery of foreign running records to
+  uncertain, usage/mode/config refusal matrix, proof-mode isolation,
+  deny-unknown-fields.
+- `tests/test_p4c_t9_cli.py`: **6 passed** - frozen-manifest hashes, thin
+  client vs frozen oracle flag/refusal/count parity, mid-run refusal parity
+  (SessionIncompleteError path with exact stderr match), refusal
+  classification durability, durable duplicate admissions.
+- Frozen embed suite against the rebuilt release binary: **34 passed**;
+  frozen HTTP/wire suite: **97 passed**; EOD CLI/server suites unchanged;
+  combined frozen + T9 suites: **169+ passed**.
+- Mutation campaign `tools/mutate_p4c_t9.py`: **14/14 hand mutants killed,
+  0 invalid, baseline/restored green** (`T9_MUTATION_CAMPAIGN=PASS`); Python
+  kills are assertion-only, native `te_host --lib` failures are the Rust-side
+  kill signal. Mutants cover actor lifecycle (stopping-before-dequeue, stop
+  success fabrication, store close, panic typing, record reads), control
+  authorization (loopback Host, same-origin, route/method, refusal kind,
+  capability), terminal-state reads, trusted dispatch, and the CLI one-shot
+  (account counters, refusal classification).
+- Full private CI (`tools/ci_local.py --include-uncommitted`):
+  **2,639 passed, 12 warnings, exit 0, 1,115.46s**.
+- Private CPython 3.13.15, editable engine/private extension and embedded
+  release executable were built/verified before implementation.
+- Journal source SHA256:
+  `9868b909a5ed21cef2add5ba4086141bc6c308f4b9785821e98cdb28ea920852`.
+- Actor source SHA256:
+  `86c9ef4e18191899838232d7be7262906038911ba61aa53068ee560b6b006cb4`.
+
+Still **not done**: the local-only verified port commit (the Rust + oracle
+tests + thin client + docs commit series). That is required before adding
+T9 to the completed-ticket row. No client checkout, real-ledger writer,
+scheduled task, live service, production port, push/merge/deployment or
+historical fixture acquisition was touched.
+
 ## Working rules
 
 - Build: `python -m pip install --no-deps --force-reinstall ./crates/te_py`

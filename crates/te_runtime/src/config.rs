@@ -21,6 +21,8 @@ pub struct Config {
     pub plugin_config: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<OwnerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeConfig>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -29,6 +31,20 @@ pub struct OwnerConfig {
     pub ledger_path: PathBuf,
     pub clock: String,
     pub initial_time: Option<String>,
+}
+
+/// Per-role runtime owner configuration (T9). The capability file is read
+/// outside source control; mutations require its exact content.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConfig {
+    pub role: String,
+    pub jobs: Vec<String>,
+    pub record_limit: usize,
+    pub stop_timeout_seconds: f64,
+    pub capability: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 fn directory(path: &Path, name: &str) -> Result<(), Value> {
@@ -90,7 +106,10 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), Value> {
-        if self.mode != "packaging-proof" && self.mode != "factory-proof" {
+        if self.mode != "packaging-proof"
+            && self.mode != "factory-proof"
+            && self.mode != "runtime-owner"
+        {
             return Err(error(format!("unsupported mode: {}", self.mode)));
         }
         directory(&self.python_home, "python_home")?;
@@ -163,6 +182,7 @@ impl Config {
         }
         match (&self.owner, self.mode.as_str()) {
             (None, "factory-proof") => return Err(error("factory-proof requires owner config")),
+            (None, "runtime-owner") => return Err(error("runtime-owner requires owner config")),
             (Some(_), "packaging-proof") => {
                 return Err(error("packaging-proof cannot configure an owner"))
             }
@@ -180,6 +200,51 @@ impl Config {
                 }
             }
             _ => {}
+        }
+        match (&self.runtime, self.mode.as_str()) {
+            (None, "runtime-owner") => {
+                return Err(error("runtime-owner requires a runtime configuration"))
+            }
+            (Some(_), "packaging-proof") => {
+                return Err(error("packaging-proof cannot configure a runtime owner"))
+            }
+            (Some(_), "factory-proof") => {
+                return Err(error("factory-proof cannot configure a runtime owner"))
+            }
+            _ => {}
+        }
+        if let Some(runtime) = &self.runtime {
+            if self.mode == "runtime-owner" {
+                let role = runtime.role.trim();
+                if role.is_empty()
+                    || role.len() > 128
+                    || !role.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+                {
+                    return Err(error("runtime role must be a configured identifier"));
+                }
+                if runtime.jobs.iter().any(|job| {
+                    let job = job.trim();
+                    job.is_empty()
+                        || job.len() > 128
+                        || !job.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+                }) || runtime.jobs.is_empty()
+                {
+                    return Err(error("runtime jobs must be configured identifiers"));
+                }
+                if runtime.record_limit == 0 {
+                    return Err(error("runtime record_limit must be positive"));
+                }
+                if !(0.0..=600.0).contains(&runtime.stop_timeout_seconds)
+                    || runtime.stop_timeout_seconds <= 0.0
+                {
+                    return Err(error(
+                        "runtime stop_timeout_seconds must be positive and bounded",
+                    ));
+                }
+                if !runtime.capability.is_absolute() {
+                    return Err(error("runtime capability must be an absolute path"));
+                }
+            }
         }
         Ok(())
     }

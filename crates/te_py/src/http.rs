@@ -96,6 +96,13 @@ fn http_validate_host(host: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// The stdlib text adapter for native owner composition (T9): the runtime
+/// owner's embedded interpreter supplies header/URL conversions while the
+/// native host owns every socket, task and reader.
+pub fn stdlib_text(py: Python<'_>) -> PyResult<std::sync::Arc<dyn Text>> {
+    Ok(std::sync::Arc::new(Stdlib::new(py)?))
+}
+
 #[pyfunction]
 #[pyo3(signature = (query=None, header=None))]
 fn http_cursor(

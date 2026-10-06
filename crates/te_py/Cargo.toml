@@ -18,6 +18,7 @@ embed = []
 te_core = { path = "../te_core" }
 te_host = { path = "../te_host" }
 chrono = { workspace = true }
+serde_json = { workspace = true }
 
 [dependencies.pyo3]
 version = "=0.23.5"

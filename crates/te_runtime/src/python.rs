@@ -111,6 +111,28 @@ fn python_error(py: Python<'_>, err: PyErr) -> Value {
     json!({"error": {"type": name, "message": message}})
 }
 
+/// Initialize the embedded interpreter for the runtime owner's HTTP loop.
+/// Idempotent: an already-initialized interpreter (proof mode) is accepted.
+pub fn initialize_for_serve(config: &Config) -> Result<(), String> {
+    unsafe {
+        if ffi::Py_IsInitialized() == 0 {
+            load_dll(config).map_err(|e| e.to_string())?;
+            initialize(config).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// The interpreter's platform.python_version() string for the server identity.
+pub fn python_version() -> String {
+    Python::with_gil(|py| {
+        py.import("platform")
+            .and_then(|platform| platform.call_method0("python_version"))
+            .and_then(|version| version.extract::<String>())
+            .unwrap_or_else(|_| "3.13".into())
+    })
+}
+
 pub fn proof(config: &Config) -> Result<Value, Value> {
     unsafe {
         load_dll(config)?;
