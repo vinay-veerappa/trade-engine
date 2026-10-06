@@ -1,6 +1,7 @@
 //! Trusted job-family dispatch: allowlisted names map to configured factories.
 //! The host never accepts submitted code, imports, SQL or arbitrary writes.
 use crate::jobs::Owner;
+use pyo3::types::{PyAnyMethods, PyModuleMethods};
 use serde_json::{json, Value};
 use std::sync::mpsc;
 use te_host::actor::Outcome;
@@ -146,4 +147,44 @@ pub fn synthetic_job_result(job: Job) -> Result<Value, Failure> {
         "job": job.job,
         "options": job.options,
     }))
+}
+
+/// The trusted owner-side executor: the owner's CONFIGURED client entry point
+/// (plain identifiers, validated at config load) receives the owner's ONE
+/// attached ledger handle plus the job's session/options and assembles the
+/// runner over it and runs it. The request carries data, never code; the
+/// entry names never come from the request. Executes on the dedicated thread
+/// with the GIL held only for the synchronous call.
+pub fn factory_job_result(entry_module: String, entry: String) -> impl FnMut(Job) -> Result<Value, Failure> {
+    move |job: Job| {
+        pyo3::Python::with_gil(|py| {
+            let outcome = (|| -> pyo3::PyResult<String> {
+                // The full admitted job crosses: session and options, exactly
+                // as persisted; the request carries data, never code.
+                let payload = json!({
+                    "session": job.session,
+                    "options": job.options,
+                });
+                let options = serde_json::to_string(&payload)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                let module = py.import("trade_engine_rs")?;
+                let function = module.getattr("owner_job_run")?;
+                function.call1((options, &entry_module, &entry))?.extract()
+            })();
+            match outcome {
+                Ok(text) => Ok(serde_json::from_str(&text).unwrap_or(Value::Null)),
+                Err(error) => {
+                    let message = error
+                        .value(py)
+                        .str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|_| error.to_string());
+                    Err(Failure {
+                        r#type: "RuntimeHostError".into(),
+                        message,
+                    })
+                }
+            }
+        })
+    }
 }

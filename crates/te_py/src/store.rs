@@ -1264,5 +1264,120 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SqlCursor>()?;
     m.add_class::<SqlRow>()?;
     m.add_function(wrap_pyfunction!(ledger_store_write, m)?)?;
+    m.add_function(wrap_pyfunction!(owner_ledger, m)?)?;
+    m.add_function(wrap_pyfunction!(owner_attached, m)?)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The runtime owner's single attached store (P4c T10): the embedded interpreter
+// composes the owner's Python Ledger over the ONE native connection/guard the
+// Rust owner already holds. Nothing re-opens or re-locks the ledger.
+// ---------------------------------------------------------------------------
+
+static OWNER: Mutex<Option<Store>> = Mutex::new(None);
+
+/// Attach the owner's already-held store parts (crate-internal; only
+/// `te_runtime` calls this from its embedded serve loop, once, before any
+/// job runs). The Arcs share the actor's one connection/guard; closing still
+/// happens exactly once, through the actor.
+pub fn attach_owner_parts(
+    _py: Python<'_>,
+    connection: SharedConnection,
+    guard: Arc<Mutex<Option<te_host::lock::SingleInstanceGuard>>>,
+) -> PyResult<()> {
+    let mut owner = OWNER.lock().expect("owner mutex poisoned");
+    if owner.is_some() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "the owner store is already attached",
+        ));
+    }
+    *owner = Some(Store {
+        connection,
+        guard,
+    });
+    Ok(())
+}
+
+/// Detach the owner's store without closing it (crate-internal; the actor
+/// owns the close).
+pub(crate) fn detach_owner() {
+    OWNER
+        .lock()
+        .expect("owner mutex poisoned")
+        .take();
+}
+
+/// Whether an owner store is attached and held.
+#[pyfunction]
+fn owner_attached() -> bool {
+    OWNER
+        .lock()
+        .expect("owner mutex poisoned")
+        .as_ref()
+        .is_some_and(Store::held)
+}
+
+/// Build the owner's Python ``Ledger`` over the attached native store.
+///
+/// The returned Ledger wraps the one connection/guard the Rust owner holds:
+/// it never opens a second writer (I4). Called only in the owner process.
+#[pyfunction]
+fn owner_ledger(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let parts = OWNER
+        .lock()
+        .expect("owner mutex poisoned")
+        .as_ref()
+        .map(|store| (store.connection.clone(), store.guard.clone()))
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "no owner store is attached; the ledger belongs to the runtime owner",
+            )
+        })?;
+    let store = Store {
+        connection: parts.0,
+        guard: parts.1,
+    };
+    if !store.held() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "the owner store is not held; the ledger belongs to the runtime owner",
+        ));
+    }
+    let native = Py::new(
+        py,
+        LedgerStore {
+            store,
+            fold: Py::new(py, LedgerFold::new(false))?,
+            revision: Arc::new(Mutex::new(BTreeMap::new())),
+            folded_at: Mutex::new(BTreeMap::new()),
+            reader: false,
+            thread: py
+                .import("threading")?
+                .call_method0("get_ident")?
+                .extract()?,
+        },
+    )?;
+    let connection = native.getattr(py, "connection")?.call0(py)?;
+    // The Python Ledger is built without `__init__` (which wants a path and
+    // mkdirs a parent); its internals are wired to the attached native store
+    // directly, so it wraps the one held writer (I4).
+    let ledger_cls = py.import("trade_engine.ledger.store")?.getattr("Ledger")?;
+    let ledger = py
+        .import("builtins")?
+        .getattr("object")?
+        .call_method1("__new__", (ledger_cls,))?;
+    ledger.setattr("path", py.None())?;
+    ledger.setattr("_native", native)?;
+    ledger.setattr("_conn", connection)?;
+    ledger.setattr(
+        "_carriers",
+        py.import("builtins")?.getattr("dict")?.call0()?,
+    )?;
+    ledger.setattr("_listeners", py.import("builtins")?.getattr("list")?.call0()?)?;
+    let lock_view = py
+        .import("trade_engine.ledger.store")?
+        .getattr("_LockView")?
+        .call1((ledger.clone(),))?;
+    ledger.setattr("_lock", lock_view)?;
+    Ok(ledger.into_any().unbind())
 }

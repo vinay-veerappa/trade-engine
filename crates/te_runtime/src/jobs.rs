@@ -4,6 +4,7 @@ use crate::config::{error, Config};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use te_host::http::ControlError;
 use te_host::jobs::Journal;
 use te_host::store::Store;
@@ -41,7 +42,17 @@ pub struct Owner {
     pub identity: Identity,
     /// The configured offline ledger path; serve passes it to the HTTP host.
     pub config_ledger: PathBuf,
+    /// The store's shared connection/guard Arcs for the embedded interpreter
+    /// attach; taken exactly once by serve.
+    pub store_parts: Option<OwnerParts>,
 }
+
+/// The shared Arcs of the owner's one store; attaching them to the embedded
+/// interpreter never creates a second writer or guard holder.
+pub type OwnerParts = (
+    te_host::store::SharedConnection,
+    Arc<Mutex<Option<te_host::lock::SingleInstanceGuard>>>,
+);
 
 impl Owner {
     pub fn open(config: &Config) -> Result<Self, Value> {
@@ -89,10 +100,12 @@ impl Owner {
         journal
             .recover()
             .map_err(|e| error(format!("owner recovery refused: {e}")))?;
+        let store_parts = Some((store.connection.clone(), store.guard.clone()));
         Ok(Self {
             store,
             journal,
             config_ledger: path.clone(),
+            store_parts,
             identity: Identity {
                 role,
                 generation,

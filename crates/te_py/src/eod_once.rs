@@ -39,6 +39,8 @@ impl JobHost for OnceHost {
                                 "fills_recorded": account.getattr("fills_recorded")?.extract::<i64>()?,
                                 "marks_appended": account.getattr("marks_appended")?.extract::<i64>()?,
                                 "orders_submitted": account.getattr("orders_submitted")?.extract::<i64>()?,
+                                "exit_actions": account.getattr("exit_actions")?.extract::<i64>()?,
+                                "snapshots_processed": account.getattr("snapshots_processed")?.extract::<i64>()?,
                             }));
                         }
                         Ok(lines)

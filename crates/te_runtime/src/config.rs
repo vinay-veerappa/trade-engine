@@ -45,6 +45,12 @@ pub struct RuntimeConfig {
     pub capability: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// The configured client entry point (module, member) the owner's job
+    /// executor calls with the injected owner ledger. Plain identifiers only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_module: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 fn directory(path: &Path, name: &str) -> Result<(), Value> {
@@ -243,6 +249,38 @@ impl Config {
                 }
                 if !runtime.capability.is_absolute() {
                     return Err(error("runtime capability must be an absolute path"));
+                }
+                match (&runtime.entry_module, &runtime.entry) {
+                    (None, None) => {}
+                    (Some(module), Some(member)) => {
+                        // A module path is dotted plain identifiers; the entry
+                        // member is one plain identifier.
+                        let segment = |value: &str| {
+                            !value.is_empty()
+                                && value.len() <= 128
+                                && value.bytes().enumerate().all(|(i, c)| {
+                    c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
+                                })
+                        };
+                        let module_valid = !module.is_empty()
+                            && module.len() <= 512
+                            && module.split('.').all(segment);
+                        if !module_valid {
+                            return Err(error(
+                                "runtime entry_module must be a dotted plain identifier",
+                            ));
+                        }
+                        if !segment(member) {
+                            return Err(error(
+                                "runtime entry must be a plain identifier",
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(error(
+                            "runtime entry_module and entry must be configured together",
+                        ))
+                    }
                 }
             }
         }

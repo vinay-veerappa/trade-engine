@@ -13,11 +13,12 @@ mod flow;
 mod oms;
 mod sim;
 mod lock;
-mod store;
+pub mod store;
 mod outbox;
 mod clock;
 pub mod http;
 mod eod_once;
+mod factory_run;
 pub mod plugins;
 
 /// The same module initializer is registered before custom CPython startup.
@@ -776,6 +777,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(risk_evaluate, m)?)?;
     runtime::register(m)?;
     eod_once::register(m)?;
+    factory_run::register(m)?;
     Ok(())
 }
 

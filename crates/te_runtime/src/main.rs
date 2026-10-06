@@ -55,21 +55,25 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
             config.mode
         )));
     }
-    let stop_timeout = config
-        .runtime
-        .as_ref()
-        .expect("validated runtime config")
-        .stop_timeout_seconds;
-    let port = config
-        .runtime
-        .as_ref()
-        .expect("validated runtime config")
-        .port;
-    let owner = jobs::Owner::open(&config)?;
+    let runtime_config = config.runtime.as_ref().expect("validated runtime config");
+    let stop_timeout = runtime_config.stop_timeout_seconds;
+    let port = runtime_config.port;
+    let entry = match (&runtime_config.entry_module, &runtime_config.entry) {
+        (Some(module), Some(member)) => Some((module.clone(), member.clone())),
+        _ => None,
+    };
+    let mut owner = jobs::Owner::open(&config)?;
     let identity = owner.identity;
-    // The dispatcher seam stays offline: a synthetic executor acknowledges
-    // each configured job without opening a second writer or any venue.
-    let dispatcher = control::Dispatcher::start_jobs(&identity.jobs, control::synthetic_job_result);
+    // The dispatcher seam: a configured entry point executes real jobs in
+    // this owner process over the attached ledger; without one, the synthetic
+    // executor acknowledges each configured job (offline proof mode).
+    let dispatcher = match &entry {
+        Some((module, member)) => control::Dispatcher::start_jobs(
+            &identity.jobs,
+            control::factory_job_result(module.clone(), member.clone()),
+        ),
+        None => control::Dispatcher::start_jobs(&identity.jobs, control::synthetic_job_result),
+    };
     let journal = Arc::new(owner.journal);
     let ledger = owner
         .config_ledger
@@ -91,8 +95,10 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
         "recovered": true,
     });
     match port {
-        // Without a port, serve proves the composition once and exits.
-        None => {
+        // Without a port, serve proves the composition once and exits. The
+        // one-shot check belongs to the synthetic proof executor: a
+        // configured real entry point only executes admitted session jobs.
+        None if entry.is_none() => {
             let payload = json!({
                 "version": jobs::RUNTIME_VERSION,
                 "request_id": "serve-composition-check",
@@ -113,6 +119,13 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
                 .stop()
                 .map_err(|message| jobs::refusal("RuntimeStopError", message))?;
         }
+        // A configured real entry without a port is a composition error: the
+        // owner would start and immediately exit without serving jobs.
+        None => {
+            return Err(config::error(
+                "runtime-owner with an entry point requires a port to serve jobs",
+            ));
+        }
         // With a port, bind loopback HTTP with the control attached and serve
         // until stdin closes: stop admission, drain the active job, close the
         // store and release the guard last.
@@ -120,9 +133,19 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
             #[cfg(windows)]
             {
                 // The embedded interpreter initializes; the stdlib adapter
-                // supplies header/URL conversions, never ownership.
+                // supplies header/URL conversions, never ownership. The owner's
+                // one held store is attached (shared connection/guard Arcs) so
+                // factory execution composes over it without a second writer.
                 crate::python::initialize_for_serve(&config)
                     .map_err(|e| jobs::refusal("RuntimePythonError", e))?;
+                let owner_parts = owner
+                    .store_parts
+                    .take()
+                    .expect("owner store parts are attached exactly once");
+                pyo3::Python::with_gil(|py| {
+                    trade_engine_rs::store::attach_owner_parts(py, owner_parts.0, owner_parts.1)
+                })
+                .map_err(|e: pyo3::PyErr| jobs::refusal("RuntimePythonError", e.to_string()))?;
                 let text = pyo3::Python::with_gil(|py| {
                     trade_engine_rs::http::stdlib_text(py)
                         .map_err(|e: pyo3::PyErr| e.to_string())
