@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11; flip verified)**; scoped checkpoints verified; the side-by-side paper-session flip is verified below, the remaining T12-T14 tickets follow |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -2240,6 +2240,46 @@ client-side (T12 owns the mirror actor).
   prefix door, pass/through carriage, the owner doors' env names, the
   pass's refused accounting, the morning alias's pass name, holdings
   atomic extend, and the two reader conversions.
+
+### P4c paper-session flip checkpoint — verified (the gate row's own condition)
+
+`tests/test_p4c_flip.py` runs the gate row's acceptance exactly as §5.1
+defines it: **two owners, two synthetic ledgers, zero live accounts**. The
+recorded session is the REAL SPX 0DTE tape of 2026-10-06 (665 chain
+snapshots, 13:30-20:00 UTC, recorded by the hub while the paper sim ran —
+read-only input, never written). Both owners consume the SAME immutable
+tape through a deterministic tape-driven replay clock and a store-served
+snapshot source (the same `run_flip` build):
+
+- **Owner A, the classic Python path**: the test process opens its own
+  synthetic SQLite ledger and runs the intraday service in-process — the
+  pre-P4c ownership shape.
+- **Owner B, the Rust runtime owner**: `te serve` attaches its own
+  synthetic ledger and executes the same build as one durable job over
+  the `/v1/runtime` control surface (the T9/T10/T11 protocol).
+
+A network guard refuses every non-loopback socket in the harness process;
+the tape is the only quote source; no hub, venue or live path is touched.
+
+The session is a full trading day on both owners: **715 events each** —
+the funding deposit, 3 entry orders (risk verdicts passed), 12 fills, the
+order lifecycle (pending/accepted/updated/cancelled), one exit action, 664
+per-tick `VenueReconcile` markers (each carrying the recorded timestamp in
+its command id) and the `EodRun` marker. Comparison per §5.2 (normalized
+rows, never raw `.db` bytes): every event's seq, ts_utc, account, kind,
+command_id, payload and schema_version is **identical**, and the folded
+session-end state agrees (cash equality via `LedgerReader` on both
+ledgers). Both runs report the same counters: 3 orders submitted, 1 exit,
+664 snapshots processed, 0 entries dropped.
+
+Gates: the flip test plus the frozen/T9/T11 engine suites: **181 passed**
+(including the T8 intraday lockstep). Owner deps installed into the
+private T9 venv for the harness only: PyYAML, pandas.
+
+This verifies the gate row's condition — a paper session run side by side
+with the Python engine produces the same ledger. The remaining P4c work
+(T12 mirror adapter, T13 recorded-replay certification at corpus scale,
+T14 rollout kit) extends coverage; it does not reopen this condition.
 
 ## Working rules
 
