@@ -1,4 +1,4 @@
-"""Compiling P5 (T1 transport, T2 normalize, T3 slippage) hand mutants: assertion kills only, finally restore, final green build."""
+"""Compiling P5 (T1-T9: transport, normalize, slippage, netting, cover, reconcile, exits, follow, broker) hand mutants: assertion kills only, finally restore, final green build."""
 from __future__ import annotations
 
 import hashlib
@@ -14,7 +14,8 @@ SOURCES = ROOT / "crates" / "te_core" / "src" / "tos_paper"
 ENV = dict(os.environ, PATH=str(Path.home() / ".cargo" / "bin") + os.pathsep + os.environ["PATH"],
            PYTHONPATH=str(ROOT / "src"), PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8",
            CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(ROOT / "crates" / "target")))
-TEST = [str(PY), "-B", "-m", "pytest", str(ROOT / "tests" / "test_p5_parity.py"),
+TEST = [str(PY), "-B", "-m", "pytest", str(ROOT / "tests" / "test_p5_broker_parity.py"),
+        str(ROOT / "tests" / "test_p5_parity.py"),
         "-x", "-q", "--tb=short", "-p", "no:cacheprovider",
         "--basetemp", str(ROOT / ".ci-local" / "p5-mutant-tests")]
 MUTANTS = (
@@ -65,6 +66,29 @@ MUTANTS = (
     ("follow-max-age-boundary-inclusive", "follow.rs", "if age > max_age_us {", "if age >= max_age_us {"),
     ("follow-pass-named-in-utc", "follow.rs", "New_York.timestamp_opt(unix, 0)", "chrono_tz::UTC.timestamp_opt(unix, 0)"),
     ("follow-combo-flat-always", "follow.rs", "Some(u) => eq(&u, &zero()),", "Some(_) => Ok(true),"),
+    ("broker-contradiction-does-not-latch-halt", "broker.rs",
+     "let event = venue_reconcile(&self.venue, &now, false, names, Some(note));\n            return Err(self.unreadable_halt(event));",
+     "let event = venue_reconcile(&self.venue, &now, false, names, Some(note));\n"
+     "            return Err(match event { Ok(e) => LErr { kind: VENUE_UNREADABLE, msg: json::dumps(&e) }, Err(e) => e });"),
+    ("broker-halt-not-sticky-across-restore", "broker.rs",
+     "if halted_venues.contains(&self.venue) {\n            self.halted = true;\n        }",
+     "self.halted = halted_venues.contains(&self.venue);"),
+    ("broker-restore-ignores-halted-venues", "broker.rs",
+     "if halted_venues.contains(&self.venue) {\n            self.halted = true;", "if false {\n            self.halted = true;"),
+    ("broker-failed-send-left-in-expected", "broker.rs",
+     'if sent.status == "REJECTED" {\n                self.unexpect(ticket, None)?;\n                acks.push(sent);',
+     'if sent.status == "REJECTED" {\n                acks.push(sent);'),
+    ("broker-cancel-of-unsent-hits-the-venue", "broker.rs",
+     "self.unexpect(&queued, None)?;\n            self.cancelled.insert(venue_order_id.to_string());",
+     "self.unexpect(&queued, None)?;\n            let _ = h.cancel_order(venue_order_id);\n            self.cancelled.insert(venue_order_id.to_string());"),
+    ("broker-drain-continues-after-failed-send", "broker.rs",
+     "                acks.push(sent);\n                continue;\n            }\n",
+     "            }\n"),
+    ("broker-unexpect-wrong-sign", "broker.rs", "add_ticket(&mut self.expected, ticket, -1, units)",
+     "add_ticket(&mut self.expected, ticket, 1, units)"),
+    ("broker-proven-order-id-before-read-back", "broker.rs",
+     "self.sent.get(ticket_key).map_or(Json::Null, |s| jstr(s.order_id.clone()))",
+     "self.sent.get(ticket_key).map_or(jstr(ticket_key.to_string()), |s| jstr(s.order_id.clone()))"),
 )
 
 
