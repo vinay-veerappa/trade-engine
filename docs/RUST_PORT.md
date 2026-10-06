@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8,T9)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -2166,6 +2166,41 @@ flip (a live paper session run side by side) stays unverified; **no push,
 merge or deployment is authorized**. No client checkout, real-ledger writer,
 scheduled task, live service, production port or historical fixture
 acquisition was touched.
+
+### P4c T10 checkpoint (runtime-owner SCAN clients) — verified
+
+T10 converts the `tvDownloadOHLC` SCAN clients to runtime-owner clients
+(oracle `8811c201`, port `819ce56a` on `p4c/t10-client`; owner-side bindings
+`6bae0cd` on `te/p4c-t9`). The forward EOD run, the report, the day-note
+push and the backfill's journal export never open the live trading writer:
+`runtime_client.py` is the one door to the owner (exact refusals, the client
+never opens the writer itself), `eod.py`'s default path submits durable
+(session, account) jobs, `owner_entry` assembles the runner over the
+owner's injected ONE ledger, and the read-only tools query through
+`LedgerReader` (no lock). `build_runner` keeps its writer for the isolated
+replay ledgers only, and now demands an explicit `ledger_path`.
+
+- Engine-side owner seam: `te_py::store::attach_owner_parts` /
+  `owner_ledger` (the Python Ledger over the attached store, built without
+  `__init__`), `te_py::factory_run::owner_job_run` (entry names from the
+  owner config, never the request; dotted-identifier module paths),
+  `te_runtime` `entry_module`/`entry` config with the serve port-path
+  attach and the no-port+entry refusal.
+- End-to-end proof (`test_forward_eod_runs_through_the_owner_end_to_end`):
+  a real `te serve` owner executes the SCAN session in its own process
+  over its one attached ledger — funding deposits (`CashFlow`), session
+  markers (`EodRun`) and the durable job record all committed; the client
+  never opened the writer. Full job 0.25s (ready 0.09s, admission 34ms).
+- Gates: client suite **428 passed** (412 baseline + 16 T10); T10
+  runtime+census 16 passed; engine workspace + feature-unification **124
+  each**; T9 suites **124 passed**.
+- Mutation campaign `tools/mutate_p4c_t10.py` (client worktree): **10/10
+  hand mutants killed, 0 invalid, baseline/restored green**
+  (`T10_MUTATION_CAMPAIGN=PASS`), assertion-only kills: endpoint
+  authorization (capability required, no production port default,
+  unreachable-owner message), the forward path (no local writer, both
+  refusal classifications), the isolated-writer guard, owner-entry
+  funding, and the reader conversions (day note, report).
 
 ## Working rules
 
