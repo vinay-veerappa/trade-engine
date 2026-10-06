@@ -31,6 +31,28 @@ This engine is designed around strict invariants (I1–I13):
 12. **I12: A sink confirms delivery, not a 200.** Outbox drains in order and stops at the first failure until confirmed.
 13. **I13: Strategies know nothing about brokers; adapters know nothing about strategies.** Clean separation of concerns.
 
+## Local HTTP/SSE Read API
+
+`trade_engine.server.http.EngineHttpServer` is a compatibility facade over the
+native Axum host in `trade_engine_rs`. The host owns the listener, read-only SQLite
+connections, reduced account snapshots, and SSE subscriptions; it never opens a
+second ledger writer. An already-open `Ledger` supplies post-commit notifications.
+
+The existing GET contract is unchanged: `/health`, `/snapshot`, and
+`/events?after=<seq>` (backlog followed by committed live events). Reconnects may
+supply `Last-Event-ID`; the query is validated first and a valid header wins.
+Only localhost Host/origin values are accepted or echoed. A native compatibility
+transport preserves the legacy HTTP version, error HTML and SSE bytes ahead of
+Axum routing. Standard-library text adapters retain unusual header, URL and
+Unicode integer conversion semantics without Python server workers.
+
+Use `EngineHttpServer(ledger, port=0)` for isolated tests and obtain the ephemeral
+port from `server.port`; its context manager closes all native connections and
+subscriptions. The legacy default remains port 3410 for API compatibility, **not**
+permission to occupy Vela's port. Select an explicitly configured, non-production
+port for offline work; no runtime mutation endpoints or live cutover are included.
+A missing native module is an error, never a Python server fallback.
+
 ## Risk Evaluation
 
 `trade_engine.risk.RiskEngine` evaluates equity intents against explicit

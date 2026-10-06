@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T3,T4,T5,T6,T7,T8)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -1876,6 +1876,152 @@ Rollback removes the offline tooling/fixtures or returns to T8; no native
 runtime, schema, ledger or client installation needs switching. No push,
 merge, PR, deployment, live job, scheduled-task operation or live heartbeat
 write occurred. T0 unblocks the next scoped ticket, T2; T9 still awaits T2.
+
+### P4C-T2 native HTTP/SSE verification and boundary
+
+T2 is complete locally on branch `te/p4c-t2`, based on T0 `76cfd91`.
+The separate oracle-identity commit is
+`c38480f2da7ae3acf5132fe9ba612da7c0c3fb89`.
+The verified port commit is recorded in the shared runtime plan and handover;
+no merge, push or deployment is authorized.
+The immutable T0 HTTP oracle is reused; its SHA256 remains
+`46750715e7fec7df147f3ac9decc0fe90d13f38c5ebf6c2760dbeb05b1228d33`.
+The original server/corpus tests and all frozen goldens remain unchanged.
+The newly authored T2 byte-parity helpers gained an optional connector for
+the approved timing-client correction; their default behavior is unchanged.
+
+Rust owns `te_host::http`: listener, legacy request grammar/wire output around
+Axum routing, reader-only SQLite queries, reduced account projection using the
+existing native codec/fold/PyDec, subscriber registration, ordered backlog,
+live deduplication, ping, disconnect cleanup and shutdown. The existing
+post-commit writer listener supplies notifications; no writer/lock/schema is
+added. The Python server shrinks to a compatibility facade, net **-281 lines**
+(`18` additions / `299` deletions). The private `_EngineHandler._handle_events`
+is a non-owning native cursor entry point so T0's immutable AST inventory
+remains meaningful; it is not a Python request worker. The native lifecycle
+view retains `daemon_threads is True`, without fabricated Python threads.
+
+The owner explicitly approved the compatibility transport on 2026-10-05.
+Actual Hyper 1.11.1 probes rejected HTTP/1.2, HTTP/2.0 and malformed headers
+before Axum routing, emitting an empty HTTP/1.1 400 rather than the frozen
+200/HTML 505 outcomes. Native Tokio parsing/wire formatting therefore wraps
+Axum instead of delegating request parsing to Hyper. Normalization remains
+limited to Date, ephemeral test port and packet segmentation.
+
+Python keeps carrier conversion and stdlib header/URL/Unicode `isdigit`/`int`
+primitives through the one existing module. Native parsing handles a disjoint
+canonical ASCII header/route subset without the GIL; unusual headers, folded
+fields and URL/query conversion retain the stdlib adapter. URL errors are
+observed only after method/Host checks, preserving the old refusal order.
+No GIL is held across socket awaits, native ledger reads or shutdown joins.
+Transport Date observes only the designated host clock seam.
+
+Measured correctness gates on restored source:
+
+- Unchanged server/corpus plus T2 tests: **225 passed**; **106 new T2 tests**
+  (97 HTTP contract/lifecycle/native smoke, nine timing/watchdog regressions).
+- Rust workspace and explicit extension/embed feature unification:
+  **109 passed each** (94 core, 12 host, 3 runtime).
+- Native release smoke proves one built-in module, zero dynamically loaded
+  extension copies, and successful HTTP reads with Python SQLite forbidden.
+- Strictly read-only ledger parity: **14,144 codec events**, **23 account
+  states**, **four full folds**, all identical.
+- Final private CI: **2,619 passed**, 12 warnings, 1,330.72 seconds; exit 0.
+  The prior checkpoint's 2,610-pass CI and failed timeout-client timing are
+  retained as historical evidence, not substituted for these final gates.
+- **15/15 compiling mutants killed by assertions**, baseline and restored
+  runs green. The campaign reuses the established T8 byte-restoring harness
+  and its assertion reporter; compilation/import/collection errors do not
+  count as kills. Every anchor is an exact single match.
+
+| Mutant | Killing test |
+|---|---|
+| Invalid Host accepted | `test_static_wire_parity[wire-6]` |
+| Allowed origin not echoed | `test_static_wire_parity[wire-11]` |
+| Last duplicate query value wins | `test_cursor_frames_parity` |
+| Last-Event-ID precedence lost | `test_cursor_frames_parity` |
+| Query validation skipped | `test_cursor_frames_parity` |
+| Snapshot seq incremented | `test_static_wire_parity[wire-1]` |
+| Optional price becomes `"None"` | `test_static_wire_parity[wire-1]` |
+| Retry bytes changed | `test_cursor_frames_parity` |
+| Live deduplication disabled | `test_lifecycle_handover_dedup_shutdown` |
+| Subscription not registered | `test_cursor_frames_parity` |
+| Backlog cursor inclusive | `test_cursor_frames_parity` |
+| Backlog order reversed | `test_cursor_frames_parity` |
+| Disconnect fails to unsubscribe | `test_lifecycle_handover_dedup_shutdown` |
+| Legacy invalid version accepted | `test_static_wire_parity[wire-31]` |
+| Ping bytes changed | `test_cursor_frames_parity` |
+
+Timing uses nine independent paired synthetic books per path, 251 committed
+events per book, alternating execution order and asserting exact outputs.
+Health/snapshot measure 20 requests, backlog measures all 251 frames, and live
+measures 20 append/notification/serialization/queue/socket round trips.
+Construction, startup and builds are excluded. No threshold or fixture was
+weakened. The owner-approved corrected client campaign **exits 0**:
+
+| Path | Oracle median s | Native median s | Oracle tail s | Native tail s | Ratio | Gate |
+|---|---:|---:|---:|---:|---:|---|
+| health | 0.029638 | 0.017831 | 0.040200 | 0.029741 | **0.601615x** | pass |
+| snapshot | 0.805467 | 0.171582 | 0.870725 | 0.187924 | 0.213021x | pass |
+| backlog | 0.041924 | 0.014769 | 0.052720 | 0.018852 | 0.352266x | pass |
+| live | 0.027332 | 0.023158 | 0.034520 | 0.028422 | 0.847296x | pass |
+
+Earlier timeout-driven client health campaigns failed at 1.362119x,
+1.487432x, 1.594922x and 1.298371x.
+Caching stdlib adapters, canonical native text handling and batched
+header/body writes improved some measured paths, but did not establish the
+required health gate. A bounded two-worker experiment measured health
+1.302453x and live 1.755683x and was **reverted**. Profiling observed some
+13-23ms parse/read waits versus roughly 0.7-1.4ms route and sub-0.2ms writes. Follow-up client-stage measurements isolated the
+delay **before the HTTP request was sent**: one 80-request cohort measured
+native `connect()` median 12.974ms versus oracle 0.141ms, while native reads
+were faster (0.638ms versus 0.729ms). Minimal TCP probes across Python/Rust,
+blocking/async listener/read combinations and reuse/backlog variants did not
+isolate a server-code cause.
+
+The controlled timed/blocking client experiment established the mechanism:
+**174/320 timeout-driven connects exceeded 8ms, versus 0/320 blocking connects**,
+across both Python and Rust TCP servers. The Windows client's timeout/nonblocking
+connect readiness path contaminated the intended HTTP comparison; this is not
+evidence of a slow native SQLite/JSON path or a claim about shared-machine load.
+
+The owner explicitly approved the client correction on 2026-10-05. Only the
+timing client uses blocking loopback connect, still **inside** the measured
+interval; five-second send/read timeouts remain. An independent 300-second
+parent-process watchdog bounds the measured child, kills/reaps it on timeout,
+and cleans its parent-managed temporary books. Worker startup and watchdog
+IPC reporting are outside the measured intervals; there is no added IPC
+inside a timed request or live append/read step. All nine pairs/path, inputs,
+request/frame counts, exact comparisons and the 1.25x threshold remain.
+Production code and the original byte-parity client are unchanged.
+
+Windows' venv executable is a redirector that spawns the actual interpreter.
+The watchdog mirrors its `__PYVENV_LAUNCHER__` protocol while launching the base
+interpreter directly, preserving the private interpreter/site-packages without
+leaving an orphan behind when the watchdog kills its child. This follows the
+[CPython 3.13 redirector](https://github.com/python/cpython/blob/3.13/PC/venvlauncher.c),
+not a global environment or timer change. Regression tests prove private
+interpreter/engine/extension identity, socket cleanup on refusal, safe
+loopback/fixture boundaries and actual killed-child absence.
+
+An immediate-stop-before-owner-thread-start race was found, fixed with
+current-value shutdown checks, and covered by 30 start/stop repetitions.
+Temporary profiling code/probe builds are removed. The final host and binding
+bytes exactly match the mutation campaign's restored identities:
+
+- Host: `f2b114d469b9bc99b15261ba97dcb95874e4fe4c76b9f12d3f3b40aa5b5e53b9`.
+- Binding: `1138ffce25bd840f2eddb5670182193f874373040913bf076fc2a588b2041a69`.
+- HTTP tests: `152cb65f56b0c97597094d4bd3b95576dc250e3e64a763fbcceddd990fcd82d3`.
+- Timing tests: `36081689784a4a2848d0ca34a03037f3a7b3e294c916fe9d46f5bf55adfba241`.
+- Mutator: `2c5b74affaf33f1541e31d7e315470deb8ae0359b85b890c3f7760bd090bbb0e`.
+- Timing: `2a2fa45f78c0db14bea6b2153d56037853e96183bded7ed10bfa56bc0f9a1872`.
+
+Rollback for this isolated, undeployed checkpoint is the retained oracle/base
+release; there is no schema/data/client/task transition to undo. Do not reset
+the worktree or discard these edits implicitly. Windows-only execution,
+recorded-session release evidence, client deployment and later tickets remain
+unverified. No push, merge, PR, deployment, live job, scheduled-task operation
+or real-ledger write occurred.
 
 ## Working rules
 

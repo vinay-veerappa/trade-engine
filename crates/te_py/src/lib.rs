@@ -16,6 +16,7 @@ mod lock;
 mod store;
 mod outbox;
 mod clock;
+mod http;
 pub mod plugins;
 
 /// The same module initializer is registered before custom CPython startup.
@@ -731,6 +732,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     store::register(m)?;
     outbox::register(m)?;
     clock::register(m)?;
+    http::register(m)?;
     plugins::register(m)?;
     sim::register(m)?;
     oms::register(m)?;
