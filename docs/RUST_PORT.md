@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12; flip verified)**; scoped checkpoints verified; the side-by-side paper-session flip is verified below, the remaining T13-T14 tickets follow |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0..T13; flip verified)**; scoped checkpoints verified; the side-by-side paper-session flip and the §5.2-scale recorded-replay certification are verified below, the remaining T14 rollout kit follows |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -2318,6 +2318,38 @@ writer to the options owner (client oracle `fbd6a40f`, port `9601d827` on
   silence, the sim-reader writer regression, the owner door's env name,
   the owner entry's route and mode, terminal-failure accounting, and the
   clear-halt refusal wording.
+
+### P4c T13 checkpoint (recorded-replay certification at §5.2 scale) — verified
+
+`tools/p4c_replay.py` + `tests/test_p4c_runtime_parity.py` (committed
+`57cbb8a` on `te/p4c-t9`) certify the full-replay contract at plan §5.2's
+scale, over **synthetic recorded sessions labeled synthetic per §5.1** —
+the real recorded release-gate corpus still needs separately authorized
+fixture acquisition (the certificate says so in its `note`).
+
+- **120 role-walks** (20 sessions × 6 roles; both DST regimes, the
+  spring-forward week, Thanksgiving and Christmas-eve early closes,
+  holiday eves), each walked through BOTH owners — the classic Python
+  owner and the Rust runtime owner (`te serve` executing the same
+  recorded stream as one durable job over its own synthetic ledger).
+- **106,200 compared steps**: every walk compares each event's
+  seq/account/kind/command_id/timestamp/payload/codec bytes, the
+  canonical folded state, the outbox rows and the meta rows (the P4c
+  runtime's own `te.runtime.*` job bookkeeping compared separately
+  against the protocol oracle — the completed record — never against the
+  classic walk's legacy meta), plus **read-only parity** through
+  `LedgerReader` on both ledgers.
+- **72 restart walks** (§5.3: 12 cut points × 6 roles): a killed owner's
+  admitted-but-never-completed job is **uncertain after the restart**
+  with `RuntimeResumeRequired` (never completed), and the durable prefix
+  stands byte for byte.
+- Gates: `tests/test_p4c_runtime_parity.py` **8 passed** (the quick
+  subset in CI: both-owner parity, read-only parity, the
+  parity-divergence and missing-fixture refusals, the
+  uncertain-never-completed rule, the §5.2 minima pins, and the
+  certify/verify CLI); engine suites **232 passed**; workspace **132**.
+  Full certificate: `tests/p4c_replay_certificate.json` (provenance
+  synthetic, binary hash pinned).
 
 ## Working rules
 
