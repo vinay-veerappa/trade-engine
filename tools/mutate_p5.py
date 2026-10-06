@@ -13,7 +13,7 @@ PY = Path(sys.executable).resolve()
 SOURCES = ROOT / "crates" / "te_core" / "src" / "tos_paper"
 ENV = dict(os.environ, PATH=str(Path.home() / ".cargo" / "bin") + os.pathsep + os.environ["PATH"],
            PYTHONPATH=str(ROOT / "src"), PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8",
-           CARGO_TARGET_DIR=str(ROOT / "crates" / "target"))
+           CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR", str(ROOT / "crates" / "target")))
 TEST = [str(PY), "-B", "-m", "pytest", str(ROOT / "tests" / "test_p5_parity.py"),
         "-x", "-q", "--tb=short", "-p", "no:cacheprovider",
         "--basetemp", str(ROOT / ".ci-local" / "p5-mutant-tests")]
@@ -42,6 +42,29 @@ MUTANTS = (
     ("one-strike-vertical", "netting.rs", "if first.strike.eq_num(&second.strike).map_err(derr)? {", "if false {"),
     ("ratio-spread-vertical", "netting.rs", "if legs[0].ratio != legs[1].ratio {", "if false {"),
     ("same-side-vertical", "netting.rs", "if legs[0].side == legs[1].side {", "if false {"),
+    ("netting-conflict-sign-inverted", "netting.rs", "if *first_side != side {", "if *first_side == side {"),
+    ("netting-fractional-rounded-not-refused", "netting.rs", "if !order.quantity.is_integral().map_err(derr)? {", "if false {"),
+    ("cover-credit-diagonal-accepted", "cover.rs", "long.strike.le(&short.strike).map_err(derr)?)", "true)"),
+    # Reversing the longs a short tries is EQUIVALENT (greedy over a transversal matroid yields the same
+    # covered-short set for any long order); reversing the order shorts are matched in is not.
+    ("cover-kuhn-short-order-reversed", "cover.rs", "for short in 0..shorts.len() {", "for short in (0..shorts.len()).rev() {"),
+    ("cover-open-sell-tickets-not-subtracted", "cover.rs",
+     "for (instrument, quantity) in ticket_contracts(&ticket.queued, &ticket.remaining()?)?.iter() {",
+     "for (instrument, quantity) in ticket_contracts(&ticket.queued, &ticket.remaining()?)?.iter().take(0) {"),
+    ("reconcile-unknown-working-state-ignored", "reconcile.rs", "if row.state == OrderState::PendingUnknown {\n            unknown.insert",
+     "if false {\n            unknown.insert"),
+    ("reconcile-one-share-drift-tolerated", "reconcile.rs", "if unknown.contains(&contract.hk()) || ne(&have, &want)? {",
+     "if unknown.contains(&contract.hk()) || crate::ledger::ops::gt(&crate::ledger::ops::abs(&sub(&have, &want)?)?, &PyDec::from_i128(1))? {"),
+    ("exits-vertical-closed-leg-by-leg", "exits.rs", "if in_vertical(&ctx.mirror, account, contract)? {", "if false {"),
+    ("exits-target-rested-gtc", "exits.rs", '("tif", jstr(Tif::Day.value())),', '("tif", jstr(Tif::Gtc.value())),'),
+    ("exits-zero-limit-priced", "exits.rs", "Some(l) if !le(l, &zero())? => None,", "Some(l) if !lt(l, &zero())? => None,"),
+    ("exits-shared-ticket-ignored", "exits.rs", "let shared = Self::shared_with(&resting, account);",
+     "let shared: Vec<String> = Self::shared_with(&resting, account).into_iter().take(0).collect();"),
+    ("exits-target-room-not-decremented", "exits.rs", "room = sub(&room, &quantity)?;", "room = room.clone();"),
+    ("follow-entry-older-than-max-age-accepted", "follow.rs", "if age > max_age_us {", "if false {"),
+    ("follow-max-age-boundary-inclusive", "follow.rs", "if age > max_age_us {", "if age >= max_age_us {"),
+    ("follow-pass-named-in-utc", "follow.rs", "New_York.timestamp_opt(unix, 0)", "chrono_tz::UTC.timestamp_opt(unix, 0)"),
+    ("follow-combo-flat-always", "follow.rs", "Some(u) => eq(&u, &zero()),", "Some(_) => Ok(true),"),
 )
 
 
