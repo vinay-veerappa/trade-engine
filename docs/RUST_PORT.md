@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8,T9)**; scoped checkpoints verified; runtime/session flip remains unverified, evidence below |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -2158,11 +2158,14 @@ Checkpoint proof, not ticket completion:
 - Actor source SHA256:
   `86c9ef4e18191899838232d7be7262906038911ba61aa53068ee560b6b006cb4`.
 
-Still **not done**: the local-only verified port commit (the Rust + oracle
-tests + thin client + docs commit series). That is required before adding
-T9 to the completed-ticket row. No client checkout, real-ledger writer,
-scheduled task, live service, production port, push/merge/deployment or
-historical fixture acquisition was touched.
+T9's scoped checkpoint is verified and committed locally: the oracle froze
+first (`9c5705a`), the port commit `1ec02d0` carries the journal, actor,
+runtime owner, `/v1/runtime` control routes, the serve HTTP loop, the
+`eod_once` one-shot CLI client and the thin `eod/cli.py`. The remaining P4c
+flip (a live paper session run side by side) stays unverified; **no push,
+merge or deployment is authorized**. No client checkout, real-ledger writer,
+scheduled task, live service, production port or historical fixture
+acquisition was touched.
 
 ## Working rules
 
