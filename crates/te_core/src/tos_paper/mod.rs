@@ -9,6 +9,7 @@
 //! `tos_unsupported` -> `UnsupportedCapability`, `value` -> `ValueError`, and the
 //! decimal kinds), its message exactly the Python's.
 
+pub mod broker;
 pub mod cover;
 pub mod exits;
 pub mod follow;
@@ -37,6 +38,13 @@ pub const NETTING: &str = "tos_netting_error";
 /// `ExitPlanError`.
 pub const EXIT_PLAN: &str = "tos_exit_plan_error";
 pub const WIRE: &str = "tos_wire";
+/// `TosPaperBrokerError`.
+pub const BROKER: &str = "tos_broker_error";
+/// `VenueUnreadable`: the message is the drifting `VenueReconcile` as JSON.
+pub const VENUE_UNREADABLE: &str = "tos_venue_unreadable";
+/// An exception the host transport raised and the broker lets through (`TransportUnavailable`):
+/// the host re-raises its own exception object.
+pub const RAISED: &str = "tos_raised";
 
 /// `op` over the JSON document `text`; the answer as JSON text.
 pub fn decide(op: &str, text: &str) -> Result<String, LErr> {

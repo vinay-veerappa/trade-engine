@@ -106,7 +106,7 @@ pub fn get(book: &Book, instrument: &Instrument) -> PyDec {
 }
 
 /// The `VenueReconcile` event as the ledger's constructor builds it (its refusals included).
-fn venue_reconcile(venue: &str, as_of: &str, reconciled: bool, drift: Vec<String>, note: Option<String>) -> R<Json> {
+pub fn venue_reconcile(venue: &str, as_of: &str, reconciled: bool, drift: Vec<String>, note: Option<String>) -> R<Json> {
     if venue.is_empty() {
         return err("payload", "VenueReconcile.venue must be non-empty");
     }

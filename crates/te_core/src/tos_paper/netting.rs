@@ -248,6 +248,7 @@ fn legs_of(order: &NOrder) -> R<Vec<(LInstrument, Side, PyDec)>> {
 
 type Account = Vec<(String, PyDec)>;
 
+#[derive(Clone)]
 pub struct Ticket {
     pub venue_order_id: String,
     pub instrument: LInstrument,
@@ -506,7 +507,7 @@ pub fn net_strategy_orders(
 
 // -- the door ---------------------------------------------------------------------------------------
 
-fn ticket_json(t: &Ticket) -> Json {
+pub fn ticket_json(t: &Ticket) -> Json {
     obj(vec![
         ("venue_order_id", jstr(t.venue_order_id.clone())),
         ("instrument", linstr_json(&t.instrument)),
@@ -538,16 +539,22 @@ fn strings_of(doc: &Json, key: &str) -> R<Vec<String>> {
         .collect()
 }
 
-pub fn net_op(doc: &Json) -> R<Json> {
-    let orders: Vec<NOrder> = req_arr(doc, "orders")?.iter().map(norder_of).collect::<R<_>>()?;
+/// The `holdings` rows, `[account, instrument, "qty"]` triples in order, keyed `(account, instrument)`.
+pub fn holdings_of(rows: &[Json]) -> R<OMap<(String, LInstrument), PyDec>> {
     let mut holdings: OMap<(String, LInstrument), PyDec> = OMap::new();
-    for row in req_arr(doc, "holdings")? {
+    for row in rows {
         let Json::Arr(r) = row else { return wire("a holdings row is not a triple") };
         let [Json::Str(acct), inst, Json::Str(q)] = r.as_slice() else { return wire("a holdings row is not a triple") };
         let instrument = linstr(inst)?;
         let hk = crate::ledger::mirror::book_hk(acct, &instrument);
         holdings.insert(hk, (acct.clone(), instrument), dec_of(q)?);
     }
+    Ok(holdings)
+}
+
+pub fn net_op(doc: &Json) -> R<Json> {
+    let orders: Vec<NOrder> = req_arr(doc, "orders")?.iter().map(norder_of).collect::<R<_>>()?;
+    let holdings = holdings_of(req_arr(doc, "holdings")?)?;
     let batch = net_strategy_orders(
         &orders,
         req_str(doc, "venue_account")?,
