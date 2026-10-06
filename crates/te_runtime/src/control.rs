@@ -1,7 +1,6 @@
 //! Trusted job-family dispatch: allowlisted names map to configured factories.
 //! The host never accepts submitted code, imports, SQL or arbitrary writes.
-use crate::jobs::Owner;
-use pyo3::types::{PyAnyMethods, PyModuleMethods};
+use pyo3::types::PyAnyMethods;
 use serde_json::{json, Value};
 use std::sync::mpsc;
 use te_host::actor::Outcome;

@@ -19,6 +19,7 @@ mod clock;
 pub mod http;
 mod eod_once;
 mod factory_run;
+mod mirror_loop;
 pub mod plugins;
 
 /// The same module initializer is registered before custom CPython startup.
@@ -776,9 +777,10 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(risk_drawdown_controls, m)?)?;
     m.add_function(wrap_pyfunction!(risk_evaluate, m)?)?;
     runtime::register(m)?;
-    eod_once::register(m)?;
-    factory_run::register(m)?;
-    Ok(())
+  eod_once::register(m)?;
+  factory_run::register(m)?;
+  mirror_loop::register(m)?;
+  Ok(())
 }
 
 mod runtime;
