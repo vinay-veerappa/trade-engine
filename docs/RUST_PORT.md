@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11; flip verified)**; scoped checkpoints verified; the side-by-side paper-session flip is verified below, the remaining T12-T14 tickets follow |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11,T12; flip verified)**; scoped checkpoints verified; the side-by-side paper-session flip is verified below, the remaining T13-T14 tickets follow |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -2280,6 +2280,44 @@ This verifies the gate row's condition — a paper session run side by side
 with the Python engine produces the same ledger. The remaining P4c work
 (T12 mirror adapter, T13 recorded-replay certification at corpus scale,
 T14 rollout kit) extends coverage; it does not reopen this condition.
+
+### P4c T12 checkpoint (mirror runtime adapter/follower loop) — verified
+
+T12 moves the follower's loop ownership to Rust and the batch mirror's
+writer to the options owner (client oracle `fbd6a40f`, port `9601d827` on
+`p4c/t12-client`; the loop `c44f61f` on `te/p4c-t9`).
+
+- `te_core::mirror::follow_loop` owns what the plan's T12 row names: the
+  send-window cutoff, the interval pacing, the shared unreadable/deferred
+  budget (give-up at max, the exact frozen give-up/resumed lines), the
+  exact waiting/refusal/halt behavior, both frozen once-mode early-return
+  paths, the ok-gated collect wait and the collect's own classification.
+  The venue I/O and every P5 business decision stay Python behind the
+  `FollowHost` seam; nothing in the loop opens a ledger. 8 behavior tests
+  in `te_core` pin each frozen branch.
+- `trade_engine_rs.mirror_follow_loop(host, plan_json)` is the one door
+  from Python; `mirror_follow.run_follow` drives it over a `_Host` seam
+  (now/sleep/probe/cycle/collect/log) and keeps the ledger lifetimes: the
+  follower's ONE mirror writer with a concurrent read-only sim reader,
+  closed in the frozen order. The frozen T2 mirror suites (39 follower +
+  stock-host + job + clear-halt tests) pass unchanged through the Rust
+  loop; a 110-cycle scripted session runs in 0.17s.
+- `mirror_job` run/collect submit one durable `mirror-<mode>` job per
+  venue through the options owner when `TE_OPT_OWNER_*` is named; the
+  owner's `mirror_owner_entry` executes one venue's pass over the
+  injected batch ledger with the **gateway route only** (the owner process
+  never drives a browser or the desktop). The frozen local path stays for
+  the fixtures; `clear-halt` keeps its exact frozen refusals, including
+  the lock refusal while a follower is active.
+- Gates: client suite **1,138 passed** (1,125 baseline + 13 T12); engine
+  workspace + feature-unification **132 each** (+8 mirror tests);
+  regression suites green (T9+T11 125, T10 16, T11 23). Mutation campaign
+  `tools/mutate_p4c_t12.py`: **12/12 hand mutants killed, 0 invalid**
+  (`T12_MUTATION_CAMPAIGN=PASS`) — loop-binding replacement, once/interval
+  honesty, budget inflation, send-open/collect-at tampering, probe
+  silence, the sim-reader writer regression, the owner door's env name,
+  the owner entry's route and mode, terminal-failure accounting, and the
+  clear-halt refusal wording.
 
 ## Working rules
 
