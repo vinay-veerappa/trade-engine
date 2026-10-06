@@ -143,7 +143,12 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
                     .take()
                     .expect("owner store parts are attached exactly once");
                 pyo3::Python::with_gil(|py| {
-                    trade_engine_rs::store::attach_owner_parts(py, owner_parts.0, owner_parts.1)
+                    trade_engine_rs::store::attach_owner_parts(
+                        py,
+                        owner_parts.0,
+                        owner_parts.1,
+                        ledger.clone(),
+                    )
                 })
                 .map_err(|e: pyo3::PyErr| jobs::refusal("RuntimePythonError", e.to_string()))?;
                 let text = pyo3::Python::with_gil(|py| {

@@ -1275,7 +1275,22 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 // Rust owner already holds. Nothing re-opens or re-locks the ledger.
 // ---------------------------------------------------------------------------
 
-static OWNER: Mutex<Option<Store>> = Mutex::new(None);
+static OWNER: Mutex<Option<OwnerStore>> = Mutex::new(None);
+
+/// The owner's attached parts: the shared connection/guard Arcs plus the
+/// configured ledger path, so the composed Python Ledger reports its real
+/// path without re-opening anything.
+struct OwnerStore {
+    connection: SharedConnection,
+    guard: Arc<Mutex<Option<te_host::lock::SingleInstanceGuard>>>,
+    path: String,
+}
+
+impl OwnerStore {
+    fn held(&self) -> bool {
+        self.connection.lock().expect("connection mutex poisoned").is_some()
+    }
+}
 
 /// Attach the owner's already-held store parts (crate-internal; only
 /// `te_runtime` calls this from its embedded serve loop, once, before any
@@ -1285,6 +1300,7 @@ pub fn attach_owner_parts(
     _py: Python<'_>,
     connection: SharedConnection,
     guard: Arc<Mutex<Option<te_host::lock::SingleInstanceGuard>>>,
+    path: String,
 ) -> PyResult<()> {
     let mut owner = OWNER.lock().expect("owner mutex poisoned");
     if owner.is_some() {
@@ -1292,9 +1308,10 @@ pub fn attach_owner_parts(
             "the owner store is already attached",
         ));
     }
-    *owner = Some(Store {
+    *owner = Some(OwnerStore {
         connection,
         guard,
+        path,
     });
     Ok(())
 }
@@ -1315,7 +1332,7 @@ fn owner_attached() -> bool {
         .lock()
         .expect("owner mutex poisoned")
         .as_ref()
-        .is_some_and(Store::held)
+        .is_some_and(OwnerStore::held)
 }
 
 /// Build the owner's Python ``Ledger`` over the attached native store.
@@ -1328,7 +1345,7 @@ fn owner_ledger(py: Python<'_>) -> PyResult<Py<PyAny>> {
         .lock()
         .expect("owner mutex poisoned")
         .as_ref()
-        .map(|store| (store.connection.clone(), store.guard.clone()))
+        .map(|store| (store.connection.clone(), store.guard.clone(), store.path.clone()))
         .ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
                 "no owner store is attached; the ledger belongs to the runtime owner",
@@ -1360,13 +1377,18 @@ fn owner_ledger(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let connection = native.getattr(py, "connection")?.call0(py)?;
     // The Python Ledger is built without `__init__` (which wants a path and
     // mkdirs a parent); its internals are wired to the attached native store
-    // directly, so it wraps the one held writer (I4).
+    // directly, so it wraps the one held writer (I4). The path is the real
+    // configured one, as a Path.
     let ledger_cls = py.import("trade_engine.ledger.store")?.getattr("Ledger")?;
     let ledger = py
         .import("builtins")?
         .getattr("object")?
         .call_method1("__new__", (ledger_cls,))?;
-    ledger.setattr("path", py.None())?;
+    let path = py
+        .import("pathlib")?
+        .getattr("Path")?
+        .call1((parts.2,))?;
+    ledger.setattr("path", path)?;
     ledger.setattr("_native", native)?;
     ledger.setattr("_conn", connection)?;
     ledger.setattr(

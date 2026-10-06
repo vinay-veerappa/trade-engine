@@ -160,10 +160,21 @@ pub fn factory_job_result(entry_module: String, entry: String) -> impl FnMut(Job
         pyo3::Python::with_gil(|py| {
             let outcome = (|| -> pyo3::PyResult<String> {
                 // The full admitted job crosses: session and options, exactly
-                // as persisted; the request carries data, never code.
+                // as persisted; a pass job's name and through-time ride in the
+                // options (the one entry signature stays (ledger, session,
+                // options)). The request carries data, never code.
+                let mut options = job.options.clone();
+                if let Some(map) = options.as_object_mut() {
+                    if let Some(pass) = &job.pass {
+                        map.insert("pass".into(), json!(pass));
+                    }
+                    if let Some(through) = &job.through {
+                        map.insert("through".into(), json!(through));
+                    }
+                }
                 let payload = json!({
                     "session": job.session,
-                    "options": job.options,
+                    "options": options,
                 });
                 let options = serde_json::to_string(&payload)
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
