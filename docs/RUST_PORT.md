@@ -54,7 +54,8 @@ dependency. A phase's gate must be green before the next one starts.
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
 | **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | pending; after P3b-2b |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
-| **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
+| **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | **web half landed** (tvDownloadOHLC main ba935583, bfe51308; `SIM_TE_WASM` default OFF); retiring the Python package waits for P4c and P5 |
+| **P6b Futures in te_core** | `Instrument::Future` and tick arithmetic, the CME Globex equity-futures calendar, `Book::new_futures`, te_wasm futures books | — (additive: the Python engine has no futures book) | P3a equity parity unchanged; seeded Globex walks agree te_core vs the te_wasm API; the browser differential agrees replay-sim vs te_wasm on MNQ/MES/ES | **done**: see "P6b verification and boundary" |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
 
 ### P3b-2a verification and boundary
@@ -542,6 +543,56 @@ Remaining/out of scope: OMS orchestration, `eod`, `intraday`, server/axum, ledge
 lock, `tos_paper`, all process/connection ownership and the final P4 paper-session
 flip. Rollback is a checkout of the base branch with a rebuild of its private
 extension: **no ledger rewrite or decimal migration**.
+
+### P6b verification and boundary
+
+Plan: `.worktrees/plans/P6B_FUTURES_IN_TE_CORE.md`. Its §0 decisions (2026-10-03) apply:
+- the session calendar is CME's published schedule, not a third-party library;
+- futures slippage is a whole number of adverse ticks;
+- margin is report-only;
+- an in-session gap is legal.
+
+Commits:
+- **T1, `Instrument::Future` and tick arithmetic** (3723bc8, da81283):
+  - prices snap to the contract's tick;
+  - P&L uses the point value.
+- **T2, `te_core::calendar::globex`** (56e015e):
+  - NQ/MNQ/ES/MES sessions run 2006 through 2027, built from `cme_equity_holidays.csv` (CME notices and the trading-hours API via the Wayback Machine, each row sourced).
+  - The calendar handles the daily 17:00-18:00 ET halt, the weekend, `early_halt` and `closed` dates, and CME's published reopen times.
+  - Instants outside the table refuse (I5).
+  - `tests/cme_pmc_oracle.rs` compares every date with `pandas_market_calendars` `CME_Equity`. Each of the 162 disagreements is allow-listed with its CME source. An unlisted difference, or an allow-listed one that has gone away, fails the test.
+  - Three 2023 dates with no CME source are deliberately left as normal days (see `globex.rs`).
+- **T3, `Book::new_futures`** (1950e59, a0e6538):
+  - a bar must lie inside a Globex session and be strictly later than the previous bar; it may jump to any later session;
+  - Day orders expire at the session close;
+  - stops and market orders slip by whole ticks; limits never slip.
+- **T4, te_wasm futures** (3acc171):
+  - `SimBook.newFutures(account, slippageTicks)` and `position_pnl`;
+  - position rows carry `point_value` and `tick_size`;
+  - a mixed-venue book refuses.
+- **T5** (3d90054): 200 seeded NQ/MNQ walks (slippage 0-3 ticks), te_core vs the te_wasm API. Every step must agree on the result or the refusal (kind and message). The walks cover:
+  - in-session gaps;
+  - daily-halt and weekend jumps;
+  - three early-halt dates and two closed dates;
+  - bad bars inside a halt or on a weekend;
+  - Day expiry.
+
+Gates:
+- `cargo test --workspace` is green: te_core 116, the CME oracle, te_wasm 7, parity 4.
+- The wasm32 release build is green.
+- `golden.json` and the P3a equity walks are unchanged.
+- The browser side is tvDownloadOHLC f0548ce4:
+  - te_wasm drives MNQ/NQ/MES/ES natively on real bar times, and the SPY/bps encoding is deleted;
+  - `p6-differential` agrees replay-sim vs te_wasm, including halt, weekend, Day expiry, 1-tick stop, MES and ES;
+  - 722/722 pass with the flag OFF, and 722/722 with the flag ON;
+  - parity rows 4, 16 and 17 are SAME.
+
+Boundary:
+- CL/MCL refuse: there is no energy holiday table yet.
+- With the flag ON, a bar outside the venue's scope (an unmodelled root, a sub-minute bar or a non-minute clock, a year outside 2006-2027) runs the pure TypeScript rules.
+- The browser book is built frictionless, and replay-sim applies the tick slippage once.
+- The web's Day order expires at 16:00 ET, te_core's at the Globex close (17:00 ET). The web check fires first.
+- Plan Gate 3 (golden fills recorded on NinjaTrader 8) is not built.
 
 ### Costs of phasing (accepted)
 
