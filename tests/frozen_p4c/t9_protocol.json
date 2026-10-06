@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "provenance": "new protocol contract; not historical observations",
+  "states": ["queued", "running", "completed", "refused", "failed", "uncertain"],
+  "request_identity": "Persisted request ID plus complete payload; same ID and different payload refuses",
+  "admission": "Persist queued admission before acknowledgment or side effects; one native store/guard per ledger",
+  "execution": "Exactly one running job per ledger; callbacks on the dedicated interpreter execution thread",
+  "restart": "Queued/running records from a dead instance become uncertain/resume-required; never auto-replay side effects",
+  "disconnect": "Client disconnect does not cancel, erase or resend an admitted job",
+  "retention": "At configured record capacity, refuse new IDs; existing duplicate/conflict lookups remain available; never evict records",
+  "versions": "Unknown metadata/request versions refuse explicitly",
+  "authorization": "Versioned runtime requests require configured loopback Host/origin, matching capability and configuration generation",
+  "authority": "Only configured role/job/factory/account mappings; no submitted Python, imports, SQL or arbitrary write paths",
+  "reads": "Nested owner reads are direct, never self-HTTP; legacy GET bytes unchanged",
+  "shutdown": "Stop admission, signal loops, finish/rollback active transaction, flush heartbeat/logs, close HTTP/readers/store, release guard last; report a blocked plugin rather than fabricate success",
+  "errors": "Preserve result or exact refusal type/message, observed and committed sequence and request correlation",
+  "cli": "Preserve existing engine EOD flags/refusals/counts through a native one-shot actor; remote-owner path is explicit",
+  "non_goals": ["client repository migration", "mirror pacing", "historical capture", "live rollout", "scheduled task changes"]
+}

@@ -1,0 +1,24 @@
+{
+  "source_release": "429bc683d46b8bc226c63d88329e042dfecddd29",
+  "cli": {
+    "source": "src/trade_engine/cli.py",
+    "git_blob": "57028b7c1175aee38466d23f35588e1f6c06dc59",
+    "source_sha256_lf": "a770a3b4469684bc24bb611640ef56003cbcbf0a1fb0779ff6350fadbf5620ab",
+    "frozen": "tests/frozen_p4c/t9_cli.py",
+    "frozen_sha256": "429a56aaf86a9e2441244b6eadd75a3b83429879cf226411e553af7ec2eef095",
+    "rewrite": "Only the EOD import points to tests.frozen_p4c.t9_eod_cli"
+  },
+  "eod_cli": {
+    "source": "src/trade_engine/eod/cli.py",
+    "git_blob": "cae7006c756e376c08085509345eff9240478cff",
+    "source_sha256_lf": "5661b74d62dc9befd53adbf1e17cfe2dedb0b9469ffb034bf31104bb4d668819",
+    "frozen": "tests/frozen_p4c/t9_eod_cli.py",
+    "frozen_sha256": "5661b74d62dc9befd53adbf1e17cfe2dedb0b9469ffb034bf31104bb4d668819",
+    "rewrite": "None; exact LF-normalized pre-port bytes, including no final newline"
+  },
+  "new_protocol": "t9_protocol.json is an explicit new contract, not a historical Python implementation",
+  "owner_decisions": [
+    "Existing EOD invocation is a thin client to a native one-shot actor; te serve also supports an explicit remote-owner client path",
+    "Configured job-record limit refuses new admissions without deleting or archiving any records"
+  ]
+}

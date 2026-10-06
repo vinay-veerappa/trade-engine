@@ -1,0 +1,4 @@
+t9_cli.py text eol=lf
+t9_eod_cli.py text eol=lf
+t9_oracle.json text eol=lf
+t9_protocol.json text eol=lf
