@@ -367,8 +367,12 @@ impl Store {
         let conn = Connection::open(path).map_err(OpenError::Sql)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(OpenError::Sql)?;
+        // TRUNCATE, not WAL: the runtime ledger lives under data\, where the
+        // operator's policy denies file delete/rename; a rollback journal is
+        // zeroed in place at commit instead of unlinked (WAL must create and
+        // unlink -wal/-shm, which the policy refuses with disk I/O error).
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+            "PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )
         .map_err(OpenError::Sql)?;
         conn.execute_batch(SCHEMA).map_err(OpenError::Sql)?;

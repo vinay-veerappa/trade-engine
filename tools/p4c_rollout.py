@@ -233,7 +233,7 @@ def default_roles(repo: Path, binary: Path) -> list[RoleSpec]:
     return [
         RoleSpec(
             name="DailyScanners", role="scan",
-            jobs=["scan-eod"],
+            jobs=["eod"],
             ledger=str(repo / "data" / "trade_engine" / "scan-ledger.db"),
             venv_python=str(repo / ".venv313" / "Scripts" / "python.exe"),
             entry_module="scan_engine.runtime_owner_entry",
