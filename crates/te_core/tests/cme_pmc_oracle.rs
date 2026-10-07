@@ -288,3 +288,177 @@ fn test_cme_vs_pandas_market_calendars_equity() {
     assert_eq!(pre2012_pit_diff_count, 1672);
     assert_eq!(exact_matches, 3851);
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// P6C: energy (CL, MCL) and metals (GC, MGC) against pandas_market_calendars `CMEGlobex_CL` / `CMEGlobex_GC`.
+// ---------------------------------------------------------------------------------------------------------------
+
+const PMC_ENERGY_CSV: &str = include_str!("fixtures/cme_pmc_fixture_energy.csv");
+const PMC_METALS_CSV: &str = include_str!("fixtures/cme_pmc_fixture_metals.csv");
+
+fn parse_csv(text: &str) -> HashMap<NaiveDate, (DateTime<Utc>, DateTime<Utc>)> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("date") {
+            continue;
+        }
+        let p: Vec<&str> = line.split(',').collect();
+        assert_eq!(p.len(), 3);
+        let d = NaiveDate::parse_from_str(p[0], "%Y-%m-%d").unwrap();
+        let o = DateTime::parse_from_rfc3339(p[1]).unwrap().with_timezone(&Utc);
+        let c = DateTime::parse_from_rfc3339(p[2]).unwrap().with_timezone(&Utc);
+        map.insert(d, (o, c));
+    }
+    map
+}
+
+/// Every date on which the root's table and pmc disagree (open instant, close instant, or one of them has no session).
+fn pmc_diffs(root: &str, csv: &str) -> Vec<(NaiveDate, Option<(DateTime<Utc>, DateTime<Utc>)>, Option<(DateTime<Utc>, DateTime<Utc>)>)> {
+    let cal = globex::GlobexCalendar::for_root(root).unwrap();
+    let pmc = parse_csv(csv);
+    let table: HashSet<NaiveDate> = cal.sessions_in_range(cal.first_date(), cal.last_date()).unwrap().into_iter().collect();
+    let mut dates: Vec<NaiveDate> = table.iter().copied().chain(pmc.keys().copied()).collect::<HashSet<_>>().into_iter().collect();
+    dates.sort();
+    let mut out = Vec::new();
+    for d in dates {
+        let t = table.contains(&d).then(|| (cal.session_open(d).unwrap(), cal.session_close(d).unwrap()));
+        let p = pmc.get(&d).copied();
+        if t != p {
+            out.push((d, t, p));
+        }
+    }
+    out
+}
+
+/// The 72 dates on which the energy table (CL, MCL) and the metals table (GC, MGC) disagree with pmc. Both groups
+/// disagree on the same dates, and every disagreement is an early-halt MINUTE (pmc carries no halt times: it uses
+/// 13:00, 14:30 or a regular 17:00 close, its own rules per era). No pmc session date is missing from, or extra to,
+/// the CME tables, and every session open agrees. In each case the CME table wins, and our 1m bars side with it:
+/// `calendar_data_oracle.rs` finds no bar after the table's halt on any of these dates in CL or GC, apart from the
+/// stamp-minute artifacts it lists. pmc is the one that is wrong.
+static ENERGY_METALS_ALLOW_LIST: &[AllowListEntry] = &[
+    AllowListEntry { date: (2009, 1, 19), cme_source_date: Some((2009, 1, 19)), notes: "close: CME table 17:00 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2009, 2, 16), cme_source_date: Some((2009, 2, 16)), notes: "close: CME table 17:00 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2009, 5, 22), cme_source_date: Some((2009, 5, 22)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2009, 5, 25), cme_source_date: Some((2009, 5, 25)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2009, 7, 3), cme_source_date: Some((2009, 7, 3)), notes: "close: CME table 13:30 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2009, 9, 4), cme_source_date: Some((2009, 9, 4)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2009, 9, 7), cme_source_date: Some((2009, 9, 7)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2009, 11, 26), cme_source_date: Some((2009, 11, 26)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2009, 12, 24), cme_source_date: Some((2009, 12, 24)), notes: "close: CME table 13:45 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 1, 15), cme_source_date: Some((2010, 1, 15)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 1, 18), cme_source_date: Some((2010, 1, 18)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 2, 12), cme_source_date: Some((2010, 2, 12)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 2, 15), cme_source_date: Some((2010, 2, 15)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 5, 28), cme_source_date: Some((2010, 5, 28)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 5, 31), cme_source_date: Some((2010, 5, 31)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 7, 2), cme_source_date: Some((2010, 7, 2)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 7, 5), cme_source_date: Some((2010, 7, 5)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 9, 3), cme_source_date: Some((2010, 9, 3)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 9, 6), cme_source_date: Some((2010, 9, 6)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 10, 8), cme_source_date: Some((2010, 10, 8)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2010, 11, 25), cme_source_date: Some((2010, 11, 25)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2011, 1, 14), cme_source_date: Some((2011, 1, 14)), notes: "close: CME table 16:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2011, 1, 17), cme_source_date: Some((2011, 1, 17)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2011, 2, 21), cme_source_date: Some((2011, 2, 21)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2011, 5, 30), cme_source_date: Some((2011, 5, 30)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2011, 7, 4), cme_source_date: Some((2011, 7, 4)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2011, 9, 5), cme_source_date: Some((2011, 9, 5)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2011, 11, 24), cme_source_date: Some((2011, 11, 24)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2012, 1, 16), cme_source_date: Some((2012, 1, 16)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2012, 2, 20), cme_source_date: Some((2012, 2, 20)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2012, 5, 28), cme_source_date: Some((2012, 5, 28)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2012, 7, 4), cme_source_date: Some((2012, 7, 4)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2012, 9, 3), cme_source_date: Some((2012, 9, 3)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2012, 11, 22), cme_source_date: Some((2012, 11, 22)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2012, 12, 24), cme_source_date: Some((2012, 12, 24)), notes: "close: CME table 13:45 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2013, 1, 21), cme_source_date: Some((2013, 1, 21)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2013, 2, 18), cme_source_date: Some((2013, 2, 18)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2013, 5, 27), cme_source_date: Some((2013, 5, 27)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2013, 7, 4), cme_source_date: Some((2013, 7, 4)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2013, 9, 2), cme_source_date: Some((2013, 9, 2)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2013, 11, 28), cme_source_date: Some((2013, 11, 28)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2013, 12, 24), cme_source_date: Some((2013, 12, 24)), notes: "close: CME table 13:45 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2014, 1, 20), cme_source_date: Some((2014, 1, 20)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2014, 2, 17), cme_source_date: Some((2014, 2, 17)), notes: "close: CME table 13:15 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2014, 12, 24), cme_source_date: Some((2014, 12, 24)), notes: "close: CME table 13:45 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2015, 12, 24), cme_source_date: Some((2015, 12, 24)), notes: "close: CME table 13:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2018, 12, 24), cme_source_date: Some((2018, 12, 24)), notes: "close: CME table 13:15 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2019, 12, 24), cme_source_date: Some((2019, 12, 24)), notes: "close: CME table 13:45 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2020, 12, 24), cme_source_date: Some((2020, 12, 24)), notes: "close: CME table 13:45 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2022, 1, 17), cme_source_date: Some((2022, 1, 17)), notes: "close: CME table 13:00 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2022, 2, 21), cme_source_date: Some((2022, 2, 21)), notes: "close: CME table 13:00 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2022, 5, 30), cme_source_date: Some((2022, 5, 30)), notes: "close: CME table 13:00 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2022, 7, 4), cme_source_date: Some((2022, 7, 4)), notes: "close: CME table 13:00 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2022, 11, 24), cme_source_date: Some((2022, 11, 24)), notes: "close: CME table 13:00 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2023, 1, 16), cme_source_date: Some((2023, 1, 16)), notes: "close: CME table 13:30 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2023, 2, 20), cme_source_date: Some((2023, 2, 20)), notes: "close: CME table 13:30 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2023, 5, 29), cme_source_date: Some((2023, 5, 29)), notes: "close: CME table 13:30 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2023, 7, 4), cme_source_date: Some((2023, 7, 4)), notes: "close: CME table 13:30 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2024, 1, 15), cme_source_date: Some((2024, 1, 15)), notes: "close: CME table 13:30 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2024, 2, 19), cme_source_date: Some((2024, 2, 19)), notes: "close: CME table 13:30 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2024, 7, 4), cme_source_date: Some((2024, 7, 4)), notes: "close: CME table 13:30 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2024, 9, 2), cme_source_date: Some((2024, 9, 2)), notes: "close: CME table 14:30 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2024, 11, 29), cme_source_date: Some((2024, 11, 29)), notes: "close: CME table 14:45 ET vs pmc 13:45 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2024, 12, 24), cme_source_date: Some((2024, 12, 24)), notes: "close: CME table 13:45 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2025, 7, 4), cme_source_date: Some((2025, 7, 4)), notes: "close: CME table 13:00 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2025, 9, 1), cme_source_date: Some((2025, 9, 1)), notes: "close: CME table 14:30 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2025, 11, 27), cme_source_date: Some((2025, 11, 27)), notes: "close: CME table 13:30 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2025, 11, 28), cme_source_date: Some((2025, 11, 28)), notes: "close: CME table 14:45 ET vs pmc 13:45 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2025, 12, 24), cme_source_date: Some((2025, 12, 24)), notes: "close: CME table 13:45 ET vs pmc 17:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2027, 6, 18), cme_source_date: Some((2027, 6, 18)), notes: "close: CME table 13:00 ET vs pmc 14:30 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2027, 9, 6), cme_source_date: Some((2027, 9, 6)), notes: "close: CME table 14:30 ET vs pmc 13:00 ET (table row cited to CME, pmc has no halt-time data)" },
+    AllowListEntry { date: (2027, 11, 26), cme_source_date: Some((2027, 11, 26)), notes: "close: CME table 14:45 ET vs pmc 13:45 ET (table row cited to CME, pmc has no halt-time data)" },
+];
+
+#[test]
+fn test_cme_vs_pandas_market_calendars_energy_metals() {
+    let mut allow_map: HashMap<NaiveDate, &AllowListEntry> = HashMap::new();
+    for e in ENERGY_METALS_ALLOW_LIST {
+        let d = NaiveDate::from_ymd_opt(e.date.0, e.date.1, e.date.2).unwrap();
+        assert!(!e.notes.is_empty());
+        allow_map.insert(d, e);
+    }
+    assert_eq!(allow_map.len(), ENERGY_METALS_ALLOW_LIST.len());
+
+    // (root, pmc fixture) for each group; MCL / MGC have the same tables as CL / GC from their listing floor.
+    for (root, csv) in [("CL", PMC_ENERGY_CSV), ("GC", PMC_METALS_CSV), ("MCL", PMC_ENERGY_CSV), ("MGC", PMC_METALS_CSV)] {
+        let cal = globex::GlobexCalendar::for_root(root).unwrap();
+        let pmc = parse_csv(csv);
+        let mut hits = HashSet::new();
+        let mut exact = 0usize;
+        let sessions = cal.sessions_in_range(cal.first_date(), cal.last_date()).unwrap();
+        let table: HashSet<NaiveDate> = sessions.iter().copied().collect();
+        for &d in &sessions {
+            let t = (cal.session_open(d).unwrap(), cal.session_close(d).unwrap());
+            match pmc.get(&d) {
+                Some(&p) if p == t => exact += 1,
+                Some(&p) => {
+                    // an open that differs, or a date pmc has no session for, is never allow-listed: only close minutes
+                    assert_eq!(t.0, p.0, "{root} {d}: session open differs from pmc");
+                    assert!(allow_map.contains_key(&d), "{root}: unlisted close difference on {d}: table={t:?} pmc={p:?}");
+                    hits.insert(d);
+                }
+                None => panic!("{root}: the table has a session on {d} that pmc lacks"),
+            }
+        }
+        // pmc sessions inside the root's range that the table does not have
+        for &d in pmc.keys() {
+            if d >= cal.first_date() && d <= cal.last_date() {
+                assert!(table.contains(&d), "{root}: pmc has a session on {d} that the table lacks");
+            }
+        }
+        // every allow-listed date inside this root's range must still disagree
+        for (&d, e) in &allow_map {
+            if d >= cal.first_date() {
+                assert!(hits.contains(&d), "{root}: allow-listed difference on {d} ({}) has gone away", e.notes);
+            }
+        }
+        println!("{root}: {} sessions, {exact} exact, {} allow-listed close-minute differences", sessions.len(), hits.len());
+        match root {
+            "CL" | "GC" => assert_eq!((sessions.len(), exact, hits.len()), (4902, 4830, 72)),
+            _ => {}
+        }
+    }
+}
