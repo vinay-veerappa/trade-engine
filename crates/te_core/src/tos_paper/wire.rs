@@ -289,6 +289,8 @@ pub fn linstr_json(i: &lm::Instrument) -> Json {
             ("right", jstr(if c.right == Right::Call { "C" } else { "P" })),
             ("multiplier", Json::Int(c.multiplier)),
         ]),
+        // A future has no tos_paper form: it reads back as `other`, which `linstr` refuses.
+        lm::Instrument::Future(f) => obj(vec![("kind", jstr("other")), ("repr", jstr(f.root.clone()))]),
         lm::Instrument::Combo(legs) => obj(vec![
             ("kind", jstr("combo")),
             (

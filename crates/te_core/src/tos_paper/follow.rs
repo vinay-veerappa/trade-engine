@@ -62,7 +62,7 @@ fn sold_of(order: &Order) -> Sold {
     let single = match &order.instrument {
         Instrument::Equity(_) => true,
         Instrument::Option(c) => c.right == Right::Call,
-        Instrument::Combo(_) => false,
+        Instrument::Combo(_) | Instrument::Future(_) => false,
     };
     if order.side != Side::Sell || !single {
         return None;

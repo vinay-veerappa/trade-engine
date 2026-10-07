@@ -189,6 +189,7 @@ pub fn cover_reason(mirror: &MirrorState, sold: &Sold, accepted: &[Sold]) -> R<O
         Instrument::Equity(symbol) => symbol.clone(),
         Instrument::Option(c) => c.underlying.clone(),
         Instrument::Combo(_) => return wire("a combo is never sold here"),
+        Instrument::Future(_) => return wire("a future is never sold here"),
     };
     let before = lookup(&uncovered(&held)?, &underlying);
     let mut after_held = held.clone();
