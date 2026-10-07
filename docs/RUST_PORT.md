@@ -52,7 +52,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **in progress (T0..T13; flip verified)**; scoped checkpoints verified; the side-by-side paper-session flip and the §5.2-scale recorded-replay certification are verified below, the remaining T14 rollout kit follows |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **complete locally (T0..T14)**; scoped checkpoints verified; the side-by-side paper-session flip, the §5.2-scale recorded-replay certification and the staged rollout kit are verified below — applying the kit needs an owner-approved canary (§7 Stage D) |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | after P5 |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
@@ -2350,6 +2350,44 @@ fixture acquisition (the certificate says so in its `note`).
   certify/verify CLI); engine suites **232 passed**; workspace **132**.
   Full certificate: `tests/p4c_replay_certificate.json` (provenance
   synthetic, binary hash pinned).
+
+### P4c T14 checkpoint (staged Windows rollout kit) — verified
+
+`tools/p4c_rollout.py` + `launch/runtime/` (committed `3a21c8d` on
+`te/p4c-t9`) STAGE the rollout; the kit never applies it. All Task
+Scheduler and process operations are fakes (`FakeShell`); registering or
+starting a real task is not implemented at all, and the CLI refuses
+`rollback-role` without `--dry-run`. Applying the kit needs an
+owner-approved canary (§7 Stage D).
+
+- **The one-action rollback** (`rollback-role`) is an ordered handoff:
+  stop admission → graceful stop (stdin close, the owner drains) → wait
+  for the ledger `.lock` release → switch the per-ledger selector to
+  legacy → start the retained legacy release. A blocked owner is
+  REPORTED and the rollback stops before the selector switch; no lock
+  or heartbeat is ever deleted to manufacture liveness.
+- **The per-ledger selector** (`launch/runtime/runtime_selector.json`,
+  default legacy, no rows) is the only switch the rollback touches; its
+  `tasks` index maps scheduled-task names to ledgers and mutual
+  exclusion is enforced (one row per ledger, legacy/runtime values
+  only, duplicate or empty rows refuse).
+- **The staged launcher template** (`launch/runtime/run_runtime_owner.ps1`)
+  keeps absolute paths, `TE_BINARY`, `logs\trade_engine` logging and the
+  owner's exit code.
+- **The client proposal** lives in worktree `p4c/t14-client` only
+  (`dae49e81`): the staged `scan_engine.runtime_owner_entry` router
+  (each configured role → its converted T10/T11/T12 owner entry over the
+  ONE attached ledger), the `runtime_rollout_job` submitter, and the
+  proposed `run_logged.ps1` selector seam whose legacy path stays
+  byte-for-byte the default (a runtime row without `TE_RUNTIME_CONFIG`
+  refuses loudly, never falls back mid-job). The live client's scripts
+  are NOT patched.
+- Gates: `tests/test_p4c_rollout.py` **15 passed** (the ordered
+  handoff, the blocked-owner rule, selector mutual exclusion and the
+  task index, the refusals, the CLI); engine P4c suites **255 passed**;
+  workspace **132**; client gate (scan_engine + options + frozen
+  T10/T11/T12) **1,143 passed, 1 skipped** (the T12 baseline 1,138 +
+  5 census).
 
 ## Working rules
 
