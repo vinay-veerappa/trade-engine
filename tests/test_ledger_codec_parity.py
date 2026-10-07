@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import pytest
 import trade_engine_rs as rs  # a missing module is an ERROR, never a skip (D5)
-from ledger_gen import dumps, encoded, event_zoo, py_reencode, zoo_kinds
+from ledger_gen import dumps, encoded, event_zoo, norm, norm_outcome, outside_bound, py_reencode, zoo_kinds
 
 from trade_engine.ledger.events import EventKind
 
@@ -45,9 +45,11 @@ def compare(data: bytes, strict: list | None = None):
     py = py_reencode(data)
     rust = rs_reencode(data)
     if py[0] == "ok" and rust[0] == "ok":
-        assert rust[1] == py[1], data
+        assert norm(rust[1]) == norm(py[1]), data  # by value (P7): the spelling is canonical on one side only
         return
     if py[0] == "ok":
+        if outside_bound(data):
+            return  # P7: a decimal beyond the canonical bound is refused (I5); the oracle accepts it
         assert rust[1] in STRICT, f"Rust refused what Python accepts ({rust}) for {data!r}"
         if strict is not None:
             strict.append((rust[1], rust[2], data))
@@ -55,6 +57,8 @@ def compare(data: bytes, strict: list | None = None):
     assert rust[0] == "err", f"Rust ACCEPTED what Python refuses ({py}) for {data!r}"
     if rust[1] in STRICT:
         return  # both refuse; Rust names the refusal as strictness, not a category
+    if outside_bound(data) and rust[1] == "codec":
+        return  # P7: both refuse; Rust refuses the out-of-bound decimal at parse, before Python's own check
     assert rust[1] == py[1], f"category {rust[1]!r} != Python {py[1]!r} for {data!r}\nrust: {rust[2]}\npy:   {py[2]}"
 
 
@@ -70,11 +74,16 @@ def test_reencode_is_byte_identical(index):
     event = event_zoo()[index]
     data = encoded([event])[0]
     result = rs_reencode(data)
-    assert result == ("ok", data), (event.kind, result)
+    if outside_bound(data):  # P7: the zoo's 39-digit Mark is beyond the canonical bound (I5): refused, not rounded
+        assert result[0] == "err" and result[1] == "codec", (event.kind, result)
+        return
+    assert result == ("ok", norm(data)), (event.kind, result)  # P7: canonical spelling
 
 
 def test_reencode_is_idempotent_and_utf8_clean():
     for data in encoded(event_zoo()):
+        if outside_bound(data):
+            continue  # P7: refused (I5)
         once = rs_reencode(data)[1]
         assert rs_reencode(once)[1] == once
 
@@ -284,7 +293,7 @@ def test_instrument_variants_are_generic():
     for inst in (AAPL, C200, SPREAD):
         event = _ev(EventKind.MARK, Mark(inst, __import__("decimal").Decimal("1.5"), event_zoo()[0].ts_utc))
         data = encoded([event])[0]
-        assert rs_reencode(data) == ("ok", data)
+        assert rs_reencode(data) == ("ok", norm(data))
     # MirrorQueued carries shares of an Equity (covered-call mirror, S1a) in both implementations
     venue = "D-1"
     queued = MirrorQueued(venue, "k", C200, Side.SELL, __import__("decimal").Decimal("1"), OrderType.MARKET, None,
@@ -294,7 +303,7 @@ def test_instrument_variants_are_generic():
     node["payload"]["f"]["instrument"] = {"dc": "Equity", "f": {"symbol": "AAPL"}}
     data = dumps(node)
     py, rust = py_reencode(data), rs_reencode(data)
-    assert py[0] == "ok" and rust == py, (py, rust)
+    assert py[0] == "ok" and rust == norm_outcome(py), (py, rust)
     # anything that is not an instrument is still refused by both, in the same category
     node["payload"]["f"]["instrument"] = {"dc": "Mark", "f": {}}
     py, rust = py_reencode(dumps(node)), rs_reencode(dumps(node))

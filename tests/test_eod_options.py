@@ -453,7 +453,7 @@ def test_an_option_fill_reaches_the_journal_as_an_option_with_its_multiplier(rig
     rig.run(S2, journal_accounts={ACCOUNT: "journal-1"})
     [item] = rig.ledger.pending_outbox("journal:journal-1")
     assert item.payload["asset_class"] == "option" and item.payload["multiplier"] == 100
-    assert item.payload["symbol"] == P270.occ and item.payload["profit_target"] == "5.00"
+    assert item.payload["symbol"] == P270.occ and item.payload["profit_target"] == "5"  # P7: canonical spelling (was "5.00")
 
 
 def test_the_daily_snapshot_margins_the_put_against_the_marked_underlying(rig) -> None:

@@ -35,6 +35,9 @@ import trade_engine_rs as rs  # a missing module is an ERROR, never a skip (D5)
 from ledger_gen import (
     encoded,
     event_zoo,
+    norm,
+    norm_outcome,
+    outside_bound,
     prod_fold,
     prod_fold_all,
     py_fold,
@@ -79,9 +82,12 @@ def rs_fold_all(blobs):
         return ("err", err.args[0], err.args[1])
 
 
-def same(py, prod, what):
+def same(py, prod, what, blobs=()):
     """The production path must equal the frozen oracle exactly: state bytes, or refusal
     kind AND message (the store and every caller see these)."""
+    if prod[0] == "err" and prod[1] == "codec" and any(outside_bound(b) for b in blobs):
+        return  # P7: a decimal beyond the canonical bound is refused (I5); the oracle folds it
+    py = norm_outcome(py)  # P7: the oracle spells decimals as str(Decimal); compared by value
     assert prod == py, f"production differs from the oracle for {what}\npy:   {py!r:.600}\nprod: {prod!r:.600}"
 
 
@@ -90,16 +96,20 @@ class Tally:
         self.ok = 0
         self.refused = 0
         self.strict = 0
+        self.bound = 0
         self.kinds = collections.Counter()
 
     def total(self):
         return self.ok + self.refused + self.strict
 
 
-def compare(py, rust, what, tally):
-    """Rust must equal Python: same bytes, or same refusal kind and message."""
+def compare(py, rust, what, tally, blobs=()):
+    """Rust must equal Python: same bytes (by value, P7), or same refusal kind and message."""
+    if rust[0] == "err" and rust[1] == "codec" and any(outside_bound(b) for b in blobs):
+        tally.bound += 1  # P7: a decimal beyond the canonical bound is refused at parse (I5)
+        return
     if py[0] == "ok" and rust[0] == "ok":
-        assert rust[1] == py[1], f"state differs for {what}\npy:   {py[1]!r}\nrust: {rust[1]!r}"
+        assert norm(rust[1]) == norm(py[1]), f"state differs for {what}\npy:   {py[1]!r}\nrust: {rust[1]!r}"
         tally.ok += 1
         return
     if py[0] == "ok":
@@ -128,11 +138,11 @@ def check_stream(events, tally, what):
     blobs = encoded(events)
     for account in accounts_of(events):
         py = py_fold(events, account)
-        compare(py, rs_fold(blobs, account), f"{what} account={account}", tally)
-        same(py, prod_fold(events, account), f"{what} account={account}")
+        compare(py, rs_fold(blobs, account), f"{what} account={account}", tally, blobs)
+        same(py, prod_fold(events, account), f"{what} account={account}", blobs)
     py = py_fold_all(events)
-    compare(py, rs_fold_all(blobs), f"{what} fold-all", tally)
-    same(py, prod_fold_all(events), f"{what} fold-all")
+    compare(py, rs_fold_all(blobs), f"{what} fold-all", tally, blobs)
+    same(py, prod_fold_all(events), f"{what} fold-all", blobs)
 
 
 # --- the zoo -------------------------------------------------------------------------
@@ -145,10 +155,11 @@ def test_zoo_every_prefix_per_account_matches():
         sub = [e for e in zoo if e.account == account]
         for n in range(1, len(sub) + 1):
             py = py_fold(sub[:n], account)
-            compare(py, rs_fold(encoded(sub[:n]), account), f"zoo {account}[:{n}]", tally)
-            same(py, prod_fold(sub[:n], account), f"zoo {account}[:{n}]")
+            compare(py, rs_fold(encoded(sub[:n]), account), f"zoo {account}[:{n}]", tally, encoded(sub[:n]))
+            same(py, prod_fold(sub[:n], account), f"zoo {account}[:{n}]", encoded(sub[:n]))
     assert tally.ok > 5 and tally.refused > 5
     assert tally.strict == 0
+    assert tally.bound > 0  # the zoo's 39-digit Mark is refused as out of bound (P7, I5)
 
 
 def test_an_empty_log_folds_to_the_default_state():
@@ -225,14 +236,14 @@ def test_the_suites_streams_fold_identically(recorded):
         what = f"recorded[{i}] {rec['kind']}"
         if rec["kind"] == "fold_account":
             py = py_fold(events, rec["account"])
-            compare(py, rs_fold(blobs, rec["account"]), what, tally)
-            same(py, prod_fold(events, rec["account"]), what)
+            compare(py, rs_fold(blobs, rec["account"]), what, tally, blobs)
+            same(py, prod_fold(events, rec["account"]), what, blobs)
             if py[0] == "ok":
                 kinds_folded |= {e.kind for e in events if e.account == rec["account"]}
         else:
             py = py_fold_all(events)
-            compare(py, rs_fold_all(blobs), what, tally)
-            same(py, prod_fold_all(events), what)
+            compare(py, rs_fold_all(blobs), what, tally, blobs)
+            same(py, prod_fold_all(events), what, blobs)
             if py[0] == "ok":
                 kinds_folded |= {e.kind for e in events}
     assert tally.strict == 0

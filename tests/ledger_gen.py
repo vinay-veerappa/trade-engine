@@ -567,3 +567,63 @@ def random_stream(seed: int) -> tuple[list[Event], str]:
             rnd.shuffle(stamped)
         evs = stamped
     return evs, acct
+
+
+# --- P7: the oracles keep their old spelling; parity is by VALUE ------------------------------
+#
+# The frozen oracles (and the pre-P7 fixtures) spell a decimal as `str(Decimal)`; the
+# production path spells it canonically (docs/RUST_PORT.md P7 S1). Comparing the two is done
+# after re-spelling BOTH sides with `norm`, so a value difference still fails and a spelling
+# difference does not. A literal outside the canonical bound is refused by production and
+# accepted by the oracle: `outside_bound` names those, the one sanctioned asymmetry.
+
+
+def _respell(node):
+    from trade_engine.ledger.codec import DecimalRangeError, canon_decimal
+
+    if isinstance(node, dict):
+        if set(node) == {"d"} and isinstance(node["d"], str):
+            try:
+                return {"d": canon_decimal(Decimal(node["d"]))}
+            except (DecimalRangeError, ArithmeticError, ValueError):
+                return node
+        return {k: _respell(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_respell(v) for v in node]
+    return node
+
+
+def norm(data: bytes) -> bytes:
+    """`data` (an encoded event or state, JSON bytes) with every decimal canonically spelled."""
+    return dumps(_respell(json.loads(data.decode("utf-8"))))
+
+
+def norm_outcome(outcome):
+    """An outcome tuple ('ok', bytes) with its bytes normalized; refusals pass through."""
+    if outcome[0] == "ok" and isinstance(outcome[1], (bytes, bytearray)):
+        return ("ok", norm(bytes(outcome[1])))
+    return outcome
+
+
+def outside_bound(data: bytes) -> bool:
+    """True when some `{"d": text}` in `data` is not representable canonically (NaN,
+    Infinity, beyond 96 bits or 28 places), or does not parse as a decimal at all."""
+    from trade_engine.ledger.codec import DecimalRangeError, canon_decimal
+
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if set(node) == {"d"} and isinstance(node["d"], str):
+                try:
+                    canon_decimal(Decimal(node["d"]))
+                except (DecimalRangeError, ArithmeticError, ValueError):
+                    return True
+                return False
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    try:
+        return walk(json.loads(data.decode("utf-8")))
+    except (ValueError, UnicodeDecodeError):
+        return False

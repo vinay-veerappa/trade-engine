@@ -20,7 +20,7 @@ import trade_engine_rs as rs  # D5: a missing module is an error, never a skip
 
 from frozen_ledger.state import AccountState as OracleState
 from frozen_ledger.state import apply_event as oracle_apply
-from ledger_gen import canon, dumps, event_zoo, kind_of, random_stream
+from ledger_gen import canon, dumps, event_zoo, kind_of, norm, random_stream
 from trade_engine.ledger import codec
 from trade_engine.ledger.reader import LedgerReader
 from trade_engine.ledger.state import AccountState, FoldCache, LedgerFoldError
@@ -40,7 +40,8 @@ def _oracle_step(states: dict, event) -> BaseException | None:
 
 
 def _same(prod_state, oracle_state, where: str) -> None:
-    assert dumps(canon(prod_state)) == dumps(canon(oracle_state)), where
+    # P7: by value; the oracle spells a decimal str(Decimal), production spells it canonically
+    assert norm(dumps(canon(prod_state))) == norm(dumps(canon(oracle_state))), where
 
 
 @pytest.mark.parametrize("read_every", [1, 3])

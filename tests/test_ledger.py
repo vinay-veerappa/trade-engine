@@ -542,7 +542,8 @@ def test_non_finite_fill_price_quantity_or_fee_is_refused() -> None:
         ("fee=NaN", a_fill("f2", "o1", quantity="100", price="10", fee="NaN")),
         ("fee=Infinity", a_fill("f3", "o1", quantity="100", price="10", fee="Infinity")),
     ]:
-        with pytest.raises(LedgerFoldError, match="finite Decimal"):
+        # P7: the Rust fold refuses a non-finite decimal at the wire (before PyDec's fold check did)
+        with pytest.raises((LedgerFoldError, PayloadCodecError), match="finite Decimal|Invalid Decimal literal"):
             fold([*events_head, Event(account="ACC", kind=EventKind.FILL, payload=fill, ts_utc=TS, seq=2)])
         # smoke: each value parses as a Decimal (they are non-finite, not invalid literals)
         assert not fill.price.is_finite() or not fill.fee.is_finite() or True
