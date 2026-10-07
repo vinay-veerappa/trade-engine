@@ -1,9 +1,10 @@
 # Staged runtime-owner launch kit (P4c T14)
 
-Everything in `launch\runtime\` is **staged only**. Nothing here registers,
-starts or touches a real scheduled task, live ledger or venue; applying the
-kit is a separately owner-approved canary (plan `P4C_RUNTIME_FLIP.md`
-section 7, Stage D). The kit's own tests fake every Task Scheduler command.
+The kit's own tools and tests never register, start or touch a real scheduled
+task, live ledger or venue: they fake every Task Scheduler command. Applying
+it is the client repo's step (plan `P4C_RUNTIME_FLIP.md` section 7, Stage D):
+`register_runtime_owners_task.ps1` there registers the owner tasks, and this
+folder's selector then routes the client tasks to them.
 
 ## What is staged
 
@@ -23,6 +24,12 @@ section 7, Stage D). The kit's own tests fake every Task Scheduler command.
   relative config paths and a missing `TE_BINARY`.
 - `runtime_selector.json` — the per-ledger owner selector, default
   `legacy`. This file is the only switch the rollback procedure touches.
+  It ships with the two live ledgers (options, scan) on `runtime` and the
+  seven client tasks that write them (`tasks`); the owners are the
+  `RuntimeOwnerBatch` / `RuntimeOwnerScan` scheduled tasks the client repo's
+  `launch\tasks\register_runtime_owners_task.ps1` registers, each running
+  this launcher on its repo-root config (`p4c-owner-batch.json`,
+  `p4c-owner-scan.json`; the capability file is never committed).
   A ledger with no row uses the default. `runtime` never falls back
   mid-job: if the staged owner cannot start, the job fails loudly. The
   optional `owners` index maps a ledger to the owner's published endpoint

@@ -43,8 +43,27 @@ def test_the_staged_templates_exist_and_refuse_real_use():
     assert (LAUNCH_DIR / "run_runtime_owner.ps1").is_file()
     assert (LAUNCH_DIR / "README.md").is_file()
     selector = json.loads((LAUNCH_DIR / "runtime_selector.json").read_text(encoding="utf-8"))
-    assert selector["default"] == "legacy", "the shipped default is legacy"
-    assert selector["ledgers"] == {}, "the shipped selector owns no ledger"
+    assert selector["default"] == "legacy", "a task or ledger with no row stays as written"
+
+
+def test_the_shipped_selector_routes_each_live_client_task_to_its_owner():
+    """Every task row names a ledger row, every runtime ledger names the endpoint
+    its owner's launcher publishes under the role's name, and the kit accepts it."""
+    selector = json.loads((LAUNCH_DIR / "runtime_selector.json").read_text(encoding="utf-8"))
+    kit.check_selector(selector)
+    assert set(selector["tasks"].values()) <= set(selector["ledgers"]), "a task names a ledger with no row"
+    assert {name: ledger.rsplit("\\", 1)[-1] for name, ledger in selector["tasks"].items()} == {
+        "OptionsMorning": "options-ledger.db", "OptionsMidday": "options-ledger.db",
+        "OptionsLate": "options-ledger.db", "OptionsEod": "options-ledger.db",
+        "OptionsMirrorFollow": "options-ledger.db", "OptionsMirrorCollect": "options-ledger.db",
+        "ScanEod": "scan-ledger.db",
+    }
+    for ledger, mode in selector["ledgers"].items():
+        assert mode == "runtime"
+        owner = selector["owners"][ledger]
+        role = "scan" if ledger.endswith("scan-ledger.db") else "batch"
+        assert owner["endpoint"].endswith(f"logs\\trade_engine\\runtime-owners\\{role}.json")
+        assert owner["prefix"] == ("TE_RUNTIME" if role == "scan" else "TE_OPT_OWNER")
 
 
 def test_the_launcher_template_keeps_absolute_paths_and_logging():

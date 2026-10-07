@@ -1,6 +1,27 @@
 {
-    "comment": "P4c T14 per-ledger owner selector. One row per ledger path. 'legacy' (the default and the only value this kit ships with) keeps the classic Python owner; 'runtime' selects the staged Rust runtime owner. A role never falls back mid-job: a missing or uninstalled Rust sidecar refuses loudly. The optional 'tasks' index maps a scheduled-task name to its ledger path (the client seam knows the task name, not the ledger). This file is the ONLY switch the one-action rollback touches.",
+    "comment": "P4c per-ledger owner selector. 'ledgers' has one row per ledger path: 'runtime' means the ledger's tasks are clients of its Rust runtime owner (te.exe serve, kept running by launch\\runtime\\run_runtime_owner.ps1 under the RuntimeOwnerBatch / RuntimeOwnerScan tasks); 'legacy' leaves the task to run as written, with no owner address. 'tasks' maps a scheduled task's name to its ledger (the client seam knows the task name, not the ledger). 'owners' maps a runtime ledger to the endpoint file its owner's launcher publishes and the environment prefix its clients read; the task wrapper (the client repo's launch\\tasks\\run_logged.ps1) sets that environment, and refuses (exit 1) when the owner is not running: a runtime row never falls back mid-job. A task or ledger with no row uses 'default'. This file is the ONLY switch the rollback touches.",
     "default": "legacy",
-    "ledgers": {},
-    "tasks": {}
+    "ledgers": {
+        "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger.db": "runtime",
+        "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\scan-ledger.db": "runtime"
+    },
+    "tasks": {
+        "OptionsMorning": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger.db",
+        "OptionsMidday": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger.db",
+        "OptionsLate": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger.db",
+        "OptionsEod": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger.db",
+        "OptionsMirrorFollow": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger.db",
+        "OptionsMirrorCollect": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger.db",
+        "ScanEod": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\scan-ledger.db"
+    },
+    "owners": {
+        "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger.db": {
+            "endpoint": "C:\\Users\\vinay\\tvDownloadOHLC\\logs\\trade_engine\\runtime-owners\\batch.json",
+            "prefix": "TE_OPT_OWNER"
+        },
+        "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\scan-ledger.db": {
+            "endpoint": "C:\\Users\\vinay\\tvDownloadOHLC\\logs\\trade_engine\\runtime-owners\\scan.json",
+            "prefix": "TE_RUNTIME"
+        }
+    }
 }
