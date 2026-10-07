@@ -113,6 +113,41 @@ def register_carrier(cls: type) -> type:
 # --- the walker: objects -> tree, deciding nothing ------------------------------------
 
 
+class DecimalRangeError(ValueError):
+    """A decimal outside the canonical bound (P7, I5): not finite, or more than 28 decimal
+    places, or a mantissa of 2**96 or more. It is refused, never rounded."""
+
+
+_MANTISSA_LIMIT = 1 << 96
+_MAX_SCALE = 28
+
+
+def canon_decimal(value: Decimal) -> str:
+    """The one canonical spelling of a decimal (docs/RUST_PORT.md, P7 S1): the exact value,
+    plain notation, no trailing zeros, ``-0`` is ``0``. Byte-identical to Rust's
+    ``Money::canon``; a value outside the bound raises :class:`DecimalRangeError`."""
+    if not value.is_finite():
+        raise DecimalRangeError(f"decimal is not finite: {value}")
+    sign, digits, exponent = value.as_tuple()
+    coefficient = int("".join(map(str, digits)) or "0")
+    if coefficient == 0:
+        return "0"
+    while coefficient % 10 == 0:
+        coefficient //= 10
+        exponent += 1
+    if exponent > 0:
+        coefficient *= 10**exponent
+        exponent = 0
+    scale = -exponent
+    if scale > _MAX_SCALE or coefficient >= _MANTISSA_LIMIT:
+        raise DecimalRangeError(f"decimal outside the canonical bound: {value}")
+    body = str(coefficient)
+    if scale:
+        body = body.rjust(scale + 1, "0")
+        body = f"{body[:-scale]}.{body[-scale:]}"
+    return f"-{body}" if sign else body
+
+
 def _encode(value: Any) -> Any:
     if value is None:
         return {"n": True}
@@ -122,7 +157,11 @@ def _encode(value: Any) -> Any:
     if isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, Decimal):
-        return {"d": str(value)}
+        try:
+            return {"d": canon_decimal(value)}
+        except DecimalRangeError:
+            # outside the bound: hand Rust the raw text so ITS refusal (the one error path) is raised
+            return {"d": str(value)}
     if isinstance(value, datetime):
         return {"T": value.isoformat()}
     if isinstance(value, date):
@@ -309,4 +348,12 @@ def decode_event(encoded: Mapping[str, Any]) -> Event:
     )
 
 
-__all__ = ["PayloadCodecError", "decode_event", "decode_payload", "encode_event", "encode_payload"]
+__all__ = [
+    "DecimalRangeError",
+    "PayloadCodecError",
+    "canon_decimal",
+    "decode_event",
+    "decode_payload",
+    "encode_event",
+    "encode_payload",
+]

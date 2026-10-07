@@ -466,6 +466,15 @@ fn ledger_check_payload(text: &str) -> PyResult<Vec<u8>> {
     lb::check_encoded(text).map_err(refuse_ledger)
 }
 
+/// The canonical spelling (P7, S1) of a decimal literal; a value outside the bound or a
+/// non-number is a `ValueError` (I5).
+#[pyfunction]
+fn money_canon(text: &str) -> PyResult<String> {
+    te_core::money::Money::try_parse(text)
+        .map(|m| m.canon())
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e:?}")))
+}
+
 /// `decode_payload`'s refusals over an encoded tree (Python builds it once accepted).
 #[pyfunction]
 fn ledger_check_decode_payload(text: &str) -> PyResult<()> {
@@ -758,6 +767,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ledger_fold, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_fold_all, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_check_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(money_canon, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_check_decode_payload, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_check_event, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_check_row, m)?)?;
