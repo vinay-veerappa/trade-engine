@@ -1,4 +1,5 @@
-//! CME Globex equity index session calendar (NQ, MNQ, ES, MES), 2006 through 2027.
+//! CME Globex session calendars: equity index (2006-2027) via the free functions, and per root (equity, energy,
+//! metals; P6C) via [`GlobexCalendar::for_root`].
 //!
 //! # Semantics
 //!
@@ -6,6 +7,8 @@
 //!   - it opens at 18:00 ET on the previous calendar evening (Sunday 18:00 for Monday);
 //!   - it closes at 17:00 ET on D;
 //!   - there is a daily halt 17:00-18:00 ET, and the weekend runs from Friday 17:00 to Sunday 18:00.
+//! - **Eras (equity group only).** Before 2021-06-28 equity sessions also have a 16:15-16:30 ET halt inside the session, and
+//!   before 2012-11-17 a Friday session closes 16:15 ET (see [`EQUITY_ERAS`]). The rule above is the default after them.
 //! - **`early_halt` on D.** D's session closes at `halt_et` instead of 17:00.
 //!   - The next session opens at `reopen_et` if given (date-qualified if not the same day).
 //!   - Otherwise it opens at the normal 18:00 ET on the evening before the next trade date.
@@ -58,6 +61,12 @@ pub enum GlobexError {
     InvertedRange(NaiveDate, NaiveDate),
     /// A row in the holiday table could not be parsed.
     MalformedRow(String),
+    /// The root has no Globex calendar (I5).
+    UnknownRoot(String),
+    /// The date is outside the range of this root's calendar (I5).
+    RootOutOfRange { root: &'static str, date: NaiveDate, first: NaiveDate, last: NaiveDate },
+    /// The instant is outside the range of this root's calendar (I5).
+    RootOutOfRangeInstant { root: &'static str, instant: DateTime<Utc>, first: NaiveDate, last: NaiveDate },
 }
 
 impl std::fmt::Display for GlobexError {
@@ -76,6 +85,13 @@ impl std::fmt::Display for GlobexError {
             Self::NotASession(d) => write!(f, "Date {d} is not a valid trading session of CME Globex (I5)"),
             Self::InvertedRange(s, e) => write!(f, "start date {s} cannot be after end date {e}"),
             Self::MalformedRow(msg) => write!(f, "Malformed CME holiday table row: {msg}"),
+            Self::UnknownRoot(r) => write!(f, "No CME Globex calendar for futures root '{r}' (I5)"),
+            Self::RootOutOfRange { root, date, first, last } => {
+                write!(f, "Date {date} is outside the CME Globex calendar range {first}..{last} of {root} (I5)")
+            }
+            Self::RootOutOfRangeInstant { root, instant, first, last } => {
+                write!(f, "Instant {instant} is outside the CME Globex calendar range {first}..{last} of {root} (I5)")
+            }
         }
     }
 }
@@ -108,6 +124,23 @@ pub struct SessionInfo {
     pub trade_date: NaiveDate,
     pub open_utc: DateTime<Utc>,
     pub close_utc: DateTime<Utc>,
+    /// An intra-session halt `[start, end)` inside `[open, close)` (the 16:15-16:30 ET equity halt of the early eras).
+    pub halt_utc: Option<(DateTime<Utc>, DateTime<Utc>)>,
+}
+
+/// A dated session-rule era of a product group (P6C review). Trade dates in `[from, to]` follow these rules instead of
+/// the default (open 18:00 ET the evening before, close 17:00 ET, no halt inside the session). A holiday-table row
+/// (closed, early halt, reopen) always wins over an era. The default rule is what applies after the last era.
+#[derive(Debug, Clone, Copy)]
+pub struct Era {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    /// Close of a Friday session, ET (hour, minute); `None` = the default 17:00.
+    pub friday_close_et: Option<(u32, u32)>,
+    /// A halt inside every weekday session of the era, ET `((start h, m), (end h, m))`.
+    pub weekday_halt_et: Option<((u32, u32), (u32, u32))>,
+    /// Provenance, also in `cme_energy_metals_holidays.md`.
+    pub source: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +190,11 @@ fn split_csv_line(line: &str) -> std::result::Result<Vec<String>, String> {
 
 /// Parses the CME holiday CSV text into a validated `HolidayTable`.
 pub fn parse_holiday_table(csv_text: &str) -> Result<HolidayTable> {
+    parse_holiday_table_eras(csv_text, &[])
+}
+
+/// As [`parse_holiday_table`], with dated session-rule eras applied to the trade dates they cover.
+pub fn parse_holiday_table_eras(csv_text: &str, eras: &[Era]) -> Result<HolidayTable> {
     let mut lines = csv_text.lines();
     let header_line = match lines.next() {
         Some(l) => l.trim(),
@@ -371,15 +409,26 @@ pub fn parse_holiday_table(csv_text: &str) -> Result<HolidayTable> {
             ny_to_utc(td - Duration::days(1), 18, 0)
         };
 
+        let era = eras.iter().find(|e| e.from <= td && td <= e.to);
+        let default_close = match era.and_then(|e| e.friday_close_et) {
+            Some((h, m)) if td.weekday() == Weekday::Fri => ny_to_utc(td, h, m),
+            _ => ny_to_utc(td, 17, 0),
+        };
         let close_utc = if let Some(row) = holidays.get(&td) {
             if row.status == HolidayStatus::EarlyHalt {
                 ny_time_to_utc(td, row.halt_et.expect("early_halt has halt_et"))
             } else {
-                ny_to_utc(td, 17, 0)
+                default_close
             }
         } else {
-            ny_to_utc(td, 17, 0)
+            default_close
         };
+        // The halt exists only when the session still runs past it (an early close or a Friday close at the halt
+        // start has no halt inside it).
+        let halt_utc = era.and_then(|e| e.weekday_halt_et).and_then(|((sh, sm), (eh, em))| {
+            let (hs, he) = (ny_to_utc(td, sh, sm), ny_to_utc(td, eh, em));
+            (open_utc <= hs && he < close_utc).then_some((hs, he))
+        });
 
         if open_utc >= close_utc {
             return Err(GlobexError::MalformedRow(format!(
@@ -391,6 +440,7 @@ pub fn parse_holiday_table(csv_text: &str) -> Result<HolidayTable> {
             trade_date: td,
             open_utc,
             close_utc,
+            halt_utc,
         });
         session_map.insert(td, (open_utc, close_utc));
     }
@@ -418,50 +468,354 @@ pub fn parse_holiday_table(csv_text: &str) -> Result<HolidayTable> {
     })
 }
 
-static TABLE: OnceLock<HolidayTable> = OnceLock::new();
+const EQUITY_CSV: &str = EMBEDDED_CSV;
+const ENERGY_CSV: &str = include_str!("../../data/cme_energy_holidays.csv");
+const METALS_CSV: &str = include_str!("../../data/cme_metals_holidays.csv");
 
-fn get_table() -> &'static HolidayTable {
-    TABLE.get_or_init(|| {
-        parse_holiday_table(EMBEDDED_CSV).expect("valid embedded CME holiday table")
-    })
+/// Session-rule eras of the equity group (ES, NQ, YM, RTY and their micros). The last era ends 2021-06-25; every trade
+/// date after it follows the default rule (open 18:00 ET, close 17:00 ET, no halt inside), byte for byte.
+///
+/// Evidence: the 1m store (ES, NQ, YM, RTY; per-year and per-root tables in `cme_energy_metals_holidays.md`).
+/// - Friday close 16:15 ET, to trade date 2012-11-16, and a 16:15-16:30 ET halt on Mon-Thu, 2006 to 2021-06-24:
+///   CME's 2009 and 2010 Globex holiday notices call 1515 CT "Regular CME Globex close" and 1530 CT "Regular CME Globex
+///   open" for equity products (`2009-4th-of-july.txt`, `2009-globex-holiday-calendar.txt` in cme_raw). The
+///   later notices (2013 on) print 1615 CT, which contradicts every year of bars, so they lost.
+/// - The Friday 16:15 close ends between 2012-11-17 and 2012-11-30 (2012-11-16 is the last 16:15 Friday, 2012-11-30
+///   the first 17:00 Friday, 2012-11-23 is a holiday row): OBSERVED, boundary set right after 2012-11-16.
+/// - The halt on every weekday, Friday included, from 2012-11-19, ends with trade date 2021-06-25 (Friday): the first
+///   trade date with bars across 16:15-16:30 ET is 2021-06-28: OBSERVED; no CME notice for it is in cme_raw.
+/// Energy and metals have no era: their one-off 16:15 Friday closes (2009-10-09 CL, 2016-10-28 CL and GC) are
+/// allow-listed in the data oracle as OBSERVED, not rules.
+pub const EQUITY_ERAS: &[Era] = &[
+    Era {
+        from: d(2006, 1, 1),
+        to: d(2012, 11, 16),
+        friday_close_et: Some((16, 15)),
+        weekday_halt_et: Some(((16, 15), (16, 30))),
+        source: "CME 2009-2010 Globex holiday notices: 1515 CT regular close, 1530 CT regular open; Friday close OBSERVED in bars",
+    },
+    Era {
+        from: d(2012, 11, 17),
+        to: d(2021, 6, 25),
+        friday_close_et: None,
+        weekday_halt_et: Some(((16, 15), (16, 30))),
+        source: "OBSERVED in ES/NQ/YM/RTY 1m bars: Friday closes 17:00 from 2012-11-30, 16:15-16:30 gap on every weekday",
+    },
+];
+
+/// Eras of a group; energy and metals have none.
+pub fn eras_for(g: Group) -> &'static [Era] {
+    match g {
+        Group::Equity => EQUITY_ERAS,
+        Group::Energy | Group::Metals => &[],
+    }
 }
 
-/// Earliest calendar date supported by the table (Jan 1 of first table year).
+/// The product group whose holiday table governs a root (P6C).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Group {
+    /// CME equity index futures (`cme_equity_holidays.csv`).
+    Equity,
+    /// NYMEX energy (`cme_energy_holidays.csv`).
+    Energy,
+    /// COMEX metals (`cme_metals_holidays.csv`).
+    Metals,
+}
+
+impl Group {
+    pub fn name(self) -> &'static str {
+        match self {
+            Group::Equity => "equity",
+            Group::Energy => "energy",
+            Group::Metals => "metals",
+        }
+    }
+}
+
+const fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+    match NaiveDate::from_ymd_opt(y, m, day) {
+        Some(x) => x,
+        None => panic!(),
+    }
+}
+
+/// One supported root: its group and the first calendar date its contract can have a session
+/// (the Sunday-evening open before the listing's first trade date; `None` = listed before the table starts).
+struct RootInfo {
+    root: &'static str,
+    group: Group,
+    listed_from: Option<NaiveDate>,
+}
+
+/// Roots with a calendar. A micro takes its mini's range, not its own listing date: the web serves mini DATA under
+/// the micro SYMBOL ("Since 2026-09-21 the spoke serves mini DATA under the micro SYMBOL", tv `web/lib/contract-specs.ts`)
+/// and sims size micros on mini history, so a micro listing floor would refuse replays that must work. The listing
+/// dates stay documented as facts in `cme_energy_metals_holidays.md` (MNQ/MES/MYM/M2K 2019-05-06, MCL 2021-07-12,
+/// MGC 2010-10-04); they are not refusals. Floors that remain are the minis' own:
+/// - RTY: returned to CME Group 2017-07-10 (CME press release 2017-04-12, "Russell 2000 index futures and options to
+///   return to CME Group July 10"); before that it was ICE's TF, so there is no CME calendar for it. M2K follows it.
+/// - YM: moved from the e-cbot platform (own hours, own holidays) to CME Globex for financial contracts on
+///   2008-01-27 (trade date 2008-01-28), CBOT migration notice (CFTC rul121807cbot001, CME "CBOT Migration Trading
+///   Hours"). The 1m data confirm CBOT-era divergence (see the .md). MYM follows it.
+/// - NQ, ES, CL, GC (and MNQ, MES, MCL, MGC) are listed on Globex before their table's first year (CL since 2006-09-05).
+const ROOTS: &[RootInfo] = &[
+    RootInfo { root: "NQ", group: Group::Equity, listed_from: None },
+    RootInfo { root: "MNQ", group: Group::Equity, listed_from: None },
+    RootInfo { root: "ES", group: Group::Equity, listed_from: None },
+    RootInfo { root: "MES", group: Group::Equity, listed_from: None },
+    RootInfo { root: "YM", group: Group::Equity, listed_from: Some(d(2008, 1, 27)) },
+    RootInfo { root: "MYM", group: Group::Equity, listed_from: Some(d(2008, 1, 27)) },
+    RootInfo { root: "RTY", group: Group::Equity, listed_from: Some(d(2017, 7, 9)) },
+    RootInfo { root: "M2K", group: Group::Equity, listed_from: Some(d(2017, 7, 9)) },
+    RootInfo { root: "CL", group: Group::Energy, listed_from: None },
+    RootInfo { root: "MCL", group: Group::Energy, listed_from: None },
+    RootInfo { root: "GC", group: Group::Metals, listed_from: None },
+    RootInfo { root: "MGC", group: Group::Metals, listed_from: None },
+];
+
+/// Every root that has a calendar, in table order.
+pub fn supported_roots() -> Vec<&'static str> {
+    ROOTS.iter().map(|r| r.root).collect()
+}
+
+static TABLE: OnceLock<HolidayTable> = OnceLock::new();
+static ENERGY_TABLE: OnceLock<HolidayTable> = OnceLock::new();
+static METALS_TABLE: OnceLock<HolidayTable> = OnceLock::new();
+
+fn get_table() -> &'static HolidayTable {
+    table_for(Group::Equity)
+}
+
+/// The parsed holiday table of a group.
+pub fn table_for(g: Group) -> &'static HolidayTable {
+    match g {
+        Group::Equity => {
+            TABLE.get_or_init(|| parse_holiday_table_eras(EQUITY_CSV, EQUITY_ERAS).expect("valid embedded CME holiday table"))
+        }
+        Group::Energy => ENERGY_TABLE
+            .get_or_init(|| parse_holiday_table(ENERGY_CSV).expect("valid embedded CME energy holiday table")),
+        Group::Metals => METALS_TABLE
+            .get_or_init(|| parse_holiday_table(METALS_CSV).expect("valid embedded CME metals holiday table")),
+    }
+}
+
+/// Earliest calendar date supported by the equity table (Jan 1 of first table year).
 pub fn first_date() -> NaiveDate {
     get_table().first_date
 }
 
-/// Latest calendar date supported by the table (Dec 31 of last table year).
+/// Latest calendar date supported by the equity table (Dec 31 of last table year).
 pub fn last_date() -> NaiveDate {
     get_table().last_date
 }
 
-/// The number of rows in the embedded holiday table.
+/// The number of rows in the embedded equity holiday table.
 pub fn table_row_count() -> usize {
     get_table().rows.len()
 }
 
-fn check_date(d: NaiveDate) -> Result<()> {
-    let table = get_table();
-    if d < table.first_date || d > table.last_date {
-        return Err(GlobexError::OutOfRange(d));
-    }
-    Ok(())
+/// The calendar of one root: its group's table, clamped to `[max(table first, listing floor), table last]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobexCalendar {
+    root: &'static str,
+    group: Group,
+    first: NaiveDate,
+    last: NaiveDate,
 }
 
-fn check_instant(t: DateTime<Utc>) -> Result<()> {
-    let table = get_table();
-    let d = utc_to_ny(t).date_naive();
-    if d < table.first_date || d > table.last_date {
-        return Err(GlobexError::OutOfRangeInstant(t));
+impl GlobexCalendar {
+    /// The calendar of `root` (case-insensitive). Unknown roots refuse (I5).
+    pub fn for_root(root: &str) -> Result<GlobexCalendar> {
+        let up = root.trim().to_ascii_uppercase();
+        let Some(info) = ROOTS.iter().find(|r| r.root == up) else {
+            return Err(GlobexError::UnknownRoot(root.to_string()));
+        };
+        let t = table_for(info.group);
+        let first = match info.listed_from {
+            Some(f) if f > t.first_date => f,
+            _ => t.first_date,
+        };
+        Ok(GlobexCalendar { root: info.root, group: info.group, first, last: t.last_date })
     }
-    Ok(())
+
+    /// The legacy equity calendar behind the free functions (whole equity table range).
+    pub fn equity() -> GlobexCalendar {
+        let t = get_table();
+        GlobexCalendar { root: "", group: Group::Equity, first: t.first_date, last: t.last_date }
+    }
+
+    pub fn root(&self) -> &'static str {
+        self.root
+    }
+
+    pub fn group(&self) -> Group {
+        self.group
+    }
+
+    pub fn first_date(&self) -> NaiveDate {
+        self.first
+    }
+
+    pub fn last_date(&self) -> NaiveDate {
+        self.last
+    }
+
+    fn table(&self) -> &'static HolidayTable {
+        table_for(self.group)
+    }
+
+    fn check_date(&self, dt: NaiveDate) -> Result<()> {
+        if dt < self.first || dt > self.last {
+            return Err(self.oor(dt));
+        }
+        Ok(())
+    }
+
+    fn check_instant(&self, t: DateTime<Utc>) -> Result<()> {
+        let dt = utc_to_ny(t).date_naive();
+        if dt < self.first || dt > self.last {
+            return Err(self.oor_instant(t));
+        }
+        Ok(())
+    }
+
+    pub fn is_trade_date(&self, dt: NaiveDate) -> Result<bool> {
+        self.check_date(dt)?;
+        Ok(self.table().session_map.contains_key(&dt))
+    }
+
+    pub fn is_session(&self, dt: NaiveDate) -> Result<bool> {
+        self.is_trade_date(dt)
+    }
+
+    pub fn is_closed(&self, dt: NaiveDate) -> Result<bool> {
+        self.check_date(dt)?;
+        Ok(self.table().holidays.get(&dt).map(|r| r.status) == Some(HolidayStatus::Closed))
+    }
+
+    pub fn is_early_halt(&self, dt: NaiveDate) -> Result<bool> {
+        self.check_date(dt)?;
+        Ok(self.table().holidays.get(&dt).map(|r| r.status) == Some(HolidayStatus::EarlyHalt))
+    }
+
+    pub fn session_open(&self, dt: NaiveDate) -> Result<DateTime<Utc>> {
+        self.check_date(dt)?;
+        match self.table().session_map.get(&dt) {
+            Some(&(open, _)) => Ok(open),
+            None => Err(GlobexError::NotASession(dt)),
+        }
+    }
+
+    pub fn session_close(&self, dt: NaiveDate) -> Result<DateTime<Utc>> {
+        self.check_date(dt)?;
+        match self.table().session_map.get(&dt) {
+            Some(&(_, close)) => Ok(close),
+            None => Err(GlobexError::NotASession(dt)),
+        }
+    }
+
+    /// The trade date whose session contains `t` (open <= t < close). An intra-session halt does NOT end the session:
+    /// `t` inside it still belongs to that trade date (so an order placed in the halt keeps its trade date);
+    /// [`Self::is_open_at`] is what excludes the halt.
+    pub fn session_at(&self, t: DateTime<Utc>) -> Result<Option<NaiveDate>> {
+        self.check_instant(t)?;
+        let table = self.table();
+        let idx = table.sessions.partition_point(|s| s.open_utc <= t);
+        if idx == 0 {
+            return Ok(None);
+        }
+        let prev = &table.sessions[idx - 1];
+        if t < prev.close_utc {
+            Ok(Some(prev.trade_date))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// True inside a session and outside its intra-session halt (the 16:15-16:30 ET equity halt of the early eras).
+    pub fn is_open_at(&self, t: DateTime<Utc>) -> Result<bool> {
+        let Some(td) = self.session_at(t)? else {
+            return Ok(false);
+        };
+        Ok(!matches!(self.session_halt(td), Some((hs, he)) if hs <= t && t < he))
+    }
+
+    /// The intra-session halt `[start, end)` of trade date `dt`, if its era has one and the session runs past it.
+    pub fn session_halt(&self, dt: NaiveDate) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        let table = self.table();
+        let i = table.sessions.binary_search_by_key(&dt, |s| s.trade_date).ok()?;
+        table.sessions[i].halt_utc
+    }
+
+    pub fn session_or_next(&self, t: DateTime<Utc>) -> Result<NaiveDate> {
+        self.check_instant(t)?;
+        if let Some(td) = self.session_at(t)? {
+            return Ok(td);
+        }
+        let table = self.table();
+        let idx = table.sessions.partition_point(|s| s.open_utc <= t);
+        if idx < table.sessions.len() {
+            Ok(table.sessions[idx].trade_date)
+        } else {
+            Err(self.oor_instant(t))
+        }
+    }
+
+    pub fn next_session(&self, dt: NaiveDate) -> Result<NaiveDate> {
+        self.check_date(dt)?;
+        let table = self.table();
+        let idx = table.trade_dates.partition_point(|&td| td <= dt);
+        if idx < table.trade_dates.len() {
+            Ok(table.trade_dates[idx])
+        } else {
+            Err(self.oor(dt))
+        }
+    }
+
+    pub fn previous_session(&self, dt: NaiveDate) -> Result<NaiveDate> {
+        self.check_date(dt)?;
+        let table = self.table();
+        let idx = table.trade_dates.partition_point(|&td| td < dt);
+        if idx > 0 && table.trade_dates[idx - 1] >= self.first {
+            Ok(table.trade_dates[idx - 1])
+        } else {
+            Err(self.oor(dt))
+        }
+    }
+
+    pub fn sessions_in_range(&self, start: NaiveDate, end: NaiveDate) -> Result<Vec<NaiveDate>> {
+        if start > end {
+            return Err(GlobexError::InvertedRange(start, end));
+        }
+        self.check_date(start)?;
+        self.check_date(end)?;
+        let table = self.table();
+        let start_idx = table.trade_dates.partition_point(|&td| td < start);
+        let end_idx = table.trade_dates.partition_point(|&td| td <= end);
+        Ok(table.trade_dates[start_idx..end_idx].to_vec())
+    }
+
+    fn oor(&self, dt: NaiveDate) -> GlobexError {
+        GlobexError::RootOutOfRange { root: self.root, date: dt, first: self.first, last: self.last }
+    }
+
+    fn oor_instant(&self, t: DateTime<Utc>) -> GlobexError {
+        GlobexError::RootOutOfRangeInstant { root: self.root, instant: t, first: self.first, last: self.last }
+    }
+}
+
+/// The equity calendar's errors in the original (root-less) shape, so the free functions are unchanged.
+fn legacy(e: GlobexError) -> GlobexError {
+    match e {
+        GlobexError::RootOutOfRange { date, .. } => GlobexError::OutOfRange(date),
+        GlobexError::RootOutOfRangeInstant { instant, .. } => GlobexError::OutOfRangeInstant(instant),
+        other => other,
+    }
 }
 
 /// True when `d` is an active CME Globex equity index trade date (not a weekend and not closed).
 pub fn is_trade_date(d: NaiveDate) -> Result<bool> {
-    check_date(d)?;
-    Ok(get_table().session_map.contains_key(&d))
+    GlobexCalendar::equity().is_trade_date(d).map_err(legacy)
 }
 
 /// Alias for `is_trade_date` matching `calendar.rs` naming.
@@ -471,107 +825,55 @@ pub fn is_session(d: NaiveDate) -> Result<bool> {
 
 /// True if `d` is marked `closed` in the CME holiday table.
 pub fn is_closed(d: NaiveDate) -> Result<bool> {
-    check_date(d)?;
-    Ok(get_table().holidays.get(&d).map(|r| r.status) == Some(HolidayStatus::Closed))
+    GlobexCalendar::equity().is_closed(d).map_err(legacy)
 }
 
 /// True if `d` is an active trade date with an early close/halt from the CME holiday table.
 pub fn is_early_halt(d: NaiveDate) -> Result<bool> {
-    check_date(d)?;
-    Ok(get_table().holidays.get(&d).map(|r| r.status) == Some(HolidayStatus::EarlyHalt))
+    GlobexCalendar::equity().is_early_halt(d).map_err(legacy)
 }
 
 /// Returns the session open instant in UTC for trade date `d`. A non-session refuses (I5).
 pub fn session_open(d: NaiveDate) -> Result<DateTime<Utc>> {
-    check_date(d)?;
-    match get_table().session_map.get(&d) {
-        Some(&(open, _)) => Ok(open),
-        None => Err(GlobexError::NotASession(d)),
-    }
+    GlobexCalendar::equity().session_open(d).map_err(legacy)
 }
 
 /// Returns the session close instant in UTC for trade date `d`. A non-session refuses (I5).
 pub fn session_close(d: NaiveDate) -> Result<DateTime<Utc>> {
-    check_date(d)?;
-    match get_table().session_map.get(&d) {
-        Some(&(_, close)) => Ok(close),
-        None => Err(GlobexError::NotASession(d)),
-    }
+    GlobexCalendar::equity().session_close(d).map_err(legacy)
 }
 
 /// Returns the session trade date active at `instant`, or `None` if in a daily halt, weekend, or closure.
 pub fn session_at(t: DateTime<Utc>) -> Result<Option<NaiveDate>> {
-    check_instant(t)?;
-    let table = get_table();
-    let idx = table.sessions.partition_point(|s| s.open_utc <= t);
-    if idx == 0 {
-        return Ok(None);
-    }
-    let prev = &table.sessions[idx - 1];
-    if t < prev.close_utc {
-        Ok(Some(prev.trade_date))
-    } else {
-        Ok(None)
-    }
+    GlobexCalendar::equity().session_at(t).map_err(legacy)
 }
 
 /// True when the CME Globex equity market is open at instant `t` (open <= t < close).
 pub fn is_open_at(t: DateTime<Utc>) -> Result<bool> {
-    Ok(session_at(t)?.is_some())
+    GlobexCalendar::equity().is_open_at(t).map_err(legacy)
 }
 
 /// Returns the trade date of the session active at instant `t`, or if `t` falls in a
 /// daily halt, weekend, or holiday closure, returns the trade date of the NEXT upcoming session.
 pub fn session_or_next(t: DateTime<Utc>) -> Result<NaiveDate> {
-    check_instant(t)?;
-    if let Some(td) = session_at(t)? {
-        return Ok(td);
-    }
-    let table = get_table();
-    let idx = table.sessions.partition_point(|s| s.open_utc <= t);
-    if idx < table.sessions.len() {
-        Ok(table.sessions[idx].trade_date)
-    } else {
-        Err(GlobexError::OutOfRangeInstant(t))
-    }
+    GlobexCalendar::equity().session_or_next(t).map_err(legacy)
 }
 
 /// Returns the first trade date strictly after `d`.
 pub fn next_session(d: NaiveDate) -> Result<NaiveDate> {
-    check_date(d)?;
-    let table = get_table();
-    let idx = table.trade_dates.partition_point(|&td| td <= d);
-    if idx < table.trade_dates.len() {
-        Ok(table.trade_dates[idx])
-    } else {
-        Err(GlobexError::OutOfRange(d))
-    }
+    GlobexCalendar::equity().next_session(d).map_err(legacy)
 }
 
 /// Returns the last trade date strictly before `d`.
 pub fn previous_session(d: NaiveDate) -> Result<NaiveDate> {
-    check_date(d)?;
-    let table = get_table();
-    let idx = table.trade_dates.partition_point(|&td| td < d);
-    if idx > 0 {
-        Ok(table.trade_dates[idx - 1])
-    } else {
-        Err(GlobexError::OutOfRange(d))
-    }
+    GlobexCalendar::equity().previous_session(d).map_err(legacy)
 }
 
 /// Returns every session from `start` through `end`, inclusive.
 pub fn sessions_in_range(start: NaiveDate, end: NaiveDate) -> Result<Vec<NaiveDate>> {
-    if start > end {
-        return Err(GlobexError::InvertedRange(start, end));
-    }
-    check_date(start)?;
-    check_date(end)?;
-    let table = get_table();
-    let start_idx = table.trade_dates.partition_point(|&td| td < start);
-    let end_idx = table.trade_dates.partition_point(|&td| td <= end);
-    Ok(table.trade_dates[start_idx..end_idx].to_vec())
+    GlobexCalendar::equity().sessions_in_range(start, end).map_err(legacy)
 }
+
 
 #[cfg(test)]
 mod tests {

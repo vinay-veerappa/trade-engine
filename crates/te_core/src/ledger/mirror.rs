@@ -47,23 +47,60 @@ fn sign(side: Side) -> i128 {
     }
 }
 
+/// Where the sign is applied. The mirror fold's `ticket_contracts` multiplies `_sign(side) *
+/// units * ratio` (the sign first); `tos_paper.reconcile.ticket_contracts` negates
+/// `units * ratio` (the sign last, and a BUY is `units` untouched). The two agree in value;
+/// they can round differently only past 28 digits, so each keeps its own order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignAt {
+    First,
+    Last,
+}
+
 /// Signed contracts `units` of a ticket put on the venue, per contract (legs as written).
 /// A repeated contract keeps its first position and its LAST value (dict comprehension).
-pub fn ticket_contracts(q: &MirrorQueued, units: &PyDec) -> R<OMap<Instrument, PyDec>> {
+pub fn signed_contracts(instrument: &Instrument, side: Side, units: &PyDec, at: SignAt) -> R<OMap<Instrument, PyDec>> {
+    let one = |side: Side, ratio: Option<i128>| -> R<PyDec> {
+        match at {
+            SignAt::First => {
+                let signed = units_signed(side, units)?;
+                match ratio {
+                    Some(r) => mul_i(&signed, r),
+                    None => Ok(signed),
+                }
+            }
+            SignAt::Last => {
+                let magnitude = match ratio {
+                    Some(r) => mul_i(units, r)?,
+                    None => units.clone(),
+                };
+                if side == Side::Buy {
+                    Ok(magnitude)
+                } else {
+                    neg(&magnitude)
+                }
+            }
+        }
+    };
     let mut out: OMap<Instrument, PyDec> = OMap::new();
-    match &q.instrument {
+    match instrument {
         Instrument::Combo(legs) => {
             for leg in legs {
-                let v = mul_i(&units_signed(leg.side, units)?, leg.ratio)?;
+                let v = one(leg.side, Some(leg.ratio))?;
                 out.insert(leg.contract.hk(), leg.contract.clone(), v);
             }
         }
         other => {
-            let v = units_signed(q.side, units)?;
+            let v = one(side, None)?;
             out.insert(other.hk(), other.clone(), v);
         }
     }
     Ok(out)
+}
+
+/// `ticket_contracts(queued, units)` of the mirror fold.
+pub fn ticket_contracts(q: &MirrorQueued, units: &PyDec) -> R<OMap<Instrument, PyDec>> {
+    signed_contracts(&q.instrument, q.side, units, SignAt::First)
 }
 
 /// `_sign(side) * units`.
@@ -84,6 +121,22 @@ pub struct MirrorTicketState {
 }
 
 impl MirrorTicketState {
+    /// `terminal`: closed, or filled through its quantity.
+    pub fn terminal(&self) -> R<bool> {
+        if self.closed {
+            return Ok(true);
+        }
+        ge(&self.filled, &self.queued.quantity)
+    }
+
+    /// `remaining`: units still expected to rest or fill at the venue; zero once terminal.
+    pub fn remaining(&self) -> R<PyDec> {
+        if self.terminal()? {
+            return Ok(zero());
+        }
+        sub(&self.queued.quantity, &self.filled)
+    }
+
     fn new(queued: MirrorQueued) -> MirrorTicketState {
         MirrorTicketState {
             queued,
@@ -107,6 +160,70 @@ pub struct MirrorState {
     pub queued_orders: OMap<String, String>,
     pub refused_orders: OMap<String, String>,
     pub order_ids: OMap<String, String>,
+}
+
+impl MirrorState {
+    /// `handled`: already queued or refused at this venue, never mirrored again (I3).
+    pub fn handled(&self, strategy_order_id: &str) -> bool {
+        self.queued_orders.contains(strategy_order_id) || self.refused_orders.contains(strategy_order_id)
+    }
+
+    /// `open_tickets`: the tickets not terminal, in ticket-key order.
+    pub fn open_tickets(&self) -> R<Vec<&MirrorTicketState>> {
+        let mut all: Vec<(&String, &MirrorTicketState)> = self.tickets.iter().collect();
+        all.sort_by(|a, b| a.0.cmp(b.0));
+        let mut out = Vec::new();
+        for (_, t) in all {
+            if !t.terminal()? {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
+    /// `exposure`: per (strategy account, contract) the book plus each open ticket's unfilled
+    /// part, the nonzero entries only.
+    pub fn exposure(&self) -> R<OMap<(String, Instrument), PyDec>> {
+        let mut exposure: OMap<(String, Instrument), PyDec> = OMap::new();
+        for (k, v) in self.book.iter() {
+            exposure.insert(book_hk(&k.0, &k.1), k.clone(), v.clone());
+        }
+        for ticket in self.open_tickets()? {
+            for allocation in &ticket.queued.allocations {
+                let have = ticket.allocated.get(&allocation.strategy_order_id).cloned().unwrap_or_else(zero);
+                let lacking = sub(&allocation.quantity, &have)?;
+                for (contract, quantity) in ticket_contracts(&ticket.queued, &lacking)?.iter() {
+                    let hk = book_hk(&allocation.strategy_account, contract);
+                    let current = exposure.get(&hk).cloned().unwrap_or_else(zero);
+                    let total = add(&current, quantity)?;
+                    exposure.insert(hk, (allocation.strategy_account.clone(), contract.clone()), total);
+                }
+            }
+        }
+        let mut out: OMap<(String, Instrument), PyDec> = OMap::new();
+        for (k, v) in exposure.iter() {
+            if !eq(v, &zero())? {
+                out.insert(book_hk(&k.0, &k.1), k.clone(), v.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// `expected`: per contract the book plus every open ticket's live remainder.
+    pub fn expected(&self) -> R<OMap<Instrument, PyDec>> {
+        let mut expected: OMap<Instrument, PyDec> = OMap::new();
+        for ((_, contract), quantity) in self.book.iter() {
+            let current = expected.get(&contract.hk()).cloned().unwrap_or_else(zero);
+            expected.insert(contract.hk(), contract.clone(), add(&current, quantity)?);
+        }
+        for ticket in self.open_tickets()? {
+            for (contract, quantity) in ticket_contracts(&ticket.queued, &ticket.remaining()?)?.iter() {
+                let current = expected.get(&contract.hk()).cloned().unwrap_or_else(zero);
+                expected.insert(contract.hk(), contract.clone(), add(&current, quantity)?);
+            }
+        }
+        Ok(expected)
+    }
 }
 
 /// The key of a book entry: injective over `(account, instrument)`.

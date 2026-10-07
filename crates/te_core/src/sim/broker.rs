@@ -194,6 +194,14 @@ pub(super) fn zero() -> PyDec {
     dec("0")
 }
 
+/// The Globex calendar of a futures instrument's root (P6C): the calendar follows the instrument, not the book.
+fn gcal(instr: &Instrument) -> R<crate::calendar::globex::GlobexCalendar> {
+    match instr {
+        Instrument::Future(fc) => crate::calendar::globex::GlobexCalendar::for_root(&fc.root).map_err(gerr),
+        _ => err("value", "SimBroker supports futures only"),
+    }
+}
+
 fn gerr(e: crate::calendar::globex::GlobexError) -> crate::ledger::model::LErr {
     crate::ledger::model::LErr { kind: "value", msg: e.to_string() }
 }
@@ -361,7 +369,7 @@ impl Book {
                 let first = now(clock)?;
                 if !self.has_expired(&order, &first)? {
                     let second = now(clock)?;
-                    if second.gt(&self.first_eligible_bar(&order.submitted_at)?) {
+                    if second.gt(&self.first_eligible_bar(&order.instr, &order.submitted_at)?) {
                         return err(
                             "sim",
                             format!(
@@ -670,7 +678,7 @@ impl Book {
             return Ok(None);
         }
         let base = if order.tif == Tif::Opg {
-            if !bar.ts.eq(&self.opg_session_open(&order.submitted_at)?) || order.otype != OrderType::Market {
+            if !bar.ts.eq(&self.opg_session_open(&order.instr, &order.submitted_at)?) || order.otype != OrderType::Market {
                 return Ok(None);
             }
             bar.open.clone()
@@ -979,17 +987,18 @@ impl Book {
                 VenueCalendar::Xnys => Ok(Some(session_close(day_session(&order.submitted_at)?)?)),
                 VenueCalendar::Globex => {
                     let t_utc = order.submitted_at.to_utc_chrono()?;
-                    let td = crate::calendar::globex::session_or_next(t_utc).map_err(gerr)?;
-                    let close_utc = crate::calendar::globex::session_close(td).map_err(gerr)?;
+                    let cal = gcal(&order.instr)?;
+                    let td = cal.session_or_next(t_utc).map_err(gerr)?;
+                    let close_utc = cal.session_close(td).map_err(gerr)?;
                     Ok(Some(Ts::utc(close_utc)))
                 }
             },
-            Tif::Opg => Ok(Some(self.opg_session_open(&order.submitted_at)?)),
+            Tif::Opg => Ok(Some(self.opg_session_open(&order.instr, &order.submitted_at)?)),
             _ => Ok(None),
         }
     }
 
-    fn first_eligible_bar(&self, submitted_at: &Ts) -> R<Ts> {
+    fn first_eligible_bar(&self, instr: &Instrument, submitted_at: &Ts) -> R<Ts> {
         match self.venue {
             VenueCalendar::Xnys => {
                 let open = session_open(day_session(submitted_at)?)?;
@@ -1000,8 +1009,9 @@ impl Book {
             }
             VenueCalendar::Globex => {
                 let t_utc = submitted_at.to_utc_chrono()?;
-                let td = crate::calendar::globex::session_or_next(t_utc).map_err(gerr)?;
-                let open_utc = crate::calendar::globex::session_open(td).map_err(gerr)?;
+                let cal = gcal(instr)?;
+                let td = cal.session_or_next(t_utc).map_err(gerr)?;
+                let open_utc = cal.session_open(td).map_err(gerr)?;
                 let open = Ts::utc(open_utc);
                 if submitted_at.lt(&open) {
                     return Ok(open);
@@ -1011,7 +1021,7 @@ impl Book {
         }
     }
 
-    fn opg_session_open(&self, submitted_at: &Ts) -> R<Ts> {
+    fn opg_session_open(&self, instr: &Instrument, submitted_at: &Ts) -> R<Ts> {
         match self.venue {
             VenueCalendar::Xnys => {
                 let d = submitted_at.ny_date()?;
@@ -1028,14 +1038,15 @@ impl Book {
             }
             VenueCalendar::Globex => {
                 let t_utc = submitted_at.to_utc_chrono()?;
-                let td = crate::calendar::globex::session_or_next(t_utc).map_err(gerr)?;
-                let open_utc = crate::calendar::globex::session_open(td).map_err(gerr)?;
+                let cal = gcal(instr)?;
+                let td = cal.session_or_next(t_utc).map_err(gerr)?;
+                let open_utc = cal.session_open(td).map_err(gerr)?;
                 let open = Ts::utc(open_utc);
                 if submitted_at.lt(&open) {
                     return Ok(open);
                 }
-                let next_td = crate::calendar::globex::next_session(td).map_err(gerr)?;
-                let next_open_utc = crate::calendar::globex::session_open(next_td).map_err(gerr)?;
+                let next_td = cal.next_session(td).map_err(gerr)?;
+                let next_open_utc = cal.session_open(next_td).map_err(gerr)?;
                 Ok(Ts::utc(next_open_utc))
             }
         }
@@ -1052,7 +1063,7 @@ impl Book {
             }
             VenueCalendar::Globex => {
                 let t_utc = bar.ts.to_utc_chrono()?;
-                crate::calendar::globex::is_open_at(t_utc).map_err(gerr)
+                gcal(&bar.instr)?.is_open_at(t_utc).map_err(gerr)
             }
         }
     }
@@ -1140,7 +1151,7 @@ impl Book {
     fn check_bar_sequence_futures(&self, bar: &Bar) -> R<()> {
         let sym = bar.instr.symbol()?;
         let t_utc = bar.ts.to_utc_chrono()?;
-        match crate::calendar::globex::session_at(t_utc) {
+        match gcal(&bar.instr)?.session_at(t_utc) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 return err(
@@ -1506,6 +1517,34 @@ mod tests {
         // Advance clock to Monday 17:00 ET (22:00 UTC); expires
         b_wknd.orders_since("2020-11-21T00:00:00+00:00", &mut || Ok("2020-11-23T22:00:00+00:00".to_string())).unwrap();
         assert_eq!(b_wknd.state_of("o4"), Some(OrderState::Expired));
+    }
+
+    /// The calendar follows the instrument's root (P6C): on 2024-07-04 energy halts 13:30 ET, equity 13:00 ET.
+    #[test]
+    fn test_futures_calendar_follows_the_root() {
+        // 13:15 ET = 17:15 UTC: inside the CL session, past the NQ halt.
+        let mut cl = Book::new_futures("A", 0).unwrap();
+        cl.connect(&mut || Ok("2024-07-04T14:00:00+00:00".to_string())).unwrap();
+        cl.process_bar(Some(f_bar("CL", "2024-07-04T17:15:00+00:00", "80", "81", "79", "80"))).unwrap();
+        let mut nq = Book::new_futures("A", 0).unwrap();
+        nq.connect(&mut || Ok("2024-07-04T14:00:00+00:00".to_string())).unwrap();
+        let e = nq.process_bar(Some(f_bar("NQ", "2024-07-04T17:15:00+00:00", "18000", "18010", "17990", "18000"))).unwrap_err();
+        assert_eq!(e.kind, "missing_bar");
+        // 13:30 ET = 17:30 UTC: the CL halt itself is outside the session.
+        let mut cl2 = Book::new_futures("A", 0).unwrap();
+        cl2.connect(&mut || Ok("2024-07-04T14:00:00+00:00".to_string())).unwrap();
+        let e = cl2.process_bar(Some(f_bar("CL", "2024-07-04T17:30:00+00:00", "80", "81", "79", "80"))).unwrap_err();
+        assert_eq!(e.kind, "missing_bar");
+        // A CL Day order expires at the energy halt (13:30 ET = 17:30 UTC), not at 13:00.
+        let mut b = Book::new_futures("A", 0).unwrap();
+        let mut clock = || Ok("2024-07-04T14:00:00+00:00".to_string());
+        b.connect(&mut clock).unwrap();
+        b.submit(f_limit_order("c1", "CL", Side::Buy, "1", "2024-07-04T14:00:00+00:00", "10"), &mut clock).unwrap();
+        b.process_bar(Some(f_bar("CL", "2024-07-04T17:29:00+00:00", "80", "81", "79", "80"))).unwrap();
+        b.orders_since("2024-07-04T00:00:00+00:00", &mut || Ok("2024-07-04T17:29:00+00:00".to_string())).unwrap();
+        assert_eq!(b.state_of("c1"), Some(OrderState::Accepted));
+        b.orders_since("2024-07-04T00:00:00+00:00", &mut || Ok("2024-07-04T17:30:00+00:00".to_string())).unwrap();
+        assert_eq!(b.state_of("c1"), Some(OrderState::Expired));
     }
 
     #[test]

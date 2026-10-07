@@ -23,9 +23,10 @@ order is either allocated to a ticket or refused with a reason (I11).
 
 from __future__ import annotations
 
+import json
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
@@ -35,7 +36,6 @@ from trade_engine.interfaces.broker import (
     BrokerAdapter,
     Capabilities,
     OrderChanges,
-    UnsupportedCapability,
     VenueAck,
     VenueCashEvent,
     VenueFill,
@@ -45,29 +45,21 @@ from trade_engine.interfaces.broker import (
     VenueOrderState,
     VenuePosition,
 )
+from trade_engine.ledger import codec
 from trade_engine.ledger.events import MirrorAck, MirrorFill, MirrorQueued, VenueReconcile
 from trade_engine.ledger.mirror import MirrorState
-from trade_engine.ledger.mirror import ticket_contracts as fold_contracts
-from trade_engine.tos_paper import normalize as norm
-from trade_engine.tos_paper.netting import NettedBatch, net_strategy_orders
-from trade_engine.tos_paper.reconcile import (
-    confirm_ticket,
-    position_book,
-    reconcile,
-    ticket_contracts,
-    unreadable,
-)
+from trade_engine.tos_paper import _rs
+from trade_engine.tos_paper.netting import NettedBatch
 from trade_engine.tos_paper.transport import (
     BalanceReader,
     OrderCanceller,
     OrderFillReader,
     TosOrderTransport,
+    TransportRefused,
+    TransportReplay,
     TransportUnavailable,
-    ticket_for,
+    ticket_of,
 )
-
-ZERO = Decimal("0")
-PREFLIGHT_MAX_AGE = timedelta(seconds=30)  # the write-ahead between a preflight and its drain takes milliseconds
 
 
 class TosPaperBrokerError(RuntimeError):
@@ -139,8 +131,59 @@ class FillCollection:
     closes: tuple[MirrorAck, ...]   # tickets the Order Book shows ended (cancelled/expired/rejected/filled)
 
 
+class _Host:
+    """The clock and the transport, answered as the core asks. No decision lives here."""
+
+    def __init__(self, broker: "TosPaperBroker") -> None:
+        self._b = broker
+        self._last: BaseException | None = None
+
+    def now(self) -> str:
+        return self._b._clock.now_utc().isoformat()
+
+    def can_read_fills(self) -> bool:
+        return isinstance(self._b.transport, OrderFillReader)
+
+    def can_cancel(self) -> bool:
+        return isinstance(self._b.transport, OrderCanceller)
+
+    def _ask(self, call):
+        try:
+            # ``default=str``: a row holding a value JSON cannot carry reaches the core as its text.
+            return ("ok", json.dumps(call(), default=str), "", "")
+        except Exception as exc:  # noqa: BLE001 - the core classifies; a BaseException unwinds as itself
+            self._last = exc
+            kind = ("refused" if isinstance(exc, TransportRefused) else "replay" if isinstance(exc, TransportReplay)
+                    else "unavailable" if isinstance(exc, TransportUnavailable) else "other")
+            return ("exc", kind, type(exc).__name__, str(exc))
+
+    def place_order(self, spec: str, key: str):
+        return self._ask(lambda: self._b.transport.place_order(ticket_of(json.loads(spec)), key))
+
+    def cancel_order(self, order_id: str):
+        return self._ask(lambda: self._b.transport.cancel_order(order_id))
+
+    def read_positions(self):
+        return self._ask(lambda: list(self._b.transport.read_positions()))
+
+    def read_working_orders(self):
+        return self._ask(lambda: list(self._b.transport.read_working_orders()))
+
+    def read_order_fills(self):
+        return self._ask(lambda: list(self._b.transport.read_order_fills()))
+
+    def reraise(self) -> None:
+        raise self._last  # the very exception object the transport raised (TransportUnavailable)
+
+
 class TosPaperBroker(BrokerAdapter):
-    """BrokerAdapter for one paperMoney mirror account."""
+    """BrokerAdapter for one paperMoney mirror account.
+
+    Every decision (the submit queue, the expected book, the sent tickets, the cancelled set, the
+    keys, the sticky halt, what to call next) is ``trade_engine_rs.TosBroker``'s; this class is the
+    I/O around it: the transport's sends, reads and cancels, ``connect`` and ``balance``, and the
+    carriers the rest of the engine takes back.
+    """
 
     name = "TosPaperBroker"
     env: Literal["paper"] = "paper"
@@ -160,25 +203,12 @@ class TosPaperBroker(BrokerAdapter):
         self._clock = clock
         self._balance_reader = balance_reader
         self._balance_unproven_ok = balance_unproven_ok
-        # Restored from the ledger fold (``ledger.state.halted_venues``): a halt survives replay.
-        self._halted = binding.venue_account in frozenset(halted_venues)
         self._identity: VenueIdentity | None = None
         self.balance_proven: bool | None = None  # recorded at connect
-        self._queue: list[VenueOrder] = []
-        self._keys: set[str] = set()  # ticket keys queued or sent (I3)
-        self._expected: dict[Instrument, Decimal] = {}
-        # True once ``restore`` loaded the fold: ``_expected`` is then the fold's own
-        # expectation, kept in step by every queue and cancel, and ``holdings`` only screens.
-        self._restored = False
-        # ticket key -> (ticket, venue Order ID, units still resting) for sends whose Order
-        # Book row was matched, restored from the fold after a restart (the remainder then
-        # excludes recorded fills); with no proven id a cancel refuses.
-        self._sent: dict[str, tuple[VenueOrder, str, Decimal]] = {}
-        self._proven: dict[str, tuple[str, OrderState]] = {}  # this drain's proven ids
-        # (when, positions) ``preflight`` read, for the next drain's "before": used once, and only
-        # while fresh (PREFLIGHT_MAX_AGE), so a write-ahead that failed cannot leave one for later.
-        self._preflight_book: tuple[datetime, dict[Instrument, Decimal]] | None = None
-        self._cancelled: set[str] = set()  # ticket keys a cancel proved (idempotent)
+        # Restored from the ledger fold (``ledger.state.halted_venues``): a halt survives replay.
+        self._core = _rs.rs.TosBroker(binding.venue_account, list(binding.mirrored_accounts),
+                                      binding.venue_account in frozenset(halted_venues))
+        self._host = _Host(self)
         self.capabilities = Capabilities(
             supported_order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}),
             supported_tifs=frozenset({TimeInForce.DAY, TimeInForce.GTC}),
@@ -194,11 +224,14 @@ class TosPaperBroker(BrokerAdapter):
 
     @property
     def halted(self) -> bool:
-        return self._halted
+        return self._core.halted
 
     @property
     def queued(self) -> tuple[VenueOrder, ...]:
-        return tuple(self._queue)
+        return tuple(_rs.venue_order(d) for d in json.loads(self._core.state())["queued"])
+
+    def _go(self, method, *args):
+        return _rs.call(method, self._host, *args)
 
     # -- connection ----------------------------------------------------------
 
@@ -246,6 +279,7 @@ class TosPaperBroker(BrokerAdapter):
             connected_at=self._clock.now_utc(),
             broker_name=self.name,
         )
+        self._core.mark_connected()
         return self._identity
 
     def balance(self) -> Decimal | None:
@@ -277,38 +311,12 @@ class TosPaperBroker(BrokerAdapter):
         here are venue refusals the caller records (I11).
         """
         self._require_connected("mirror_batch")
-        orders = list(strategy_orders)
-        if self._halted:
-            return NettedBatch(
-                venue_orders=(),
-                refused=tuple(
-                    (o.order_id, f"venue {self.venue} is halted by a reconcile drift; refused")
-                    for o in orders
-                ),
-            )
-        batch = net_strategy_orders(
-            orders,
-            venue_account=self.venue,
-            mirrored_accounts=self.binding.mirrored_accounts,
-            at=self._clock.now_utc(),
-            holdings=holdings,
-        )
-        if self._restored:  # the fold's expectation, already including the queue
-            expected: dict[Instrument, Decimal] = dict(self._expected)
-        else:
-            expected = {}
-            for (_account, instrument), quantity in holdings.items():
-                expected[instrument] = expected.get(instrument, ZERO) + quantity
-            for queued in self._queue:  # still unsent: part of what the venue should end up holding
-                _add(expected, queued, 1)
-        for ticket in batch.venue_orders:
-            if ticket.venue_order_id in self._keys:
-                continue  # the same ticket was already queued or sent (I3)
-            self._keys.add(ticket.venue_order_id)
-            self._queue.append(ticket)
-            _add(expected, ticket, 1)
-        self._expected = expected
-        return batch
+        out = json.loads(self._go(
+            self._core.mirror_batch,
+            json.dumps([_rs.order_doc(o) for o in list(strategy_orders)], default=str),
+            json.dumps(_rs.holdings_doc(holdings))))
+        return NettedBatch(venue_orders=tuple(_rs.venue_order(d) for d in out["venue_orders"]),
+                           refused=tuple((o, r) for o, r in out["refused"]))
 
     # -- the ledger's memory (restart-safe) ------------------------------------
 
@@ -323,139 +331,20 @@ class TosPaperBroker(BrokerAdapter):
 
         Refuses over an undrained queue: the queue would be lost or sent twice.
         """
-        if mirror.venue is not None and mirror.venue != self.venue:
-            raise TosPaperBrokerError(f"cannot restore venue {mirror.venue}'s mirror into {self.venue} (I8)")
-        if self._queue:
-            raise TosPaperBrokerError("restore over an undrained queue; drain (or cancel) it first")
-        if self.venue in frozenset(halted_venues):
-            self._halted = True
-        self._sent = {
-            ticket.key: (venue_order_of(ticket.queued), ticket.venue_order_id, ticket.remaining)
-            for ticket in mirror.open_tickets
-            if ticket.venue_order_id is not None
-        }
-        self._restored = True
-        self._keys |= set(mirror.tickets)
-        self._cancelled |= {
-            key for key, ticket in mirror.tickets.items() if ticket.book_status is OrderState.CANCELLED
-        }
-        self._expected = mirror.expected()
+        _rs.call(self._core.restore, json.dumps(codec.canon(mirror)), list(halted_venues))
 
     def collect_fills(self, mirror: MirrorState) -> FillCollection:
-        """Read the venue's cumulative fills per Order ID; return the increments (I3).
-
-        Matched to tickets by the venue Order ID the fold holds; an Order ID the fold
-        does not know is not ours and is ignored. A ticket whose Order Book row now reads
-        CANCELED, EXPIRED, REJECTED or FILLED gets a closing ``MirrorAck`` (after its fill,
-        so a partial fill before a cancel is booked). Never sends anything.
-
-        Refuses (``VenueUnreadable``, and the venue halts) when the rows cannot be read,
-        when one Order ID has two rows, or when the venue contradicts the fold — a
-        cumulative lower than recorded, more than the ticket, FILLED short of it, or the
-        recorded cumulative at another average price.
-        A transport without :class:`OrderFillReader` cannot prove a fill: refused.
-        """
-        self._require_connected("collect_fills")
-        if mirror.venue is not None and mirror.venue != self.venue:
-            raise TosPaperBrokerError(f"venue {mirror.venue}'s mirror is not {self.venue}'s (I8)")
-        if not isinstance(self.transport, OrderFillReader):
-            raise TosPaperBrokerError(
-                "the transport cannot read order fills (OrderFillReader); refusing to guess the mirror book (I5)"
-            )
-        now = self._clock.now_utc()
-        tracked = [t for _, t in sorted(mirror.tickets.items()) if t.venue_order_id is not None]
-        contracts = [c for t in tracked for c in fold_contracts(t.queued, t.queued.quantity)]
-        try:
-            rows = [norm.normalize_order_fill(row) for row in self.transport.read_order_fills()]
-        except TransportUnavailable:
-            raise  # could not ask: nothing learned, nothing halted; the session defers
-        except Exception as exc:  # noqa: BLE001 — a failed read is a refusal, not a crash
-            raise self._unreadable(unreadable(self.venue, now, contracts, f"fill read-back failed: {exc}"))
-        by_id: dict[str, norm.OrderFill] = {}
-        for row in rows:
-            if row.order_id in by_id:
-                raise self._unreadable(
-                    unreadable(self.venue, now, contracts, f"two fill rows for order {row.order_id}")
-                )
-            by_id[row.order_id] = row
-        fills: list[MirrorFill] = []
-        closes: list[MirrorAck] = []
-        contradicted: list[tuple[MirrorQueued, str]] = []
-        for ticket in tracked:
-            row = by_id.get(ticket.venue_order_id)
-            if row is None:
-                continue  # not on today's book; the reconcile judges what the venue holds
-            quantity = ticket.queued.quantity
-            if row.filled < ticket.filled or row.filled > quantity:
-                contradicted.append(
-                    (
-                        ticket.queued,
-                        f"order {row.order_id} reads filled {row.filled}; the mirror has "
-                        f"{ticket.filled} of {quantity}",
-                    )
-                )
-                continue
-            if row.state is OrderState.FILLED and row.filled != quantity:
-                contradicted.append(
-                    (ticket.queued, f"order {row.order_id} reads FILLED at {row.filled} of {quantity}")
-                )
-                continue
-            if row.filled == ticket.filled and row.filled > 0 and row.avg_price != ticket.avg_price:
-                contradicted.append(
-                    (
-                        ticket.queued,
-                        f"order {row.order_id} reads filled {row.filled} at {row.avg_price}; the "
-                        f"mirror booked it at {ticket.avg_price}",
-                    )
-                )
-                continue
-            if row.filled > ticket.filled:
-                fills.append(
-                    MirrorFill(
-                        venue=self.venue,
-                        ticket_key=ticket.key,
-                        venue_order_id=row.order_id,
-                        filled=row.filled,
-                        avg_price=row.avg_price,
-                        at=now,
-                    )
-                )
-            ended = row.state is OrderState.FILLED or row.state in _CLOSED
-            if ended and not ticket.closed and ticket.book_status is not row.state:
-                closes.append(
-                    MirrorAck(
-                        venue=self.venue,
-                        ticket_key=ticket.key,
-                        status="REJECTED" if row.state is OrderState.REJECTED else "ACCEPTED",
-                        message=(
-                            f"order book: order {row.order_id} reads {row.state.value}, "
-                            f"filled {row.filled} of {quantity}"
-                        ),
-                        at=now,
-                        venue_order_id=row.order_id,
-                        book_status=row.state,
-                    )
-                )
-        if contradicted:
-            names = sorted(
-                {c.symbol for queued, _ in contradicted for c in fold_contracts(queued, queued.quantity)}
-            )
-            raise self._unreadable(
-                VenueReconcile(
-                    venue=self.venue,
-                    as_of=now,
-                    reconciled=False,
-                    drift=tuple(names),
-                    note="venue fills contradict the mirror ("
-                    + "; ".join(why for _, why in contradicted)
-                    + "); venue halted",
-                )
-            )
-        return FillCollection(fills=tuple(fills), closes=tuple(closes))
-
-    def _unreadable(self, event: VenueReconcile) -> VenueUnreadable:
-        self._halted = True
-        return VenueUnreadable(event)
+        """Read the venue's cumulative fills per Order ID: the ``MirrorFill`` increments, and the
+        Order Book closes, for the host to append (see ``tos_paper.session``)."""
+        out = json.loads(self._go(self._core.collect_fills, json.dumps(codec.canon(mirror))))
+        return FillCollection(
+            fills=tuple(MirrorFill(venue=f["venue"], ticket_key=f["ticket_key"], venue_order_id=f["venue_order_id"],
+                                   filled=Decimal(f["filled"]), avg_price=_rs.dec(f["avg_price"]),
+                                   at=datetime.fromisoformat(f["at"])) for f in out["fills"]),
+            closes=tuple(MirrorAck(venue=c["venue"], ticket_key=c["ticket_key"], status=c["status"],
+                                   message=c["message"], at=datetime.fromisoformat(c["at"]),
+                                   venue_order_id=c["venue_order_id"], book_status=OrderState(c["book_status"]))
+                         for c in out["closes"]))
 
     # -- the slow path (host-driven, off the sim critical path) --------------
 
@@ -465,179 +354,31 @@ class TosPaperBroker(BrokerAdapter):
         The session calls this BEFORE its write-ahead: a venue that cannot be asked
         (:class:`TransportUnavailable`) raises here, while nothing is queued in the ledger, so the
         run defers whole and loses nothing. The drain then sends from this read instead of
-        reading again, so no read sits between the write-ahead and the send. Any other read
-        failure is left to the drain, which judges it exactly as it always has (refused, halted).
+        reading again, so no read sits between the write-ahead and the send.
         """
-        self._require_connected("preflight")
-        self._preflight_book = None
-        try:
-            self._preflight_book = (self._clock.now_utc(), position_book(self._read_positions()))
-        except TransportUnavailable:
-            raise
-        except Exception:  # noqa: BLE001 — not the absence of an answer: the drain judges the read
-            self._preflight_book = None
+        self._go(self._core.preflight)
 
     def drain(self) -> DrainReport:
-        """Send queued tickets one at a time, each read back, then reconcile.
-
-        Never raises out of the batch for a venue problem: every ticket ends with an
-        ack (REJECTED with a reason, PENDING, or ACCEPTED only when read back), and the
-        batch ends with a VenueReconcile the host appends to the ledger.
-        """
-        self._require_connected("drain")
-        taken, self._preflight_book = self._preflight_book, None  # one drain's, never a later one's
-        if not self._queue:
-            return DrainReport(acks=(), reconcile=None)
-        tickets, self._queue = self._queue, []
-        self._proven = {}
-        contracts = [c for t in tickets for c in ticket_contracts(t)]
-        acks: list[VenueAck] = []
-        fresh = taken is not None and self._clock.now_utc() - taken[0] <= PREFLIGHT_MAX_AGE
-        try:
-            before = taken[1] if fresh else position_book(self._read_positions())
-        except Exception as exc:  # noqa: BLE001 — a failed read is a refusal, not a crash
-            for ticket in tickets:
-                acks.append(self._ack(ticket, "REJECTED", f"cannot read the venue before sending: {exc}"))
-                self._unexpect(ticket)
-            return self._finish(acks, contracts, f"pre-send read failed: {exc}")
-        claimed: set[int] = set()
-        for ticket in tickets:
-            if self._halted:
-                acks.append(self._ack(ticket, "REJECTED", f"venue {self.venue} is halted; not sent"))
-                self._unexpect(ticket)
-                continue
-            ack = self._send(ticket)
-            if ack.status == "REJECTED":
-                self._unexpect(ticket)
-                acks.append(ack)
-                continue
-            try:
-                positions = self._read_positions()
-                working = self._read_working()
-            except Exception as exc:  # noqa: BLE001
-                acks.append(self._ack(ticket, "PENDING", f"{ack.message}; read-back failed: {exc}"))
-                continue
-            status, reason = confirm_ticket(ticket, before, positions, working, claimed)
-            if status == "REJECTED":
-                self._unexpect(ticket)
-            acks.append(self._ack(ticket, status, f"{ack.message}; {reason}" if status == "PENDING" else reason))
-            before = position_book(positions)
-        return self._finish(acks, contracts, None)
-
-    def _finish(self, acks: list[VenueAck], contracts: list[Instrument], failed: str | None) -> DrainReport:
-        now = self._clock.now_utc()
-        if failed is not None:
-            event = unreadable(self.venue, now, contracts + list(self._expected), failed)
-        else:
-            event = self.reconcile_now()
-        if not event.reconciled:
-            self._halted = True
-        return DrainReport(acks=tuple(acks), reconcile=event, proven=dict(self._proven))
+        """Send the queue one ticket at a time, each read back before the next, then reconcile."""
+        out = json.loads(self._go(self._core.drain))
+        return DrainReport(
+            acks=tuple(_rs.ack(a) for a in out["acks"]),
+            reconcile=None if out["reconcile"] is None else _rs.event(out["reconcile"]),
+            proven={k: (oid, OrderState(state)) for k, (oid, state) in out["proven"]})
 
     def reconcile_now(self, *, defer_unavailable: bool = False) -> VenueReconcile:
-        """Compare the venue with the mirror book; drift (or an unreadable venue) halts.
-
-        With ``defer_unavailable`` a venue that could not be asked (:class:`TransportUnavailable`)
-        raises instead of halting: the collect, which sends nothing, defers. The drain's own
-        closing reconcile comes AFTER sends, where an unanswered read must stay unproven (I5).
-        """
-        now = self._clock.now_utc()
-        try:
-            positions = self._read_positions()
-            working = self._read_working()
-        except Exception as exc:  # noqa: BLE001
-            if defer_unavailable and isinstance(exc, TransportUnavailable):
-                raise
-            event = unreadable(self.venue, now, list(self._expected), str(exc))
-        else:
-            event = reconcile(self.venue, now, self._expected, positions, working)
-        if not event.reconciled:
-            self._halted = True
-        return event
-
-    def _send(self, ticket: VenueOrder) -> VenueAck:
-        try:
-            spec = ticket_for(ticket)
-        except UnsupportedCapability as exc:
-            return self._ack(ticket, "REJECTED", f"UnsupportedCapability: {exc}")
-        try:
-            raw = self.transport.place_order(spec, ticket.venue_order_id)
-        except Exception as exc:  # noqa: BLE001 — mapped, never propagated out of a batch
-            return norm.normalize_place_exception(exc, ticket.venue_order_id, self._clock.now_utc())
-        order_id = norm.placed_order_id(raw)
-        if order_id is not None:
-            self._sent[ticket.venue_order_id] = (ticket, order_id, ticket.quantity)
-            self._proven[ticket.venue_order_id] = (order_id, norm.book_state(raw.get("book_status")))
-        return norm.normalize_place_result(raw, ticket.venue_order_id, self._clock.now_utc())
-
-    def _ack(self, ticket: VenueOrder, status: str, message: str) -> VenueAck:
-        return VenueAck(ticket.venue_order_id, status, self._clock.now_utc(), message)
-
-    def _read_positions(self) -> list[VenuePosition]:
-        now = self._clock.now_utc()
-        return [norm.normalize_position(row, now) for row in self.transport.read_positions()]
-
-    def _read_working(self) -> list[norm.WorkingOrder]:
-        return [norm.normalize_working_order(row) for row in self.transport.read_working_orders()]
-
-    # -- the adapter contract -------------------------------------------------
+        """Read the venue and compare it with what the mirror expects (drift halts the venue)."""
+        return _rs.event(json.loads(self._go(self._core.reconcile_now, defer_unavailable)))
 
     def submit(self, order: VenueOrder) -> VenueAck:
-        """Send one venue order directly (the OMS path). PENDING until read back."""
-        self._require_connected("submit")
-        if self._halted:
-            return self._ack(order, "REJECTED", f"venue {self.venue} is halted by a reconcile drift")
-        ticket_for(order)  # UnsupportedCapability for anything the venue cannot express
-        return self._send(order)
+        return _rs.ack(json.loads(self._go(self._core.submit, json.dumps(_rs.venue_order_doc(order)))))
 
     def cancel(self, venue_order_id: str) -> VenueAck:
-        """Cancel one ticket by its key. Allowed while halted: a cancel only lowers risk.
-
-        A still-queued ticket is dropped from the queue (nothing reached the venue). A
-        sent one is cancelled by the venue Order ID its send proved; with no proven id,
-        or a transport without :class:`OrderCanceller`, the cancel is REJECTED (I5).
-        ACCEPTED only when the Order Book row reads CANCELED; then the ticket's unfilled
-        remainder leaves the expectation — after ``restore`` that is the quantity less the
-        fills the fold recorded, so the expectation stays the fold's (a fill not yet
-        collected shows as drift). ``tos_paper.session.cancel_ticket`` records the cancel.
-        """
-        self._require_connected("cancel")
-        now = self._clock.now_utc()
-        if venue_order_id in self._cancelled:
-            return VenueAck(venue_order_id, "ACCEPTED", now, "already cancelled")
-        for index, queued in enumerate(self._queue):
-            if queued.venue_order_id == venue_order_id:
-                del self._queue[index]
-                self._unexpect(queued)
-                self._cancelled.add(venue_order_id)
-                return VenueAck(venue_order_id, "ACCEPTED", now, "cancelled before send: dropped from the queue")
-        sent = self._sent.get(venue_order_id)
-        if sent is None:
-            return VenueAck(
-                venue_order_id, "REJECTED", now,
-                "no venue Order ID was proven for this ticket; refusing to guess the row (I5)",
-            )
-        if not isinstance(self.transport, OrderCanceller):
-            return VenueAck(venue_order_id, "REJECTED", now, "the transport cannot cancel; refusing")
-        ticket, order_id, resting = sent
-        try:
-            raw = self.transport.cancel_order(order_id)
-        except Exception as exc:  # noqa: BLE001 — mapped, never propagated
-            return norm.normalize_cancel_exception(exc, venue_order_id, self._clock.now_utc())
-        ack = norm.normalize_cancel_result(raw, venue_order_id, self._clock.now_utc())
-        if ack.status == "ACCEPTED":
-            del self._sent[venue_order_id]
-            self._unexpect(ticket, resting)
-            self._cancelled.add(venue_order_id)
-        return ack
-
-    def _unexpect(self, ticket: VenueOrder, units: Decimal | None = None) -> None:
-        _add(self._expected, ticket, -1, units)
+        return _rs.ack(json.loads(self._go(self._core.cancel, venue_order_id)))
 
     def proven_order_id(self, ticket_key: str) -> str | None:
         """The venue Order ID a send (or the restored fold) proved for a ticket, or None."""
-        sent = self._sent.get(ticket_key)
-        return None if sent is None else sent[1]
+        return self._core.proven_order_id(ticket_key)
 
     def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
         raise TosPaperBrokerError(
@@ -659,18 +400,12 @@ class TosPaperBroker(BrokerAdapter):
 
     def positions(self) -> list[VenuePosition]:
         self._require_connected("positions")
-        return self._read_positions()
+        return [VenuePosition(_rs.unwire(p["instrument"]), Decimal(p["quantity"]), Decimal(p["avg_price"]),
+                              datetime.fromisoformat(p["as_of"]))
+                for p in json.loads(self._go(self._core.positions))]
 
     def cash_events(self, since: datetime) -> list[VenueCashEvent]:
         raise TosPaperBrokerError("venue cash events (assignment/exercise) cannot be read yet")
-
-
-_CLOSED = frozenset({OrderState.CANCELLED, OrderState.EXPIRED, OrderState.REJECTED})
-
-
-def _add(expected: dict[Instrument, Decimal], ticket: VenueOrder, sign: int, units: Decimal | None = None) -> None:
-    for contract, quantity in ticket_contracts(ticket, units).items():
-        expected[contract] = expected.get(contract, ZERO) + sign * quantity
 
 
 def venue_order_of(queued: MirrorQueued) -> VenueOrder:
