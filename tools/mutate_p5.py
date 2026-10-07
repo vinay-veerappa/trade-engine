@@ -156,6 +156,8 @@ def main():
                     continue
                 source = SOURCES / filename
                 text = originals[source].decode("utf-8")
+                if "\r\n" in text:  # a CRLF checkout (core.autocrlf): multi-line anchors use the file's line ending
+                    anchor, replacement = anchor.replace("\n", "\r\n"), replacement.replace("\n", "\r\n")
                 assert text.count(anchor) == 1, (name, text.count(anchor))
                 try:
                     source.write_bytes(text.replace(anchor, replacement).encode("utf-8"))
