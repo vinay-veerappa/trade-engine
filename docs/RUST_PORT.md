@@ -1304,8 +1304,8 @@ equity bracket is REFUSED as an idempotency conflict, never double-placed (see B
    refused. No real ledger value is near the bound (the migration reports the widest value seen).
 3. *Equity-bracket replay across the migration* (above): refuse, or build a host seam for the
    alias. Recommended: refuse until an equity ledger exists.
-4. *Applying the migration* to the live ledgers, after the P4c rollout and the Python retire, is
-   the owner's call; this branch only builds and proves it on copies.
+4. *Applying the migration* to the live ledgers, after the P4c rollout, is the owner's call;
+   this branch only builds and proves it on copies.
 
 **Owner decisions (2026-10-07).** Context: the stored ledgers hold decimals of scale 2 to 6 at
 most (a scan of the copies: 2 and 4 places, one `25006.700000`); 28 places only matter for the
@@ -1323,12 +1323,31 @@ the 20th decimal place, far below a cent.
    decimal it sends fits the bound (tvDownloadOHLC change, tracked with P7).
 5. *Bound* (96-bit mantissa, scale 28): accepted.
 6. *Applying the migration*: approved in principle, applied last, in this order: the P4c rollout
-   completes; the Python logic is retired; this branch is rebased onto main and re-gated (the full
-   `mutate_p7` run, the copies migration and `time_p7`, which predate c99c73a..e03e331); then,
-   outside market hours with the ledger's writers stopped (I4), each ledger is migrated to a NEW
-   file, the configured ledger path is pointed at it (the `data\` policy denies rename and
-   delete), and the source stays as the backup. Reading old spellings forever instead of
-   migrating was rejected: it keeps a second reader (D3).
+   completes; this branch is rebased onto main and re-gated (the full `mutate_p7` run, the copies
+   migration and `time_p7`, which predate c99c73a..e03e331); then, outside market hours with the
+   ledger's writers stopped (I4), each ledger is migrated to a NEW file, the configured ledger
+   path is pointed at it (the `data\` policy denies rename and delete), and the source stays as
+   the backup. Reading old spellings forever instead of migrating was rejected: it keeps a second
+   reader (D3).
+
+**Amendment (2026-10-07, evening).** The owner keeps the Python scripts for a few more weeks and
+wants the Rust cut-over now, so the Python retire is no longer a step before P7: it is its own
+later phase. P7 never needed it (the gates below pass with the Python logic in place). The
+scan_engine precision change of decision 4 landed on tvDownloadOHLC main (8280f8ec).
+
+**Re-gate after the rebase onto main c19f63f (2026-10-07).** No conflicts. `cargo test
+--workspace` 237 passed; the wasm32 release build ok; `ci_local` 2743 passed (base 2707);
+`mutate_p7` 22/22 KILLED, baseline and restored green (the Rust mutants leave proptest seed files
+under `crates/te_core/proptest-regressions/`; they pass on the restored code and are deleted).
+Copies taken 13:54 PT (outside market hours), source opened `mode=ro`:
+
+| ledger | events | rows respelled | accounts | fingerprints mapped (opaque) | value-equal | reverse sha256 |
+|---|---|---|---|---|---|---|
+| `options-ledger.db` | 26 | 6 | 5 | 1 (1) | yes | restores |
+| `options-0dte-ledger.db` | 1499 | 19 | 1 | 9 (7) | yes | restores |
+
+`time_p7` against the pre-P7 build on the 0DTE copy (new/old medians, gate 1.25): fold 0.956,
+append 0.980, bracket 1.003.
 
 ### Costs of phasing (accepted)
 
