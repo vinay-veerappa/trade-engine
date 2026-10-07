@@ -7,6 +7,8 @@ mod plugins;
 #[cfg(windows)]
 mod python;
 mod routes;
+#[cfg(windows)]
+mod stdin_watch;
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -182,15 +184,7 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
                     .expect("report serialization cannot fail")
                 );
                 // Serve until stdin closes; a remote owner stops explicitly.
-                use std::io::Read;
-                let mut stdin = std::io::stdin();
-                let mut buffer = [0u8; 1024];
-                loop {
-                    match stdin.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                }
+                stdin_watch::wait_for_close();
                 server.stop().map_err(|e| {
                     jobs::refusal("RuntimeStopError", e)
                 })?;
