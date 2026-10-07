@@ -1209,6 +1209,100 @@ Boundary:
 - The web (`web/lib/orders/cme-calendar.ts`) still mirrors the equity table only, without the eras. Day expiry for a pre-2021 equity date, or for CL/GC, can differ from te_core until the web follow-up lands: per-group generated tables, the 12 venue roots and the per-root ranges.
 - Before 2021-06-28, te_core keeps 17:00 ET as the session identity and does not model CME's 16:15 ET trade-date roll (documented in the .md).
 
+### P7 verification and boundary
+
+#### 1. The canonical decimal spelling (design, written before the code)
+
+Python clients survive P7: `scan_engine` (tvDownloadOHLC) builds events with Python `Decimal`
+and `trade_engine.ledger.codec` encodes them. So one spelling must be producible, byte for byte,
+by Python and by Rust. Chosen (S1):
+
+- the exact value in plain positional notation, never an exponent, never `+`;
+- no trailing zeros after the point, no point on an integer, `0.x` (not `.x`) below one;
+- zero is `0` (so `-0`, `0.000` and `0E+3` are all `0`); a negative value is `-` and its digits;
+- bound: the value must be `m / 10^s` with an integer `m` below `2^96` (`rust_decimal`'s
+  mantissa) and `0 <= s <= 28`, after the trailing zeros are stripped. A value outside the bound
+  is REFUSED (I5): `Overflow` in Rust, `DecimalRangeError` (a `ValueError`) in Python. It is never
+  rounded, truncated or saturated, and `NaN`/`Infinity` are refused the same way.
+
+How each input is spelled before (`str(Decimal)`, what is stored today) and after (S1):
+
+| value | before | after |
+|---|---|---|
+| `Decimal('1.10')` | `1.10` | `1.1` |
+| `Decimal('1E+2')` | `1E+2` | `100` |
+| `Decimal('-0')` | `-0` | `0` |
+| `Decimal('0.000')` | `0.000` | `0` |
+| `Decimal('0E+3')` | `0E+3` | `0` |
+| `Decimal(100)/Decimal(3)` (28 significant digits) | `33.33333333333333333333333333` | `33.33333333333333333333333333` (28 digits, scale 26: inside the bound, so unchanged) |
+| `Decimal('7.77E+3')` | `7.77E+3` | `7770` |
+| `Decimal('1E-7')` | `1E-7` | `0.0000001` |
+| `Decimal('1E+30')`, `Decimal(2**96)`, `Decimal('1E-29')` | accepted | REFUSED (beyond 96 bits or scale 28) |
+| `NaN`, `Infinity` | accepted by `Decimal` | REFUSED |
+
+The spelling is a function of the value only, so two spellings of one value hash alike and the
+decimal text in a stored event is idempotent (`canon(canon(x)) == canon(x)`).
+
+**Arithmetic (`te_core::money::Money`).** A `rust_decimal::Decimal` newtype, always held in S1
+form, with no `NaN`/`Infinity`. Every operation computes the exact result, rounds it to 28
+significant digits half-even (Python's default context, so a quotient is value-equal to the one
+the Python oracle computes), and only then checks the bound; a result outside it is `Overflow`,
+never rounded further. `rust_decimal`'s own `checked_add`/`checked_mul` are not used for the
+result because they round a wide result to a smaller scale silently (I5). Division by zero and
+`0/0` are `DivisionByZero` and `InvalidOperation`, as `decimal` raises. The proptests compare
+add, sub, mul, div, quantize (half-even and floor), neg, abs and compare against `PyDec` wherever
+both are defined, and require a refusal wherever the `PyDec` value is outside the bound.
+
+**What the spelling touches.**
+
+- Ledger payloads: every `{"d": ...}` is re-spelled by the codec. Reading accepts any `Decimal`
+  literal (exponent forms included), so an unmigrated ledger still decodes; writing is S1.
+- Canonical state (`ledger::canon`): S1.
+- Fingerprints (`fingerprint_order`, `reduce_fingerprint`, `bracket_fingerprint`, the option
+  intent and order fingerprints) hash S1 text: decimal-valued fields are canonicalized before
+  hashing, so `1.10` and `1.1` are one command. This changes every stored fingerprint whose input
+  held a non-canonical spelling.
+- Idempotency keys: `command_id` and `order_id` are caller-chosen strings (timestamps and
+  prefixes), not hashes of decimals, and are carried byte for byte. What is rehashed is the
+  fingerprint stored in `OrdersCreated`, which is what a replay is compared with.
+
+**Stored-ledger migration (`tools/p7_migrate.py`, written never in place).**
+
+1. Every event payload is re-spelled to S1; a value outside the bound aborts the migration
+   (nothing is written to the destination's final name).
+2. `OrdersCreated.fingerprint` is rehashed. Where the old fingerprint can be re-derived from the
+   stored payload (the order fingerprint of a close) the new one is the S1 hash of the migrated
+   payload and the derivation is verified against the old value first. A fingerprint of an
+   intent whose inputs are not stored (`intent_id`, `quantity_rule`: the option and bracket
+   intents) cannot be re-derived: it is rehashed as `sha256("p7:1:" + old)`, flagged `opaque` in
+   the map, and counted in the report.
+3. The old to new pairs go into the new ledger's table `p7_key_map(old, new, event_seq, kind)`.
+4. The new ledger is re-folded and every account's balances and positions are compared with the
+   source's BY VALUE (cash, realized pnl, quantities, average costs, lots); a difference aborts.
+5. `--reverse` rebuilds the source database from the migrated one and the map and proves the
+   dumped bytes (`events` and `outbox` rows) hash to the sha256 recorded at migration time.
+
+A replay that presents an old key: the options OMS computes the legacy fingerprint (the same
+function as before, over the strings as presented) next to the S1 one, asks the ledger for the
+alias of the legacy value in `p7_key_map`, and accepts the stored fingerprint if it equals the
+S1 value or that alias (`oms_fingerprint_conflict`). Opaque rows therefore dedupe a replay made
+the way it was made before the migration. The Rust equity-bracket flow has no host seam for the
+alias, and none of the stored ledgers holds an equity bracket: a replay of a migrated, opaque,
+equity bracket is REFUSED as an idempotency conflict, never double-placed (see Boundary).
+
+**Needs the owner (continued with the recommendation).**
+
+1. *Arithmetic rounding.* Recommended and implemented: Python's 28-digit half-even, so that
+   quotients stay value-equal with the Python clients and the frozen oracles. The alternative,
+   `rust_decimal`'s native division, would differ from Python in the last digits of every inexact
+   quotient (29 digits against 28).
+2. *Bound.* 96-bit and scale 28 are `rust_decimal`'s; a value Python could hold beyond them is
+   refused. No real ledger value is near the bound (the migration reports the widest value seen).
+3. *Equity-bracket replay across the migration* (above): refuse, or build a host seam for the
+   alias. Recommended: refuse until an equity ledger exists.
+4. *Applying the migration* to the live ledgers, after the P4c rollout and the Python retire, is
+   the owner's call; this branch only builds and proves it on copies.
+
 ### Costs of phasing (accepted)
 
 - Until P4 Python calls Rust across pyo3 with plain values or JSON; most of that
