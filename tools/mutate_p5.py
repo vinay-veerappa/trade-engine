@@ -1,4 +1,9 @@
-"""Compiling P5 (T1-T9: transport, normalize, slippage, netting, cover, reconcile, exits, follow, broker) hand mutants: assertion kills only, finally restore, final green build."""
+"""Compiling P5 (T1-T9: transport, normalize, slippage, netting, cover, reconcile, exits, follow, broker) hand mutants: assertion kills only, finally restore, final green build.
+
+T10: the parity tests compare the frozen oracle against the Rust door AND production ``tos_paper`` (the shims).
+Each mutant is run through each leg alone (``P5_LEG=door`` then ``P5_LEG=production``) and must be killed by an
+assertion through BOTH: a mutant only the door sees would be a decision production never takes.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -92,6 +97,16 @@ MUTANTS = (
 )
 
 
+# A kill production cannot show, and why. Reversing the order shorts are matched in changes WHICH shorts a
+# long covers, never how many are covered, and `covers` needs equal multipliers, so the shares step that
+# follows sees the same multipliers: `uncovered` (the only reader production has) is unchanged. Only the
+# door's internal `bare` op, which production deleted, exposes it.
+DOOR_ONLY = {
+    "cover-kuhn-short-order-reversed":
+        "which shorts a long covers is unobservable through uncovered(): covering needs equal multipliers",
+}
+
+
 def paths():
     assert PY == (ROOT / ".venv" / "Scripts" / "python.exe").resolve()
     assert ROOT.name == "rust-p5"
@@ -111,9 +126,16 @@ def build():
     return time.perf_counter() - start
 
 
-def tests():
-    return subprocess.run(TEST, cwd=ROOT, env=ENV, capture_output=True,
+def tests(leg="both"):
+    return subprocess.run(TEST, cwd=ROOT, env=dict(ENV, P5_LEG=leg), capture_output=True,
                           text=True, encoding="utf-8", errors="replace")
+
+
+def assertion_kill(proc):
+    failed = [line for line in proc.stdout.splitlines() if line.startswith("FAILED")]
+    ok = (proc.returncode == 1 and failed and "AssertionError" in proc.stdout
+          and "ERROR collecting" not in proc.stdout and "ImportError" not in proc.stdout)
+    return failed[0] if ok else None
 
 
 def main():
@@ -126,7 +148,7 @@ def main():
     try:
         seconds = build()
         baseline = tests()
-        baseline_green = baseline.returncode == 0
+        baseline_green = baseline.returncode == 0 and all(tests(leg).returncode == 0 for leg in ("door", "production"))
         print(f"baseline exit={baseline.returncode} build={seconds:.3f}s\n{baseline.stdout[-2000:]}", flush=True)
         if baseline_green:
             for name, filename, anchor, replacement in MUTANTS:
@@ -143,16 +165,19 @@ def main():
                         failures.append((name, "compile failed"))
                         print(f"INVALID {name}: compile failed {exc.stderr[-2000:]!r}", flush=True)
                         continue
-                    proc = tests()
-                    failed = [line for line in proc.stdout.splitlines() if line.startswith("FAILED")]
-                    assertion = (proc.returncode == 1 and failed and "AssertionError" in proc.stdout
-                                 and "ERROR collecting" not in proc.stdout and "ImportError" not in proc.stdout)
-                    if assertion:
-                        kills.append((name, failed[0]))
-                        print(f"KILLED {name} build={seconds:.3f}s {failed[0]}", flush=True)
+                    proc_door = tests("door")
+                    through_door = assertion_kill(proc_door)
+                    proc_production = tests("production")
+                    through_production = assertion_kill(proc_production)
+                    if through_door and (through_production or (name in DOOR_ONLY and proc_production.returncode == 0)):
+                        kills.append((name, through_door, through_production))
+                        print(f"KILLED {name} build={seconds:.3f}s door: {through_door} | production: "
+                              f"{through_production or 'unobservable: ' + DOOR_ONLY[name]}", flush=True)
                     else:
-                        failures.append((name, "survived" if proc.returncode == 0 else "not an assertion kill"))
-                        print(f"INVALID {name} exit={proc.returncode}\n{proc.stdout[-5000:]}", flush=True)
+                        for leg, proc, kill in (("door", proc_door, through_door), ("production", proc_production, through_production)):
+                            if not kill:
+                                failures.append((name, leg, "survived" if proc.returncode == 0 else "not an assertion kill"))
+                                print(f"INVALID {name} {leg} exit={proc.returncode}\n{proc.stdout[-5000:]}", flush=True)
                 finally:
                     source.write_bytes(originals[source])
     finally:
