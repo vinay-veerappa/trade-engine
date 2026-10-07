@@ -258,6 +258,15 @@ def default_roles(repo: Path, binary: Path) -> list[RoleSpec]:
     ]
 
 
+def _base_prefix(venv_python: Path) -> Path:
+    """The private CPython 3.13 home a venv's pyvenv.cfg points at."""
+    cfg = venv_python.parent.parent / "pyvenv.cfg"
+    for line in cfg.read_text(encoding="utf-8-sig").splitlines():
+        if line.strip().startswith("home"):
+            return Path(line.split("=", 1)[1].strip())
+    raise RolloutError(f"cannot find the base prefix: {cfg} has no home row")
+
+
 def render_config(spec: RoleSpec, *, binary: Path, capability: Path,
                   folder: Path) -> dict:
     """Render one runtime-owner config (the T9+ serve schema). Absolute
@@ -267,8 +276,10 @@ def render_config(spec: RoleSpec, *, binary: Path, capability: Path,
     python = Path(spec.venv_python)
     return {
         "mode": "runtime-owner",
-        "python_home": python.parent.parent.name and str(python.parent.parent),
-        "python_dll": str(Path(sys.base_prefix) / "python313.dll"),
+        # python_home is the stdlib home (the interpreter's base prefix),
+        # not the venv dir; serve validates it holds the 3.13 stdlib.
+        "python_home": str(_base_prefix(python)),
+        "python_dll": str(_base_prefix(python) / "python313.dll"),
         "python_executable": str(python),
         "site_packages": str(Path(python).parent.parent / "Lib" / "site-packages"),
         "engine_source": str(ROOT / "src"),
