@@ -116,9 +116,15 @@ def test_schema_pragmas_and_native_proxy_rows(tmp_path):
         for ledger in (old, new):
             ledger.append(cash(command="deposit"))
             ledger.set_meta("unicode-🚀", "exact \0 text")
+        # The journal mode is no longer cross-checked: the frozen oracle
+        # opens WAL while the native store journals in TRUNCATE (the data\
+        # policy denies file delete/rename; a journal that must be unlinked
+        # at commit fails with disk I/O error). The pragma is asserted
+        # directly instead.
+        assert new.conn.execute("PRAGMA journal_mode").fetchone()[0] == "truncate"
         for query in (
             "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
-            "PRAGMA journal_mode", "PRAGMA synchronous", "PRAGMA foreign_keys",
+            "PRAGMA synchronous", "PRAGMA foreign_keys",
             "SELECT * FROM events", "SELECT * FROM meta", "SELECT * FROM outbox",
         ):
             def inspect(ledger):
