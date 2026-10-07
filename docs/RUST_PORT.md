@@ -1095,6 +1095,17 @@ Windows' default TEMP before explicit worktree TMPDIR/TEMP/TMP pinning;
 subsequent builds/tests and all authored scratch/log files were worktree-local.
 No push, merge, PR or later ticket was started.
 
+**Accepted deviation after rollout (a79f3c8): TRUNCATE, not WAL.** The runtime
+ledger lives under `data\`, where the operator's policy denies file
+delete/rename. So WAL's `-wal`/`-shm` and the default delete-journal both fail
+with `disk I/O error`. The native store opens with `journal_mode=TRUNCATE`,
+which zeroes the rollback journal in place. The frozen oracle stays WAL.
+`test_schema_pragmas_and_native_proxy_rows` no longer compares
+`journal_mode`; instead it pins `wal` for the oracle and `truncate` for the
+native store exactly. `tests/test_ledger.py::test_ledger_uses_wal` became
+`test_ledger_journals_in_truncate`. `synchronous=FULL`, `foreign_keys`, the schema and all
+rows are still compared.
+
 ### P5 verification and boundary
 
 Commits: 64afa1c (frozen Python oracle); T1-T8 77783c1..d95d629 (transport, normalize, slippage, reconcile, cover, netting, exits, follow decisions in te_core, each in lockstep with the frozen oracle); T9 5d4573a (the broker state machine); T10 76b26c4 (production `tos_paper` runs on `trade_engine_rs`); hand mutants 90874bf, 1c823f5, 7680e21, 0415eb8, 6c68e86; 73213c9 and a7e2f6e (test move and rebase fix, below).

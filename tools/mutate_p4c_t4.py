@@ -33,7 +33,7 @@ MUTANTS=(
      '        let conn = Connection::open(path).map_err(OpenError::Sql)?;',
      'let conn = Connection::open(path).map_err(OpenError::Sql)?;\n'
      '        let guard = SingleInstanceGuard::acquire(sidecar, pid).map_err(OpenError::Lock)?;'),
-    ("wal-disabled",HOST,"PRAGMA journal_mode=WAL;","PRAGMA journal_mode=DELETE;"),
+    ("truncate-journal-lost",HOST,"PRAGMA journal_mode=TRUNCATE;","PRAGMA journal_mode=WAL;"),
     ("durability-weakened",HOST,"PRAGMA synchronous=FULL;","PRAGMA synchronous=NORMAL;"),
     ("foreign-keys-disabled",HOST,"PRAGMA foreign_keys=ON;","PRAGMA foreign_keys=OFF;"),
     ("command-replay-lost",HOST,"if let Some(event) = self.by_command(&command)? {",

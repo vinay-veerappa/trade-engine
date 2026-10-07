@@ -871,9 +871,10 @@ def test_uncommitted_row_is_invisible_to_a_second_reader(ledger_path: Path, monk
     assert rows == 1
 
 
-def test_ledger_uses_wal(ledger: Ledger) -> None:
+def test_ledger_journals_in_truncate(ledger: Ledger) -> None:
+    # TRUNCATE, not WAL (a79f3c8): data\ policy denies the delete/rename WAL needs.
     mode = ledger.conn.execute("PRAGMA journal_mode").fetchone()[0]
-    assert mode.lower() == "wal"
+    assert mode.lower() == "truncate"
 
 
 # --------------------------------------------------------------------------- single instance
