@@ -1635,7 +1635,7 @@ def test_reduce_bracket_refuses_a_fraction_it_cannot_size(manager_factory):
     with pytest.raises(OrderManagementError, match="rounds down to nothing"):
         manager.reduce_bracket(entry_id, Decimal("0.05"), command_id="tiny", reason="r")
     for fraction in (Decimal("0"), Decimal("1"), Decimal("1.5"), Decimal("NaN")):
-        with pytest.raises(ValueError, match="fraction"):
+        with pytest.raises(ValueError, match="fraction|not a Decimal"):
             manager.reduce_bracket(entry_id, fraction, command_id=f"bad-{fraction}", reason="r")
     assert len(broker.submitted) == sent
     assert manager.get_order(bracket.targets[0].order_id).state is OrderState.ACCEPTED

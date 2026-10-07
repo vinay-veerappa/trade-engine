@@ -61,7 +61,10 @@ fn a_value_outside_the_bound_is_refused_never_rounded() {
     // arithmetic that lands outside refuses too
     assert_eq!(m("1000000000000000").mul(&m("1000000000000000")), Err(DecErr::Overflow));
     assert_eq!(m("0.0000000001").mul(&m("0.0000000001")).unwrap().canon(), "0.00000000000000000001");
+    // finer than scale 28: rounded half-even to it; one that would vanish refuses
+    assert_eq!(m("0.000000000000001").mul(&m("0.00000000000007")).unwrap().canon(), "0.0000000000000000000000000001");
     assert_eq!(m("0.000000000000001").mul(&m("0.000000000000001")), Err(DecErr::Overflow));
+    assert_eq!(m("1.90").div(&m("45")).unwrap().canon(), "0.0422222222222222222222222222");
     assert_eq!(m("1").div(&m("0")), Err(DecErr::DivisionByZero));
     assert_eq!(m("0").div(&m("0")), Err(DecErr::InvalidOperation));
     // 2^96 - 1 plus one is 29 digits: Python rounds it to 28 digits and so does Money
@@ -94,6 +97,13 @@ fn rounding_modes() {
 }
 
 fn oracle_value(p: &PyDec) -> DecResult<Money> {
+    // an arithmetic result finer than scale 28 is rounded half-even to it, never to zero
+    if !p.is_zero() && p.exponent() < -28 {
+        return match p.quantize(-28) {
+            Ok(q) if !q.is_zero() => Money::try_parse(&q.format_f()),
+            _ => Err(DecErr::Overflow),
+        };
+    }
     Money::try_parse(&p.format_f())
 }
 

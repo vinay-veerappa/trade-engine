@@ -190,6 +190,19 @@ fn finish_u128(neg: bool, coef: u128, exp: i64) -> DecResult<Money> {
     } else {
         (coef, exp)
     };
+    // An arithmetic result finer than the bound's scale is rounded half-even to it (a
+    // quotient such as 1.90/45 has 28 digits but scale 29); one that would vanish is
+    // refused, never turned into zero. Literals never come through here.
+    let (coef, exp) = if exp < -(MAX_SCALE as i64) {
+        let drop = (-(MAX_SCALE as i64) - exp) as usize;
+        let r = shift_round_u128(coef, drop, neg, Round::HalfEven);
+        if r == 0 {
+            return Err(DecErr::Overflow);
+        }
+        (r, -(MAX_SCALE as i64))
+    } else {
+        (coef, exp)
+    };
     Money::build(neg, coef, exp)
 }
 

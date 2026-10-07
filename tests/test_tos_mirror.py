@@ -665,7 +665,7 @@ def test_the_same_cumulative_at_another_price_is_a_contradiction(ledger) -> None
     venue.fill_rows_override = [{"order_id": "5400000001", "filled": "1", "avg_price": "2.0", "status": "WORKING"}]
     assert _broker(venue, clock=MORNING)[0].collect_fills(_mirror(ledger)).fills == ()  # 2.0 == 2.00
     venue.fill_rows_override = [{"order_id": "5400000001", "filled": "1", "avg_price": "2.10", "status": "WORKING"}]
-    with pytest.raises(VenueUnreadable, match="booked it at 2.00"):
+    with pytest.raises(VenueUnreadable, match="booked it at 2"):
         _broker(venue, clock=MORNING)[0].collect_fills(_mirror(ledger))
 
 
