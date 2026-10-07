@@ -73,6 +73,15 @@ fn a_value_outside_the_bound_is_refused_never_rounded() {
 }
 
 #[test]
+fn arithmetic_results_are_spelled_without_trailing_zeros() {
+    assert_eq!(m("2.5").mul(&m("2")).unwrap().canon(), "5");
+    assert_eq!(m("1.5").add(&m("1.5")).unwrap().canon(), "3");
+    assert_eq!(m("1.10").add(&m("1.10")).unwrap().canon(), "2.2");
+    assert_eq!(m("10").div(&m("4")).unwrap().canon(), "2.5");
+    assert_eq!(m("100").sub(&m("0.5")).unwrap().add(&m("0.5")).unwrap().canon(), "100");
+}
+
+#[test]
 fn negative_zero_never_exists() {
     let z = m("-0").neg().unwrap();
     assert_eq!(z.canon(), "0");
@@ -137,6 +146,9 @@ fn agrees(py: pydec::DecResult<PyDec>, got: DecResult<Money>) {
         Ok(r) => {
             let expected = oracle_value(&r);
             assert_eq!(got, expected, "oracle {}", r.to_py_string());
+            if let (Ok(g), Ok(e)) = (&got, &expected) {
+                assert_eq!(g.canon(), e.canon(), "spelling of {}", r.to_py_string()); // by text, not only by value
+            }
         }
         Err(pydec::DecErr::Unsupported(_)) => {}
         Err(pydec::DecErr::InvalidOperation) => assert_eq!(got, Err(DecErr::InvalidOperation)),
