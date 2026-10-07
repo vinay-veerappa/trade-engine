@@ -1246,8 +1246,10 @@ decimal text in a stored event is idempotent (`canon(canon(x)) == canon(x)`).
 **Arithmetic (`te_core::money::Money`).** A `rust_decimal::Decimal` newtype, always held in S1
 form, with no `NaN`/`Infinity`. Every operation computes the exact result, rounds it to 28
 significant digits half-even (Python's default context, so a quotient is value-equal to the one
-the Python oracle computes), and only then checks the bound; a result outside it is `Overflow`,
-never rounded further. `rust_decimal`'s own `checked_add`/`checked_mul` are not used for the
+the Python oracle computes); a result finer than scale 28 (for example `1.90 / 45`, 28 digits
+but scale 29) is then rounded half-even to scale 28, never to zero (a nonzero result that would
+become zero is `Overflow`); only then is the bound checked, and a result outside it (more than 96
+bits) is `Overflow`, never rounded further. `rust_decimal`'s own `checked_add`/`checked_mul` are not used for the
 result because they round a wide result to a smaller scale silently (I5). Division by zero and
 `0/0` are `DivisionByZero` and `InvalidOperation`, as `decimal` raises. The proptests compare
 add, sub, mul, div, quantize (half-even and floor), neg, abs and compare against `PyDec` wherever
@@ -1293,7 +1295,9 @@ equity bracket is REFUSED as an idempotency conflict, never double-placed (see B
 **Needs the owner (continued with the recommendation).**
 
 1. *Arithmetic rounding.* Recommended and implemented: Python's 28-digit half-even, so that
-   quotients stay value-equal with the Python clients and the frozen oracles. The alternative,
+   quotients stay value-equal with the Python clients and the frozen oracles, then to scale 28
+   (the one place Money rounds beyond Python: a result finer than scale 28 is rounded, where the
+   Python codec's `canon_decimal` still REFUSES such a value if it is ever handed one). The alternative,
    `rust_decimal`'s native division, would differ from Python in the last digits of every inexact
    quotient (29 digits against 28).
 2. *Bound.* 96-bit and scale 28 are `rust_decimal`'s; a value Python could hold beyond them is
