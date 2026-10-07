@@ -1,0 +1,6 @@
+{
+    "comment": "P4c T14 per-ledger owner selector. One row per ledger path. 'legacy' (the default and the only value this kit ships with) keeps the classic Python owner; 'runtime' selects the staged Rust runtime owner. A role never falls back mid-job: a missing or uninstalled Rust sidecar refuses loudly. The optional 'tasks' index maps a scheduled-task name to its ledger path (the client seam knows the task name, not the ledger). This file is the ONLY switch the one-action rollback touches.",
+    "default": "legacy",
+    "ledgers": {},
+    "tasks": {}
+}
