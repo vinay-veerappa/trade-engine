@@ -1307,6 +1307,29 @@ equity bracket is REFUSED as an idempotency conflict, never double-placed (see B
 4. *Applying the migration* to the live ledgers, after the P4c rollout and the Python retire, is
    the owner's call; this branch only builds and proves it on copies.
 
+**Owner decisions (2026-10-07).** Context: the stored ledgers hold decimals of scale 2 to 6 at
+most (a scan of the copies: 2 and 4 places, one `25006.700000`); 28 places only matter for the
+inexact quotients the engine computes itself (average costs), where Python and Money differ near
+the 20th decimal place, far below a cent.
+
+1. *NaN and Infinity* are refused at parse: accepted (no stored value is one).
+2. *Fingerprints*: the opaque `p7:1:` rehash with `p7_key_map` is accepted. An equity-bracket
+   replay of a migrated fingerprint stays REFUSED; revisit when an equity ledger first exists.
+3. *Arithmetic rounding* (28 significant digits half-even, then scale 28): accepted.
+4. *Python refuses scale > 28, Rust arithmetic rounds*: both kept, on purpose. Rust rounding its
+   own quotient is computation; `canon_decimal` checks an INPUT from a client and refuses it
+   (I5). The client owns its precision: scan_engine quantizes what it computes to an explicit
+   business scale before handing it to the engine, and a scan_engine test asserts that every
+   decimal it sends fits the bound (tvDownloadOHLC change, tracked with P7).
+5. *Bound* (96-bit mantissa, scale 28): accepted.
+6. *Applying the migration*: approved in principle, applied last, in this order: the P4c rollout
+   completes; the Python logic is retired; this branch is rebased onto main and re-gated (the full
+   `mutate_p7` run, the copies migration and `time_p7`, which predate c99c73a..e03e331); then,
+   outside market hours with the ledger's writers stopped (I4), each ledger is migrated to a NEW
+   file, the configured ledger path is pointed at it (the `data\` policy denies rename and
+   delete), and the source stays as the backup. Reading old spellings forever instead of
+   migrating was rejected: it keeps a second reader (D3).
+
 ### Costs of phasing (accepted)
 
 - Until P4 Python calls Rust across pyo3 with plain values or JSON; most of that
