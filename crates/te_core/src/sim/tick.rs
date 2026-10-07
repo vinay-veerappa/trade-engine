@@ -7,11 +7,13 @@
 //! - MNQ: tick_size = 0.25, point_value = 2
 //! - ES: tick_size = 0.25, point_value = 50
 //! - MES: tick_size = 0.25, point_value = 5
+//! - YM: 1.0 / 5, MYM: 1.0 / 0.5, RTY: 0.1 / 50, M2K: 0.1 / 5 (P6C)
+//! - CL: 0.01 / 1000, MCL: 0.01 / 100, GC: 0.1 / 100, MGC: 0.1 / 10 (P6C)
 //!
-//! Unknown roots (such as CL, MCL, RTY, YM, etc.) are explicitly refused.
-//! CL and MCL are deliberately absent until their CME holiday table exists (plan §0.1).
+//! Every root here has a Globex calendar (`calendar::globex::GlobexCalendar::for_root`); a test keeps the two lists equal.
+//! Unknown roots (such as ZN, SPY) are explicitly refused.
 //!
-//! Values match `tvDownloadOHLC/web/lib/contract-specs.ts` exactly.
+//! Values match `tvDownloadOHLC/web/lib/contract-specs.ts` (L48-57) exactly; checked against CME contract specs in P6C.
 //!
 //! # Rounding and Slippage
 //!
@@ -41,13 +43,21 @@ pub struct StaticFutureSpec {
     pub point_value_str: &'static str,
 }
 
-/// System-of-record specifications for supported CME equity index futures roots.
-/// Refuses unknown roots. CL and MCL are deliberately absent until their holiday table exists.
+/// System-of-record specifications for supported CME futures roots (equity index, energy, metals).
+/// Refuses unknown roots.
 pub const FUTURE_SPECS: &[StaticFutureSpec] = &[
     StaticFutureSpec { root: "NQ", tick_size_str: "0.25", point_value_str: "20" },
     StaticFutureSpec { root: "MNQ", tick_size_str: "0.25", point_value_str: "2" },
     StaticFutureSpec { root: "ES", tick_size_str: "0.25", point_value_str: "50" },
     StaticFutureSpec { root: "MES", tick_size_str: "0.25", point_value_str: "5" },
+    StaticFutureSpec { root: "YM", tick_size_str: "1.0", point_value_str: "5" },
+    StaticFutureSpec { root: "MYM", tick_size_str: "1.0", point_value_str: "0.5" },
+    StaticFutureSpec { root: "RTY", tick_size_str: "0.1", point_value_str: "50" },
+    StaticFutureSpec { root: "M2K", tick_size_str: "0.1", point_value_str: "5" },
+    StaticFutureSpec { root: "CL", tick_size_str: "0.01", point_value_str: "1000" },
+    StaticFutureSpec { root: "MCL", tick_size_str: "0.01", point_value_str: "100" },
+    StaticFutureSpec { root: "GC", tick_size_str: "0.1", point_value_str: "100" },
+    StaticFutureSpec { root: "MGC", tick_size_str: "0.1", point_value_str: "10" },
 ];
 
 /// A resolved futures contract specification with parsed decimal fields.
@@ -87,7 +97,7 @@ fn d(r: Result<PyDec, DecErr>) -> R<PyDec> {
 }
 
 /// Lookup contract specification for a futures root.
-/// Refuses unknown roots (including CL and MCL).
+/// Refuses unknown roots.
 pub fn spec_for_root(root: &str) -> R<FutureSpec> {
     let r_upper = root.trim().to_ascii_uppercase();
     for s in FUTURE_SPECS {
@@ -182,9 +192,11 @@ pub fn parse_future_symbol(symbol: &str) -> R<FutureContract> {
     let mut matched_root: Option<&'static str> = None;
     let mut remainder = "";
 
-    for candidate in &["MNQ", "MES", "NQ", "ES"] {
+    let mut candidates: Vec<&'static str> = FUTURE_SPECS.iter().map(|s| s.root).collect();
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.len()));
+    for candidate in candidates {
         if upper.starts_with(candidate) {
-            matched_root = Some(*candidate);
+            matched_root = Some(candidate);
             remainder = &upper[candidate.len()..];
             break;
         }
@@ -368,13 +380,53 @@ mod tests {
         assert!(spec_for_root("es").is_ok());
         assert!(spec_for_root("mes").is_ok());
 
-        // 2. Refuse unknown roots: CL and MCL are deliberately absent (plan §0.1)
-        assert_eq!(spec_for_root("CL").unwrap_err().kind, "unsupported");
-        assert_eq!(spec_for_root("MCL").unwrap_err().kind, "unsupported");
-        assert_eq!(spec_for_root("RTY").unwrap_err().kind, "unsupported");
-        assert_eq!(spec_for_root("YM").unwrap_err().kind, "unsupported");
-        assert_eq!(spec_for_root("GC").unwrap_err().kind, "unsupported");
+        // 2. Refuse unknown roots (P6C: CL, MCL, RTY, YM, GC are supported now)
+        assert_eq!(spec_for_root("ZN").unwrap_err().kind, "unsupported");
+        assert_eq!(spec_for_root("6E").unwrap_err().kind, "unsupported");
         assert_eq!(spec_for_root("SPY").unwrap_err().kind, "unsupported");
+        assert_eq!(spec_for_root("").unwrap_err().kind, "unsupported");
+    }
+
+    /// P6C: the eight new roots, value for value against web/lib/contract-specs.ts L48-57 and CME.
+    #[test]
+    fn test_spec_table_p6c_roots() {
+        let want = [
+            ("YM", "1.0", "5"),
+            ("MYM", "1.0", "0.5"),
+            ("RTY", "0.1", "50"),
+            ("M2K", "0.1", "5"),
+            ("CL", "0.01", "1000"),
+            ("MCL", "0.01", "100"),
+            ("GC", "0.1", "100"),
+            ("MGC", "0.1", "10"),
+        ];
+        for (root, tick, pv) in want {
+            let s = spec_for_root(root).unwrap();
+            assert_eq!(s.root, root);
+            assert!(dec_eq(&s.tick_size, &p(tick)), "{root} tick");
+            assert!(dec_eq(&s.point_value, &p(pv)), "{root} point value");
+            let fc = parse_future_symbol(&format!("{root}Z26")).unwrap();
+            assert_eq!(fc.root, root);
+            assert_eq!(fc.contract_month, Some(ContractMonth { year: 2026, month: 12 }));
+            assert_eq!(parse_future_symbol(&format!("/{}", root.to_lowercase())).unwrap().root, root);
+        }
+        // M-prefixed micros are not swallowed by their minis, and vice versa.
+        assert_eq!(parse_future_symbol("MCLH27").unwrap().root, "MCL");
+        assert_eq!(parse_future_symbol("CLH27").unwrap().root, "CL");
+        assert_eq!(parse_future_symbol("MGCG27").unwrap().root, "MGC");
+        assert_eq!(parse_future_symbol("GCG27").unwrap().root, "GC");
+        assert_eq!(parse_future_symbol("MYMM27").unwrap().root, "MYM");
+        assert_eq!(parse_future_symbol("YMM27").unwrap().root, "YM");
+    }
+
+    /// Every spec root has a Globex calendar, and every calendar root has a spec.
+    #[test]
+    fn test_spec_roots_equal_calendar_roots() {
+        let mut a: Vec<&str> = FUTURE_SPECS.iter().map(|s| s.root).collect();
+        let mut b = crate::calendar::globex::supported_roots();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
     }
 
     #[test]
@@ -467,18 +519,18 @@ mod tests {
         assert!(parse_future_symbol("NQ Z26").is_err());
         assert!(parse_future_symbol("NQ/Z26").is_err());
 
-        // Unknown roots (including CL and MCL)
-        let cl_err = parse_future_symbol("CL").unwrap_err();
-        assert_eq!(cl_err.kind, "unsupported");
-        assert!(cl_err.msg.contains("Unknown futures root: 'CL'"));
+        // Unknown roots (P6C: CL and MCL are supported now; ZN stands in)
+        let zn_err = parse_future_symbol("ZN").unwrap_err();
+        assert_eq!(zn_err.kind, "unsupported");
+        assert!(zn_err.msg.contains("Unknown futures root: 'ZN'"));
 
-        let mcl_err = parse_future_symbol("MCL").unwrap_err();
-        assert_eq!(mcl_err.kind, "unsupported");
-        assert!(mcl_err.msg.contains("Unknown futures root: 'MCL'"));
+        let zb_err = parse_future_symbol("ZBH27").unwrap_err();
+        assert_eq!(zb_err.kind, "unsupported");
+        assert!(zb_err.msg.contains("Unknown futures root: 'ZB'"));
 
-        let clz_err = parse_future_symbol("CLZ26").unwrap_err();
-        assert_eq!(clz_err.kind, "unsupported");
-        assert!(clz_err.msg.contains("Unknown futures root: 'CL'"));
+        let znz_err = parse_future_symbol("ZNZ26").unwrap_err();
+        assert_eq!(znz_err.kind, "unsupported");
+        assert!(znz_err.msg.contains("Unknown futures root: 'ZN'"));
 
         let spy_err = parse_future_symbol("SPY").unwrap_err();
         assert_eq!(spy_err.kind, "unsupported");
