@@ -15,7 +15,8 @@ authors = [
 # The exchange calendar is Rust now (trade_engine_rs, built from crates/te_py by
 # tools/ci_local.py); exchange-calendars stays as its test-only oracle. Greeks and
 # implied vol are Rust too (te_core::greeks); vollib is that module's test-only oracle.
-dependencies = []
+# zoneinfo has no system tz database on Windows: without tzdata, ExchangeCalendar() raises.
+dependencies = ["tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 test = [
