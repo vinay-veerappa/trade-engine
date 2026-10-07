@@ -37,10 +37,8 @@ previous session gates this one, and its marker for this session ends it.
 
 from __future__ import annotations
 
-import json
-import os
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -48,24 +46,17 @@ from zoneinfo import ZoneInfo
 
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.domain.instruments import OptionContract
-from trade_engine.domain.option_orders import CloseStructure, OptionIntent, is_structure
-from trade_engine.domain.orders import OrderState
+from trade_engine.domain.option_orders import CloseStructure, OptionIntent
 from trade_engine.eod.options_routing import OptionRouter, RoutingTally
 from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import StaleDataError
-from trade_engine.ledger import EodRun, Event, EventKind, Ledger, VenueReconcile
+from trade_engine.ledger import Event, EventKind, Ledger, VenueReconcile
 from trade_engine.market_data.chains import ChainSnapshot
-from trade_engine.oms.restore import MIN_TIME, PendingResolution, RestoreError
 from trade_engine.sim import underlying_of
-from trade_engine.sim._rs import register
+from trade_engine.sim._rs import register, rs as native
 from trade_engine.eod._runtime import decide, flag, micros
 
 NEW_YORK = ZoneInfo("America/New_York")
-_ENTRY_WORKING = frozenset(
-    {OrderState.NEW, OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
-)
-
-
 class IntradayServiceError(RuntimeError):
     """A refused intraday run (I5)."""
 
@@ -213,69 +204,12 @@ class IntradayService:
     ) -> dict[str, Any]:
         """Walk one session. ``stop_at`` simulates a crash: the loop stops there
         without a marker, exactly as a killed process would leave the ledger (I2)."""
-        decide("intraday:session", (session.isoformat(), self._calendar.exchange), flags=(self._calendar.is_session(session),))
-        state = _TickState()
-        if self._ledger.event_by_command(self._eod_marker(session)) is not None:
-            # The after-close pass has settled this session: nothing here may add to it (I9).
-            return self._result(session, state, settled=True)
-        self._refuse_other_live_instance(session)
-        self._require_previous_eod_complete(session)
-        self._write_heartbeat(session, state, "starting")
-        self._config.broker.connect()
-        self._rehydrate(session, state)
-        open_et = self._calendar.session_open(session)
-        close_et = self._calendar.session_close(session)
-        if start_at is not None:
-            self._advance(start_at)
-        self._wait_until(open_et, session, state)
-        try:
-            while self._clock.now_utc() < close_et:
-                if stop_at is not None and self._clock.now_utc() >= stop_at:
-                    return self._result(session, state, stopped_at=self._clock.now_utc())
-                self._tick(session, state)
-                self._pause()
-            note = self._close_mark(session, state)
-        except Exception as err:  # noqa: BLE001 - every unexpected error ends in an alert
-            self._emergency(session, state, err)
-        self._write_heartbeat(session, state, f"closed; {note}", exited=True)
-        return self._result(session, state)
+        return native.intraday_run(self, session, start_at, stop_at)
 
     # -- the tick ----------------------------------------------------------------
 
     def _tick(self, session: date, state: "_TickState") -> None:
-        now = self._clock.now_utc()
-        try:
-            snapshot = self._config.snapshot_source(self._config.underlying, now)
-            # A live pull takes time and the chain is stamped when it returns, after the
-            # clock read above. Judge it, and time the rest of the tick, on the clock as it
-            # stands now; a chain stamped past THIS reading is still a clock fault (I5).
-            now = self._clock.now_utc()
-            view = self._fresh_view(snapshot, now)
-        except (StaleDataError, ValueError) as err:
-            self._go_flat_and_refuse(session, state, str(err))
-            self._write_heartbeat(session, state, f"stale quote: {err}")
-            return
-        # A fresh quote returned: the flatten order fills at these quotes and entries
-        # are allowed again (unless the whole session is barred).
-        state.refusing = False
-        entry_end, flat = self._deadlines(session)
-        flat_due, entries_open = decide("intraday:tick", numbers=(micros(now), micros(entry_end), micros(flat)),
-            flags=(state.barred is not None,))[2]
-        if not entries_open:
-            self._cancel_working_entries(session, "flat-sweep" if flat_due else "entry-end")
-        if flat_due:
-            closed = self._flatten(
-                session, "flat-sweep", f"flat by {flat.astimezone(NEW_YORK):%H:%M} ET"
-            )
-            state.tally.exit_actions = decide("routing:increment", numbers=(state.tally.exit_actions, closed))[1][0]
-        self._gate.allow = entries_open
-        # A refusal here (a reconcile that does not add up, an OMS guard) is unexpected
-        # mid-session: it ends in the emergency path, which alerts and exits (I5).
-        state.tally += self._router.manage_at_snapshot(
-            self._config.account_id, session, view, state.snapshots, self._cause(session)
-        )
-        self._record_tick(session, view)
-        self._write_heartbeat(session, state, "ok" if entries_open else "ok; entries closed")
+        native.intraday_tick(self, session, state)
 
     def _fresh_view(self, snapshot: ChainSnapshot, now: datetime) -> ChainSnapshot:
         """``snapshot`` cut to its fresh quotes, if it proves a live market; else refuse."""
@@ -317,42 +251,15 @@ class IntradayService:
         The command ids stay free of the stale message — it varies between the first
         process and a resumed one — while the human reason carries the detail (I3).
         """
-        state.refusing = True
-        self._cancel_working_entries(session, "stale-quote")
-        closed = self._flatten(session, "stale-quote", f"stale quote: {why}")
-        state.tally.exit_actions = decide("routing:increment", numbers=(state.tally.exit_actions, closed))[1][0]
+        native.intraday_refuse(self, session, state, why)
 
     def _flatten(self, session: date, code: str, reason: str) -> int:
         """Close at market whatever is open and not already closing; returns how many."""
-        manager = self._router.manager(self._config.account_id)
-        folded = self._ledger.state(self._config.account_id)
-        from trade_engine.oms.options import open_structures
-
-        closed = 0
-        for structure in open_structures(folded):
-            if not flag("intraday:flatten", (underlying_of(structure.instrument), self._config.underlying),
-                flags=(structure.closing_order_id is not None,)):
-                continue
-            # A close the venue rejected leaves the structure open: the next attempt
-            # needs its own command id, derived from the fold so a restart agrees (I3).
-            attempt = decide("intraday:attempt", (structure.entry_order_id, *folded.orders))[1][0]
-            manager.close(self._config.account_id, flat_close(structure, session, code, attempt, reason))
-            closed = decide("routing:increment", numbers=(closed, 1))[1][0]
-        return closed
+        return native.intraday_flatten(self, session, code, reason)
 
     def _cancel_working_entries(self, session: date, code: str) -> None:
         """Cancel every entry still working: past the entry end, at the sweep, when stale."""
-        manager = self._router.manager(self._config.account_id)
-        folded = self._ledger.state(self._config.account_id)
-        for order in sorted(folded.orders.values(), key=lambda value: value.order_id):
-            if not flag("intraday:cancel", (order.state.value,
-                underlying_of(order.instrument) if is_structure(order.instrument) else "", self._config.underlying),
-                flags=(order.parent_order_id is None, is_structure(order.instrument))):
-                continue
-            manager.orders.cancel(
-                order.order_id,
-                command_id=f"intraday:cancel-entry:{order.order_id}:{code}:{session.isoformat()}",
-            )
+        native.intraday_cancel(self, session, code)
 
     def _record_tick(self, session: date, snapshot: ChainSnapshot) -> None:
         """One position check per fresh snapshot: the session's record of it (I2, I11)."""
@@ -405,39 +312,7 @@ class IntradayService:
         sent is cancelled (it was decided on quotes that are gone); a close created but
         never sent is sent (the decision to be flat stands).
         """
-        from trade_engine.oms.restore import restorable, restorable_positions
-
-        broker = self._config.broker
-        if broker.orders(MIN_TIME) or broker.fills(MIN_TIME):
-            return  # this process's own venue: nothing was lost
-        account = self._config.account_id
-        folded = self._ledger.state(account)
-        resolution = PendingResolution()
-        try:
-            orders, fills = restorable(
-                self._ledger, account, folded, pending="resolve", resolution=resolution
-            )
-        except RestoreError as err:
-            raise IntradayServiceError(str(err)) from err
-        positions = restorable_positions(folded)
-        if orders or fills or positions:
-            broker.restore(orders, fills, positions)
-        manager = self._router.manager(account)
-        for order_id in resolution.resolved:
-            manager.orders.reconcile_order(order_id)
-        if resolution.unresolved:
-            state.barred = "; ".join(resolution.unresolved.values())
-        for order in sorted(self._ledger.state(account).orders.values(), key=lambda o: o.order_id):
-            action = decide("intraday:restart", (order.state.value, order.order_id, str(order.parent_order_id)),
-                flags=(order.parent_order_id is None, is_structure(order.instrument)))[0][0]
-            if action == "cancel":
-                manager.orders.cancel(
-                    order.order_id, command_id=f"intraday:orphan:{order.order_id}:{session.isoformat()}"
-                )
-            elif action == "submit":
-                sent = manager.orders.submit(order)
-                if sent.state not in (OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED):
-                    manager.orders.reconcile_order(order.order_id)
+        native.intraday_restore(self, session, state)
 
     # -- unexpected errors -----------------------------------------------------------
 
@@ -448,29 +323,16 @@ class IntradayService:
         the ledger, so the restarted service (restart-on-failure) fills it at its first
         fresh snapshot. With no fresh quote nothing is sent and the alert says so.
         """
-        note = f"ALERT {type(err).__name__}: {err}"
-        state.refusing = True
-        try:
-            now = self._clock.now_utc()
-            self._fresh_view(self._config.snapshot_source(self._config.underlying, now), now)
-        except Exception as stale:  # noqa: BLE001
-            note += f"; no fresh quote to flatten on ({stale}); positions left open, entries refused"
-        else:
-            try:
-                self._cancel_working_entries(session, "emergency")
-                asked = self._flatten(session, "emergency", f"unexpected error: {type(err).__name__}")
-                note += f"; flatten asked for {asked} structure(s) at a fresh quote, entries refused"
-            except Exception as second:  # noqa: BLE001
-                note += f"; flatten failed: {type(second).__name__}: {second}"
-        self._write_heartbeat(session, state, note, alert=True, exited=True)
-        raise IntradayServiceAlert(
-            f"The intraday service for '{self._config.account_id}' stopped on "
-            f"{session.isoformat()}: {note}"
-        ) from err
+        native.intraday_emergency(self, session, state, err)
 
     # -- the close -----------------------------------------------------------------
 
     def _close_mark(self, session: date, state: "_TickState") -> str:
+        return native.intraday_close(self, session, state)
+
+    def _close_plan(
+        self, session: date, state: "_TickState"
+    ) -> tuple[datetime, dict[Any, tuple[Any, str]], str]:
         """Mark at a fresh snapshot taken near the close, then the run marker.
 
         Without such a snapshot (the service was refusing at the close, or restarted
@@ -478,7 +340,6 @@ class IntradayService:
         snapshot and the official close (O2). A guessed mark is not a mark (I5).
         """
         from trade_engine.domain.instruments import Equity
-        from trade_engine.ledger import Mark
 
         now = self._clock.now_utc()
         close = self._calendar.session_close(session)
@@ -503,39 +364,7 @@ class IntradayService:
                 marks = {i: (q.mid, source) for i, q in quotes.items()}
                 marks[Equity(self._config.underlying)] = (snapshot.underlying_price, source)
                 note = f"marked at {source}"
-        for instrument, (price, source) in sorted(marks.items(), key=lambda item: item[0].symbol):
-            command = (
-                f"intraday:mark:{self._config.account_id}:{session.isoformat()}:{instrument.symbol}"
-            )
-            if self._ledger.event_by_command(command) is not None:
-                continue
-            self._ledger.append(
-                Event(
-                    account=self._config.account_id,
-                    kind=EventKind.MARK,
-                    payload=Mark(instrument=instrument, price=price, as_of=now, source=source),
-                    ts_utc=now,
-                    command_id=command,
-                )
-            )
-        self._ledger.append(
-            Event(
-                account=self._config.account_id,
-                kind=EventKind.EOD_RUN,
-                payload=EodRun(
-                    session=session,
-                    job=f"intraday:{self._config.job_name}",
-                    account_id=self._config.account_id,
-                    # The session's snapshots, not this process's: a restarted run must
-                    # append the same marker as an uninterrupted one (I3).
-                    bars_processed=self._session_snapshot_count(session),
-                    at_close=now,
-                ),
-                ts_utc=now,
-                command_id=self._own_marker(session),
-            )
-        )
-        return note
+        return now, marks, note
 
     def _session_snapshot_count(self, session: date) -> int:
         """Fresh snapshots processed this session, across every process (I2, I3)."""
@@ -570,25 +399,10 @@ class IntradayService:
         return result
 
     def _refuse_other_live_instance(self, session: date) -> None:
-        heartbeat = self._read_heartbeat()
-        if heartbeat is None:
-            return
-        decide("intraday:heartbeat_account", (heartbeat.account_id, self._config.account_id, str(self._heartbeat_path)))
-        if heartbeat.exited:
-            return  # the last process said it stopped; nobody is running
-        decide("intraday:heartbeat", (self._config.account_id, heartbeat.at_utc.isoformat()),
-            flags=(heartbeat.session == session,),
-            floats=((self._clock.now_utc() - heartbeat.at_utc).total_seconds(), self._config.heartbeat_ttl_seconds))
+        native.intraday_live_guard(self, session)
 
     def _require_previous_eod_complete(self, session: date) -> None:
-        account = self._config.account_id
-        if self._ledger.event_by_command(self._own_marker(session)) is not None:
-            return  # this session already completed; the re-run proves idempotency
-        previous = self._calendar.previous_session(session)
-        if self._ledger.event_by_command(self._eod_marker(previous)) is not None:
-            return
-        decide("intraday:previous", (session.isoformat(), account, previous.isoformat(), self._config.eod_job_name,
-            self._eod_marker(previous)), flags=(self._has_history(account),))
+        native.intraday_previous_guard(self, session)
 
     def _has_history(self, account_id: str) -> bool:
         for event in self._ledger.events(account=account_id):
@@ -606,59 +420,17 @@ class IntradayService:
         exited: bool = False,
     ) -> None:
         """Written to a temporary file and moved into place: a reader never sees half."""
-        if self._heartbeat_path is None:
-            return
-        heartbeat = Heartbeat(
-            account_id=self._config.account_id,
-            session=session,
-            at_utc=self._clock.now_utc(),
-            refusing=state.refusing or state.barred is not None,
-            note=note if state.barred is None else f"{note}; entries barred: {state.barred}",
-            alert=alert,
-            exited=exited,
-        )
-        body = asdict(heartbeat)
-        body.update(session=heartbeat.session.isoformat(), at_utc=heartbeat.at_utc.isoformat())
-        temporary = self._heartbeat_path.with_name(self._heartbeat_path.name + ".tmp")
-        temporary.write_text(json.dumps(body), encoding="utf-8")
-        os.replace(temporary, self._heartbeat_path)
+        native.intraday_heartbeat_write(self, session, state, note, alert, exited)
 
     def _read_heartbeat(self) -> Heartbeat | None:
-        path = self._heartbeat_path
-        if path is None or not path.exists():
-            return None
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            return Heartbeat(
-                account_id=raw["account_id"],
-                session=date.fromisoformat(raw["session"]),
-                at_utc=datetime.fromisoformat(raw["at_utc"]),
-                refusing=bool(raw["refusing"]),
-                note=str(raw.get("note", "")),
-                alert=bool(raw.get("alert", False)),
-                exited=bool(raw.get("exited", False)),
-            )
-        except (ValueError, KeyError, TypeError) as err:
-            raise IntradayServiceError(
-                f"The heartbeat file {path} cannot be read ({type(err).__name__}: {err}); it "
-                f"cannot prove no other instance is running, so the service refuses to start "
-                f"(C4). Remove it once you have checked that no service is running."
-            ) from err
+        return native.intraday_heartbeat_read(self)
 
     def _advance(self, target: datetime) -> None:
-        advance = getattr(self._clock, "advance_to", None)
-        if callable(advance) and self._clock.now_utc() < target:
-            advance(target)
+        native.intraday_advance(self, target)
 
     def _wait_until(self, target: datetime, session: date, state: "_TickState") -> None:
         """Nothing ticks before the open: a replay clock jumps, a wall clock waits."""
-        if callable(getattr(self._clock, "advance_to", None)):
-            self._advance(target)
-            return
-        while self._clock.now_utc() < target:
-            self._write_heartbeat(session, state, f"waiting for the open at {target.isoformat()}")
-            remaining = (target - self._clock.now_utc()).total_seconds()
-            self._clock.sleep(max(min(self._config.tick_seconds, remaining), 0.001))
+        native.intraday_wait(self, target, session, state)
 
     def _pause(self) -> None:
         self._clock.sleep(self._config.tick_seconds)

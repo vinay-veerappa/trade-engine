@@ -2,7 +2,7 @@
 
 This is the canonical plan and status for moving this engine to Rust. The
 umbrella decision lives in `tvDownloadOHLC/docs/architecture/STRATEGY_WORKFLOW.md`
-§15.16 (R5 row), which points here.
+Â§15.16 (R5 row), which points here.
 
 ## Decisions (2026-10-02)
 
@@ -20,12 +20,12 @@ umbrella decision lives in `tvDownloadOHLC/docs/architecture/STRATEGY_WORKFLOW.m
 
 | Need | Use | Avoid |
 |---|---|---|
-| Implied vol | `implied-vol` (Jäckel "Let's Be Rational", the same algorithm as `vollib`; returns `None` for an impossible price) | nautilus `imply_vol` (`unwrap_or(0.0)` turns "no answer" into 0) |
+| Implied vol | `implied-vol` (JÃ¤ckel "Let's Be Rational", the same algorithm as `vollib`; returns `None` for an impossible price) | nautilus `imply_vol` (`unwrap_or(0.0)` turns "no answer" into 0) |
 | Decimal | `rust_decimal` | f64 money, nautilus fixed-point |
 | Storage | `rusqlite` + `serde` | an event-sourcing framework |
-| Lock | `fd-lock` | — |
-| HTTP | `axum` | — |
-| Tests | `rstest`, `proptest`, `insta` | — |
+| Lock | `fd-lock` | â€” |
+| HTTP | `axum` | â€” |
+| Tests | `rstest`, `proptest`, `insta` | â€” |
 | Sim broker | nautilus `SimulatedExchange` behind an adapter (P3, evaluate then) | nautilus risk engine (short-circuits rules), margin (flat %), settlement (last trade), reconciliation (inferred fills; LGPL) |
 
 Nothing open-source covers the OMS, Reg-T option margin, OCC symbol parsing, the
@@ -38,13 +38,13 @@ dependency. A phase's gate must be green before the next one starts.
 
 | Phase | Moves | Python lines | Gate | Status |
 |---|---|---|---|---|
-| **P0 Harness** | `crates/` workspace, `te_core` (pure Rust, no pyo3), `te_py` → `trade_engine_rs`; `ci_local.py` and CI build it | — | `import trade_engine_rs` works in CI; a missing module fails the run | **done**: `tools/ci_local.py` `build_extension` (fails the gate on a failed build or import) and `check_rust_invariants` (I7 in Rust) |
+| **P0 Harness** | `crates/` workspace, `te_core` (pure Rust, no pyo3), `te_py` â†’ `trade_engine_rs`; `ci_local.py` and CI build it | â€” | `import trade_engine_rs` works in CI; a missing module fails the run | **done**: `tools/ci_local.py` `build_extension` (fails the gate on a failed build or import) and `check_rust_invariants` (I7 in Rust) |
 | **P1a Calendar** | `calendar/sessions.py` | 199 | `tests/test_calendar.py` unchanged; oracle: every date 2000-01-01..2040-12-31 agrees with `exchange_calendars` XNYS on session / open / close / early close | **done**: `tests/test_calendar_oracle.py` (4 mutants of the rules, all killed) + `tests/test_calendar.py` unchanged |
-| **P1b Greeks & IV** | `market_data/greeks.py` | 122 | `tests/test_option_chains.py` + greeks tests unchanged; oracle: IV, price and greeks match `vollib` over a strike × expiry × vol grid, and every price `vollib` refuses, Rust refuses | **done**: `tests/test_greeks_oracle.py` (price and greeks rel 1e-9 / abs 1e-12 and IV vs vollib over a 2x7x7x7x4x3 grid, refusals both ways, 5 mutants of `greeks.rs` all killed) + `tests/test_option_chains.py` unchanged; `vollib` is test-only |
+| **P1b Greeks & IV** | `market_data/greeks.py` | 122 | `tests/test_option_chains.py` + greeks tests unchanged; oracle: IV, price and greeks match `vollib` over a strike Ã— expiry Ã— vol grid, and every price `vollib` refuses, Rust refuses | **done**: `tests/test_greeks_oracle.py` (price and greeks rel 1e-9 / abs 1e-12 and IV vs vollib over a 2x7x7x7x4x3 grid, refusals both ways, 5 mutants of `greeks.rs` all killed) + `tests/test_option_chains.py` unchanged; `vollib` is test-only |
 | **P1c Margin** | `metrics/margin.py`, `metrics/option_margin.py` | 795 | margin tests unchanged; property tests on the Reg-T formulas | **done**: `tests/test_margin_parity.py` (dense grid vs the frozen pre-port Python in `tests/frozen_margin/`, exact Decimal equality and identical refusal type/message; 5 mutants of margin.rs / margin/option.rs, all killed) + `te_core` unit and proptest properties in `margin.rs` and `margin/option.rs`; the two Python files are shims over `margin_*` in `trade_engine_rs` |
-| **P1d Risk rules** | `risk.py` (every rule recorded, no short-circuit) | 934 | `tests/test_risk_engine.py` unchanged; recorded order × account corpus produces identical verdict lists | **done**: `tests/test_risk_parity.py` (1837 generated order x account x control x instant cases vs the frozen pre-port Python embedded from commit b9274d9: identical verdicts, ordered rule results, control events; construction and `from_mapping` refusals with identical type and message; dense `TradingHours.is_open` sweep) + `te_core::risk` unit tests (no short-circuit: all 21 rules present when the first fails; boundaries; overflow refuses; drawdown latches); `tests/test_risk_engine.py` unchanged; 8 mutants of `risk.rs` (`>=` vs `>`, kill switch ignored, wrong timezone, drawdown thresholds x2, hours close `<=`, short-circuit, dropped rule), all killed. Scope: rules and config validation are Rust (one JSON document in, one out); **ledger reads and writes stay Python until P2** (`risk.py` reads state, calls Rust, appends the control events). Accepted deviations (Rust refuses where Python accepted): non-ASCII digits in an integer rule, integers beyond i64, decimals beyond 28 places, a truthy non-str `industry`. |
-| **P1e Option rules** | OCC parse/format and contract validation in `domain/instruments.py` (the dataclasses stay as Python carriers until P2), `domain/option_roots.py`, `domain/option_lifecycle.py` | ~470 | `tests/test_option_chains.py` and lifecycle tests unchanged; parity vs the frozen pre-port Python over every OCC string shape, root and settlement case, identical refusals | **done**: `tests/test_option_rules_parity.py` (frozen pre-port Python embedded from commit 0f26fb3 in `tests/frozen_option_rules/`; equality of value (Decimal by `str`, so scale counts) or refusal (type name AND message): ~1,500 generated OCC strings (canonical and compact, root 1-6, lowercase, padded, bad dates incl. Feb 29 non-leap, YY pivot 68/69/70, strike 0 and 99999999, malformed, non-str), every MMDD for nine years plus 20,000 seeded six-digit dates, a code-point sweep of `strip`/`\s`/`\d`/`int()`/`upper()` (2,384 points), ~80 strikes x multipliers and ~22 rights x ~23 underlyings, error order across four bad fields, every index root, settlement and last-trade for SPX/SPXW/AAPL over every day 1999-12-30 to 2041-01-03, and lifecycle grids (intrinsic, outcome, delivery, dividend incl. the bid-intrinsic == dividend tie)) + `te_core::options` unit tests; `test_option_chains.py`, `test_option_lifecycle.py`, `test_instrument_resolver.py` unchanged. 9 mutants of the Rust, all killed: SPX AM->PM (`test_option_style_and_chain_roots[SPX]`), 3-dp check dropped (`test_constructor_huge_exponents`), OCC strike bound `>` to `>=` and year pivot 68->69 and U+001C..1F not whitespace (all `test_from_occ_matches`), put intrinsic sign swapped (`test_intrinsic_and_outcome_over_the_grid`), dividend `<` to `<=` (`test_exercised_for_dividend_over_the_grid`), decimal scale dropped on add/sub and put premium floor `<=` to `<` (both `test_delivery_over_the_grid`). Preserved defects: `%y` pivot (69 -> 1969, 70 -> 1970), a strike of more than 28 significant digits slips the 3-dp check (`strike * 1000` rounds first), Unicode digits and whitespace accepted in an OCC string, `ß` upper-cases to `SS`, and `strptime`'s first-match regex (`261301` reads as month 1, day 3, leftover `01` refused by its own message). Accepted deviations (Rust refuses or differs where Python accepted): a non-int `multiplier` (100.0, `Decimal(100)`), non-Decimal/int money (floats), infinite or exponent-form (`1E+2`) money and money beyond 28 digits in lifecycle, `settlement_instant`/`last_trade_date` take only the XNYS `ExchangeCalendar` (every caller does; a fake calendar now raises), the 3.13 wording of the day-range `strptime` error, characters newly cased after Unicode 15.1 (the echoed text of a refusal). |
-| **P2a Ledger shadow** | Rust domain + event types, the event codec and the fold (`ledger/state.py`, `ledger/mirror.py` fold) in `te_core`, with NO Python reader: production still runs the Python ledger | — (additive) | byte parity: every event the Python codec writes, Rust decodes and re-encodes to identical bytes; fold parity: every generated event stream folds to an identical `AccountState` (as canonical JSON); every Rust refusal matches a Python refusal. Until P2b the two implementations co-exist, so any ledger change must land in both; the parity test is what makes a one-sided change fail | **done**: `te_core::ledger` (codec, fold, mirror fold) exposed as `ledger_reencode` / `ledger_fold` / `ledger_fold_all`; gates `tests/test_ledger_codec_parity.py` + `tests/test_ledger_fold_parity.py` (155 tests: the per-kind zoo and every prefix, the streams 20 existing suites fold, 1500 seeded episode streams a third perturbed); 8 hand mutants killed (P&L sign, FIFO→LIFO, duplicate fill, fee into cash, fee out of realized, any transition legal, unsorted keys, non-ASCII unescaped). `tools/ledger_parity.py` (local, `mode=ro`) over the real ledgers 2026-10-02: PM-B mirror 4095, 0DTE 3278, PM-A options 436, scan 6296 events, codec and fold identical, 0 strict refusals. Sanctioned asymmetry: Rust refuses as `strict`/`unsupported` field types Python is lax about (counted, never the reverse) |
+| **P1d Risk rules** | `risk.py` (every rule recorded, no short-circuit) | 934 | `tests/test_risk_engine.py` unchanged; recorded order Ã— account corpus produces identical verdict lists | **done**: `tests/test_risk_parity.py` (1837 generated order x account x control x instant cases vs the frozen pre-port Python embedded from commit b9274d9: identical verdicts, ordered rule results, control events; construction and `from_mapping` refusals with identical type and message; dense `TradingHours.is_open` sweep) + `te_core::risk` unit tests (no short-circuit: all 21 rules present when the first fails; boundaries; overflow refuses; drawdown latches); `tests/test_risk_engine.py` unchanged; 8 mutants of `risk.rs` (`>=` vs `>`, kill switch ignored, wrong timezone, drawdown thresholds x2, hours close `<=`, short-circuit, dropped rule), all killed. Scope: rules and config validation are Rust (one JSON document in, one out); **ledger reads and writes stay Python until P2** (`risk.py` reads state, calls Rust, appends the control events). Accepted deviations (Rust refuses where Python accepted): non-ASCII digits in an integer rule, integers beyond i64, decimals beyond 28 places, a truthy non-str `industry`. |
+| **P1e Option rules** | OCC parse/format and contract validation in `domain/instruments.py` (the dataclasses stay as Python carriers until P2), `domain/option_roots.py`, `domain/option_lifecycle.py` | ~470 | `tests/test_option_chains.py` and lifecycle tests unchanged; parity vs the frozen pre-port Python over every OCC string shape, root and settlement case, identical refusals | **done**: `tests/test_option_rules_parity.py` (frozen pre-port Python embedded from commit 0f26fb3 in `tests/frozen_option_rules/`; equality of value (Decimal by `str`, so scale counts) or refusal (type name AND message): ~1,500 generated OCC strings (canonical and compact, root 1-6, lowercase, padded, bad dates incl. Feb 29 non-leap, YY pivot 68/69/70, strike 0 and 99999999, malformed, non-str), every MMDD for nine years plus 20,000 seeded six-digit dates, a code-point sweep of `strip`/`\s`/`\d`/`int()`/`upper()` (2,384 points), ~80 strikes x multipliers and ~22 rights x ~23 underlyings, error order across four bad fields, every index root, settlement and last-trade for SPX/SPXW/AAPL over every day 1999-12-30 to 2041-01-03, and lifecycle grids (intrinsic, outcome, delivery, dividend incl. the bid-intrinsic == dividend tie)) + `te_core::options` unit tests; `test_option_chains.py`, `test_option_lifecycle.py`, `test_instrument_resolver.py` unchanged. 9 mutants of the Rust, all killed: SPX AM->PM (`test_option_style_and_chain_roots[SPX]`), 3-dp check dropped (`test_constructor_huge_exponents`), OCC strike bound `>` to `>=` and year pivot 68->69 and U+001C..1F not whitespace (all `test_from_occ_matches`), put intrinsic sign swapped (`test_intrinsic_and_outcome_over_the_grid`), dividend `<` to `<=` (`test_exercised_for_dividend_over_the_grid`), decimal scale dropped on add/sub and put premium floor `<=` to `<` (both `test_delivery_over_the_grid`). Preserved defects: `%y` pivot (69 -> 1969, 70 -> 1970), a strike of more than 28 significant digits slips the 3-dp check (`strike * 1000` rounds first), Unicode digits and whitespace accepted in an OCC string, `ÃŸ` upper-cases to `SS`, and `strptime`'s first-match regex (`261301` reads as month 1, day 3, leftover `01` refused by its own message). Accepted deviations (Rust refuses or differs where Python accepted): a non-int `multiplier` (100.0, `Decimal(100)`), non-Decimal/int money (floats), infinite or exponent-form (`1E+2`) money and money beyond 28 digits in lifecycle, `settlement_instant`/`last_trade_date` take only the XNYS `ExchangeCalendar` (every caller does; a fake calendar now raises), the 3.13 wording of the day-range `strptime` error, characters newly cased after Unicode 15.1 (the echoed text of a refusal). |
+| **P2a Ledger shadow** | Rust domain + event types, the event codec and the fold (`ledger/state.py`, `ledger/mirror.py` fold) in `te_core`, with NO Python reader: production still runs the Python ledger | â€” (additive) | byte parity: every event the Python codec writes, Rust decodes and re-encodes to identical bytes; fold parity: every generated event stream folds to an identical `AccountState` (as canonical JSON); every Rust refusal matches a Python refusal. Until P2b the two implementations co-exist, so any ledger change must land in both; the parity test is what makes a one-sided change fail | **done**: `te_core::ledger` (codec, fold, mirror fold) exposed as `ledger_reencode` / `ledger_fold` / `ledger_fold_all`; gates `tests/test_ledger_codec_parity.py` + `tests/test_ledger_fold_parity.py` (155 tests: the per-kind zoo and every prefix, the streams 20 existing suites fold, 1500 seeded episode streams a third perturbed); 8 hand mutants killed (P&L sign, FIFOâ†’LIFO, duplicate fill, fee into cash, fee out of realized, any transition legal, unsorted keys, non-ASCII unescaped). `tools/ledger_parity.py` (local, `mode=ro`) over the real ledgers 2026-10-02: PM-B mirror 4095, 0DTE 3278, PM-A options 436, scan 6296 events, codec and fold identical, 0 strict refusals. Sanctioned asymmetry: Rust refuses as `strict`/`unsupported` field types Python is lax about (counted, never the reverse) |
 | **P2b Ledger switch** | `codec`, `state`, `store` read through `trade_engine_rs`; the Python codec/fold deleted (D3) | ~4.6k | P2a parity tests become the regression gate; every existing ledger test unchanged; a local tool folds the real paper ledgers both ways before the switch | **done**: the oracle is FROZEN first: the pre-port `codec.py`/`state.py`/`mirror.py` embedded in `tests/frozen_ledger/` (imports rewritten to each other), and `ledger_gen`, the recorder plugin, `test_ledger_fold_parity.py` and `tools/ledger_parity.py` compare Rust AND the production shims (`prod_*`) against it, never against production. Deleted from Python (D3, same commit as the shims): the codec's per-type encode/decode and validation (`codec.py`), every fold handler, `apply_fill`/`_apply_trade`/lot consumption, the lifecycle handlers and `FoldCache`'s fold (`state.py`), the mirror fold steps, `pro_rata` and `ticket_contracts` (`mirror.py`); 1,098 lines deleted, 559 added (net -539) across `codec`/`state`/`mirror`/`store`/`reader` plus the new `errors.py` (the exception classes, `__module__` kept) and `_rs.py` (the one door: a Rust refusal crosses as `ValueError(kind, message)` and is raised as the pre-port exception type for that kind). Rust gained `te_core::ledger::bridge` (row/payload checks, carrier JSON in) and `canon::export_full`/`export_delta`; `trade_engine_rs.LedgerFold` is the `#[pyclass]` holding folded state per account: the store's append applies its stored row ONCE (no refold), the reader applies only rows past its last fold, `FoldCache` is an atomic handle; Python carriers are built on first read and then PATCHED from Rust's delta (`+t` new fills, `+fs` new fill ids, `+m` changed map entries), holding no rules. Gates: full suite 1880 passed (every pre-existing ledger test unchanged); `tools/ledger_parity.py` over the real ledgers 2026-10-03, codec/state/fold all identical: PM-B mirror 4095, 0DTE 3278, PM-A options 436 (9 accounts), scan 6296 (12 accounts) events; new `tests/test_ledger_p2b_glue.py` reads state between EVERY event (FoldCache over 300 seeded streams, store and a concurrent `LedgerReader` over 100) against the frozen oracle, and pins the handle's refusal contract and the seeded `base_seq` boundary. 10 hand mutants of the glue, all killed (each restored, run under `python -B`, Rust ones rebuilt; final restore + rebuild unconditional): carrier served while stale, kind `fold` mapped to `ValueError`, `+m` drops untouched entries, `base_seq` `<=` to `<`, store keeps touched accounts after a failed write, seed ignored, `+fs` replaces, Rust `fills_held` never advances, atomic apply skips its restore, non-atomic decode refusal keeps the account (the last five first SURVIVED the existing suites, which read a carrier only once per fold; the glue test is what kills them). Timing, 5000 appends: 2.33-2.34 s vs 2.82-2.92 s pre-port (gate <= 2x). Deviations: `register_handler` stays importable but always raises `LedgerFoldError` (no callers outside `tests/test_ledger.py`'s import; a Python handler would be a fold the store, reader and restart never run); `HANDLERS` is a read-only map whose values are the Rust step; the `MirrorState` read-only queries (`handled`, `open_tickets`, `exposure`, `expected`) stay Python; codec and fold messages are Rust's text; `KeyError`/`JSONDecodeError`/decimal-signal refusals are rebuilt from kind + message (no `pos`/`doc` on a JSON error); `strict`/`unsupported` inputs and lone surrogates refuse as `PayloadCodecError`; carriers are rebuilt from JSON, so no object identity survives a fold (a `FoldCache` seed object is not the state returned after an event), datetimes come back via `fromisoformat`; `ticket_contracts` returns a plain dict; the store folds the row AS STORED, so a payload that encodes but would not decode is refused at append rather than on the next restart; a cold `state()` decodes and folds row by row, so with two defects in one log the first refusal may name a different one; the store drops touched accounts on any `BaseException` (rollback still only on `Exception`). |
 | **P3a Fill & option-risk rules** | `sim/broker.py`, `sim/snapshot_venue.py`, `oms/trailing.py`, `risk_options.py` (and the structure reading in `oms/options.py` they share) | ~2.0k | a FROZEN copy of the pre-port Python (`tests/frozen_p3a/`) and the production shims are driven in lockstep by seeded generators; every step agrees on the return value (Decimals by `str`) or on the refusal (type name AND message) | **done**: `te_core::sim` (`broker`: the one-minute-bar equity book, bar sequencing, MARKET/LIMIT/STOP/STOP_LIMIT matching, gaps, slippage, brackets, OCO and target priority, the late-exit and inside-entry-bar stop rules, DAY/OPG expiry, restore; `snapshot`: the chain-snapshot book, model price, combo shading, fees, stale quotes, DAY expiry, restore; `trailing`), `te_core::oms::structures` (`open_structures`, `uncovered_calls`) and `te_core::risk_options` (every option rule from `regime` to `covered_calls`, entry-quote gates included, recorded without short-circuit), reached through `trade_engine_rs.SimBook` / `SnapBook` / `trail_update` / `oms_open_structures` / `oms_uncovered_calls` / `option_risk_evaluate` (one door `sim/_rs.py`: a refusal crosses as `ValueError(kind, message)` and is raised as the pre-port type). Deleted from Python (D3, same commit as the shims): 1,742 lines, 640 added (net -1,102) across `broker.py` (-732/+213), `snapshot_venue.py` (-380/+214), `risk_options.py` (-513/+105), `oms/options.py` (-98/+29), `trailing.py` (-19/+36) and the new `sim/_rs.py` (43). The duplicate-protection and persistent kill-switch checks and the rules' config validation stay Python (they read the ledger/config, not the book). Gates: `tests/test_p3a_parity.py`, 8 tests, 614,180 compared steps per run: `SimBroker` 900 seeded walks (513,514 steps: 13 sessions incl. both DST regimes, early closes and holiday eves; every order type and TIF, both sides, gaps, bars touching or one cent short of a working price, brackets sent right after their entry fills, replaces, cancels, clock jumps, reads exactly at the close, nine kinds of malformed bar, restore 25% of walks, a third of them perturbed), `SnapshotVenue` 2,000 walks (73,847 steps: singles, shares, 2-4 leg combos, limits on the model net, stale/zero/look-ahead quotes, DAY expiry, restore with leg perturbations, invalid constructor arguments), `underlying_of` 331 instruments, trailing 1,500 seeds (18,920 updates incl. 0, negative, NaN, Inf), `open_structures`/`uncovered_calls` over 1,000 folded books (2,703 calls; entries working, partial, filled, cancelled, targets, closes, expiries), and 4,865 `OptionRiskEngine.evaluate` verdicts against random rules (every optional rule on and off, every entry gate) where each of the 24 rule names both passes and fails (`entry_quote.vertical` at least evaluates). Full suite 1896 passed (1888 pre-existing, unchanged: no existing test edited, plus the 8 parity tests); `cargo test -p te_core` 78 passed. 11 hand mutants of the Rust, each rebuilt, run under `python -B`, restored in `try/finally` with an unconditional final restore + rebuild + green parity run: all 11 KILLED: buy-stop gap fill at the stop instead of the open, buy limit needing `low < limit`, sell stop read on the high, DAY expiring strictly after the close, slippage sign, venue fee per order instead of per contract, snapshot sell limit needing `price > limit`, trailing sell trigger `<`, `min_short_bid` as `>=`, margin no longer passing when the entry reduces it, and an early return after a failed `regime` (the rule short-circuit). The DAY-expiry mutant first SURVIVED: a read with the clock exactly at the close was too rare, so the walk gained `to_close` (simulate through the last regular bar, read AT the close); then killed. Deviations: one production defect found by the generator and fixed before commit (a `SnapshotVenue.restore` refused part-way left Rust holding restored positions the shim had not recorded, so `positions()` raised `IndexError`; the shim now records them before the call); datetimes cross as ISO strings and come back via `fromisoformat` (the fold/DST semantics of the pre-port `astimezone` are reproduced, not shared); `SnapshotVenue` accepts only the XNYS calendar; `max_quote_age_seconds` crosses as f64; a fill number or leg id with non-ASCII digits, or a fill number beyond u128, refuses (`unsupported`) where Python would parse it; restore consumes its iterables eagerly; `is_structure`/`legs_of` exist in both languages (the Python ones are domain helpers other modules use); the Reg-T margin request for the risk book is built in Rust, duplicating `metrics/option_margin.py`'s input shape until P3b; snapshot quotes are precomputed eagerly in Python; `equity_marks` parse errors are reported in insertion order; earnings dates cross as ISO strings and `regime_of` must return `str` or `None`; the new pyfunction is `option_risk_evaluate` (P1's `risk_evaluate` keeps its name). |
 | **P3b-1 OMS core, non-manager half** | `oms/reconcile.py`, `oms/restore.py`, the remaining decision logic of `oms/options.py` | ~0.9k | a FROZEN copy of the pre-port Python (`tests/frozen_p3b/`) and the production shims are driven in lockstep (two worlds, each with its own ledger, clock and `SnapshotVenue`); every step agrees on the return value (Decimals by `str`), or on the refusal (type name AND message), and after every step on the ledger events and the outbox; folded state byte for byte at the end of a walk | **done**: `te_core::oms::reconcile` (which venue orders `reconcile_after` re-reads; the unknown-order refusal (I5); the journal payload of one fill, its asset class, multiplier, bracket stop and target, the missing-event refusal (I1)), `te_core::oms::restore` (which orders, brackets, fills and positions rebuild a venue; what a PENDING_UNKNOWN order becomes in `refuse` and `resolve` mode; the pending-request classification; the refusals), `te_core::oms::options` (intent and order fingerprints with an in-crate SHA-256, replay and fingerprint conflicts, `plan_open` duplicate (C4) and uncovered (C3) refusals, `plan_close` incl. the out-of-ratio refusal and the `:close:N` numbering, `plan_holding`, and the `sync` plan), reached through 15 `trade_engine_rs.oms_*` functions (`oms_orders_to_read`, `oms_restorable`, ...) and the one door `sim/_rs.py` (refusal kinds `reconcile`, `restore`, `option`, `duplicate`, `uncovered`, `closed`, `idempotency`). Ledger reads and writes and venue I/O stay Python and cross as callbacks (`restorable` makes its two ledger reads in the order Python did). Deleted from Python in the same commit as the shims (D3): 197+48+83 lines, 86+36+77 added (net -129). Gates: `tests/test_p3b_parity.py`, 7 tests: 631 random folded books (5,747 compared steps: open new/replayed/conflicting, close incl. bogus ids and reused commands, `close_holding`, `sync`, `restorable`/`restorable_positions` in both pending modes and with malformed modes, journal fills recorded or not, ORDER_PENDING events injected), 220 flow walks (10,277 compared steps over real `SnapshotVenue` sessions: entries with and without targets, snapshots that fill them, `reconcile_after` with and without the journal, `sync`, closes, requests left pending, restarts that rebuild the venue in `refuse` and `resolve` mode, a venue order the ledger never knew, orders whose parent the ledger lacks), `reconcile_after` re-read order over 631 books with NEW, working, terminal and unknown venue orders, and the import check (`trade_engine_rs` is imported unconditionally: missing is an ERROR, D5). Coverage asserted on the tally: every refusal kind both happens and succeeds (reconcile, restore, key, option, duplicate, uncovered, closed, idempotency). Full suite 1903 passed (1896 pre-existing, unchanged; plus 7); `cargo test -p te_core` 79 passed. 16 hand mutants (`tools/mutate_p3b.py`: rebuilt each time, `python -B`, original bytes restored in `finally`, final restore + rebuild, baseline run first), all 16 KILLED: restore keeping NEW children, a cancel-pending order restored as ACCEPTED, the pending-cancel test ignoring the reason, a forgotten earlier-unresolved order, a combo target on every leg of the journal, `reconcile_after` re-reading NEW orders, the latest fill read as the earliest, `sync` cancelling a non-target on a settled leg, `sync` ignoring a terminal entry, `close_holding` skipping the cover check, the over-close test on the signed holding, duplicate protection counting flat positions, duplicate protection counting terminal entries, a `close` replay of any target, `:close:N` numbering from 0, and the out-of-ratio check off. Two first SURVIVED and were strengthened: `reconcile_after` re-reading NEW orders (books never held a NEW order, so a direct test appends NEW children and has the venue list every order) and the latest-fill tie rule (an equivalent mutant: on a tie both choices read the same timestamp, so the mutant became the earliest-fill one, which the flows kill). Deviations: the order fingerprint takes its UTC offset from the order's own `created_at` rather than the zone at year 1 (identical for the UTC clocks every runner uses); the non-str `pending` guard stays in the shim (same message); a non-ASCII, surrogate or overflowing value refuses as in P3a; `restorable` scans `ledger.events` once, and only when a PENDING_UNKNOWN order exists in `resolve` mode; `close_holding` raises its held/uncovered refusals before reading the clock, so a naive clock together with a refusal now raises the refusal; `enqueue_journal_fill` looks the ledger event up before the order lookups (the I1 refusal still comes after them); pyo3 reaches the shims only through `trade_engine.sim._rs`, there is no `oms/_rs.py`. |
@@ -52,11 +52,11 @@ dependency. A phase's gate must be green before the next one starts.
 | **P3b-2b OMS manager orchestration** | The command flow of `oms/manager.py` (`te_core::oms::flow`); Python keeps only the host effects | 1,170 -> ~390 lines | Durable-before-network ordering, exact callbacks and read-back, frozen-manager lockstep per ticket family, unchanged `test_oms.py` | **done**: `tests/test_p3b2b_flow.py`, `tests/test_p3b2_parity.py` (now against the switched manager), `tools/mutate_p3b2b.py`; measured evidence and boundaries below |
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
-| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | pending; after P3b-2b |
+| **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | **complete locally (T0..T14)**; scoped checkpoints verified; the side-by-side paper-session flip, the Â§5.2-scale recorded-replay certification and the staged rollout kit are verified below â€” applying the kit needs an owner-approved canary (Â§7 Stage D) |
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
-| **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | **web half landed** (tvDownloadOHLC main ba935583, bfe51308; `SIM_TE_WASM` default OFF); retiring the Python package waits for P4c and P5 |
-| **P6b Futures in te_core** | `Instrument::Future` and tick arithmetic, the CME Globex equity-futures calendar, `Book::new_futures`, te_wasm futures books | — (additive: the Python engine has no futures book) | P3a equity parity unchanged; seeded Globex walks agree te_core vs the te_wasm API; the browser differential agrees replay-sim vs te_wasm on MNQ/MES/ES | **done**: see "P6b verification and boundary" |
-| **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
+| **P6 Browser & retire** | `web/engine`, `replay-sim` â†’ wasm; delete the Python package | ~1.5k | browser replay matches the engine | **web half landed** (tvDownloadOHLC main ba935583, bfe51308; `SIM_TE_WASM` default OFF); retiring the Python package waits for P4c and P5 |
+| **P6b Futures in te_core** | `Instrument::Future` and tick arithmetic, the CME Globex equity-futures calendar, `Book::new_futures`, te_wasm futures books | â€” (additive: the Python engine has no futures book) | P3a equity parity unchanged; seeded Globex walks agree te_core vs the te_wasm API; the browser differential agrees replay-sim vs te_wasm on MNQ/MES/ES | **done**: see "P6b verification and boundary" |
+| **P7 Decimal migration** | `PyDec` â†’ `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | â€” | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an oldâ†’new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
 
 ### P3b-2a verification and boundary
 
@@ -544,9 +544,559 @@ lock, `tos_paper`, all process/connection ownership and the final P4 paper-sessi
 flip. Rollback is a checkout of the base branch with a rebuild of its private
 extension: **no ledger rewrite or decimal migration**.
 
+### P4c verification and boundary
+
+**P4C-T1 only**, based on `038045ac9f8e94c01fe9201e335f9404bff70ed7`.
+The standalone oracle commit is
+`4d8d505f63ea909c19ab1d217f0a6e062a4fca65`: only
+`tests/frozen_p4c/lock.py`, copied before production edits. Its Git blob
+`47a9deb5c145210fc4e8e8b03fa30a5579bf397e` is identical to the base's production
+lock. The oracle remains immutable; no pre-existing test was edited.
+
+Rust now owns parent-directory creation, sidecar open, nonblocking OS exclusion,
+PID write/truncate/flush, and the guard's native file lifetime, in the new
+`te_host::lock` infrastructure crate using **fd-lock 4.0.4**. The existing ONE
+`trade_engine_rs` module registers one small `LedgerLock` binding. `te_core` and
+`te_wasm` acquire no OS dependency or clock read. The fd-lock borrowed guard is
+transferred to the owned file's close without a self-reference, unsafe code, or
+a leaked descriptor; release and process teardown free the lock.
+
+Python's `ledger/lock.py` is now only path/PID conversion, the native handle,
+the unchanged `LedgerLockError` and exact refusal message, and context-manager
+plumbing. It shrinks **107 -> 42 lines, net -65** (Git diff: +8/-73).
+`_lock_file`, `_unlock_file`, msvcrt/fcntl calls and Python file operations are
+deleted. The existing store remains unchanged: acquire still precedes every
+writable SQLite open; failed opens release the guard. Python still owns SQLite,
+server, clocks, plugins and runtime loops. T1 adds **no runtime binary**; D5's
+mandatory extension import/build applies without an imaginary binary skip.
+
+Measured Windows/Python 3.13 proof (`tests/test_p4c_lock.py`, **23 tests**):
+
+- **8,000 seeded lockstep API steps**, asserting exact outcomes and held state:
+  **5,722 successes / 2,278 refusals**. Exception type names and messages match.
+  Only the two distinct synthetic root strings in generated refusal messages
+  are normalized; subprocess, path/open errors and all other text are exact.
+- **8 owner/contender process walks**: old Python/new Rust in both directions,
+  Rust/Rust and old/old, each with graceful release and forced process death.
+  All 8 contenders refuse; all 8 post-exit acquisitions succeed.
+- **24 simultaneous acquisition races** (8 each old/new, new/old, new/new):
+  exactly 24 winners and 24 matching refusals, followed by successful reacquire.
+- Same-process contention; relative/dot/dot-dot, hardlink and Windows case
+  aliases; stale PID files, PID capture/text, held-state/idempotent acquire and
+  release, context exit and garbage-collection close. A native unit test reads
+  PID text through the owning handle while held.
+- Five malformed/open-path refusals and one missing-directory success, plus
+  read-only-file PermissionError, null filename/parent error order, BMP,
+  non-BMP and unpaired-surrogate paths. A failed open does not poison the handle.
+  Windows held sidecars cannot be deleted or replaced to bypass exclusion.
+  The SQLite-open spy proves refusal occurs before any writable DB open.
+
+`tools/mutate_p4c_t1.py` uses the private interpreter, rebuilds every mutant,
+runs `python -B`, asserts one raw-source occurrence (preserving CRLF), restores
+original bytes in `finally`, and unconditionally rebuilds and checks restored
+green. An explicit pytest exception hook recognizes **AssertionError only**;
+compiler/import/collection failures never count. Final baseline and restored
+runs both pass **23 tests**; **12/12 compiling mutants killed**, no equivalents
+or survivors:
+
+| Mutant | Killing test |
+|---|---|
+| `guard-dropped-before-return` | generated lockstep |
+| `pid-not-truncated` | aliases/PID/stale/context |
+| `pid-prefix-lost` | aliases/PID/stale/context |
+| `held-file-delete-sharing` | held sidecar deletion/replacement |
+| `parent-creation-lost` | generated lockstep |
+| `truncate-before-lock` | aliases/PID/stale/context |
+| `contention-accepted` | generated lockstep |
+| `held-always-false` | generated lockstep |
+| `release-leaks-descriptor` | generated lockstep |
+| `reacquire-not-idempotent` | generated lockstep |
+| `pid-capture-ignored` | aliases/PID/stale/context |
+| `open-error-filename-lost` | exact invalid-path errors |
+
+Final gates (2026-10-03):
+
+- Pre-port existing locking baseline: **5 passed, 86 deselected**.
+- Restored focused lock + unchanged ledger suite: **114 passed**.
+- `cargo test --manifest-path crates/Cargo.toml --workspace`: **94 passed**:
+  90 core unit tests, 1 host unit test, 3 wasm integration tests; zero failures,
+  ignored tests or doctests. te_py and te_wasm unit targets also build.
+- Private `python -B tools/ci_local.py --include-uncommitted`: **exit 0**,
+  **1,969 Python tests passed in 795.04 s**; I7/version/extension gates green.
+- Read-only `tools/ledger_parity.py`: **exit 0**; mirror-PM-B 4,095 events,
+  0DTE 3,278, options 436, scan 6,296: **14,105 codec rows, 23 account states
+  and 4 folds identical**. All oracle folds succeed. This remains a codec/fold
+  gate (refusal kind only), not full runtime/tape certification.
+
+Timing (`tools/time_p4c_t1.py`): startup/open/close is **not a tick hot path**.
+Nine independent synthetic populated books per implementation, three accounts
+and 300 cash-flow events per book; identical unchanged store/schema/WAL/FULL
+lifecycle, 50 opens per sample, seeding/build outside the timer. No recorded
+session or trading fixture is claimed. Old/new median open/close:
+**2.655864 / 2.926010 ms**, ratio **1.101717** (<1.25); largest sample means
+**4.344502 / 4.027056 ms**. Lock-only median **0.576044 / 0.455764 ms**,
+ratio **0.791197**; tails **0.878112 / 0.821142 ms**.
+
+Compatibility details and discrepancies found, not silent library departures:
+
+- fd-lock's Windows LockFileEx range (byte zero, length one) actually excludes
+  the old msvcrt holder both ways. Native open explicitly shares read/write,
+  **not delete**, matching Python's CRT sharing flags. Write access (rather than
+  append-only access) is required for locked truncation on Windows.
+- The pinned PyO3 0.23 PathBuf extractor panics on non-BMP Windows filenames.
+  The binding uses a lossless UTF-16/surrogatepass conversion instead. OS errors
+  use Python's Windows/CRT errno and message formatting, preserving exact
+  mkdir-vs-open and embedded-null text. No dependency/version/design substitute
+  was made. Unix fd-lock/flock paths exist but were **not executed on this
+  Windows machine**; do not infer a separate Unix platform certification.
+- An unpinned Cargo workspace command initially discovered Python 3.14 and
+  refused it. Explicit `PYO3_PYTHON` set to the private 3.13 interpreter makes
+  the requested whole-workspace gate pass without changing PyO3 features.
+- Initial harness failures (Windows venv launcher PID versus actual child PID,
+  reused null-test roots, CRLF anchors and pytest's abbreviated assertion text)
+  were corrected. Death tests terminate the reported synthetic child's actual
+  PID. No invalid campaign was counted as a completed mutation gate.
+
+Isolation: branch `te/p4c-t1`, worktree
+`C:\Users\vinay\trade-engine\.worktrees\p4c-t1`, private `.venv` only. Package
+resolution is this worktree's `src`; the actual
+`trade_engine_rs.cp313-win_amd64.pyd` is under this private `.venv`.
+Cargo target is worktree-local `crates\target`. Full CI removes inherited
+`PYTEST_ADDOPTS` and sets TMPDIR/TEMP/TMP to `.ci-local\temp`, so nested pytest
+numbered roots coexist. Timing/native scratch files and probe processes are
+cleaned by their exact names. No root checkout, client, plan file, scheduled
+task, real writer, venue or trading job was changed or started.
+
+Only this documentation evidence/status was edited after the accepted full-tree
+gate; production, tests, build manifests and mutation sources remain unchanged.
+The documentation-only artifact is checked with `git diff --check`.
+Rollback is the retained base release plus its rebuilt private extension after
+the current guard closes: mixed-version handoff is tested, stale PID files need
+not be deleted, and **no ledger/schema/decimal rewrite** is required. No push,
+merge, PR, T0 or later-ticket work is part of this checkpoint.
+
+#### P4C-T3 additive embedded-host packaging
+
+Branch `te/p4c-t3` starts from the **unmerged prerequisite**
+`te/p4c-t1` at `7f20078d32eff8598e0a9e9847c62046e58b5fd9`. T1's oracle
+`4d8d505f63ea909c19ab1d217f0a6e062a4fca65` and all existing frozen oracles
+remain immutable. T3 replaces **no pre-existing Python responsibility**: there
+was no engine Rust executable/bootstrap to freeze. A standalone frozen-oracle
+commit is therefore **not applicable**, not omitted parity or an invented old
+runtime. Existing production Python and pre-existing tests are unchanged.
+
+The new `te_runtime` executable is **only**
+`te --proof --config <absolute JSON path>`, with mode `packaging-proof`.
+It owns its native process and interpreter startup, registers the **same**
+`trade_engine_rs` module before CPython initialization, discovers a configured
+fake plugin/factory, reports provenance and exits. It does not acquire a real
+ledger, start a server, import SCAN strategies/providers, or run any job.
+No clock/store/loop/job/client responsibility moved. Temporary embedding is
+approved; new Rust strategy implementations and embedding retirement remain
+separate future tickets, not presumed available crates or fixtures.
+
+PyO3 remains pinned to **0.23.5**, CPython **3.13**, without an ABI/version
+substitution. `te_py` emits an rlib and cdylib; its default feature set is empty,
+`embed` exposes the existing initializer registration, and only maturin enables
+`extension-module` for ordinary Python installations. There is still **one**
+`#[pymodule]` in this repository. No second dynamic `.pyd` or module alias is
+loaded by `te`. `te_core` and `te_wasm` retain their pure boundary.
+
+Private build/proof, from the worktree (never the root/client environment):
+
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e ".[test]"
+$env:PATH = "C:\Users\vinay\.cargo\bin;" + $env:PATH
+$env:PYO3_PYTHON = "$PWD\.venv\Scripts\python.exe"
+$env:CARGO_TARGET_DIR = "$PWD\crates\target"
+Remove-Item Env:PYTEST_ADDOPTS -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force .ci-local\temp | Out-Null
+$env:TMPDIR = "$PWD\.ci-local\temp"
+$env:TEMP = $env:TMPDIR
+$env:TMP = $env:TMPDIR
+.venv\Scripts\python.exe -B tools\build_p4c_t3.py
+cargo test --manifest-path crates\Cargo.toml --workspace
+.venv\Scripts\python.exe -B -m pytest tests\test_p4c_embed.py -q
+```
+
+The build tool assembles `crates\target\release\te.exe` and its colocated
+`python313.dll`, then installs the ordinary extension into the private venv.
+`ci_local.py` now also builds the release bundle and runs the whole Rust
+workspace, pinning its resolved Python and worktree-local Cargo target. Missing
+binary, DLL or extension fails; none of these gates is skipped.
+
+The JSON configuration has **all fields required**, rejects unknown fields,
+relative/missing paths and every mode except `packaging-proof`:
+
+```json
+{
+  "mode": "packaging-proof",
+  "python_home": "C:\\absolute\\Python313",
+  "python_dll": "C:\\absolute\\worktree\\crates\\target\\release\\python313.dll",
+  "python_executable": "C:\\absolute\\worktree\\.venv\\Scripts\\python.exe",
+  "site_packages": "C:\\absolute\\worktree\\.venv\\Lib\\site-packages",
+  "engine_source": "C:\\absolute\\worktree\\src",
+  "plugin_paths": ["C:\\absolute\\synthetic plugins"],
+  "plugin_module": "fake_plugin",
+  "plugin_factory": "probe",
+  "plugin_config": {"tag": "synthetic packaging only"}
+}
+```
+
+The venv's `pyvenv.cfg` must identify the configured home and Python 3.13;
+site-packages must be that venv's directory. The DLL must be beside `te.exe`,
+byte-identical to the configured home's DLL, and actually loaded from that
+configured location. Home must contain the standard library/encodings and DLLs;
+source must contain `trade_engine`. The plugin is a plain module identifier,
+not an engine alias, and its resolved `.py` must lie on the explicit plugin
+roots **before its code executes**. This is trusted plugin plumbing, not a
+sandbox for malicious Python code.
+
+`PyConfig_InitIsolatedConfig` plus explicit home/executable/search paths disables
+environment discovery, user-site/site startup, `.pth` processing, bytecode writes
+and signal-handler installation. Search paths are exactly home `Lib`, home
+`DLLs`, private site-packages, engine source and explicit plugin roots. An
+unrelated cwd or poisoned PYTHONHOME/PYTHONPATH cannot change them. CPython 3.13
+with explicit home and disabled site reports `sys.prefix == sys.base_prefix ==
+home`, just as the standalone `-I -S` baseline does; the private venv paths and
+configured executable are separately verified, not fabricated prefix values.
+The host does not launch Python as a worker. Reinitialization in the same
+process explicitly refuses; imports retain identity; CPython lives until native
+process exit (no unsafe finalize/reinitialize cycle).
+
+Windows loader constraint, measured rather than hidden:
+MSVC refuses `/DELAYLOAD:python313.dll` with **LNK1194** because pinned PyO3
+imports data (`__imp_PyBaseObject_Type`) as well as functions. The successful
+design is the conventional colocated private DLL bundle, not delay loading,
+another PyO3 version, a worker, or a fallback. Missing/malformed **configured**
+paths produce JSON `RuntimeConfigError` on stderr and exit 2. Missing/corrupt
+**native bundle dependencies** fail before Rust entry with Windows loader
+statuses **0xC0000135 / 0xC000012F**, respectively; no JSON can be emitted before
+entry. Copied synthetic bundles prove both failures with Python absent from
+PATH and loader dialogs disabled. A mismatched loaded DLL refuses rather than
+using PATH's Python. Plugin/import exceptions retain their exact type/message
+and exit 2.
+
+Standalone comparison is the private interpreter, `-I -S -B`, using the same
+explicit discovery paths and fake-plugin inputs. It is not an invented frozen
+runtime owner or a recorded trading session. The deliberate packaging-only
+differences are explicit: a built-in module is not a package, so attempted
+`trade_engine_rs.<alias>` raises the built-in's exact "not a package" message;
+the ordinary installed extension retains its existing package wrapper.
+A non-callable configured factory has the host's explicit TypeError message;
+ordinary Python calling an integer gives its usual "'int' object is not
+callable". No existing test was edited to accommodate either difference.
+
+Focused proof: **34 packaging tests**, no skips. They exercise the real optimized
+executable, not a mocked initializer: one registered built-in entry, one loaded
+mandatory module identity, zero `trade_engine_rs` `.pyd` mappings (measured with
+Windows `EnumProcessModules`), correct private source/extension paths and CPython
+version. Imports and second initialization are repeated in-process. Both native
+and ordinary extension bindings acquire/refuse/release a synthetic lock sidecar;
+no SQLite book is needed or created. The native process continues to load its
+built-in with the installed `.pyd` missing **and** corrupt, while ordinary
+extension imports explicitly refuse both cases.
+
+The five applicable plugin refusal pairs compare **exact exception type name and
+message** against standalone Python: missing module, syntax error, missing
+factory, Unicode/non-BMP ValueError and SystemExit. The non-callable/alias
+differences above are pinned explicitly. Configuration tests cover unsupported
+mode, absent/corrupt/unknown-field config, relative/missing interpreter/DLL/home/
+source/site/plugin paths, wrong private-venv home/version, reserved/invalid module
+and factory names, non-object plugin configuration, unconfigured stdlib/source
+fallback and refusal before plugin execution. Space/BMP/non-BMP paths cover the
+native executable, home, private executable/site-packages, source, config and
+plugin roots; unrelated cwd, poisoned environment and a PATH without Python are
+also exercised. All fixtures are labelled synthetic; none is a strategy tape.
+
+`tools/mutate_p4c_t3.py` builds both release binary/DLL bundle and installed
+extension before a green **34-test** baseline, rebuilds both for every mutant,
+runs Python with `-B`, requires exactly one raw-source occurrence, recognizes
+only pytest call-stage **AssertionError** kills, and restores original bytes
+in `finally`. An unconditional final rebuild and **34-test** green run prove
+restoration. The final campaign kills **15/15 compiling mutants** with zero
+invalid builds, collection/import-error kills, survivors or equivalents:
+
+| Mutant | Killing packaging test |
+|---|---|
+| Live mode allowed | mode configuration refusal |
+| Home standard-library check lost | wrong home/DLL/venv |
+| Bundled DLL path check lost | wrong home/DLL/venv |
+| Private site-packages check lost | wrong home/DLL/venv |
+| Venv version check lost | wrong venv home/version |
+| Reserved mandatory module accepted as plugin | reserved-module configuration refusal |
+| Non-object plugin config accepted | plugin-config object refusal |
+| Environment isolation lost | private built-in/path/repeat smoke |
+| Site startup enabled | private built-in/path/repeat smoke |
+| Bytecode writes enabled | private built-in/path/repeat smoke |
+| Plugin search path omitted | private built-in/path/repeat smoke |
+| Built-in registration omitted | private built-in/path/repeat smoke |
+| Built-in version wrong | private built-in/path/repeat smoke |
+| Reinitialization guard lost | private built-in/path/repeat smoke |
+| Plugin provenance guard lost | unconfigured plugin refused before execution |
+
+An earlier 14-mutant run also killed every mutant; the final run adds the
+wrong-version initializer and reruns all 15 after the final provenance/lock/
+missing-and-corrupt-extension checks. No mutant was weakened. Baseline/restored
+focused timings were **4.10 / 4.22 seconds** (not performance gates).
+
+Startup timing (`tools/time_p4c_t3.py`): **nine independently configured synthetic
+plugin roots**, two untimed warmups and five measured fresh processes per path,
+alternating standalone/native order. Both paths include interpreter startup,
+explicit config/path setup, mandatory module import, fake-plugin discovery/
+invocation and provenance serialization; construction/build are excluded.
+Standalone uses its real private venv launcher, `-I -S -B`, and the ordinary
+extension. Native includes its additional preflight checks. Median sample
+medians: **48.262400 ms Python / 42.663700 ms native**, ratio **0.883995**;
+largest sample medians **50.925500 / 45.597300 ms**. This is a fair bootstrap
+comparison, **not a tick/strategy/runtime hot-path or recorded-session gate**.
+
+Final Windows gates:
+
+- Pre-edit private CI baseline: **1,969 Python tests passed in 687.30 s**,
+  exit 0, with the original T1 source/extension; no pre-existing test edited.
+- Whole Rust workspace: **94 passed** (90 core, 1 host, 3 wasm integration;
+  te_py and runtime targets link/build; zero failures/ignored tests).
+- Final private `python -B tools\ci_local.py --include-uncommitted`:
+  **exit 0, 2,003 Python tests passed in 585.13 s** (1,969 unchanged + 34 new);
+  invariant/version/whole-workspace/release-bundle/normal-extension gates green.
+  The inherited `PYTEST_ADDOPTS` was removed; TMPDIR/TEMP/TMP used the private
+  `.ci-local\temp` parent so nested numbered pytest roots coexist.
+- Explicit feature-unification gate:
+  `cargo test --manifest-path crates\Cargo.toml --workspace
+  --features te_py/extension-module`: **94 passed**. This actually unifies
+  extension and embed features; it is not a `te_core` substitute or a skip.
+- Normal private extension install/import and optimized native executable/
+  built-in/fake-plugin smoke coexist; every mutation rebuilds both artifacts.
+- Authorized read-only `tools/ledger_parity.py`: **exit 0**, mirror-PM-B 4,095,
+  0DTE 3,278, options 436, scan 6,296 events: **14,105 codec rows, 23 account
+  states and 4 folds identical**. This remains the existing codec/fold gate
+  (refusal kind only), not new runtime/session certification.
+- Toolchain: **rustc 1.98.1**, **cargo 1.98.1**, **PyO3 0.23.5**,
+  private **CPython 3.13.15, AMD64 / MSC 1944**.
+
+Tested provenance:
+
+- Worktree: `C:\Users\vinay\trade-engine\.worktrees\p4c-t3`.
+- Interpreter: this worktree's `.venv\Scripts\python.exe`; home is
+  `C:\Users\vinay\AppData\Local\Programs\Python\Python313`.
+- Engine import: this worktree's `src\trade_engine\__init__.py`.
+- Normal extension: this worktree's
+  `.venv\Lib\site-packages\trade_engine_rs\trade_engine_rs.cp313-win_amd64.pyd`.
+- Native entry: this worktree's `crates\target\release\te.exe`; its report
+  identifies the real executable, the configured/loaded private DLL and exactly
+  one `trade_engine_rs` built-in entry, with no module file or dynamic alias.
+
+Final tested artifact SHA-256 (build outputs remain ignored, never committed):
+
+| Artifact | SHA-256 |
+|---|---|
+| `te.exe` | `6620134ce8756c82708d3873480d945792713be584f609e7eb5f2edf4dd5e301` |
+| Bundled `python313.dll` | `e820bf024efd2b56bb2b82791e6b6ddc7303f070f8e72cba7637482a8a906238` |
+| Private normal `.pyd` | `be05aeb45d1ae872b789aa997e0fa39fa75de4c87b0fc2201e0b8b59db9d40df` |
+
+Changed-path inventory against T1 (Git additions/deletions; no Python logic
+deleted because no existing responsibility moved):
+
+| Path | Added | Deleted | Net |
+|---|---:|---:|---:|
+| `README.md` | 11 | 0 | +11 |
+| `crates/Cargo.lock` | 11 | 0 | +11 |
+| `crates/Cargo.toml` | 1 | 1 | 0 |
+| `crates/te_py/Cargo.toml` | 7 | 3 | +4 |
+| `crates/te_py/pyproject.toml` | 1 | 0 | +1 |
+| `crates/te_py/src/lib.rs` | 10 | 0 | +10 |
+| `crates/te_runtime/Cargo.toml` | 19 | 0 | +19 |
+| `crates/te_runtime/build.rs` | 12 | 0 | +12 |
+| `crates/te_runtime/src/config.rs` | 156 | 0 | +156 |
+| `crates/te_runtime/src/main.rs` | 39 | 0 | +39 |
+| `crates/te_runtime/src/proof.py` | 53 | 0 | +53 |
+| `crates/te_runtime/src/python.rs` | 137 | 0 | +137 |
+| `docs/RUST_PORT.md` | 264 | 4 | +260 |
+| `tests/test_p4c_embed.py` | 400 | 0 | +400 |
+| `tools/build_p4c_t3.py` | 41 | 0 | +41 |
+| `tools/ci_local.py` | 20 | 3 | +17 |
+| `tools/mutate_p4c_t3.py` | 135 | 0 | +135 |
+| `tools/time_p4c_t3.py` | 73 | 0 | +73 |
+| **Total (18 paths)** | **1,390** | **11** | **+1,379** |
+
+After the accepted full-tree gate, only this documentation evidence was updated;
+`git diff --check` verifies it. Production/test/build/mutation bytes stayed
+unchanged. Synthetic scratch was cleaned; private venv, release artifacts and
+ignored gate logs remain worktree-local. Root checkout, client, plan files,
+scheduled tasks, real writers and trading jobs were never changed or started.
+
+Rollback: retain T1's release/private extension and stop using the opt-in proof
+binary. No task selector, writer handoff, ledger/schema/Decimal rewrite, live
+rollout, push, merge or PR exists in T3. Windows x86-64 alone is certified here;
+Unix/macOS embedding and deployment, real plugin dependency packaging,
+recorded-session parity and all later P4c tickets remain unverified.
+
+#### P4C-T4 native event-store checkpoint
+
+Dependency: this worktree/branch `te/p4c-t4` was created from **unmerged**
+`te/p4c-t3` commit `dc1bed0581782b6cb2e82f6390007b025cfb4bec`, including T1
+`7f20078d`. The oracle-only commit, made before production edits, is
+`c27a4fdcc9b4203bdbb00af51d2f2348aca29d31`: current store/reader frozen under
+`tests/frozen_p4c`, with only frozen lock/mutual imports redirected. T1's
+immutable lock blob remains `47a9deb5c145210fc4e8e8b03fa30a5579bf397e`.
+All frozen files remain unchanged; parent-owned plans were not edited.
+
+**Sole owner-approved existing-test change:** the first affected run stopped
+at **244 passed / 1 failed** because
+`tests/test_p4c_lock.py::test_refusal_precedes_any_writable_db_open` required
+Python `sqlite3.connect` to run after releasing the guard. That expectation
+conflicted with native SQL ownership. After explicit approval, only this
+function changed: its held-lock refusal/no-created-database/no-held-guard
+assertions remain; after release, a directory at the synthetic database path
+causes genuine SQLite-open failure. Frozen and native owners both refuse with
+`OperationalError("unable to open database file")` and leave no guard held.
+Frozen/native locks then reacquire the same sidecar, and removing the directory
+allows a real native open/close. There is no fake Python writer or production
+injection seam. The compiling **open-before-guard mutant is killed by this
+function alone**. A source comparison proves every other existing test and
+the rest of this file unchanged.
+
+Final measured gates:
+
+- Pre-edit unchanged relevant store/P2b/OMS/server baseline:
+  **131 passed in 49.43 s**.
+- Affected store/outbox/P2b/OMS/server/T1 gates plus all existing T3
+  packaging tests: **281 passed, 12 warnings in 89.25 s**.
+- New T4 coverage: **35 tests**; mutation baseline and unconditional
+  restored-tree gate each include these and the approved T1 function
+  (**36 passed**).
+- Exact `cargo test --manifest-path crates/Cargo.toml --workspace`:
+  **97 passed** (90 core, 4 host, 3 wasm integration), zero failures/ignored.
+  The explicit `--features te_py/extension-module` workspace gate also
+  passes **97**, retaining embed/extension feature-unification proof.
+- Private `python -B tools/ci_local.py --include-uncommitted`: **exit 0**;
+  mandatory native release/private-DLL and force-reinstalled extension builds
+  remain intact, Rust/invariant/version gates pass, full Python suite
+  **2,038 passed, 12 warnings in 901.84 s**. No mandatory artifact was skipped.
+- Dense frozen/native tests compare every stored event/outbox/meta row,
+  encoded event, return/refusal type/message and account state at each prefix:
+  **100 seeded walks, 1,700 prefixes, 1,544 successes / 156 refusals**.
+  Separate walks cover command replay, malformed SQLite field types and
+  decode/fold error ordering, snapshots/seed/base_seq, account-first ordering,
+  commit/KeyboardInterrupt/post-commit failures, batch/outbox rollback,
+  reader cursor failure/recovery, listener commit-only/replay behavior,
+  retained SQL handles after close, read-only refresh/reopen and three
+  coordinated concurrent readers. A final counter-only rerun passes.
+- SQL compatibility tests exercise the same native writable connection's
+  actual transactions, cursor iteration/fetches, named/positional parameters,
+  rows/factories, scripts and exact refusals. Twelve warnings are the frozen
+  CPython 3.13 deprecation of named placeholders with sequence bindings.
+- The rebuilt release `te.exe` runs a synthetic plugin that appends/replays an
+  event with atomic outbox rows, reads meta/native folded state and opens a
+  native read-only reader while Python `sqlite3.connect` is forbidden.
+  The report says `trade_engine_rs` is **built-in**, with **zero loaded
+  trade_engine_rs .pyd modules**. Final private source/extension provenance
+  checks pass after CI rebuilt both artifacts.
+- Read-only `tools/ledger_parity.py`: **exit 0**, four real ledgers,
+  **14,105/14,105 event codecs**, **23/23 account states**, four full folds
+  identical, no mismatch/refusal. Both SQL readers are read-only; this tool's
+  historical refusal comparison is kind-only, whereas synthetic T4 walks
+  compare exact type/message. No real ledger writer was opened.
+
+T4 puts SQLite/schema/open/read/event transaction ownership in
+`te_host` (bundled rusqlite 0.37), registers store/connection/cursor/row handles
+through the existing ONE `trade_engine_rs`, and reuses the existing codec,
+PyDec and cached Rust fold handle; hot OMS calls do not serialize the whole
+account. `te_core`/`te_wasm` gain no effects.
+Python **outbox/meta business sequencing remains T5's existing sole logic**
+over the same native writable connection; it has not been ported. The
+`_commit` seam and `.conn` transaction surface are real native operations.
+No schema/decimal/fingerprint migration or runtime/strategy port was attempted.
+SQL compatibility covers the methods actually used here, not arbitrary SQLite
+UDFs or the entire CPython connection API.
+
+`tools/mutate_p4c_t4.py`: **15/15 compiling assertion kills**, zero survivors
+or invalid runs. Each anchor occurs exactly once; each mutant rebuilds the
+release binary and private extension, then runs Python `-B`. Compile/import/
+runtime errors do not count as kills. Original bytes are restored in `finally`;
+the unconditional final artifact rebuild and green gate pass.
+
+| Native-store mutant | Compile + assertion kill |
+|---|---|
+| `open-before-guard` | yes; approved T1 function alone |
+| `wal-disabled` | yes |
+| `durability-weakened` | yes |
+| `foreign-keys-disabled` | yes |
+| `command-replay-lost` | yes |
+| `accounts-alphabetized` | yes |
+| `fold-applied-twice` | yes |
+| `atomic-outbox-lost` | yes |
+| `batch-commits-per-event` | yes |
+| `failure-cache-retained` | yes |
+| `baseexception-rollback-changed` | yes |
+| `reader-refresh-lost` | yes |
+| `snapshot-cutoff-exclusive` | yes |
+| `timestamp-precision-lost` | yes |
+| `sequence-validation-lost` | yes |
+
+Nine paired populated-book samples: 1,720 synthetic seed events, three
+accounts with 120 positions/orders each, 60 hot appends including state/handle
+reads, and 15 open/closes per sample; seed work is outside timers and owner
+order alternates. Final states/counts match; final untouched-code confirmation:
+
+| Operation | Frozen/native median ms | Native/frozen | Frozen/native maximum ms |
+|---|---:|---:|---:|
+| 60 append/fold/handle calls | 40.3763 / 48.4250 | **1.199342x <= 1.25x** | 70.3746 / 63.3954 |
+| Full fold | 168.7079 / 164.2958 | 0.973848x | 230.9367 / 220.4936 |
+| 15 open/closes | 38.6947 / 32.6412 | 0.843557x | 62.1902 / 43.1432 |
+
+**Timing variability disclosed, not silently waived:** an initial run
+overlapping Cargo compilation failed at 1.353161x; a serial rerun passed
+at 1.060528x (31.8036 / 33.7286 ms). A post-CI serial run then failed at
+1.289555x (64.2680 / 82.8771 ms). A read-only five-second process sample
+observed 21.375 CPU-seconds of other work on this shared 24-processor machine;
+it does not prove the failure's cause. Exactly one unchanged-harness
+confirmation passed as tabulated above. No source, threshold, fixture or
+assertion was weakened between measurements; performance under arbitrary
+shared-machine load is not certified.
+
+Isolation: `C:\Users\vinay\trade-engine\.worktrees\p4c-t4`; private
+`.venv\Scripts\python.exe` **CPython 3.13.15**, **PyO3 0.23.5**,
+source `src\trade_engine`, native extension
+`.venv\Lib\site-packages\trade_engine_rs\trade_engine_rs.cp313-win_amd64.pyd`;
+explicit `PYO3_PYTHON` and worktree-only `crates\target`.
+Authored logs/synthetic fixtures use `.ci-local\temp`; inherited
+`PYTEST_ADDOPTS` was removed and TMPDIR/TEMP/TMP point there. No root/client
+environment, scheduled/live job or real ledger writer was touched. Windows
+x86-64 alone was exercised; Unix/macOS, deployment and recorded/live-session
+runtime equivalence remain unverified.
+
+Final artifact SHA256:
+
+- `crates/target/release/te.exe`:
+  `ab2b42c6430813ba43200521cb413412e9ede1f03a3e74a7af899d648cb966fd`.
+- `crates/target/release/python313.dll`:
+  `e820bf024efd2b56bb2b82791e6b6ddc7303f070f8e72cba7637482a8a906238`.
+- Private `trade_engine_rs.cp313-win_amd64.pyd`:
+  `a346617bb213635e1127805f0e9369be3029e4c9187afa5891665a0836e16b84`.
+
+The 15 scoped port/evidence paths are:
+`crates/Cargo.lock`, `crates/te_host/Cargo.toml`,
+`crates/te_host/src/{lib,store}.rs`, `crates/te_py/src/{lib,lock,store}.rs`,
+`src/trade_engine/ledger/{store,reader}.py`, `tests/p4c_store_fixture.py`,
+`tests/test_p4c_store.py`, the sole approved `tests/test_p4c_lock.py` function,
+`tools/{mutate,time}_p4c_t4.py`,
+`docs/RUST_PORT.md`. Production Python store/reader changes are **net -145
+lines** (+72/-217); new tests/tools are additive. The final documentation-only
+evidence replacement follows accepted full CI; executable/test sources and
+native source hashes are unchanged afterward. Rollback is reverting the T4
+port commit and rebuilding private T3 artifacts (the oracle checkpoint remains
+available); no ledger rewrite is required.
+Environment deviation: the initial private dependency installation inherited
+Windows' default TEMP before explicit worktree TMPDIR/TEMP/TMP pinning;
+subsequent builds/tests and all authored scratch/log files were worktree-local.
+No push, merge, PR or later ticket was started.
+
 ### P6b verification and boundary
 
-Plan: `.worktrees/plans/P6B_FUTURES_IN_TE_CORE.md`. Its §0 decisions (2026-10-03) apply:
+Plan: `.worktrees/plans/P6B_FUTURES_IN_TE_CORE.md`. Its Â§0 decisions (2026-10-03) apply:
 - the session calendar is CME's published schedule, not a third-party library;
 - futures slippage is a whole number of adverse ticks;
 - margin is report-only;
@@ -593,25 +1143,3 @@ Boundary:
 - The browser book is built frictionless, and replay-sim applies the tick slippage once.
 - The web's Day order expires at 16:00 ET, te_core's at the Globex close (17:00 ET). The web check fires first.
 - Plan Gate 3 (golden fills recorded on NinjaTrader 8) is not built.
-
-### Costs of phasing (accepted)
-
-- Until P4 Python calls Rust across pyo3 with plain values or JSON; most of that
-  marshalling is thrown away at the flip.
-- P1 functions that take domain objects (risk rules) receive them as JSON until
-  P2 makes the types native.
-- P4 is the one large switch (who owns the process); the side-by-side paper
-  session exists to make it safe.
-
-## Working rules
-
-- Build: `python -m pip install --no-deps --force-reinstall ./crates/te_py`
-  (maturin backend via `crates/te_py/pyproject.toml`; `tools/ci_local.py` does this).
-  `crates/te_py/pyproject.toml` must exist: without it maturin reads the root
-  pyproject and replaces the `trade-engine` editable install.
-- Rust tests: `cargo test --manifest-path crates/Cargo.toml -p te_core` (also run by
-  `ci_local.py`). Not the whole workspace: `te_py` links pyo3, which refuses a
-  Python newer than it supports.
-- Each phase is one commit series: Rust + oracle test, then the shim and the
-  deletion of the Python logic, then this table's status. A row turns **done**
-  only in the commit that adds the enforcing test, which the row names.

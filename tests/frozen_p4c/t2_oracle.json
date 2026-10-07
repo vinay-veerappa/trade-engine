@@ -1,0 +1,7 @@
+{
+  "source_release": "76cfd91f91ff7b84711e306c4e4c93f8a66318e1",
+  "path": "tests/frozen_p4c/http.py",
+  "sha256": "46750715e7fec7df147f3ac9decc0fe90d13f38c5ebf6c2760dbeb05b1228d33",
+  "git_blob": "aaff2b56ccf8585cd919cb2f52fb3045755a5bb6",
+  "note": "Reuse the immutable T0 pre-port HTTP oracle; production HTTP is unchanged at this checkpoint."
+}

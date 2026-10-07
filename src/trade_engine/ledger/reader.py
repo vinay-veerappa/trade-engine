@@ -13,10 +13,9 @@ only because it is the one writer; this instance watches someone else's writes.
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
-from trade_engine.ledger.state import AccountState, IncrementalFold
+from trade_engine.ledger import _rs
 from trade_engine.ledger.store import Ledger
 
 
@@ -29,11 +28,9 @@ class LedgerReader(Ledger):
 
     def __init__(self, path: str | Path) -> None:  # noqa: D107 - no mkdir, no lock
         self.path = Path(path)
-        self._lock = None
-        self._lock_held = False
+        self._native = None
         self._conn = None
-        self._fold = IncrementalFold(atomic=False)
-        self._folded_at: dict[str, int] = {}
+        self._carriers = {}
         self._listeners = []
 
     def open(self) -> LedgerReader:
@@ -41,28 +38,18 @@ class LedgerReader(Ledger):
             return self
         if not self.path.is_file():
             raise LedgerReadOnlyError(f"no ledger at {self.path}; a reader never creates one")
-        conn = sqlite3.connect(f"file:{self.path.resolve().as_posix()}?mode=ro", uri=True, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        self._conn = conn
+        uri = f"file:{self.path.resolve().as_posix()}?mode=ro"
+        if self._native is None:
+            self._native = _rs.rs.LedgerStore(str(self.path), str(self.path), "", uri)
+        else:
+            self._native.reopen(uri)
+        self._conn = self._native.connection()
         return self
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
+        if self._native is not None:
+            self._native.close()
             self._conn = None
-
-    def state(self, account: str) -> AccountState:
-        """The account's fold as of the newest committed event, re-read when the file grew."""
-        newest = self.next_seq() - 1
-        folded_at = self._folded_at.get(account)
-        if folded_at != newest:
-            self._folded_at.pop(account, None)
-            if folded_at is not None and folded_at < newest and self._fold.has(account):
-                self._fold.apply_rows(account, self._rows(account, after=folded_at))
-            else:
-                self._fold.load(account, self._rows(account))
-            self._folded_at[account] = newest
-        return self._fold.state(account)
 
     def _refuse(self, *_args, **_kwargs):
         raise LedgerReadOnlyError(f"{self.path} is open read-only; its writer is another process (I4)")

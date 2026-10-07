@@ -1,0 +1,18 @@
+[package]
+name = "te_host"
+version = "0.1.0"
+edition = "2021"
+description = "Native OS infrastructure; no effects belong in te_core."
+license = "MIT"
+
+[dependencies]
+fd-lock = "4.0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }
+te_core = { path = "../te_core" }
+axum = "=0.8.9"
+chrono = "0.4"
+regex = "1"
+tokio = { version = "=1.53.2", features = ["rt", "net", "io-util", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

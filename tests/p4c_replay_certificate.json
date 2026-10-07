@@ -1,0 +1,1220 @@
+{
+  "binary_sha256": "7f545643ed05d526bd0fafa17f2917465facfab60c4e67b2e391612efaa57f18",
+  "compared_steps": 106200,
+  "minima": {
+    "restart_walks": 72,
+    "role_walks": 60,
+    "sessions": 20,
+    "steps": 100000
+  },
+  "note": "synthetic full-session variants per \u00c2\u00a75.1; the recorded release-gate corpus needs separately authorized fixture acquisition",
+  "provenance": "synthetic",
+  "restart_walks": 72,
+  "restarts": [
+    {
+      "cut": 1,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 1
+    },
+    {
+      "cut": 5,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 5
+    },
+    {
+      "cut": 20,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 20
+    },
+    {
+      "cut": 41,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 41
+    },
+    {
+      "cut": 60,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 60
+    },
+    {
+      "cut": 80,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 80
+    },
+    {
+      "cut": 100,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 100
+    },
+    {
+      "cut": 101,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 101
+    },
+    {
+      "cut": 102,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 102
+    },
+    {
+      "cut": 103,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 103
+    },
+    {
+      "cut": 120,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 120
+    },
+    {
+      "cut": 123,
+      "id": "SCAN-2026-01-05-00",
+      "prefix_events": 123
+    },
+    {
+      "cut": 1,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 1
+    },
+    {
+      "cut": 5,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 5
+    },
+    {
+      "cut": 20,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 20
+    },
+    {
+      "cut": 41,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 41
+    },
+    {
+      "cut": 60,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 60
+    },
+    {
+      "cut": 80,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 80
+    },
+    {
+      "cut": 100,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 100
+    },
+    {
+      "cut": 101,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 101
+    },
+    {
+      "cut": 102,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 102
+    },
+    {
+      "cut": 103,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 103
+    },
+    {
+      "cut": 120,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 120
+    },
+    {
+      "cut": 123,
+      "id": "options-pass-2026-01-05-00",
+      "prefix_events": 123
+    },
+    {
+      "cut": 1,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 1
+    },
+    {
+      "cut": 5,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 5
+    },
+    {
+      "cut": 20,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 20
+    },
+    {
+      "cut": 41,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 41
+    },
+    {
+      "cut": 60,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 60
+    },
+    {
+      "cut": 80,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 80
+    },
+    {
+      "cut": 100,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 100
+    },
+    {
+      "cut": 101,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 101
+    },
+    {
+      "cut": 102,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 102
+    },
+    {
+      "cut": 103,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 103
+    },
+    {
+      "cut": 120,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 120
+    },
+    {
+      "cut": 123,
+      "id": "options-eod-2026-01-05-00",
+      "prefix_events": 123
+    },
+    {
+      "cut": 1,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 1
+    },
+    {
+      "cut": 5,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 5
+    },
+    {
+      "cut": 20,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 20
+    },
+    {
+      "cut": 41,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 41
+    },
+    {
+      "cut": 60,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 60
+    },
+    {
+      "cut": 80,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 80
+    },
+    {
+      "cut": 100,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 100
+    },
+    {
+      "cut": 101,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 101
+    },
+    {
+      "cut": 102,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 102
+    },
+    {
+      "cut": 103,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 103
+    },
+    {
+      "cut": 120,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 120
+    },
+    {
+      "cut": 123,
+      "id": "intraday-2026-01-05-00",
+      "prefix_events": 123
+    },
+    {
+      "cut": 1,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 1
+    },
+    {
+      "cut": 5,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 5
+    },
+    {
+      "cut": 20,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 20
+    },
+    {
+      "cut": 41,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 41
+    },
+    {
+      "cut": 60,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 60
+    },
+    {
+      "cut": 80,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 80
+    },
+    {
+      "cut": 100,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 100
+    },
+    {
+      "cut": 101,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 101
+    },
+    {
+      "cut": 102,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 102
+    },
+    {
+      "cut": 103,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 103
+    },
+    {
+      "cut": 120,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 120
+    },
+    {
+      "cut": 123,
+      "id": "mirror-batch-2026-01-05-00",
+      "prefix_events": 123
+    },
+    {
+      "cut": 1,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 1
+    },
+    {
+      "cut": 5,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 5
+    },
+    {
+      "cut": 20,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 20
+    },
+    {
+      "cut": 41,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 41
+    },
+    {
+      "cut": 60,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 60
+    },
+    {
+      "cut": 80,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 80
+    },
+    {
+      "cut": 100,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 100
+    },
+    {
+      "cut": 101,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 101
+    },
+    {
+      "cut": 102,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 102
+    },
+    {
+      "cut": 103,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 103
+    },
+    {
+      "cut": 120,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 120
+    },
+    {
+      "cut": 123,
+      "id": "mirror-follow-2026-01-05-00",
+      "prefix_events": 123
+    }
+  ],
+  "role_walks": 120,
+  "sessions": 20,
+  "version": 1,
+  "walks": [
+    {
+      "events": 125,
+      "id": "SCAN-2026-01-05-00",
+      "role": "SCAN",
+      "session": "2026-01-05",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-01-05-00",
+      "role": "options-pass",
+      "session": "2026-01-05",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-01-05-00",
+      "role": "options-eod",
+      "session": "2026-01-05",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-01-05-00",
+      "role": "intraday",
+      "session": "2026-01-05",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-01-05-00",
+      "role": "mirror-batch",
+      "session": "2026-01-05",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-01-05-00",
+      "role": "mirror-follow",
+      "session": "2026-01-05",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-02-13-00",
+      "role": "SCAN",
+      "session": "2026-02-13",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-02-13-00",
+      "role": "options-pass",
+      "session": "2026-02-13",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-02-13-00",
+      "role": "options-eod",
+      "session": "2026-02-13",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-02-13-00",
+      "role": "intraday",
+      "session": "2026-02-13",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-02-13-00",
+      "role": "mirror-batch",
+      "session": "2026-02-13",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-02-13-00",
+      "role": "mirror-follow",
+      "session": "2026-02-13",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-03-06-00",
+      "role": "SCAN",
+      "session": "2026-03-06",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-03-06-00",
+      "role": "options-pass",
+      "session": "2026-03-06",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-03-06-00",
+      "role": "options-eod",
+      "session": "2026-03-06",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-03-06-00",
+      "role": "intraday",
+      "session": "2026-03-06",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-03-06-00",
+      "role": "mirror-batch",
+      "session": "2026-03-06",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-03-06-00",
+      "role": "mirror-follow",
+      "session": "2026-03-06",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-03-09-00",
+      "role": "SCAN",
+      "session": "2026-03-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-03-09-00",
+      "role": "options-pass",
+      "session": "2026-03-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-03-09-00",
+      "role": "options-eod",
+      "session": "2026-03-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-03-09-00",
+      "role": "intraday",
+      "session": "2026-03-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-03-09-00",
+      "role": "mirror-batch",
+      "session": "2026-03-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-03-09-00",
+      "role": "mirror-follow",
+      "session": "2026-03-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-04-10-00",
+      "role": "SCAN",
+      "session": "2026-04-10",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-04-10-00",
+      "role": "options-pass",
+      "session": "2026-04-10",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-04-10-00",
+      "role": "options-eod",
+      "session": "2026-04-10",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-04-10-00",
+      "role": "intraday",
+      "session": "2026-04-10",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-04-10-00",
+      "role": "mirror-batch",
+      "session": "2026-04-10",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-04-10-00",
+      "role": "mirror-follow",
+      "session": "2026-04-10",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-05-25-00",
+      "role": "SCAN",
+      "session": "2026-05-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-05-25-00",
+      "role": "options-pass",
+      "session": "2026-05-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-05-25-00",
+      "role": "options-eod",
+      "session": "2026-05-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-05-25-00",
+      "role": "intraday",
+      "session": "2026-05-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-05-25-00",
+      "role": "mirror-batch",
+      "session": "2026-05-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-05-25-00",
+      "role": "mirror-follow",
+      "session": "2026-05-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-06-19-00",
+      "role": "SCAN",
+      "session": "2026-06-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-06-19-00",
+      "role": "options-pass",
+      "session": "2026-06-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-06-19-00",
+      "role": "options-eod",
+      "session": "2026-06-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-06-19-00",
+      "role": "intraday",
+      "session": "2026-06-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-06-19-00",
+      "role": "mirror-batch",
+      "session": "2026-06-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-06-19-00",
+      "role": "mirror-follow",
+      "session": "2026-06-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-07-03-00",
+      "role": "SCAN",
+      "session": "2026-07-03",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-07-03-00",
+      "role": "options-pass",
+      "session": "2026-07-03",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-07-03-00",
+      "role": "options-eod",
+      "session": "2026-07-03",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-07-03-00",
+      "role": "intraday",
+      "session": "2026-07-03",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-07-03-00",
+      "role": "mirror-batch",
+      "session": "2026-07-03",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-07-03-00",
+      "role": "mirror-follow",
+      "session": "2026-07-03",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-08-14-00",
+      "role": "SCAN",
+      "session": "2026-08-14",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-08-14-00",
+      "role": "options-pass",
+      "session": "2026-08-14",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-08-14-00",
+      "role": "options-eod",
+      "session": "2026-08-14",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-08-14-00",
+      "role": "intraday",
+      "session": "2026-08-14",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-08-14-00",
+      "role": "mirror-batch",
+      "session": "2026-08-14",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-08-14-00",
+      "role": "mirror-follow",
+      "session": "2026-08-14",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-09-07-00",
+      "role": "SCAN",
+      "session": "2026-09-07",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-09-07-00",
+      "role": "options-pass",
+      "session": "2026-09-07",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-09-07-00",
+      "role": "options-eod",
+      "session": "2026-09-07",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-09-07-00",
+      "role": "intraday",
+      "session": "2026-09-07",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-09-07-00",
+      "role": "mirror-batch",
+      "session": "2026-09-07",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-09-07-00",
+      "role": "mirror-follow",
+      "session": "2026-09-07",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-09-11-00",
+      "role": "SCAN",
+      "session": "2026-09-11",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-09-11-00",
+      "role": "options-pass",
+      "session": "2026-09-11",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-09-11-00",
+      "role": "options-eod",
+      "session": "2026-09-11",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-09-11-00",
+      "role": "intraday",
+      "session": "2026-09-11",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-09-11-00",
+      "role": "mirror-batch",
+      "session": "2026-09-11",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-09-11-00",
+      "role": "mirror-follow",
+      "session": "2026-09-11",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-10-09-00",
+      "role": "SCAN",
+      "session": "2026-10-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-10-09-00",
+      "role": "options-pass",
+      "session": "2026-10-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-10-09-00",
+      "role": "options-eod",
+      "session": "2026-10-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-10-09-00",
+      "role": "intraday",
+      "session": "2026-10-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-10-09-00",
+      "role": "mirror-batch",
+      "session": "2026-10-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-10-09-00",
+      "role": "mirror-follow",
+      "session": "2026-10-09",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-10-16-00",
+      "role": "SCAN",
+      "session": "2026-10-16",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-10-16-00",
+      "role": "options-pass",
+      "session": "2026-10-16",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-10-16-00",
+      "role": "options-eod",
+      "session": "2026-10-16",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-10-16-00",
+      "role": "intraday",
+      "session": "2026-10-16",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-10-16-00",
+      "role": "mirror-batch",
+      "session": "2026-10-16",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-10-16-00",
+      "role": "mirror-follow",
+      "session": "2026-10-16",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-11-26-00",
+      "role": "SCAN",
+      "session": "2026-11-26",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-11-26-00",
+      "role": "options-pass",
+      "session": "2026-11-26",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-11-26-00",
+      "role": "options-eod",
+      "session": "2026-11-26",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-11-26-00",
+      "role": "intraday",
+      "session": "2026-11-26",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-11-26-00",
+      "role": "mirror-batch",
+      "session": "2026-11-26",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-11-26-00",
+      "role": "mirror-follow",
+      "session": "2026-11-26",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-11-27-00",
+      "role": "SCAN",
+      "session": "2026-11-27",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-11-27-00",
+      "role": "options-pass",
+      "session": "2026-11-27",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-11-27-00",
+      "role": "options-eod",
+      "session": "2026-11-27",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-11-27-00",
+      "role": "intraday",
+      "session": "2026-11-27",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-11-27-00",
+      "role": "mirror-batch",
+      "session": "2026-11-27",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-11-27-00",
+      "role": "mirror-follow",
+      "session": "2026-11-27",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2026-12-24-00",
+      "role": "SCAN",
+      "session": "2026-12-24",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2026-12-24-00",
+      "role": "options-pass",
+      "session": "2026-12-24",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2026-12-24-00",
+      "role": "options-eod",
+      "session": "2026-12-24",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2026-12-24-00",
+      "role": "intraday",
+      "session": "2026-12-24",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2026-12-24-00",
+      "role": "mirror-batch",
+      "session": "2026-12-24",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2026-12-24-00",
+      "role": "mirror-follow",
+      "session": "2026-12-24",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2027-02-19-00",
+      "role": "SCAN",
+      "session": "2027-02-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2027-02-19-00",
+      "role": "options-pass",
+      "session": "2027-02-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2027-02-19-00",
+      "role": "options-eod",
+      "session": "2027-02-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2027-02-19-00",
+      "role": "intraday",
+      "session": "2027-02-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2027-02-19-00",
+      "role": "mirror-batch",
+      "session": "2027-02-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2027-02-19-00",
+      "role": "mirror-follow",
+      "session": "2027-02-19",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2027-05-31-00",
+      "role": "SCAN",
+      "session": "2027-05-31",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2027-05-31-00",
+      "role": "options-pass",
+      "session": "2027-05-31",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2027-05-31-00",
+      "role": "options-eod",
+      "session": "2027-05-31",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2027-05-31-00",
+      "role": "intraday",
+      "session": "2027-05-31",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2027-05-31-00",
+      "role": "mirror-batch",
+      "session": "2027-05-31",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2027-05-31-00",
+      "role": "mirror-follow",
+      "session": "2027-05-31",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2027-07-02-00",
+      "role": "SCAN",
+      "session": "2027-07-02",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2027-07-02-00",
+      "role": "options-pass",
+      "session": "2027-07-02",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2027-07-02-00",
+      "role": "options-eod",
+      "session": "2027-07-02",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2027-07-02-00",
+      "role": "intraday",
+      "session": "2027-07-02",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2027-07-02-00",
+      "role": "mirror-batch",
+      "session": "2027-07-02",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2027-07-02-00",
+      "role": "mirror-follow",
+      "session": "2027-07-02",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "SCAN-2027-11-25-00",
+      "role": "SCAN",
+      "session": "2027-11-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-pass-2027-11-25-00",
+      "role": "options-pass",
+      "session": "2027-11-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "options-eod-2027-11-25-00",
+      "role": "options-eod",
+      "session": "2027-11-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "intraday-2027-11-25-00",
+      "role": "intraday",
+      "session": "2027-11-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-batch-2027-11-25-00",
+      "role": "mirror-batch",
+      "session": "2027-11-25",
+      "steps": 885
+    },
+    {
+      "events": 125,
+      "id": "mirror-follow-2027-11-25-00",
+      "role": "mirror-follow",
+      "session": "2027-11-25",
+      "steps": 885
+    }
+  ]
+}

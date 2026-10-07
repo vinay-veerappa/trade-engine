@@ -27,54 +27,37 @@ Snapshots are a cache: `snapshot(account)` must equal `fold(events())[account]`,
 from __future__ import annotations
 
 import json
+import os
+import weakref
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, TYPE_CHECKING
 
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import codec
-from trade_engine.ledger.events import SCHEMA_VERSION, Event, EventKind
-from trade_engine.ledger.lock import LedgerLockError, SingleInstanceLock
+from trade_engine.ledger import _rs, codec
+from trade_engine.ledger.events import Event, EventKind
+from trade_engine.ledger.lock import LedgerLockError
 from trade_engine.ledger.outbox import DrainResult, OutboxItem, OutboxStatus
-from trade_engine.ledger.state import AccountState, FoldCache, IncrementalFold, fold
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
-    seq            INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts_utc         TEXT    NOT NULL,
-    account        TEXT    NOT NULL,
-    kind           TEXT    NOT NULL,
-    command_id     TEXT,
-    payload_json   TEXT    NOT NULL,
-    schema_version INTEGER NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_events_command_id
-    ON events(command_id) WHERE command_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS ix_events_account_seq ON events(account, seq);
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS outbox (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_seq    INTEGER NOT NULL,
-    destination  TEXT    NOT NULL,
-    payload_json TEXT    NOT NULL,
-    status       TEXT    NOT NULL,
-    attempts     INTEGER NOT NULL DEFAULT 0,
-    last_error   TEXT,
-    created_at   TEXT    NOT NULL,
-    delivered_at TEXT,
-    FOREIGN KEY(event_seq) REFERENCES events(seq),
-    UNIQUE(event_seq, destination)
-);
-CREATE INDEX IF NOT EXISTS ix_outbox_dest_status_id
-    ON outbox(destination, status, id);
-"""
+from trade_engine.ledger.state import AccountState, FoldCache, fold
 
 OutboxSpec = Mapping[str, dict[str, Any]] | Sequence[tuple[str, dict[str, Any]]]
+
+if TYPE_CHECKING:
+    from trade_engine_rs import LedgerStore, SqlConnection
+
+
+class _LockView:
+    """Non-owning compatibility view of the store's actual native guard."""
+
+    def __init__(self, ledger: Ledger) -> None:
+        self._ledger = weakref.ref(ledger)
+
+    @property
+    def held(self) -> bool:
+        ledger = self._ledger()
+        native = None if ledger is None else ledger._native
+        return native is not None and native.held
 
 
 class Ledger:
@@ -83,13 +66,10 @@ class Ledger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Always locked: there is no unlocked writer, or I4 is only a convention.
-        self._lock = SingleInstanceLock(self.path)
-        self._lock_held = False
-        self._conn: sqlite3.Connection | None = None
-        # Folded state per account as of the last commit (in Rust); the base append()
-        # validates against. Safe to hold because this instance is the only writer (I4).
-        self._fold = IncrementalFold(atomic=False)
+        self._native: LedgerStore | None = None
+        self._lock = _LockView(self)
+        self._conn: SqlConnection | None = None
+        self._carriers: dict[str, tuple[int, AccountState]] = {}
         self._listeners: list[Callable[[Event], None]] = []
 
     def add_listener(self, callback: Callable[[Event], None]) -> None:
@@ -117,33 +97,17 @@ class Ledger:
         """Acquire the single-instance lock (I4) and open the database."""
         if self._conn is not None:
             return self
-        self._lock.acquire()
-        self._lock_held = True
-        self._fold.clear()
-        try:
-            conn = sqlite3.connect(str(self.path), isolation_level=None)
-            conn.row_factory = sqlite3.Row
-            # synchronous=FULL, so a committed row is durable and an interrupted write
-            # rolls back rather than half-applying (I2).
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=FULL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript(_SCHEMA)
-            self._conn = conn
-        except Exception:
-            if self._lock_held:
-                self._lock.release()
-                self._lock_held = False
-            raise
+        sidecar = self.path.with_name(self.path.name + ".lock")
+        self._native = _rs.rs.LedgerStore(str(self.path), str(sidecar), str(os.getpid()))
+        self._conn = self._native.connection()
+        self._carriers.clear()
         return self
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
+        if self._native is not None:
+            self._native.close()
+            self._native = None
             self._conn = None
-        if self._lock_held:
-            self._lock.release()
-            self._lock_held = False
 
     def __enter__(self) -> Ledger:
         return self.open()
@@ -152,10 +116,16 @@ class Ledger:
         self.close()
 
     @property
-    def conn(self) -> sqlite3.Connection:
+    def conn(self) -> SqlConnection:
         if self._conn is None:
             raise RuntimeError("Ledger is not open; use `with Ledger(path):`")
         return self._conn
+
+    @property
+    def _store(self) -> LedgerStore:
+        self.conn  # Preserve the public unopened-ledger refusal.
+        assert self._native is not None
+        return self._native
 
     def _commit(self) -> None:
         """Commit the open transaction.
@@ -189,148 +159,52 @@ class Ledger:
     def _write(
         self, entries: Sequence[tuple[Event, Sequence[tuple[str, dict[str, Any]]]]]
     ) -> list[Event]:
-        batch = [event for event, _ in entries]
-        for event in batch:
-            if event.seq is not None:
-                raise ValueError("Event.seq is assigned by the ledger; pass seq=None to append")
-
-        conn = self.conn
-        touched: set[str] = set()
-        written: list[Event] = []
-        new_events: list[Event] = []
-        in_transaction = False
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            in_transaction = True
-            for event, outbox_items in entries:
-                if event.command_id is not None:
-                    existing = conn.execute(
-                        "SELECT * FROM events WHERE command_id = ?", (event.command_id,)
-                    ).fetchone()
-                    if existing is not None:
-                        # Decode inside the transaction so a malformed stored row surfaces
-                        # before anything commits.
-                        written.append(self._row_to_event(existing))
-                        continue
-
-                # Load the base state before the INSERT, which would otherwise be folded in.
-                if not self._fold.has(event.account):
-                    self._load(event.account)
-                touched.add(event.account)
-                payload_json = codec.payload_text(event.payload)
-                ts_utc = event.ts_utc.isoformat()
-                cursor = conn.execute(
-                    "INSERT INTO events (ts_utc, account, kind, command_id, payload_json, schema_version) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        ts_utc,
-                        event.account,
-                        event.kind.value,
-                        event.command_id,
-                        payload_json,
-                        event.schema_version,
-                    ),
-                )
-                seq = int(cursor.lastrowid)
-                # The row as stored, applied once: what a reload from the log will fold.
-                self._fold.apply_row(
-                    event.account, event.kind.value, payload_json, ts_utc, event.command_id, event.schema_version, seq
-                )
-                appended = replace(event, seq=seq)
-                written.append(appended)
-                new_events.append(appended)
-                for destination, payload in outbox_items:
-                    self._insert_outbox(int(cursor.lastrowid), destination, payload, event.ts_utc)
-            self._commit()
-            in_transaction = False
-        except BaseException as exc:
-            # Nothing committed: the touched accounts hold uncommitted events, so they
-            # are dropped and reload from the log on their next read.
-            for account in touched:
-                self._fold.drop(account)
-            if in_transaction and isinstance(exc, Exception):
-                self._rollback()
-            raise
+        written, new_events = _rs.call(_rs.rs.ledger_store_write, self._native, entries, self)
         self._notify_listeners(new_events)
         return written
 
     def _rows(self, account: str, after: int | None = None) -> list[tuple]:
         """The account's stored rows as the Rust fold reads them, in seq order."""
-        cursor = self.conn.cursor()
-        cursor.row_factory = None
-        sql = (
-            "SELECT kind, payload_json, ts_utc, command_id, schema_version, seq FROM events WHERE account = ?"
-        )
-        params: list[Any] = [account]
-        if after is not None:
-            sql += " AND seq > ?"
-            params.append(after)
-        return cursor.execute(sql + " ORDER BY seq ASC", params).fetchall()
-
-    def _load(self, account: str) -> None:
-        self._fold.load(account, self._rows(account))
+        return _rs.call(self._store.rows, account, after)
 
     def fold_handle(self, account: str):
         """The Rust fold holding ``account``'s committed state, loaded if absent: what
         ``state(account)`` is built from, for Rust callers that need no Python carrier."""
-        if not self._fold.has(account):
-            self._load(account)
-        return self._fold.handle
+        return _rs.call(self._store.fold_handle, account)
 
     def _committed_state(self, account: str) -> AccountState:
-        if not self._fold.has(account):
-            self._load(account)
-        return self._fold.state(account)
+        revision = _rs.call(self._store.revision, account)
+        previous = self._carriers.get(account)
+        if previous is not None and previous[0] == revision:
+            return previous[1]
+        whole, data = _rs.call(self._store.export, account, previous is None)
+        tree = json.loads(data)
+        carrier = codec.build(tree) if whole else codec.patch(previous[1], tree)
+        self._carriers[account] = (revision, carrier)
+        return carrier
 
     # -- read --------------------------------------------------------------------
 
     def next_seq(self) -> int:
-        row = self.conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM events").fetchone()
-        return int(row["n"])
+        return self._store.next_seq()
 
     def count(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
-        return int(row["n"])
+        return self._store.count()
 
     def events(self, *, after: int | None = None, account: str | None = None) -> list[Event]:
-        sql = "SELECT * FROM events"
-        clauses: list[str] = []
-        params: list[Any] = []
-        if after is not None:
-            clauses.append("seq > ?")
-            params.append(after)
-        if account is not None:
-            clauses.append("account = ?")
-            params.append(account)
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY seq ASC"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return _rs.call(self._store.events, after, account)
 
     def events_of_kind(self, kind: EventKind, *, account: str | None = None) -> list[Event]:
         """Events of one kind in append order, filtered in SQL: a scan for one kind
         does not decode the rest of the log."""
-        sql = "SELECT * FROM events WHERE kind = ?"
-        params: list[Any] = [kind.value]
-        if account is not None:
-            sql += " AND account = ?"
-            params.append(account)
-        rows = self.conn.execute(sql + " ORDER BY seq ASC", params).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        return _rs.call(self._store.events, None, account, kind.value)
 
     def accounts(self) -> list[str]:
         """Every account with events, in order of its first event."""
-        rows = self.conn.execute(
-            "SELECT account FROM events GROUP BY account ORDER BY MIN(seq)"
-        ).fetchall()
-        return [row["account"] for row in rows]
+        return self._store.accounts()
 
     def event_by_command(self, command_id: str) -> Event | None:
-        row = self.conn.execute(
-            "SELECT * FROM events WHERE command_id = ?", (command_id,)
-        ).fetchone()
-        return None if row is None else self._row_to_event(row)
+        return _rs.call(self._store.event_by_command, command_id)
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> Event:
@@ -348,7 +222,7 @@ class Ledger:
 
     def fold(self) -> dict[str, AccountState]:
         """Full fold of every event. Pure over the log (I2)."""
-        return fold(self.events())
+        return {account: codec.build_text(state) for account, state in _rs.call(self._store.fold)}
 
     def state(self, account: str) -> AccountState:
         """Folded state of one account, from that account's events only (I8).
@@ -361,11 +235,7 @@ class Ledger:
 
     def snapshot(self, account: str, *, at_seq: int | None = None) -> AccountState:
         """Folded state for one account, with `last_seq` pinned to the snapshot point."""
-        events = self.events(account=account)
-        if at_seq is not None:
-            events = [e for e in events if e.seq is not None and e.seq <= at_seq]
-        state = self._fold_events(events, account)
-        return state
+        return codec.build_text(_rs.call(self._store.snapshot, account, at_seq))
 
     @staticmethod
     def _fold_events(events: Sequence[Event], account: str) -> AccountState:
@@ -413,59 +283,13 @@ class Ledger:
         created_at: datetime | None = None,
     ) -> OutboxItem:
         """Enqueue an outbox item for delivery to an external sink."""
-        if not destination or not destination.strip():
-            raise ValueError("Outbox destination must be non-empty string")
-        row = self.conn.execute("SELECT ts_utc FROM events WHERE seq = ?", (event_seq,)).fetchone()
-        if row is None:
-            raise ValueError(f"Unknown event sequence {event_seq}")
-        if created_at is None:
-            created_at = datetime.fromisoformat(row["ts_utc"])
-        elif created_at.tzinfo is None or created_at.tzinfo.utcoffset(created_at) is None:
-            raise ValueError("Outbox created_at must be timezone-aware UTC datetime (I7)")
-
-        conn = self.conn
-        in_transaction = False
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            in_transaction = True
-            outbox_id = self._insert_outbox(event_seq, destination, payload, created_at)
-            self._commit()
-            in_transaction = False
-        except sqlite3.IntegrityError as e:
-            if in_transaction:
-                self._rollback()
-            raise ValueError(f"Outbox entry violates constraint (e.g. duplicate or missing foreign key): {e}") from e
-        except Exception:
-            if in_transaction:
-                self._rollback()
-            raise
-
-        return OutboxItem(
-            id=outbox_id,
-            event_seq=event_seq,
-            destination=destination.strip(),
-            payload=payload,
-            status=OutboxStatus.PENDING,
-            attempts=0,
-            created_at=created_at,
-        )
+        return _rs.rs.ledger_outbox_enqueue(self, event_seq, destination, payload, created_at)
 
     def _insert_outbox(
         self, event_seq: int, destination: str, payload: dict[str, Any], created_at: datetime
     ) -> int:
         """INSERT one PENDING row; the caller owns the transaction."""
-        cursor = self.conn.execute(
-            "INSERT INTO outbox (event_seq, destination, payload_json, status, attempts, created_at) "
-            "VALUES (?, ?, ?, ?, 0, ?)",
-            (
-                event_seq,
-                destination.strip(),
-                json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                OutboxStatus.PENDING.value,
-                created_at.isoformat(),
-            ),
-        )
-        return int(cursor.lastrowid)
+        return self._store.insert_outbox(event_seq, destination, payload, created_at)
 
     def pending_outbox(
         self,
@@ -474,59 +298,15 @@ class Ledger:
         include_failed: bool = True,
     ) -> list[OutboxItem]:
         """Fetch undelivered outbox entries in strict FIFO order (id ASC)."""
-        sql = "SELECT * FROM outbox WHERE "
-        conditions: list[str] = []
-        params: list[Any] = []
-        if destination is not None:
-            conditions.append("destination = ?")
-            params.append(destination.strip())
-        if include_failed:
-            conditions.append("status != ?")
-            params.append(OutboxStatus.DELIVERED.value)
-        else:
-            conditions.append("status = ?")
-            params.append(OutboxStatus.PENDING.value)
-        sql += " AND ".join(conditions) + " ORDER BY id ASC"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [self._row_to_outbox(row) for row in rows]
+        return self._store.pending_outbox(destination, include_failed)
 
     def mark_outbox_delivered(self, outbox_id: int, delivered_at: datetime) -> None:
         """Mark an outbox item delivered with confirmation timestamp."""
-        if delivered_at.tzinfo is None or delivered_at.tzinfo.utcoffset(delivered_at) is None:
-            raise ValueError("delivered_at must be timezone-aware UTC datetime (I7)")
-        conn = self.conn
-        in_transaction = False
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            in_transaction = True
-            conn.execute(
-                "UPDATE outbox SET status = ?, delivered_at = ? WHERE id = ?",
-                (OutboxStatus.DELIVERED.value, delivered_at.isoformat(), outbox_id),
-            )
-            self._commit()
-            in_transaction = False
-        except Exception:
-            if in_transaction:
-                self._rollback()
-            raise
+        _rs.rs.ledger_outbox_delivered(self, outbox_id, delivered_at)
 
     def mark_outbox_failed(self, outbox_id: int, error: str) -> None:
         """Mark an outbox item failed and record error message."""
-        conn = self.conn
-        in_transaction = False
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            in_transaction = True
-            conn.execute(
-                "UPDATE outbox SET status = ?, attempts = attempts + 1, last_error = ? WHERE id = ?",
-                (OutboxStatus.FAILED.value, str(error), outbox_id),
-            )
-            self._commit()
-            in_transaction = False
-        except Exception:
-            if in_transaction:
-                self._rollback()
-            raise
+        self._store.mark_outbox_failed(self, outbox_id, error)
 
     def drain_outbox(
         self,
@@ -538,85 +318,28 @@ class Ledger:
 
         Stops at the very first failure (I12) so later items remain queued in order.
         """
-        pending = self.pending_outbox(destination=destination, include_failed=True)
-        drained_count = 0
-        failed_item: OutboxItem | None = None
-        error_msg: str | None = None
-
-        for item in pending:
-            try:
-                ok = publisher(item)
-                if ok:
-                    self.mark_outbox_delivered(item.id, clock.now_utc())
-                    drained_count += 1
-                else:
-                    error_msg = f"Delivery unconfirmed by sink {destination}"
-                    self.mark_outbox_failed(item.id, error_msg)
-                    failed_item = replace(
-                        item,
-                        status=OutboxStatus.FAILED,
-                        attempts=item.attempts + 1,
-                        last_error=error_msg,
-                    )
-                    break  # Stop immediately! Later events stay queued in order.
-            except Exception as exc:
-                error_msg = f"Sink {destination} raised: {exc}"
-                self.mark_outbox_failed(item.id, error_msg)
-                failed_item = replace(
-                    item,
-                    status=OutboxStatus.FAILED,
-                    attempts=item.attempts + 1,
-                    last_error=error_msg,
-                )
-                break  # Stop immediately!
-
-        remaining = len(self.pending_outbox(destination=destination, include_failed=True))
-        return DrainResult(
-            drained_count=drained_count,
-            failed_item=failed_item,
-            error=error_msg,
-            remaining_count=remaining,
-        )
+        return _rs.rs.ledger_outbox_drain(self, destination, publisher, clock)
 
     @staticmethod
     def _row_to_outbox(row: sqlite3.Row) -> OutboxItem:
-        return OutboxItem(
-            id=int(row["id"]),
-            event_seq=int(row["event_seq"]),
-            destination=str(row["destination"]),
-            payload=json.loads(row["payload_json"]),
-            status=OutboxStatus(str(row["status"])),
-            attempts=int(row["attempts"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            last_error=row["last_error"],
-            delivered_at=datetime.fromisoformat(row["delivered_at"]) if row["delivered_at"] else None,
-        )
+        return _rs.rs.ledger_outbox_row(row)
 
     # -- meta --------------------------------------------------------------------
 
     def set_meta(self, key: str, value: str) -> None:
-        self.conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
+        self._store.set_meta(key, value)
 
     def get_meta(self, key: str) -> str | None:
-        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-        return None if row is None else str(row["value"])
+        return self._store.get_meta(key)
 
     def has_command(self, command_id: str) -> bool:
         """Return whether a persisted event already claims this idempotency key (I3)."""
         if not command_id:
             raise ValueError("command_id must be non-empty")
-        row = self.conn.execute(
-            "SELECT 1 FROM events WHERE command_id = ? LIMIT 1", (command_id,)
-        ).fetchone()
-        return row is not None
+        return self._store.has_command(command_id)
 
     def schema_version(self) -> int:
-        stored = self.get_meta("schema_version")
-        return int(stored) if stored is not None else SCHEMA_VERSION
+        return self._store.schema_version()
 
 
 def fold_events(events: Iterable[Event]) -> dict[str, AccountState]:
@@ -625,15 +348,7 @@ def fold_events(events: Iterable[Event]) -> dict[str, AccountState]:
 
 
 def _outbox_items(outbox: OutboxSpec | None) -> list[tuple[str, dict[str, Any]]]:
-    if not outbox:
-        return []
-    items = list(outbox.items()) if isinstance(outbox, Mapping) else list(outbox)
-    for destination, payload in items:
-        if not isinstance(destination, str) or not destination.strip():
-            raise ValueError("Outbox destination must be non-empty string")
-        if not isinstance(payload, dict):
-            raise ValueError(f"Outbox payload for '{destination}' must be a dict")
-    return items
+    return _rs.rs.ledger_outbox_items(outbox)
 
 
 __all__ = [

@@ -6,6 +6,7 @@ pub mod greeks;
 pub mod ledger;
 pub mod oms;
 pub mod margin;
+pub mod mirror;
 pub mod options;
 pub mod risk;
 pub mod risk_options;

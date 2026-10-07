@@ -2,6 +2,17 @@
 
 Generic trading engine: event-sourced ledger, OMS, risk layer, simulator, and venue adapters.
 
+## Offline embedded-host packaging proof
+
+P4C-T3 adds an opt-in Windows `te --proof --config <absolute JSON path>`
+executable, **not** a trading owner or a `serve` command. It embeds the existing
+`trade_engine_rs` initializer and loads only an explicitly configured synthetic
+plugin. Python still owns the existing jobs, SQLite, clocks and loops.
+Private CPython 3.13 setup, bundle/configuration requirements, proof commands,
+refusals and rollback are documented in
+[the P4c boundary](docs/RUST_PORT.md#p4c-verification-and-boundary).
+No production launcher, task, client or ledger is changed.
+
 ## Architecture & Invariants
 
 This engine is designed around strict invariants (I1–I13):
@@ -19,6 +30,28 @@ This engine is designed around strict invariants (I1–I13):
 11. **I11: Every decision is recorded with its reason.** Accepted, refused (and by which specific rule), or skipped. Every rule is evaluated without short-circuiting.
 12. **I12: A sink confirms delivery, not a 200.** Outbox drains in order and stops at the first failure until confirmed.
 13. **I13: Strategies know nothing about brokers; adapters know nothing about strategies.** Clean separation of concerns.
+
+## Local HTTP/SSE Read API
+
+`trade_engine.server.http.EngineHttpServer` is a compatibility facade over the
+native Axum host in `trade_engine_rs`. The host owns the listener, read-only SQLite
+connections, reduced account snapshots, and SSE subscriptions; it never opens a
+second ledger writer. An already-open `Ledger` supplies post-commit notifications.
+
+The existing GET contract is unchanged: `/health`, `/snapshot`, and
+`/events?after=<seq>` (backlog followed by committed live events). Reconnects may
+supply `Last-Event-ID`; the query is validated first and a valid header wins.
+Only localhost Host/origin values are accepted or echoed. A native compatibility
+transport preserves the legacy HTTP version, error HTML and SSE bytes ahead of
+Axum routing. Standard-library text adapters retain unusual header, URL and
+Unicode integer conversion semantics without Python server workers.
+
+Use `EngineHttpServer(ledger, port=0)` for isolated tests and obtain the ephemeral
+port from `server.port`; its context manager closes all native connections and
+subscriptions. The legacy default remains port 3410 for API compatibility, **not**
+permission to occupy Vela's port. Select an explicitly configured, non-production
+port for offline work; no runtime mutation endpoints or live cutover are included.
+A missing native module is an error, never a Python server fallback.
 
 ## Risk Evaluation
 

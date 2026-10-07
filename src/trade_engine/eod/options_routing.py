@@ -27,6 +27,7 @@ from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.options import OptionOrderManager, open_structures
 from trade_engine.sim import underlying_of
 from trade_engine.eod._runtime import decide, flag
+from trade_engine.sim._rs import rs
 
 ROUNDS = 4  # how many times a strategy may act at one snapshot: a buy-write needs two
 
@@ -154,34 +155,7 @@ class OptionRouter:
         cause: str,
     ) -> RoutingTally:
         """Match, then let the strategy act on these quotes until it brings nothing new."""
-        manager = self.manager(account_id)
-        tally = RoutingTally()
-        self.match_snapshot(account_id, snapshot, cause, snapshot.as_of)
-        tally.snapshots_processed = decide("routing:increment", numbers=(tally.snapshots_processed, 1))[1][0]
-        snapshots[snapshot.underlying] = snapshot
-        manage = getattr(self._strategies.get(account_id), "manage_options", None)
-        if not callable(manage):
-            return tally
-        for _ in range(ROUNDS):
-            state = self._ledger.state(account_id)
-            actions = list(
-                manage(
-                    self.context(
-                        account_id,
-                        session,
-                        self._clock.now_utc(),
-                        open_structures(state),
-                        snapshot=snapshot,
-                        snapshots=snapshots,
-                    )
-                )
-            )
-            if all(self.taken(action) for action in actions):
-                return tally  # nothing new: every action is one already taken (I3)
-            tally += self.apply(account_id, session, actions, snapshot, snapshots, cause)
-            # Decided on these quotes, so traded on them.
-            self.match_snapshot(account_id, snapshot, cause, snapshot.as_of)
-        decide("routing:rounds", (account_id, snapshot.underlying), numbers=(ROUNDS,))
+        return rs.options_manage(self, account_id, session, snapshot, snapshots, cause)
 
     def apply(
         self,
@@ -198,29 +172,7 @@ class OptionRouter:
         against those quotes at once, and any other underlying's would not be the ones
         it was decided on. A refused guard (C3, C4, C5) fails the run loudly.
         """
-        manager = self.manager(account_id)
-        tally = RoutingTally()
-        for action in actions:
-            underlying = self._action_underlying(account_id, action) if snapshot is not None else ""
-            decide("routing:action", (
-                account_id, type(action).__name__, getattr(action, "command_id", "?"),
-                underlying, snapshot.underlying if snapshot is not None else "",
-            ), flags=(snapshot is not None, isinstance(action, (OptionIntent, CloseStructure, CloseHolding))))
-            if isinstance(action, OptionIntent):
-                submitted = self.enter_option(account_id, session, action, snapshot, snapshots)
-                tally.orders_submitted = decide("routing:increment", numbers=(tally.orders_submitted, submitted))[1][0]
-            elif isinstance(action, CloseStructure):
-                manager.close(account_id, action)
-                tally.exit_actions = decide("routing:increment", numbers=(tally.exit_actions, 1))[1][0]
-            elif isinstance(action, CloseHolding):
-                manager.close_holding(account_id, action)
-                tally.exit_actions = decide("routing:increment", numbers=(tally.exit_actions, 1))[1][0]
-            else:
-                raise _fail(
-                    f"Strategy for '{account_id}' returned {type(action).__name__}; options "
-                    "actions are OptionIntent, CloseStructure or CloseHolding"
-                )
-        return tally
+        return rs.options_apply(self, account_id, session, actions, snapshot, snapshots, cause)
 
     def _action_underlying(self, account_id: str, action: Any) -> str:
         entry = None
@@ -246,33 +198,7 @@ class OptionRouter:
         snapshot: ChainSnapshot | None,
         snapshots: dict[str, ChainSnapshot] | None,
     ) -> int:
-        decide("routing:entry", (account_id, type(intent).__name__,
-            getattr(intent, "account_id", ""), getattr(intent, "intent_id", "")),
-            flags=(isinstance(intent, OptionIntent),))
-        engine = self._option_risk_engines.get(account_id)
-        decide("routing:engine", (account_id, intent.intent_id), flags=(engine is not None,))
-        now = self._clock.now_utc()
-        context = self.context(
-            account_id,
-            session,
-            now,
-            open_structures(self._ledger.state(account_id)),
-            snapshot=snapshot,
-            snapshots=snapshots,
-        )
-        verdict = engine.evaluate(intent, context)
-        self._record_verdict(account_id, intent, verdict)
-        accepted, resize = decide("routing:approved",
-            (str(verdict.approved_quantity), str(intent.quantity)),
-            flags=(verdict.accepted, verdict.approved_quantity is not None))[2]
-        if not accepted:
-            return 0
-        if resize:
-            from dataclasses import replace
-
-            intent = replace(intent, quantity=verdict.approved_quantity)
-        self.manager(account_id).open(intent)
-        return 1
+        return rs.options_enter(self, account_id, session, intent, snapshot, snapshots)
 
     def _record_verdict(self, account_id: str, intent: OptionIntent, verdict: RiskVerdict) -> None:
         now = self._clock.now_utc()

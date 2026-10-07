@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import math
-import time
+from datetime import datetime
+
+import trade_engine_rs
 
 from trade_engine.interfaces.clock import Clock
 
@@ -12,16 +12,16 @@ from trade_engine.interfaces.clock import Clock
 class WallClock(Clock):
     """Wall-clock time provider for live/paper trading.
 
-    This is the ONLY class in the trade_engine codebase permitted to read the system clock (I7).
+    The native owner clock is the only system-clock source (I7).
     """
+
+    def __init__(self) -> None:
+        self._native = trade_engine_rs.NativeWallClock()
 
     def now_utc(self) -> datetime:
         """Return the current time as a timezone-aware UTC datetime."""
-        return datetime.now(timezone.utc)
+        return self._native.now_utc()
 
     def sleep(self, seconds: float) -> None:
         """Sleep for the given number of seconds."""
-        if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds < 0:
-            raise ValueError(f"sleep seconds cannot be negative or non-finite, got: {seconds!r}")
-        if seconds > 0:
-            time.sleep(seconds)
+        self._native.sleep(seconds)
