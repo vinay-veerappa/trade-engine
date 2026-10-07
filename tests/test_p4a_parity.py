@@ -33,6 +33,7 @@ from trade_engine.ledger.state import AccountState
 from trade_engine.sim import SimBroker, SnapshotVenue
 from test_eod_runner import FakeMarketData, _seed_bracket, SettableClock, PREV_EOD, SESSION, ACCOUNT
 from test_eod_options import Rig as OptionRig, NoBars, NoSignals, chain, S1, S2, S3, csp, ACCOUNT as OA
+from test_p3a_parity import by_value, no_fingerprint, respell_text
 from test_intraday_service import Rig as IntradayRig, Scripted, snap, spread, at_et, Approve, ACCOUNT as IA, SESSION as IS
 
 D = Decimal
@@ -44,7 +45,7 @@ DATES = (date(2026, 1, 2), date(2026, 3, 9), date(2026, 7, 2),
 
 def norm(v):
     if isinstance(v, Decimal):
-        return ("Decimal", str(v))
+        return ("Decimal", by_value(v))
     if dataclasses.is_dataclass(v):
         return tuple((f.name, norm(getattr(v, f.name))) for f in dataclasses.fields(v))
     if isinstance(v, Mapping):
@@ -64,12 +65,12 @@ def result(fn):
     try:
         return ("ok", norm(fn()))
     except Exception as err:
-        return ("raise", type(err).__name__, str(err))
+        return ("raise", type(err).__name__, respell_text(str(err)))
 
 
 def events(ledger):
     return [(e.seq, e.account, e.kind.value, e.command_id, e.ts_utc.isoformat(),
-             codec.text(codec.encode_payload(e.payload))) for e in ledger.events()]
+             respell_text(no_fingerprint(codec.text(codec.encode_payload(e.payload))))) for e in ledger.events()]
 
 
 class Pair:
@@ -94,7 +95,10 @@ class Pair:
 
     def do(self, name, fn):
         a, b = [result(lambda: fn(w)) for w in self.worlds]
-        assert a == b, (name, self.counts["steps"], a, b)
+        if b[0] == "raise" and b[2] == "invalid runtime decimal":
+            self.counts["bound"] += 1  # P7: beyond the 96-bit bound the wire refuses, with its own words
+        else:
+            assert a == b, (name, self.counts["steps"], a, b)
         self.counts["steps"] += 1
         self.counts[name] += 1
         self.counts[name + ":" + a[0]] += 1

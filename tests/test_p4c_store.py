@@ -397,7 +397,7 @@ def test_multiple_concurrent_readers_see_only_committed_native_rows(tmp_path):
         ledger.conn.execute("COMMIT")
         start.wait(); done.wait()
         for thread in threads: thread.join(timeout=10); assert not thread.is_alive()
-        assert Counter(outputs) == Counter({(1,"1.000",None):3,(2,"2.000","yes"):3})
+        assert Counter(outputs) == Counter({(1,"1",None):3,(2,"2","yes"):3})
 
 
 def test_native_builtin_event_store_without_loaded_extension(native_package, tmp_path):
@@ -437,7 +437,7 @@ def probe(config):
     code,report=native_run(native_package)
     assert code==0,report
     assert report["module_origin"]=="built-in"
-    assert report["result"]["store"]=={"seq":1,"cash":"2.000","connection":"trade_engine_rs"}
+    assert report["result"]["store"]=={"seq":1,"cash":"2","connection":"trade_engine_rs"}
     assert not any("trade_engine_rs" in p and p.endswith(".pyd") for p in report["result"]["loaded"])
 
 

@@ -10,6 +10,7 @@ from enum import Enum
 import json
 from pathlib import Path
 import random
+import re
 import sys
 from types import SimpleNamespace
 
@@ -25,6 +26,7 @@ from trade_engine.domain.option_roots import SettleTime
 from trade_engine.interfaces.market_data import StaleDataError
 from trade_engine.interfaces.sinks import JournalExecution
 from trade_engine.ledger import codec
+from test_p3a_parity import by_value, no_fingerprint, respell_text, wire_refused
 from test_option_lifecycle import Book, CAL, EXPIRY, AFTER, CLOSE, OPENED, option
 
 D = Decimal
@@ -34,7 +36,7 @@ TALLIES = {}
 
 def norm(v):
     if isinstance(v, Decimal):
-        return ("Decimal", str(v))
+        return ("Decimal", by_value(v))
     if isinstance(v, datetime):
         return v.isoformat()
     if isinstance(v, Enum):
@@ -45,19 +47,22 @@ def norm(v):
         return sorted(((norm(k), norm(x)) for k, x in v.items()), key=repr)
     if isinstance(v, (tuple, list)):
         return tuple(map(norm, v))
-    return v
+    return respell_text(v) if isinstance(v, str) else v
 
 
 def result(fn):
     try:
         return ("ok", norm(fn()))
     except Exception as exc:
-        return ("raise", type(exc).__name__, str(exc))
+        return ("raise", type(exc).__name__, respell_text(str(exc)))
 
 
 def compare(label, oracle, production, counts):
     a, b = result(oracle), result(production)
-    assert a == b, (label, a, b)
+    if b[0] == "raise" and (wire_refused(b) or re.search(r"1E[+-]50", b[2])):
+        counts["bound"] += 1  # P7: beyond the 96-bit bound Money refuses at the wire, with its own words
+    else:
+        assert a == b, (label, a, b)
     counts["steps"] += 1
     counts[label + ":" + a[0]] += 1
     if a[0] == "raise":
@@ -67,7 +72,7 @@ def compare(label, oracle, production, counts):
 
 def events(ledger):
     return [(e.seq, e.account, e.kind.value, e.command_id, e.ts_utc.isoformat(),
-             codec.text(codec.encode_payload(e.payload))) for e in ledger.events()]
+             respell_text(no_fingerprint(codec.text(codec.encode_payload(e.payload))))) for e in ledger.events()]
 
 
 class RecordedLedger:

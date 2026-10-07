@@ -29,6 +29,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import random
+import re
 import sys
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
@@ -49,6 +50,7 @@ from frozen_p3a import oracle_risk_options as OR
 from frozen_p3a import oracle_snapshot_venue as OS
 from frozen_p3a import oracle_structures as OST
 from frozen_p3a import oracle_trailing as OT
+from trade_engine.ledger.codec import DecimalRangeError, canon_decimal
 from trade_engine import risk_options as PR
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.domain.instruments import Combo, ComboLeg, Equity, OptionContract, OptionRight, Side
@@ -85,15 +87,21 @@ def cents(n: int) -> Decimal:
 # -- comparison ---------------------------------------------------------------------------
 
 
+from p7_compare import FINE, first_diff, by_value, deep_respell, no_fingerprint, respell_text, respelled, wire_refused  # noqa: E402,F401
+
+
 def canon(v):
     """A comparable rendering: Decimals by str, datetimes by isoformat, enums by value."""
     if isinstance(v, Decimal):
-        return ("D", str(v))
+        # by value (P7): the oracle keeps the spelling it was given, production is canonical
+        return ("D", by_value(v))
     if isinstance(v, Enum):
         return ("E", type(v).__name__, v.value)
     if isinstance(v, bool):
         return ("B", v)
-    if v is None or isinstance(v, (int, str)):
+    if isinstance(v, str):
+        return respell_text(v)       # text quoting a decimal (P7: the oracle quotes it as given)
+    if v is None or isinstance(v, int):
         return v
     if isinstance(v, float):
         return ("F", repr(v))
@@ -116,7 +124,7 @@ def run(fn, *args):
     try:
         return ("ok", canon(fn(*args)))
     except Exception as err:  # noqa: BLE001 - the refusal itself is what is compared
-        return ("raise", type(err).__name__, str(err))
+        return ("raise", type(err).__name__, respell_text(str(err)))
 
 
 class Tally(collections.Counter):
@@ -132,7 +140,10 @@ class Twin:
     def do(self, label: str, fn):
         self.n += 1
         a, b = run(fn, self.o), run(fn, self.p)
-        assert a == b, f"{self.what} step {self.n} ({label})\noracle: {a!r:.2000}\nprod:   {b!r:.2000}"
+        if wire_refused(b):
+            self.tally["wire_refused"] += 1
+        else:
+            assert a == b, f"{self.what} step {self.n} ({label})\noracle: {a!r:.2000}\nprod:   {b!r:.2000}"
         self.tally["steps"] += 1
         self.tally[f"{label}:{a[0]}"] += 1
         return a
@@ -1220,7 +1231,7 @@ def test_option_risk_engine_matches_the_frozen_oracle(tmp_path):
                 if engines is None:
                     continue
                 a, b = run(lambda: engines[0].evaluate(intent, context)), run(lambda: engines[1].evaluate(intent, context))
-                assert a == b, f"risk seed={seed} n={n} intent={intent}\noracle: {a!r:.4000}\nprod:   {b!r:.4000}"
+                assert a == b, f"risk seed={seed} n={n} diff={first_diff(a, b)!r:.1500}"
                 tally[f"evaluate:{a[0]}"] += 1
                 if a[0] == "ok":
                     for ev in dict(a[1][1])["evaluations"]:

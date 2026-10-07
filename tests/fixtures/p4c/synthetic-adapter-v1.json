@@ -254,7 +254,7 @@
             "dc": "CashFlow",
             "f": {
               "amount": {
-                "d": "50000.00"
+                "d": "50000"
               },
               "kind": "deposit",
               "as_of": {
@@ -1411,11 +1411,11 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030302e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -1431,7 +1431,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030302e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -1439,7 +1439,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -1455,7 +1455,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030302e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -1463,7 +1463,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -1535,7 +1535,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030302e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -1543,7 +1543,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -1615,7 +1615,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030302e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -1623,7 +1623,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -1695,7 +1695,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030302e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f30222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -1703,7 +1703,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_0\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_0\",\"cash\":{\"d\":\"50000\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-06T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -1791,7 +1791,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203134320d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f30223a7b226163636f756e745f6964223a2253594e5448455449435f30222c2263617368223a2235303030302e3030222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203133390d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f30223a7b226163636f756e745f6964223a2253594e5448455449435f30222c2263617368223a223530303030222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
             }
           }
         },
@@ -1827,7 +1827,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f30222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030302e3030227d2c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f30222c22636f6d6d616e645f6964223a2270726f62653a5343414e3a323032362d30332d3036222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d30332d30365431343a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030227d0a0a"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f30222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303030227d2c2261735f6f66223a7b2254223a22323032362d30332d30365430393a33303a30302d30353a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f30222c22636f6d6d616e645f6964223a2270726f62653a5343414e3a323032362d30332d3036222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d30332d30365431343a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d30332d30365431343a33303a30302b30303a3030227d0a0a"
             }
           }
         },
@@ -1928,7 +1928,7 @@
             "dc": "CashFlow",
             "f": {
               "amount": {
-                "d": "50001.00"
+                "d": "50001"
               },
               "kind": "deposit",
               "as_of": {
@@ -3085,11 +3085,11 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030312e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303031227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -3105,7 +3105,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030312e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303031227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -3113,7 +3113,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -3129,7 +3129,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030312e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303031227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -3137,7 +3137,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -3209,7 +3209,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030312e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303031227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -3217,7 +3217,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -3289,7 +3289,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030312e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303031227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -3297,7 +3297,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -3369,7 +3369,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030312e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f31222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303031227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -3377,7 +3377,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_1\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_1\",\"cash\":{\"d\":\"50001\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-03-09T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -3465,7 +3465,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203134320d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f31223a7b226163636f756e745f6964223a2253594e5448455449435f31222c2263617368223a2235303030312e3030222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203133390d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f31223a7b226163636f756e745f6964223a2253594e5448455449435f31222c2263617368223a223530303031222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
             }
           }
         },
@@ -3501,7 +3501,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f31222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030312e3030227d2c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f31222c22636f6d6d616e645f6964223a2270726f62653a6f7074696f6e732d706173733a323032362d30332d3039222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d30332d30395431333a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030227d0a0a"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f31222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303031227d2c2261735f6f66223a7b2254223a22323032362d30332d30395430393a33303a30302d30343a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f31222c22636f6d6d616e645f6964223a2270726f62653a6f7074696f6e732d706173733a323032362d30332d3039222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d30332d30395431333a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d30332d30395431333a33303a30302b30303a3030227d0a0a"
             }
           }
         },
@@ -3602,7 +3602,7 @@
             "dc": "CashFlow",
             "f": {
               "amount": {
-                "d": "50002.00"
+                "d": "50002"
               },
               "kind": "deposit",
               "as_of": {
@@ -4759,11 +4759,11 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030322e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303032227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -4779,7 +4779,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030322e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303032227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -4787,7 +4787,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -4803,7 +4803,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030322e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303032227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -4811,7 +4811,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -4883,7 +4883,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030322e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303032227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -4891,7 +4891,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -4963,7 +4963,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030322e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303032227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -4971,7 +4971,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -5043,7 +5043,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030322e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f32222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303032227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -5051,7 +5051,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_2\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_2\",\"cash\":{\"d\":\"50002\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-07-02T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -5139,7 +5139,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203134320d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f32223a7b226163636f756e745f6964223a2253594e5448455449435f32222c2263617368223a2235303030322e3030222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203133390d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f32223a7b226163636f756e745f6964223a2253594e5448455449435f32222c2263617368223a223530303032222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
             }
           }
         },
@@ -5175,7 +5175,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f32222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030322e3030227d2c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f32222c22636f6d6d616e645f6964223a2270726f62653a6f7074696f6e732d656f643a323032362d30372d3032222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d30372d30325431333a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030227d0a0a"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f32222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303032227d2c2261735f6f66223a7b2254223a22323032362d30372d30325430393a33303a30302d30343a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f32222c22636f6d6d616e645f6964223a2270726f62653a6f7074696f6e732d656f643a323032362d30372d3032222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d30372d30325431333a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d30372d30325431333a33303a30302b30303a3030227d0a0a"
             }
           }
         },
@@ -5276,7 +5276,7 @@
             "dc": "CashFlow",
             "f": {
               "amount": {
-                "d": "50003.00"
+                "d": "50003"
               },
               "kind": "deposit",
               "as_of": {
@@ -6433,11 +6433,11 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030332e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303033227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -6453,7 +6453,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030332e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303033227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -6461,7 +6461,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -6477,7 +6477,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030332e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303033227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -6485,7 +6485,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -6557,7 +6557,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030332e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303033227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -6565,7 +6565,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -6637,7 +6637,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030332e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303033227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -6645,7 +6645,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -6717,7 +6717,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030332e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f33222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303033227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -6725,7 +6725,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_3\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_3\",\"cash\":{\"d\":\"50003\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-09-25T13:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -6813,7 +6813,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203134320d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f33223a7b226163636f756e745f6964223a2253594e5448455449435f33222c2263617368223a2235303030332e3030222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203133390d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f33223a7b226163636f756e745f6964223a2253594e5448455449435f33222c2263617368223a223530303033222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
             }
           }
         },
@@ -6849,7 +6849,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f33222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030332e3030227d2c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f33222c22636f6d6d616e645f6964223a2270726f62653a696e7472616461793a323032362d30392d3235222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d30392d32355431333a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030227d0a0a"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f33222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303033227d2c2261735f6f66223a7b2254223a22323032362d30392d32355430393a33303a30302d30343a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f33222c22636f6d6d616e645f6964223a2270726f62653a696e7472616461793a323032362d30392d3235222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d30392d32355431333a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d30392d32355431333a33303a30302b30303a3030227d0a0a"
             }
           }
         },
@@ -6950,7 +6950,7 @@
             "dc": "CashFlow",
             "f": {
               "amount": {
-                "d": "50004.00"
+                "d": "50004"
               },
               "kind": "deposit",
               "as_of": {
@@ -8107,11 +8107,11 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030342e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303034227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -8127,7 +8127,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030342e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303034227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -8135,7 +8135,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -8151,7 +8151,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030342e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303034227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -8159,7 +8159,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -8231,7 +8231,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030342e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303034227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -8239,7 +8239,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -8311,7 +8311,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030342e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303034227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -8319,7 +8319,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -8391,7 +8391,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030342e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f34222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303034227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -8399,7 +8399,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_4\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_4\",\"cash\":{\"d\":\"50004\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-11-27T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -8487,7 +8487,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203134320d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f34223a7b226163636f756e745f6964223a2253594e5448455449435f34222c2263617368223a2235303030342e3030222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203133390d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f34223a7b226163636f756e745f6964223a2253594e5448455449435f34222c2263617368223a223530303034222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
             }
           }
         },
@@ -8523,7 +8523,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f34222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030342e3030227d2c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f34222c22636f6d6d616e645f6964223a2270726f62653a6d6972726f722d62617463683a323032362d31312d3237222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d31312d32375431343a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030227d0a0a"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f34222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303034227d2c2261735f6f66223a7b2254223a22323032362d31312d32375430393a33303a30302d30353a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f34222c22636f6d6d616e645f6964223a2270726f62653a6d6972726f722d62617463683a323032362d31312d3237222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d31312d32375431343a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d31312d32375431343a33303a30302b30303a3030227d0a0a"
             }
           }
         },
@@ -8624,7 +8624,7 @@
             "dc": "CashFlow",
             "f": {
               "amount": {
-                "d": "50005.00"
+                "d": "50005"
               },
               "kind": "deposit",
               "as_of": {
@@ -9781,11 +9781,11 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030352e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303035227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"n\":true},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":1}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -9801,7 +9801,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030352e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303035227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -9809,7 +9809,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": []
@@ -9825,7 +9825,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030352e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303035227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -9833,7 +9833,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -9905,7 +9905,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030352e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303035227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -9913,7 +9913,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -9985,7 +9985,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030352e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303035227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -9993,7 +9993,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -10065,7 +10065,7 @@
             "value": [
               {
                 "tag": "bytes",
-                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030352e3030227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
+                "value": "7b226163636f756e74223a2253594e5448455449435f35222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303035227d2c226b696e64223a226465706f736974222c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226e6f7465223a7b226e223a747275657d7d7d2c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c22736368656d615f76657273696f6e223a312c22736571223a317d"
               },
               {
                 "tag": "bytes",
@@ -10073,7 +10073,7 @@
               }
             ]
           },
-          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005.00\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
+          "fold": "{\"m\":[[\"SYNTHETIC_5\",{\"dc\":\"AccountState\",\"f\":{\"account_id\":\"SYNTHETIC_5\",\"cash\":{\"d\":\"50005\"},\"positions\":{\"m\":[]},\"orders\":{\"m\":[]},\"filled_quantity\":{\"m\":[]},\"leg_filled\":{\"m\":[]},\"venue_order_ids\":{\"m\":[]},\"emulated_orders\":{\"m\":[]},\"fills\":{\"t\":[]},\"fill_ids\":{\"fs\":[]},\"marks\":{\"m\":[]},\"realized_pnl\":{\"d\":\"0\"},\"signals_seen\":0,\"verdicts\":0,\"refusals\":0,\"last_reconcile\":{\"dc\":\"VenueReconcile\",\"f\":{\"venue\":\"synthetic\",\"as_of\":{\"T\":\"2026-12-24T14:30:00+00:00\"},\"reconciled\":true,\"drift\":{\"t\":[]},\"note\":\"adapter probe\"}},\"venue_halted\":false,\"halted_venues\":{\"fs\":[]},\"risk_controls\":{\"m\":[]},\"mirror\":{\"dc\":\"MirrorState\",\"f\":{\"venue\":{\"n\":true},\"tickets\":{\"m\":[]},\"book\":{\"m\":[]},\"queued_orders\":{\"m\":[]},\"refused_orders\":{\"m\":[]},\"order_ids\":{\"m\":[]}}},\"last_seq\":2}}]]}",
           "outbox": {
             "tag": "tuple",
             "value": [
@@ -10161,7 +10161,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203134320d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f35223a7b226163636f756e745f6964223a2253594e5448455449435f35222c2263617368223a2235303030352e3030222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a436f6e74656e742d4c656e6774683a203133390d0a4163636573732d436f6e74726f6c2d416c6c6f772d4f726967696e3a2068747470733a2f2f6c6f63616c686f73743a353535350d0a0d0a7b226163636f756e7473223a7b2253594e5448455449435f35223a7b226163636f756e745f6964223a2253594e5448455449435f35222c2263617368223a223530303035222c226c6173745f736571223a322c226f7264657273223a7b7d2c22706f736974696f6e73223a7b7d2c227265616c697a65645f706e6c223a2230227d7d2c22736571223a327d"
             }
           }
         },
@@ -10197,7 +10197,7 @@
           "outcome": {
             "return": {
               "tag": "bytes",
-              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f35222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a2235303030352e3030227d2c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f35222c22636f6d6d616e645f6964223a2270726f62653a6d6972726f722d666f6c6c6f773a323032362d31322d3234222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d31322d32345431343a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030227d0a0a"
+              "value": "485454502f312e3020323030204f4b0d0a5365727665723a2042617365485454502f302e3620507974686f6e2f332e31332e31350d0a446174653a203c7472616e73706f72742d446174653e0d0a436f6e74656e742d547970653a20746578742f6576656e742d73747265616d0d0a43616368652d436f6e74726f6c3a206e6f2d63616368650d0a436f6e6e656374696f6e3a206b6565702d616c6976650d0a0d0a72657472793a20313030300a0a69643a20310a646174613a207b226163636f756e74223a2253594e5448455449435f35222c22636f6d6d616e645f6964223a2273796e7468657469632d73656564222c226b696e64223a2243617368466c6f77222c227061796c6f6164223a7b226463223a2243617368466c6f77222c2266223a7b22616d6f756e74223a7b2264223a223530303035227d2c2261735f6f66223a7b2254223a22323032362d31322d32345430393a33303a30302d30353a3030227d2c226b696e64223a226465706f736974222c226e6f7465223a7b226e223a747275657d7d7d2c22736368656d615f76657273696f6e223a312c22736571223a312c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030227d0a0a69643a20320a646174613a207b226163636f756e74223a2253594e5448455449435f35222c22636f6d6d616e645f6964223a2270726f62653a6d6972726f722d666f6c6c6f773a323032362d31322d3234222c226b696e64223a2256656e75655265636f6e63696c65222c227061796c6f6164223a7b226463223a2256656e75655265636f6e63696c65222c2266223a7b2261735f6f66223a7b2254223a22323032362d31322d32345431343a33303a30302b30303a3030227d2c226472696674223a7b2274223a5b5d7d2c226e6f7465223a22616461707465722070726f6265222c227265636f6e63696c6564223a747275652c2276656e7565223a2273796e746865746963227d7d2c22736368656d615f76657273696f6e223a312c22736571223a322c2274735f757463223a22323032362d31322d32345431343a33303a30302b30303a3030227d0a0a"
             }
           }
         },

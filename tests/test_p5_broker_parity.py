@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from trade_engine.tos_paper import _rs as H  # noqa: E402
 from frozen_p5 import broker as FB  # noqa: E402
 from frozen_p5 import transport as FT  # noqa: E402
+from p7_compare import by_value, deep_respell  # noqa: E402 - P7: compared by value, not spelling
 from test_p5_parity import AAPL, C200, P195, P200, TALLY, combo, family, opt, parametrized, settle  # noqa: E402
 from trade_engine.domain.instruments import Combo, Side  # noqa: E402
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce  # noqa: E402
@@ -65,7 +66,7 @@ class ReplayMismatch(BaseException):
 def ser(x):
     """A comparable form: dataclasses by field, Decimals by str, datetimes by isoformat, enums by name."""
     if isinstance(x, Decimal):
-        return "D:" + str(x)
+        return "D:" + by_value(x)
     if isinstance(x, (datetime, date)):
         return x.isoformat()
     if isinstance(x, Enum):
@@ -220,9 +221,9 @@ class Lock:
         else:
             a = outcome_of(r[1]) if r[0] == "raise" else ("ok", ser(r[1]))
             b = outcome_of(o[1]) if o[0] == "raise" else ("ok", ser(o[1]))
-            assert a == b, (label, a, b)
+            assert deep_respell(a) == deep_respell(b), (label, a, b)
             key = (a[1], family(a[2]))
-        assert snap_rust(self.rust) == snap_oracle(self.oracle), (label, snap_rust(self.rust), snap_oracle(self.oracle))
+        assert deep_respell(snap_rust(self.rust)) == deep_respell(snap_oracle(self.oracle)), (label, snap_rust(self.rust), snap_oracle(self.oracle))
         assert self.rust.halted == self.oracle.halted and ser(self.rust.queued) == ser(self.oracle.queued), label
         OPS[name] += 1
         TALLY.setdefault(self.tally, Counter())[key] += 1

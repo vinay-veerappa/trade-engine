@@ -602,6 +602,9 @@ def norm_outcome(outcome):
     """An outcome tuple ('ok', bytes) with its bytes normalized; refusals pass through."""
     if outcome[0] == "ok" and isinstance(outcome[1], (bytes, bytearray)):
         return ("ok", norm(bytes(outcome[1])))
+    if outcome[0] == "err" and len(outcome) == 3 and isinstance(outcome[2], str):
+        from p7_compare import respell_text
+        return (*outcome[:2], respell_text(outcome[2]))      # P7: the oracle quotes a decimal as stored
     return outcome
 
 

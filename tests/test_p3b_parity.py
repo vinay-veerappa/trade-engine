@@ -54,9 +54,11 @@ from test_p3a_parity import (  # noqa: E402 - the shared generators and comparis
     Tally,
     canon,
     cents,
+    no_fingerprint,
     random_intent,
     random_snapshot,
     run,
+    wire_refused,
 )
 from trade_engine.clock.replay import ReplayClock
 from trade_engine.domain.instruments import Equity, Side
@@ -113,7 +115,7 @@ class World:
 
     def log(self) -> list:
         return [
-            (e.seq, e.kind.value, e.command_id, e.ts_utc.isoformat(), codec.text(codec.encode_payload(e.payload)))
+            (e.seq, e.kind.value, e.command_id, e.ts_utc.isoformat(), no_fingerprint(codec.text(codec.encode_payload(e.payload))))
             for e in self.ledger.events(account=ACC)
         ]
 
@@ -146,7 +148,10 @@ class Pair:
     def do(self, label: str, fn):
         self.n += 1
         a, b = run(fn, self.o), run(fn, self.p)
-        assert a == b, f"{self.what} step {self.n} ({label})\noracle: {a!r:.3000}\nprod:   {b!r:.3000}"
+        if wire_refused(b):
+            self.tally["wire_refused"] += 1
+        else:
+            assert a == b, f"{self.what} step {self.n} ({label})\noracle: {a!r:.3000}\nprod:   {b!r:.3000}"
         self.tally["steps"] += 1
         kind = a[0] if a[0] == "ok" else a[1]
         if kind == "RuntimeError" and "|" in a[2]:

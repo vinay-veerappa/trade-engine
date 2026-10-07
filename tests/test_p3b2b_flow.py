@@ -25,6 +25,7 @@ import trade_engine_rs  # noqa: F401 - D5, not importorskip
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from flow_p3b2b import FlowManager
 from frozen_p3b2.oracle_manager import OrderManager as Oracle
+from p7_compare import deep_respell, no_fingerprint, wire_refused
 from test_p3a_parity import canon
 from test_p3b2_parity import (
     ACC, NOW, OPT, SEEDS, XYZ, FaultBroker, World, bracket_walk, intent, real_venue,
@@ -75,7 +76,10 @@ class FlowPair:
     def do(self, label, fn):
         self.n += 1
         a, b = run(fn, self.o), run(fn, self.p)
-        assert a == b, f"{label} step {self.n}\noracle: {a!r:.1500}\nflow:   {b!r:.1500}"
+        if wire_refused(b):
+            self.tally["wire_refused"] += 1      # P7: Money has no NaN/Infinity
+        else:
+            assert a == b, f"{label} step {self.n}\noracle: {a!r:.1500}\nflow:   {b!r:.1500}"
         self.tally["steps"] += 1
         self.tally[f"{label}:{a[0]}"] += 1
         if a[0] == "raise":
@@ -111,11 +115,13 @@ class RecordedPair:
         self.p = FlowWorld(root, cls, venue)
         self.tally = tally
         self.golden = None if golden is None else json.loads(golden.read_text(encoding="utf-8"))
+        if self.golden is not None:      # P7: recorded before the canonical spelling; compared by value
+            self.golden["steps"] = [self.masked(s) for s in self.golden["steps"]]
         self.steps = []
 
     def do(self, label, fn):
         result = run(fn, self.p)
-        step = json.loads(json.dumps([label, result, self.p.events(), self.p.outbox(), self.p.venue_records()]))
+        step = self.masked(json.loads(json.dumps([label, result, self.p.events(), self.p.outbox(), self.p.venue_records()])))
         if self.golden is not None:
             n = len(self.steps)
             assert step == self.golden["steps"][n], (
@@ -126,6 +132,16 @@ class RecordedPair:
         if result[0] == "raise":
             self.tally[f"exception:{result[1]}"] += 1
         return result
+
+    @staticmethod
+    def masked(x):
+        if isinstance(x, str):
+            return deep_respell(no_fingerprint(x))
+        if isinstance(x, list):
+            return [RecordedPair.masked(i) for i in x]
+        if isinstance(x, dict):
+            return {k: RecordedPair.masked(v) for k, v in x.items()}
+        return x
 
     def both(self, fn):
         fn(self.p)

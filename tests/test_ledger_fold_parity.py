@@ -46,6 +46,7 @@ from ledger_gen import (
 )
 
 from frozen_ledger import codec  # the frozen oracle's codec (P2b)
+from p7_compare import respell_text  # P7: the oracle quotes a decimal as stored, the Rust fold canonically
 from trade_engine.ledger.events import EventKind
 
 STRICT = {"strict", "unsupported"}
@@ -120,7 +121,7 @@ def compare(py, rust, what, tally, blobs=()):
     if rust[1] in STRICT:
         tally.strict += 1
         return
-    assert (rust[1], rust[2]) == (py[1], py[2]), f"refusal differs for {what}\npy:   {py}\nrust: {rust}"
+    assert (rust[1], respell_text(rust[2])) == (py[1], respell_text(py[2])), f"refusal differs for {what}\npy:   {py}\nrust: {rust}"
     tally.refused += 1
     tally.kinds[py[1]] += 1
 

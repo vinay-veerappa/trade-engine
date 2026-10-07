@@ -26,7 +26,7 @@ from trade_engine.interfaces.broker import (
 )
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import EmulatedOrderState, Event, EventKind, Ledger, codec
-from trade_engine.ledger.codec import encode_payload
+from trade_engine.ledger.codec import DecimalRangeError, canon_decimal, encode_payload
 from trade_engine.oms.models import Bracket
 from trade_engine.sim import _rs
 
@@ -76,7 +76,10 @@ for _kind, _cls in (
 def _wire(value):
     """Exact boundary plumbing, not OMS decisions."""
     if isinstance(value, Decimal):
-        return str(value)
+        try:
+            return canon_decimal(value)  # P7: one spelling, so a fingerprint does not depend on padding
+        except DecimalRangeError:
+            return str(value)  # outside the bound: te_core refuses it
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, OrderIntent):

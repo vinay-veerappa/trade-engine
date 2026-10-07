@@ -264,7 +264,7 @@ def test_committed_snapshot_and_projection(tmp_path):
         assert outputs[0] == outputs[1]
         body = json.loads(outputs[1].split(b"\r\n\r\n")[1])
         assert body == {"seq": 1, "accounts": {"ACC-\u00e9": {
-            "account_id": "ACC-\u00e9", "cash": "100000.00", "realized_pnl": "0",
+            "account_id": "ACC-\u00e9", "cash": "100000", "realized_pnl": "0",
             "last_seq": 1, "positions": {}, "orders": {},
         }}}
 
