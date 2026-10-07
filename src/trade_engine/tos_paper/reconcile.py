@@ -20,26 +20,21 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 
-from trade_engine.domain.instruments import Combo, Instrument, Side
-from trade_engine.domain.orders import OrderState, OrderType
+from trade_engine.domain.instruments import Instrument
 from trade_engine.interfaces.broker import VenueOrder, VenuePosition
 from trade_engine.ledger.events import VenueReconcile
-from trade_engine.tos_paper.normalize import WorkingOrder
+from trade_engine.tos_paper import _rs
+from trade_engine.tos_paper.normalize import WorkingOrder, working_order_doc
 
-ZERO = Decimal("0")
-_LIVE_STATES = frozenset({OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED})
 UNREADABLE = "<venue unreadable>"
 
 
-def _signed(side: Side, quantity: Decimal) -> Decimal:
-    return quantity if side is Side.BUY else -quantity
+def _positions(positions: Sequence[VenuePosition]) -> list:
+    return [{"instrument": _rs.wire(p.instrument), "quantity": str(p.quantity)} for p in positions]
 
 
 def position_book(positions: Sequence[VenuePosition]) -> dict[Instrument, Decimal]:
-    book: dict[Instrument, Decimal] = {}
-    for position in positions:
-        book[position.instrument] = book.get(position.instrument, ZERO) + position.quantity
-    return book
+    return _rs.unpairs(_rs.decide("position_book", {"positions": _positions(positions)}))
 
 
 def reconcile(
@@ -50,41 +45,15 @@ def reconcile(
     working: Sequence[WorkingOrder],
 ) -> VenueReconcile:
     """Per contract: venue position + live working remainder must equal expected."""
-    held = position_book(positions)
-    resting: dict[Instrument, Decimal] = {}
-    unknown: set[Instrument] = set()
-    for row in working:
-        if row.state is OrderState.PENDING_UNKNOWN:
-            unknown.add(row.instrument)
-        elif row.live:
-            resting[row.instrument] = resting.get(row.instrument, ZERO) + _signed(row.side, row.remaining)
-    drift: list[str] = []
-    for contract in set(expected) | set(held) | set(resting) | unknown:
-        want = expected.get(contract, ZERO)
-        have = held.get(contract, ZERO) + resting.get(contract, ZERO)
-        if contract in unknown or have != want:
-            drift.append(contract.symbol)
-    if drift:
-        return VenueReconcile(
-            venue=venue,
-            as_of=as_of,
-            reconciled=False,
-            drift=tuple(sorted(drift)),
-            note="venue positions + working orders disagree with the mirror book; venue halted",
-        )
-    return VenueReconcile(venue=venue, as_of=as_of, reconciled=True)
+    return _rs.event(_rs.decide("reconcile", {
+        "venue": venue, "as_of": as_of.isoformat(), "expected": _rs.pairs(expected),
+        "positions": _positions(positions), "working": [working_order_doc(r) for r in working]}))
 
 
 def unreadable(venue: str, as_of: datetime, contracts: Sequence[Instrument], why: str) -> VenueReconcile:
     """A reconcile that could not read the venue: drift on every contract in play."""
-    names = tuple(sorted({c.symbol for c in contracts})) or (UNREADABLE,)
-    return VenueReconcile(
-        venue=venue,
-        as_of=as_of,
-        reconciled=False,
-        drift=names,
-        note=f"cannot read the venue ({why}); refusing to assume it matches (I5)",
-    )
+    return _rs.event(_rs.decide("unreadable", {
+        "venue": venue, "as_of": as_of.isoformat(), "contracts": [_rs.wire(c) for c in contracts], "why": why}))
 
 
 def confirm_ticket(
@@ -99,86 +68,14 @@ def confirm_ticket(
     ``claimed`` holds indexes of ``working`` rows already matched to earlier tickets of
     this batch, so two identical tickets cannot both claim one row.
     """
-    if isinstance(ticket.instrument, Combo):
-        return _confirm_combo(ticket, before, positions, working, claimed)
-    limit = ticket.limit_price if ticket.order_type is OrderType.LIMIT else None
-    for index, row in enumerate(working):
-        if index in claimed:
-            continue
-        if (
-            row.instrument == ticket.instrument
-            and row.side is ticket.side
-            and row.quantity == ticket.quantity
-            and row.limit_price == limit
-            and row.order_type is ticket.order_type
-        ):
-            claimed.add(index)
-            if row.live:
-                return "ACCEPTED", f"on the order book ({row.state.value}, filled {row.filled})"
-            if row.state is OrderState.FILLED:
-                return "ACCEPTED", "filled (order book)"
-            if row.state is OrderState.PENDING_UNKNOWN:
-                return "PENDING", "order book row in an unknown state"
-            return "REJECTED", f"venue order book shows {row.state.value}"
-    moved = position_book(positions).get(ticket.instrument, ZERO) - before.get(ticket.instrument, ZERO)
-    if moved == _signed(ticket.side, ticket.quantity):
-        return "ACCEPTED", f"filled (position moved {moved})"
-    return "PENDING", "not visible on the order book or in positions yet"
+    out = _rs.decide("confirm_ticket", {
+        "ticket": _rs.ticket_doc(ticket), "before": _rs.pairs(before), "positions": _positions(positions),
+        "working": [working_order_doc(r) for r in working], "claimed": sorted(claimed)})
+    claimed.update(out["claimed"])
+    return out["status"], out["reason"]
 
 
 def ticket_contracts(ticket: VenueOrder, units: Decimal | None = None) -> dict[Instrument, Decimal]:
     """Signed contracts ``units`` of a ticket (default: all of it) put on the venue, per contract."""
-    units = ticket.quantity if units is None else units
-    if isinstance(ticket.instrument, Combo):
-        return {leg.contract: _signed(leg.side, units * leg.ratio) for leg in ticket.instrument.legs}
-    return {ticket.instrument: _signed(ticket.side, units)}
-
-
-def _confirm_combo(
-    ticket: VenueOrder,
-    before: Mapping[Instrument, Decimal],
-    positions: Sequence[VenuePosition],
-    working: Sequence[WorkingOrder],
-    claimed: set[int],
-) -> tuple[str, str]:
-    """A vertical is proven leg by leg: a matching row for every leg, or every leg moved.
-
-    Each leg's row is the leg's contract, side and contracts with the order's net limit.
-    The legs of one order share its state: any unknown leg is PENDING, any leg the book
-    shows ended unfilled REJECTS the ticket, otherwise it is on the book (ACCEPTED).
-    """
-    rows: list[int] = []
-    for leg in ticket.instrument.legs:
-        match = next(
-            (
-                index
-                for index, row in enumerate(working)
-                if index not in claimed
-                and index not in rows
-                and row.instrument == leg.contract
-                and row.side is leg.side
-                and row.quantity == ticket.quantity * leg.ratio
-                and row.order_type is ticket.order_type
-                and row.limit_price == ticket.limit_price
-            ),
-            None,
-        )
-        if match is None:
-            break
-        rows.append(match)
-    else:
-        claimed.update(rows)
-        states = [working[index].state for index in rows]
-        if OrderState.PENDING_UNKNOWN in states:
-            return "PENDING", "a leg's order book row is in an unknown state"
-        ended = [s for s in states if s is not OrderState.FILLED and s not in _LIVE_STATES]
-        if ended:
-            return "REJECTED", f"venue order book shows {ended[0].value}"
-        return "ACCEPTED", f"on the order book, both legs ({', '.join(s.value for s in states)})"
-    held = position_book(positions)
-    if all(
-        held.get(contract, ZERO) - before.get(contract, ZERO) == moved
-        for contract, moved in ticket_contracts(ticket).items()
-    ):
-        return "ACCEPTED", "filled (every leg's position moved)"
-    return "PENDING", "not visible on the order book or in positions yet"
+    return _rs.unpairs(_rs.decide("ticket_contracts", {
+        "ticket": _rs.ticket_doc(ticket), "units": None if units is None else str(units)}))

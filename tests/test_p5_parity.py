@@ -1,5 +1,7 @@
-"""P5 lockstep (T1 transport, T2 normalize, T3 slippage): the frozen Python oracle against the
-Rust door ``trade_engine_rs.tos_paper_decide(op, json)`` on identical inputs.
+"""P5 lockstep (T1-T8; T10 adds the production leg): the frozen Python oracle (``tests/frozen_p5``) against
+(a) the Rust door ``trade_engine_rs.tos_paper_decide(op, json)`` and (b) production ``tos_paper``, the shims
+over that door, on identical inputs. Production is never compared with itself: ``Twin`` re-runs each oracle
+lambda with its names bound to the production modules. ``P5_LEG=door|production`` narrows a run to one leg.
 
 Returns are compared as Decimal text, refusals by exception type NAME and message (the frozen
 and the production classes are distinct objects with one name). Every comparison is a step; each
@@ -7,6 +9,7 @@ test asserts its step count and that every refusal family both refuses and succe
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
 import decimal
@@ -25,8 +28,8 @@ import pytest
 import trade_engine_rs as rs  # D5: a missing extension is an error.
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from frozen_p5 import normalize as FN, slippage as FS, transport as FT
-from frozen_p5.netting import vertical_reason as frozen_vertical_reason
+from frozen_p5 import cover as _FC, exits as _FE, follow as _FF, netting as _FNET, normalize as _FN
+from frozen_p5 import reconcile as _FR, slippage as _FS, transport as _FT
 from trade_engine.domain.instruments import Combo, ComboLeg, Equity, OptionContract, OptionRight, Side
 from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
@@ -34,23 +37,60 @@ from trade_engine.interfaces.broker import (
     UnsupportedCapability, VenueAck, VenueFill, VenueOrder, VenueOrderAllocation, VenuePosition,
 )
 from trade_engine.sim import _rs as sim_rs
-from trade_engine.tos_paper import normalize as PN, slippage as PS
+from trade_engine.tos_paper import (
+    broker as PB, cover as PC, exits as PE, follow as PF, netting as PNET, normalize as PN,
+    reconcile as PR, slippage as PS, transport as PT,
+)
 
 D = Decimal
 UTC = timezone.utc
 T = datetime(2026, 9, 24, 20, 0, tzinfo=UTC)
 TALLY: dict[str, Counter] = {}
 
-# The kinds the door's refusals carry. Production names them nowhere yet (T9/T10 do), so the test
-# registers them; the names are what is compared.
-sim_rs.register("tos_normalize", PN.NormalizeError)
-sim_rs.register("tos_slippage", PS.SlippageError)
-sim_rs.register("tos_unsupported", UnsupportedCapability)
-sim_rs.register("tos_overflow_error", OverflowError)
-sim_rs.register("tos_division_undefined", lambda _m: decimal.InvalidOperation([decimal.DivisionUndefined]))
+# The kinds the door's refusals carry are registered by production's door module (imported above).
+# What is compared is the exception type NAME and message.
+
+
+class NoProd(BaseException):
+    """The frozen oracle has this name; production deleted it (a private helper that was ported)."""
+
+
+MODE = {"prod": False}
+# P5_LEG narrows what a step compares (tools/mutate_p5.py reads each kill through each leg alone):
+# "door" is oracle against the Rust door, "production" is oracle against the production shims, both is the gate.
+LEG = os.environ.get("P5_LEG", "both")
+assert LEG in ("both", "door", "production"), LEG
+PRODUCTION_STEPS: Counter = Counter()
+
+
+class Twin:
+    """One name, two modules: the frozen oracle, and (when MODE['prod']) the production shim."""
+
+    def __init__(self, frozen, prod):
+        self.__dict__["_f"], self.__dict__["_p"] = frozen, prod
+
+    def __getattr__(self, name):
+        if not MODE["prod"]:
+            return getattr(self._f, name)
+        if self._p is None or not hasattr(self._p, name):
+            raise NoProd(name)
+        return getattr(self._p, name)
+
+
+FN = Twin(_FN, PN)
+FS = Twin(_FS, PS)
+FT = Twin(_FT, PT)
+FR = Twin(_FR, PR)
+FC = Twin(_FC, PC)
+FN6 = Twin(_FNET, PNET)
+FE = Twin(_FE, PE)
+FF = Twin(_FF, PF)
+frozen_vertical_reason = _FNET.vertical_reason
 
 
 def door(op: str, doc: dict) -> dict:
+    if LEG == "production":
+        pytest.skip("a direct door call: the door leg reads this one")
     return json.loads(sim_rs.call(rs.tos_paper_decide, op, json.dumps(doc)))
 
 
@@ -61,9 +101,46 @@ def outcome(fn):
         return ("raise", type(exc).__name__, str(exc))
 
 
-def step(tally: str, label, oracle, rust):
-    a, b = outcome(oracle), outcome(rust)
-    assert a == b, (label, a, b)
+@contextlib.contextmanager
+def patched(obj, name, value):
+    old = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, old)
+
+
+def ledger_mirror(ledger, venue):
+    return ledger.mirror
+
+
+def production(fn):
+    """``fn`` with every Twin name bound to production; ``None`` when it names a deleted helper."""
+    MODE["prod"] = True
+    try:
+        return outcome(fn)
+    except NoProd:
+        return None
+    finally:
+        MODE["prod"] = False
+
+
+def step(tally: str, label, oracle, rust, prod="twin"):
+    """The oracle against the Rust door and, unless ``prod`` is None, against production.
+
+    ``prod='twin'`` re-runs ``oracle`` with the Twin names bound to the production modules; a
+    callable is an explicit production leg; ``None`` is for a decision production no longer names.
+    """
+    a = outcome(oracle)
+    if LEG != "production":
+        b = outcome(rust)
+        assert a == b, (label, a, b)
+    if prod is not None and LEG != "door":
+        c = production(oracle if prod == "twin" else prod)
+        if c is not None:
+            assert a == c, ("production", label, a, c)
+            PRODUCTION_STEPS[tally] += 1
     TALLY.setdefault(tally, Counter())[a[0] if a[0] == "ok" else (a[1], family(a[2]))] += 1
     return a
 
@@ -357,23 +434,29 @@ class Boom(Exception):
     pass
 
 
-class RefusedSub(FT.TransportRefused):
-    pass
+def refused_sub(base):
+    return type("RefusedSub", (base,), {})
 
 
 def test_p5_t2_exceptions_lockstep() -> None:
     texts = ["echo mismatch", "", "é\n'q'", "key used", "x" * 200]
-    excs = []
+    # Each exception is built from the module under test (the frozen and the production
+    # transport classes are distinct), so a factory takes that module.
+    makers = []
     for text in texts:
-        excs += [FT.TransportRefused(text), RefusedSub(text), FT.TransportReplay(text), TimeoutError(text),
-                 ValueError(text), Boom(text), KeyError(text), OSError(2, text), FT.TransportUnavailable(text)]
-    excs += [Boom(), Boom(1, 2), KeyError("a"), RuntimeError(None)]
-    for exc in excs:
-        kind = "refused" if isinstance(exc, FT.TransportRefused) else "replay" if isinstance(exc, FT.TransportReplay) else "other"
+        makers += [lambda m, t=text: m.TransportRefused(t), lambda m, t=text: refused_sub(m.TransportRefused)(t),
+                   lambda m, t=text: m.TransportReplay(t), lambda m, t=text: TimeoutError(t),
+                   lambda m, t=text: ValueError(t), lambda m, t=text: Boom(t), lambda m, t=text: KeyError(t),
+                   lambda m, t=text: OSError(2, t), lambda m, t=text: m.TransportUnavailable(t)]
+    makers += [lambda m: Boom(), lambda m: Boom(1, 2), lambda m: KeyError("a"), lambda m: RuntimeError(None)]
+    for make in makers:
+        exc = make(_FT)
+        kind = ("refused" if isinstance(exc, _FT.TransportRefused) else
+                "replay" if isinstance(exc, _FT.TransportReplay) else "other")
         e = {"class": kind, "type": type(exc).__name__, "text": str(exc)}
-        step("place_exception", repr(exc), lambda: ack_json(FN.normalize_place_exception(exc, "k", T)),
+        step("place_exception", repr(exc), lambda: ack_json(FN.normalize_place_exception(make(FT), "k", T)),
              lambda: door("place_exception", {"exc": e}))
-        step("cancel_exception", repr(exc), lambda: ack_json(FN.normalize_cancel_exception(exc, "k", T)),
+        step("cancel_exception", repr(exc), lambda: ack_json(FN.normalize_cancel_exception(make(FT), "k", T)),
              lambda: door("cancel_exception", {"exc": e}))
     assert {"ok"} == set(TALLY["place_exception"]) and sum(TALLY["place_exception"].values()) >= 45
     assert sum(TALLY["cancel_exception"].values()) >= 45
@@ -872,7 +955,6 @@ def test_p5_existing_ticket_vectors_through_the_door(monkeypatch) -> None:
 
 # -- T4 reconcile ----------------------------------------------------------------------------
 
-from frozen_p5 import reconcile as FR  # noqa: E402
 from trade_engine.ledger.events import VenueReconcile  # noqa: E402
 
 VENUE = "D-00000001"
@@ -1181,7 +1263,6 @@ def test_p5_existing_reconcile_vectors_through_the_door(monkeypatch) -> None:
 
 from types import MappingProxyType  # noqa: E402
 
-from frozen_p5 import cover as FC  # noqa: E402
 from trade_engine.domain.orders import Order  # noqa: E402
 from trade_engine.ledger import codec as LCODEC  # noqa: E402
 from trade_engine.ledger.events import MirrorAllocation, MirrorQueued  # noqa: E402
@@ -1458,12 +1539,9 @@ def test_p5_existing_cover_vectors_through_the_door(monkeypatch) -> None:
 
 # -- T6 netting ------------------------------------------------------------------------------
 
-from frozen_p5 import netting as FN6  # noqa: E402
 from trade_engine.domain.orders import Order  # noqa: E402
 from trade_engine.interfaces.broker import VenueOrderAllocation  # noqa: E402
-from trade_engine.tos_paper import netting as PNET  # noqa: E402
 
-sim_rs.register("tos_netting_error", PNET.NettingError)
 
 NMIRROR = ("OPT_CSP", "OPT_PUT_SPREAD")
 NACCTS = ["OPT_CSP", "OPT_PUT_SPREAD", "OPT_WHEEL_CORE", "O'Q"]
@@ -1773,13 +1851,10 @@ def test_p5_existing_netting_vectors_through_the_door(monkeypatch) -> None:
 
 # -- T7 exits --------------------------------------------------------------------------------
 
-from frozen_p5 import exits as FE  # noqa: E402
 from frozen_p5.broker import MirrorBinding  # noqa: E402
 from trade_engine.domain.portfolio import Position  # noqa: E402
 from trade_engine.ledger.state import AccountState  # noqa: E402
-from trade_engine.tos_paper import exits as PE  # noqa: E402
 
-sim_rs.register("tos_exit_plan_error", PE.ExitPlanError)
 
 XS = date(2026, 9, 28)
 XAT = datetime(2026, 9, 28, 16, 35, tzinfo=UTC)
@@ -1875,13 +1950,41 @@ def check_exit(label, mirror, states, prices, name="midday", at=XAT, mirrored=XM
         return prices.get((contract, side))
 
     def oracle():
-        FE.mirror_of = lambda ledger, venue: ledger.mirror
+        _FE.mirror_of = ledger_mirror
         plan = FE.plan_exits(XLedger(mirror, states), MirrorBinding(VENUE, "margin", tuple(mirrored), D("1000")),
                              session, name=name, price=price, at=at)
         return {**xplan_doc(plan), "priced": calls}
 
+    def production_leg():
+        # Production asks each (contract, side) once (a lazy fixpoint over the door's `prices` table); the
+        # oracle may ask twice. An accepted deviation: the quote is a read, and no caller counts asks.
+        del calls[:]
+        with patched(PE, "mirror_of", ledger_mirror):
+            plan = PE.plan_exits(XLedger(mirror, states), MirrorBinding(VENUE, "margin", tuple(mirrored), D("1000")),
+                                 session, name=name, price=price, at=at)
+        return {**xplan_doc(plan), "priced": calls}
+
+    def deduped(outcome_):
+        if outcome_[0] != "ok":
+            return outcome_
+        seen_, once = set(), []
+        for ask in outcome_[1]["priced"]:
+            if json.dumps(ask) not in seen_:
+                seen_.add(json.dumps(ask))
+                once.append(ask)
+        return ("ok", {**outcome_[1], "priced": once})
+
+    del calls[:]
     got = step("exit", label, oracle,
-               lambda: door("plan_exits", xdoc(mirror, states, mirrored, session, name, prices, at)))
+               lambda: door("plan_exits", xdoc(mirror, states, mirrored, session, name, prices, at)), prod=None)
+    if LEG != "door":
+        del calls[:]
+        prod_got = outcome(production_leg)
+        want = deduped(got)
+        assert (prod_got[0], prod_got[1:] if prod_got[0] != "ok" else {**prod_got[1], "priced": sorted(map(json.dumps, prod_got[1]["priced"]))}) == (
+            want[0], want[1:] if want[0] != "ok" else {**want[1], "priced": sorted(map(json.dumps, want[1]["priced"]))}), (
+            "production", label, want, prod_got)
+        PRODUCTION_STEPS["exit"] += 1
     if got[0] == "ok":
         plan = got[1]
         seen("exit", "plan")
@@ -2278,8 +2381,6 @@ def test_p5_existing_exits_vectors_through_the_door(monkeypatch, tmp_path) -> No
 
 # -- T8 follow -------------------------------------------------------------------------------
 
-from frozen_p5 import follow as FF  # noqa: E402
-from trade_engine.tos_paper import follow as PF  # noqa: E402
 
 FMIRROR = (CCA, PMA)
 FBASE = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
@@ -2307,13 +2408,20 @@ def fdoc(mirror, states, now, session_open, max_age, mirrored=FMIRROR) -> dict:
 
 def check_follow(label, mirror, states, now, session_open=FOPEN, max_age=timedelta(minutes=5), mirrored=FMIRROR):
     def oracle():
-        FF.mirror_of = lambda ledger, venue: ledger.mirror
+        _FF.mirror_of = ledger_mirror
         send, refused = FF.follow_entries(XLedger(mirror, states), MirrorBinding(VENUE, "margin", tuple(mirrored), D("1000")),
                                           session_open=session_open, now=now, max_age=max_age)
         return {"send": [[o.account_id, o.order_id] for o in send], "refused": [list(r) for r in refused]}
 
+    def production_leg():
+        with patched(PF, "mirror_of", ledger_mirror):
+            send, refused = PF.follow_entries(XLedger(mirror, states), MirrorBinding(VENUE, "margin", tuple(mirrored), D("1000")),
+                                              session_open=session_open, now=now, max_age=max_age)
+        return {"send": [[o.account_id, o.order_id] for o in send], "refused": [list(r) for r in refused]}
+
     got = step("follow", label, oracle,
-               lambda: door("follow_entries", fdoc(mirror, states, now, session_open, max_age, mirrored)))
+               lambda: door("follow_entries", fdoc(mirror, states, now, session_open, max_age, mirrored)),
+               prod=production_leg)
     if got[0] == "ok":
         if got[1]["send"]:
             seen("follow", "sent")
@@ -2464,3 +2572,22 @@ def test_p5_existing_follow_vectors_through_the_door(monkeypatch, tmp_path) -> N
     monkeypatch.setattr(PE, "plan_exits", door_plan_exits)
     ran = run_module_with_ledger(V, tmp_path)
     assert ran >= 20, ran
+
+
+# Ported decisions production deleted (D3: private helpers the Rust core now owns); the oracle and the
+# Rust door are still compared, production has no name to call.
+FROZEN_ONLY = {"sold", "bare", "screen", "mixed_signs", "ticket", "exit_flip", "exit_units"}
+
+
+def test_p5_zz_every_comparison_also_ran_through_production() -> None:
+    for tally, counter in sorted(TALLY.items()):
+        if tally.startswith("broker"):      # the broker lockstep's own tallies: production is its Rust side
+            continue
+        if os.environ.get("P5_DUMP"):
+            print(tally, sum(counter.values()), PRODUCTION_STEPS[tally])
+        if LEG == "door":
+            assert not PRODUCTION_STEPS, PRODUCTION_STEPS
+        elif tally in FROZEN_ONLY:
+            assert PRODUCTION_STEPS[tally] == 0, tally
+        else:
+            assert PRODUCTION_STEPS[tally] == sum(counter.values()), (tally, PRODUCTION_STEPS[tally], sum(counter.values()))

@@ -17,16 +17,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
 
 from trade_engine.domain.instruments import Side
 from trade_engine.domain.portfolio import Fill
 from trade_engine.interfaces.broker import VenueFill, VenueOrder
-from trade_engine.ledger.mirror import pro_rata
-
-BPS = Decimal("10000")
-ZERO = Decimal("0")
-CENT = Decimal("0.01")
+from trade_engine.tos_paper import _rs
 
 
 class SlippageError(RuntimeError):
@@ -51,52 +47,25 @@ def allocate_venue_fill(
     venue fills allocated here match the mirror book exactly. Fees split pro-rata to the
     cent, remainder to the first-in order.
     """
-    if fill.venue_order_id != ticket.venue_order_id:
-        raise SlippageError(f"fill {fill.venue_fill_id} is for {fill.venue_order_id}, not {ticket.venue_order_id}")
-    if fill.instrument != ticket.instrument:
-        raise SlippageError(f"fill {fill.venue_fill_id} instrument does not match the ticket (I6)")
-    if fill.side is not ticket.side:
-        raise SlippageError(f"fill {fill.venue_fill_id} side {fill.side.value} != ticket side {ticket.side.value}")
-    prior = dict(already_filled or {})
-    done = sum(prior.values(), ZERO)
-    total = done + fill.quantity
-    if total > ticket.quantity:
-        raise SlippageError(
-            f"fill {fill.venue_fill_id} takes the ticket to {total} of {ticket.quantity}; overfill (I5)"
+    out = _rs.decide("allocate_venue_fill", {
+        "fill": {"venue_fill_id": fill.venue_fill_id, "venue_order_id": fill.venue_order_id,
+                 "instrument": _rs.wire(fill.instrument), "side": fill.side.value, "quantity": str(fill.quantity),
+                 "price": str(fill.price), "filled_at": fill.filled_at.isoformat(), "fee": str(fill.fee)},
+        "ticket": {"venue_order_id": ticket.venue_order_id, "instrument": _rs.wire(ticket.instrument),
+                   "side": ticket.side.value, "quantity": str(ticket.quantity),
+                   "allocations": [{"strategy_order_id": a.strategy_order_id, "account_id": a.account_id,
+                                    "quantity": str(a.quantity)} for a in ticket.allocations]},
+        "already_filled": None if already_filled is None else {k: str(v) for k, v in already_filled.items()},
+    })
+    return tuple(
+        Fill(
+            fill_id=f["fill_id"], order_id=f["order_id"], account_id=f["account_id"], instrument=fill.instrument,
+            quantity=Decimal(f["quantity"]), price=Decimal(f["price"]), venue_env=f["venue_env"],
+            filled_at=fill.filled_at, side=Side(f["side"]), fee=Decimal(f["fee"]),
+            venue_order_id=f["venue_order_id"], venue_execution_id=f["venue_execution_id"],
         )
-    known = {a.strategy_order_id: a.quantity for a in ticket.allocations}
-    for order_id, quantity in prior.items():
-        if order_id not in known or quantity < 0 or quantity > known[order_id]:
-            raise SlippageError(
-                f"already_filled gives {order_id} {quantity}, which ticket {ticket.venue_order_id} "
-                "cannot have allocated (I5)"
-            )
-    lacking = [a.quantity - prior.get(a.strategy_order_id, ZERO) for a in ticket.allocations]
-    shares = pro_rata(lacking, ticket.quantity - done, fill.quantity)
-    pieces = [(index, piece) for index, piece in enumerate(shares) if piece > 0]
-    fees = [(fill.fee * piece / fill.quantity).quantize(CENT, rounding=ROUND_FLOOR) for _, piece in pieces]
-    if fees:
-        fees[0] += fill.fee - sum(fees, ZERO)
-    fills: list[Fill] = []
-    for (index, piece), fee in zip(pieces, fees):
-        allocation = ticket.allocations[index]
-        fills.append(
-            Fill(
-                fill_id=f"{fill.venue_fill_id}:{allocation.strategy_order_id}",
-                order_id=allocation.strategy_order_id,
-                account_id=allocation.account_id,
-                instrument=fill.instrument,
-                quantity=piece,
-                price=fill.price,
-                venue_env="paper",
-                filled_at=fill.filled_at,
-                side=fill.side,
-                fee=fee,
-                venue_order_id=fill.venue_order_id,
-                venue_execution_id=fill.venue_fill_id,
-            )
-        )
-    return tuple(fills)
+        for f in out
+    )
 
 
 # -- the report --------------------------------------------------------------
@@ -137,26 +106,9 @@ class SlippageReport:
             raise SlippageError("venue must be non-empty")
 
 
-def _signed_points(side: Side, venue: Decimal, sim: Decimal) -> Decimal:
-    """Adverse-only convention: positive always costs money."""
-    return (venue - sim) if side is Side.BUY else (sim - venue)
-
-
-def _group(fills: Sequence[Fill]) -> tuple[dict[str, list[Fill]], dict[str, str]]:
-    by_order: dict[str, list[Fill]] = {}
-    bad: dict[str, str] = {}
-    seen: set[str] = set()
-    for fill in fills:
-        if fill.fill_id in seen:
-            bad[fill.order_id] = f"duplicate fill id {fill.fill_id} (I3)"
-        seen.add(fill.fill_id)
-        by_order.setdefault(fill.order_id, []).append(fill)
-    return by_order, bad
-
-
-def _vwap(fills: Sequence[Fill]) -> tuple[Decimal, Decimal]:
-    quantity = sum((f.quantity for f in fills), ZERO)
-    return quantity, sum((f.price * f.quantity for f in fills), ZERO) / quantity
+def _fill_doc(f: Fill) -> dict:
+    return {"fill_id": f.fill_id, "order_id": f.order_id, "instrument": _rs.wire(f.instrument),
+            "side": f.side.value, "quantity": str(f.quantity), "price": str(f.price)}
 
 
 def slippage_report(
@@ -166,69 +118,16 @@ def slippage_report(
     venue_fills: Sequence[Fill],
 ) -> SlippageReport:
     """Pair sim and venue fills per strategy order; refuse per order, never per report."""
-    sim_by, sim_bad = _group(sim_fills)
-    venue_by, venue_bad = _group(venue_fills)
-    pairs: list[SlippagePair] = []
-    unmatched_sim: list[str] = []
-    refused: list[tuple[str, str]] = []
-    for order_id, sims in sim_by.items():
-        if order_id in sim_bad:
-            refused.append((order_id, f"sim: {sim_bad[order_id]}"))
-            continue
-        venues = venue_by.get(order_id)
-        if not venues:
-            unmatched_sim.append(order_id)
-            continue
-        if order_id in venue_bad:
-            refused.append((order_id, f"venue: {venue_bad[order_id]}"))
-            continue
-        sides = {f.side for f in sims} | {f.side for f in venues}
-        instruments = {f.instrument for f in sims} | {f.instrument for f in venues}
-        if len(sides) > 1:
-            refused.append((order_id, f"side mismatch {sorted(s.value for s in sides)}; not paired"))
-            continue
-        if len(instruments) > 1:
-            refused.append((order_id, "instrument mismatch between sim and venue fills; not paired (I6)"))
-            continue
-        sim_qty, sim_price = _vwap(sims)
-        venue_qty, venue_price = _vwap(venues)
-        if venue_qty != sim_qty:
-            refused.append(
-                (
-                    order_id,
-                    f"sim filled {sim_qty} but the venue filled {venue_qty}; mirror drifted (I5)",
-                )
-            )
-            continue
-        side = sims[0].side
-        points = _signed_points(side, venue_price, sim_price)
-        bps = (points / sim_price * BPS).quantize(Decimal("0.0001")) if sim_price > 0 else None
-        pairs.append(
-            SlippagePair(
-                order_id=order_id,
-                instrument=sims[0].instrument.symbol,
-                side=side,
-                quantity=sim_qty,
-                sim_price=sim_price,
-                venue_price=venue_price,
-                slippage_points=points,
-                slippage_bps=bps,
-            )
-        )
-    unmatched_venue = [order_id for order_id in venue_by if order_id not in sim_by]
-    priced = [p for p in pairs if p.slippage_bps is not None]
-    mean_bps: Decimal | None = None
-    if priced:
-        weight = sum((p.quantity for p in priced), ZERO)
-        mean_bps = (sum((p.slippage_bps * p.quantity for p in priced), ZERO) / weight).quantize(
-            Decimal("0.0001")
-        )
-    return SlippageReport(
-        venue=venue,
-        as_of=as_of,
-        pairs=tuple(pairs),
-        unmatched_sim=tuple(sorted(unmatched_sim)),
-        unmatched_venue=tuple(sorted(unmatched_venue)),
-        refused=tuple(sorted(refused)),
-        mean_slippage_bps=mean_bps,
+    r = _rs.decide("slippage_report", {
+        "venue": venue, "as_of": as_of.isoformat(),
+        "sim_fills": [_fill_doc(f) for f in sim_fills], "venue_fills": [_fill_doc(f) for f in venue_fills],
+    })
+    pairs = tuple(
+        SlippagePair(p["order_id"], p["instrument"], Side(p["side"]), Decimal(p["quantity"]),
+                     Decimal(p["sim_price"]), Decimal(p["venue_price"]), Decimal(p["slippage_points"]),
+                     _rs.dec(p["slippage_bps"]))
+        for p in r["pairs"]
     )
+    return SlippageReport(r["venue"], datetime.fromisoformat(r["as_of"]), pairs, tuple(r["unmatched_sim"]),
+                          tuple(r["unmatched_venue"]), tuple(tuple(x) for x in r["refused"]),
+                          _rs.dec(r["mean_slippage_bps"]))

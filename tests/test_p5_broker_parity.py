@@ -1,4 +1,4 @@
-"""P5-T9 lockstep: the frozen ``TosPaperBroker`` against the Rust-backed adapter (``p5_broker_host``).
+"""P5-T9/T10 lockstep: the frozen ``TosPaperBroker`` against production ``TosPaperBroker`` (a shim over the Rust core).
 
 Both are driven by the same op sequence over the same fake transport. The Rust side runs against the
 real fake venue and every transport call is recorded (name, arguments, answer or exception); the
@@ -31,7 +31,7 @@ from types import MappingProxyType
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import p5_broker_host as H  # noqa: E402
+from trade_engine.tos_paper import _rs as H  # noqa: E402
 from frozen_p5 import broker as FB  # noqa: E402
 from frozen_p5 import transport as FT  # noqa: E402
 from test_p5_parity import AAPL, C200, P195, P200, TALLY, combo, family, opt, parametrized, settle  # noqa: E402
@@ -186,7 +186,7 @@ class Lock:
                  balance_unproven_ok=False, halted_venues=(), tally="broker") -> None:
         self.tally = tally
         self.rlog, self.olog, self.tape, self.ticks = [], [], [], []
-        self.rust = H.RustTosPaperBroker(
+        self.rust = PB.TosPaperBroker(
             _proxy(transport, self.rlog, self.tape, False), binding, clock=LogClock(clock, self.rlog, self.ticks, False),
             balance_reader=balance_reader, balance_unproven_ok=balance_unproven_ok, halted_venues=halted_venues)
         frozen_binding = FB.MirrorBinding(
@@ -723,5 +723,5 @@ def test_p5_t9_the_broker_test_module_runs_on_both_sides(monkeypatch) -> None:
     ran = run_module_tests(V, only=names)
     assert ran >= 65, ran
     assert sum(OPS.values()) - before >= 150, sum(OPS.values()) - before
-    monkeypatch.setattr(V, "TosPaperBroker", H.RustTosPaperBroker)
+    monkeypatch.setattr(V, "TosPaperBroker", PB.TosPaperBroker)
     assert run_module_tests(V, only=plain - {"test_an_inexpressible_queued_ticket_is_rejected_not_raised"}) == 1

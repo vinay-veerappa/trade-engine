@@ -28,19 +28,18 @@ An entry reaches the venue as the sim made it, or is refused with the reason (I1
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from trade_engine.domain.instruments import Combo
-from trade_engine.domain.orders import Order, OrderState
+from trade_engine.domain.orders import Order
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Event, EventKind, Ledger
+from trade_engine.ledger import Event, EventKind, Ledger, codec
 from trade_engine.ledger.events import MirrorRefused
 from trade_engine.ledger.state import AccountState
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
-from trade_engine.tos_paper.cover import cover_reason
-from trade_engine.tos_paper.exits import FOLLOW_PREFIX, Express, Price, _units, run_pass_mirror
-from trade_engine.tos_paper.session import _ENDED_UNFILLED, MirrorRunReport, _append, _with, mirror_of
+from trade_engine.tos_paper import _rs
+from trade_engine.tos_paper.exits import FOLLOW_PREFIX, Express, Price, run_pass_mirror
+from trade_engine.tos_paper.session import MirrorRunReport, _append, _with, mirror_of
 
 ET = ZoneInfo("America/New_York")
 MAX_AGE = timedelta(minutes=5)
@@ -108,49 +107,24 @@ def follow_entries(
     An entry is a sim order with no parent, created since ``session_open``, that the sim
     did not cancel, reject or expire unfilled, and this venue has not handled.
     """
-    mirror = mirror_of(ledger, binding.venue_account)
-    send: list[Order] = []
-    refused: list[tuple[str, str, str]] = []
-    for account in binding.mirrored_accounts:
-        state = ledger.state(account)
-        for order in sorted(state.orders.values(), key=lambda o: o.order_id):
-            if (
-                order.parent_order_id is not None
-                or order.created_at < session_open
-                or order.state in _ENDED_UNFILLED
-                or mirror.handled(order.order_id)
-            ):
-                continue
-            age = now - order.created_at
-            if age > max_age:
-                # An entry the session has held for its cover is not a late copy: say what never came.
-                missing = cover_reason(mirror, order)
-                refused.append((order.order_id, account,
-                                f"the follower first saw this entry {int(age.total_seconds())}s after the sim made it "
-                                f"(more than {int(max_age.total_seconds())}s); a late copy is not the sim's trade"
-                                if missing is None else
-                                f"{missing}; the cover did not arrive within {int(max_age.total_seconds())}s "
-                                "of the sim's entry"))
-            elif order.state is OrderState.FILLED and _flat(state, order):
-                refused.append((order.order_id, account,
-                                "the sim opened and closed this entry before the follower saw it; "
-                                "the venue would open what the sim is out of"))
-            else:
-                send.append(order)
-    return tuple(send), tuple(refused)
+    out = _rs.decide("follow_entries", {
+        "mirror": codec.canon(mirror_of(ledger, binding.venue_account)),
+        "accounts": [[a, codec.canon(ledger.state(a))] for a in binding.mirrored_accounts],
+        "mirrored": list(binding.mirrored_accounts), "now": now.isoformat(),
+        "session_open": session_open.isoformat(), "max_age_us": max_age // timedelta(microseconds=1)})
+    send = tuple(ledger.state(account).orders[order_id] for account, order_id in out["send"])
+    return send, tuple((o, a, r) for o, a, r in out["refused"])
 
 
 def _flat(state: AccountState, order: Order) -> bool:
     """The sim holds none of ``order``'s instrument (a vertical by its spreads)."""
-    held = {c: p.quantity for c, p in state.positions.items()}
-    if isinstance(order.instrument, Combo):
-        units = _units(held, order.instrument)
-        return units is not None and units == 0
-    return held.get(order.instrument, 0) == 0
+    return _rs.decide("follow_flat", {"account": codec.canon(state), "order_id": order.order_id})["flat"]
 
 
 def pass_name(now: datetime) -> str:
-    return f"{FOLLOW_PREFIX}{now.astimezone(ET):%H%M}"
+    # A naive clock reads as local time, as ``astimezone`` always did.
+    when = now if now.tzinfo is not None else now.astimezone(UTC)
+    return _rs.decide("pass_name", {"now": when.isoformat()})["name"]
 
 
 def follow_cycle(
