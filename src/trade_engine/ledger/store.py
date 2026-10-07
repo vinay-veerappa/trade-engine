@@ -203,6 +203,17 @@ class Ledger:
         """Every account with events, in order of its first event."""
         return self._store.accounts()
 
+    def fingerprint_alias(self, legacy: str) -> str | None:
+        """The fingerprint a pre-P7 command now carries, if `p7_migrate` rewrote its ledger.
+
+        `p7_key_map(old, new, ...)` is written only by the migration tool; a ledger that was
+        never migrated has no such table and answers None."""
+        try:
+            row = self.conn.execute("SELECT new FROM p7_key_map WHERE old = ?", (legacy,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return None if row is None else row[0]
+
     def event_by_command(self, command_id: str) -> Event | None:
         return _rs.call(self._store.event_by_command, command_id)
 

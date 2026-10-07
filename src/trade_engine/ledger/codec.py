@@ -19,6 +19,8 @@ plumbing between Python objects and the encoded tree, and it decides nothing:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import json
 from datetime import date, datetime
@@ -148,6 +150,22 @@ def canon_decimal(value: Decimal) -> str:
     return f"-{body}" if sign else body
 
 
+_LEGACY_SPELLING: contextvars.ContextVar[bool] = contextvars.ContextVar("p7_legacy_spelling", default=False)
+
+
+@contextlib.contextmanager
+def legacy_spelling():
+    """Spell every decimal as ``str(Decimal)`` inside the block: the pre-P7 spelling.
+
+    Used only to recompute a pre-P7 fingerprint, so a replay of a command written before
+    the migration still dedupes (docs/RUST_PORT.md P7). Nothing is ever written this way."""
+    token = _LEGACY_SPELLING.set(True)
+    try:
+        yield
+    finally:
+        _LEGACY_SPELLING.reset(token)
+
+
 def _encode(value: Any) -> Any:
     if value is None:
         return {"n": True}
@@ -157,6 +175,8 @@ def _encode(value: Any) -> Any:
     if isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, Decimal):
+        if _LEGACY_SPELLING.get():
+            return {"d": str(value)}
         try:
             return {"d": canon_decimal(value)}
         except DecimalRangeError:
@@ -354,6 +374,7 @@ __all__ = [
     "canon_decimal",
     "decode_event",
     "decode_payload",
+    "legacy_spelling",
     "encode_event",
     "encode_payload",
 ]

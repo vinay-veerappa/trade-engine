@@ -22,6 +22,7 @@ The guards the old options engine lacked (rules doc §7.1) are structural here:
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from decimal import Decimal
 
@@ -45,7 +46,7 @@ from trade_engine.interfaces.broker import BrokerAdapter
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import Event, EventKind, Ledger, OrdersCreated
 from trade_engine.ledger import codec
-from trade_engine.ledger.codec import encode_payload
+from trade_engine.ledger.codec import DecimalRangeError, canon_decimal, encode_payload, legacy_spelling
 from trade_engine.ledger.state import AccountState
 from trade_engine.oms.manager import IdempotencyConflictError, OrderManagementError, OrderManager
 from trade_engine.sim import _rs
@@ -164,7 +165,8 @@ class OptionOrderManager:
                 existing.kind is EventKind.ORDERS_CREATED,
                 existing.account == intent.account_id,
             )
-            _rs.call(_rs.rs.oms_fingerprint_conflict, intent.command_id, existing.payload.fingerprint, fingerprint)
+            presented = self._presented_fingerprint(intent, existing.payload.fingerprint, fingerprint)
+            _rs.call(_rs.rs.oms_fingerprint_conflict, intent.command_id, existing.payload.fingerprint, presented)
             return self._submit(existing.payload.orders[0])  # a replay changes nothing (I3)
         state = self._ledger.state(intent.account_id)
         _rs.call(
@@ -352,21 +354,47 @@ class OptionOrderManager:
             raise ValueError("Clock returned a naive datetime")
         return now
 
+    def _presented_fingerprint(self, intent: OptionIntent, stored: str, current: str) -> str:
+        """The fingerprint to hold against the stored one when a command id replays (P7).
+
+        A command written before the migration carries the pre-P7 fingerprint (the same
+        terms spelled as ``str(Decimal)``), or, once `p7_migrate` ran, an opaque one that
+        `p7_key_map` ties to it. The replay is the same command exactly when its terms,
+        spelled the old way, are the stored fingerprint or the one the map aliases to it;
+        any other terms keep the stored fingerprint and still conflict (I3)."""
+        if stored == current:
+            return current
+        legacy = self._intent_fingerprint(intent, legacy=True)
+        if stored == legacy or self._ledger.fingerprint_alias(legacy) == stored:
+            return stored
+        return current
+
     @staticmethod
-    def _intent_fingerprint(intent: OptionIntent) -> str:
-        return _rs.call(
-            _rs.rs.oms_intent_fingerprint,
-            intent.intent_id,
-            intent.account_id,
-            _tree(intent.instrument),
-            intent.side.value,
-            str(intent.quantity),
-            intent.order_type.value,
-            None if intent.limit_price is None else str(intent.limit_price),
-            intent.tif.value,
-            None if intent.profit_target is None else str(intent.profit_target),
-            intent.reason,
-        )
+    def _intent_fingerprint(intent: OptionIntent, legacy: bool = False) -> str:
+        def spell(value: Decimal | None) -> str | None:
+            if value is None:
+                return None
+            if legacy:
+                return str(value)
+            try:
+                return canon_decimal(value)
+            except DecimalRangeError:
+                return str(value)
+
+        with legacy_spelling() if legacy else contextlib.nullcontext():
+            return _rs.call(
+                _rs.rs.oms_intent_fingerprint,
+                intent.intent_id,
+                intent.account_id,
+                _tree(intent.instrument),
+                intent.side.value,
+                spell(intent.quantity),
+                intent.order_type.value,
+                spell(intent.limit_price),
+                intent.tif.value,
+                spell(intent.profit_target),
+                intent.reason,
+            )
 
     @staticmethod
     def _order_fingerprint(order: Order) -> str:
