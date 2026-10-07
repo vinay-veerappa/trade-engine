@@ -56,6 +56,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | **web half landed** (tvDownloadOHLC main ba935583, bfe51308; `SIM_TE_WASM` default OFF); retiring the Python package waits for P4c and P5 |
 | **P6b Futures in te_core** | `Instrument::Future` and tick arithmetic, the CME Globex equity-futures calendar, `Book::new_futures`, te_wasm futures books | — (additive: the Python engine has no futures book) | P3a equity parity unchanged; seeded Globex walks agree te_core vs the te_wasm API; the browser differential agrees replay-sim vs te_wasm on MNQ/MES/ES | **done**: see "P6b verification and boundary" |
+| **P6C Globex calendars per root** | CME energy/metals holiday tables; the Globex calendar chosen by root; YM/MYM/RTY/M2K/CL/MCL/GC/MGC specs | — (additive) | P6b equity table byte-identical; the 1m store agrees with every calendar (allow-listed deviations with reasons); pmc energy/metals disagreements allow-listed | **done**: see "P6C verification and boundary" |
 | **P7 Decimal migration** | `PyDec` → `rust_decimal` everywhere (D6 without its exception); one canonical decimal spelling for the ledger, canonical state and fingerprints | — | a one-shot, reversible migration of the stored ledgers (backup kept): every ledger re-canonicalized and re-folded, balances and positions equal by value before and after, fingerprints/idempotency keys rehashed with an old→new map so replays still dedupe; Rust-vs-`PyDec` value-equality proptests over the arithmetic; a timing comparison | after the last oracle-gated phase (the Python history is small, so the data rewrite is cheap; it waits only because every gate before it compares decimal strings with Python) |
 
 ### P3b-2a verification and boundary
@@ -593,6 +594,28 @@ Boundary:
 - The browser book is built frictionless, and replay-sim applies the tick slippage once.
 - The web's Day order expires at 16:00 ET, te_core's at the Globex close (17:00 ET). The web check fires first.
 - Plan Gate 3 (golden fills recorded on NinjaTrader 8) is not built.
+
+### P6C verification and boundary
+
+Owner decision (2026-10-06): calendars for every root we hold 1m data for (YM, RTY, CL, GC and their micros), not only NQ/ES.
+
+Commits: 2a53413 (energy/metals tables), f0c45f2 (calendar per root, specs), 4e86502 (1m data oracle, mutants), 3b57b14 (review: micro ranges, equity session eras).
+- **Tables.** `cme_energy_holidays.csv` (CL, MCL) and `cme_metals_holidays.csv` (GC, MGC): 213 rows each, 2009-2027, built by `tools/build_cme_energy_metals_holidays.py` from the CME captures in `.worktrees/plans/cme_raw`. Provenance, conflicts and the 13 OBSERVED-OVERRIDE rows are in `crates/te_core/data/cme_energy_metals_holidays.md`. 2008 was not built: the sources cover one 2008 holiday of about nine. The equity table is unchanged byte for byte.
+- **Calendar per root.** `GlobexCalendar::for_root`; the broker takes the calendar from the order's or bar's instrument, so te_wasm needed no API change (the root comes from the symbol).
+- **Ranges (I5).** Equity 2006-2027; YM/MYM from 2008-01-27 (CBOT moved to Globex); RTY/M2K from 2017-07-09 (RTY returned from ICE); CL/MCL and GC/MGC 2009-2027. A micro takes its mini's range, because the web serves mini data under the micro symbol.
+- **Equity session eras** (`EQUITY_ERAS`): a 16:15 ET Friday close to 2012-11-16, and a 16:15-16:30 ET weekday halt to 2021-06-25. This rests on CME's 2009-2010 notices and on the bars; the boundaries are OBSERVED. After 2021-06-25 the default rule is unchanged. Energy and metals have no era.
+- **Specs** match tv `web/lib/contract-specs.ts`: YM 1.0/5, MYM 1.0/0.5, RTY 0.1/50, M2K 0.1/5, CL 0.01/1000, MCL 0.01/100, GC 0.1/100, MGC 0.1/10. Unknown roots still refuse.
+
+Gates:
+- `tests/calendar_data_oracle.rs` checks the 1m store (READ ONLY, SHA-256 per source file in each fixture) against each root's calendar: no bars when closed, after an early halt, inside a halt or on a weekend; every open session has bars. The allow-list has 83 entries (ES 29, NQ 23, YM 14, RTY 5, CL 6, GC 6), each with a reason (store gap, stamp artifact, OBSERVED one-off, unsourced 2023 equity rows).
+- `cme_pmc_oracle.rs` is extended to `CMEGlobex_CL` and `CMEGlobex_GC`: the session dates and opens are the same, and 72 close minutes differ. All 72 are allow-listed, and pmc is the wrong side on each.
+- Hand mutants `tools/mutate_p6c.py`: 15 of 15 KILLED.
+- `cargo test --workspace`: 156 green. The wasm32 release build is green. `golden.json` and the P6b walks are unchanged. ci_local: 1946 passed.
+- Existing tests changed: only the `sim/tick.rs` tests that asserted CL/MCL/RTY/YM/GC refuse; they now assert an unknown root refuses.
+
+Boundary:
+- The web (`web/lib/orders/cme-calendar.ts`) still mirrors the equity table only, without the eras. Day expiry for a pre-2021 equity date, or for CL/GC, can differ from te_core until the web follow-up lands: per-group generated tables, the 12 venue roots and the per-root ranges.
+- Before 2021-06-28, te_core keeps 17:00 ET as the session identity and does not model CME's 16:15 ET trade-date roll (documented in the .md).
 
 ### Costs of phasing (accepted)
 
