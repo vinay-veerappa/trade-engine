@@ -14,7 +14,12 @@
 //! - `outside`     bars outside every session otherwise, e.g. weekends (check d);
 //! - `no-bars`     a session the calendar opens that has no bars at all (check c);
 //! - `ends-early`  an early-halt session whose last bar ends more than 5 minutes before the halt (check e);
-//! - `friday-1615` a regular Friday session whose data ends 16:15 ET (the pre-2016-10-31 equity-index Friday close);
+//! - `in-halt`     bars inside an intra-session halt (the 16:15-16:30 ET equity halt of the dated eras), one minute of
+//!                 tolerance at each edge;
+//! - `unmodelled-halt` a session the calendar runs through 16:15-16:30 ET whose data has bars on both sides and
+//!                 none inside (a halt the eras do not know);
+//! - `friday-1615` a regular Friday session whose data ends 16:15 ET (a one-off; the equity Friday 16:15 close is an
+//!                 era, `EQUITY_ERAS`, not an allow-list entry);
 //! - `unlisted-halt` a date with no table row whose data ends at 13:00 ET (a halt the table does not know);
 //! - `short-data`  any other session whose last bar ends more than 5 minutes before the close (thin data, store
 //!   gap). This is counted and printed, never failed: a thin or truncated session is not a calendar claim.
@@ -135,6 +140,21 @@ fn findings_for(root: &'static str, fx: &Loaded) -> Vec<Finding> {
         .iter()
         .map(|&d| (d, cal.session_open(d).unwrap().timestamp(), cal.session_close(d).unwrap().timestamp()))
         .collect();
+    // The spans where bars are legal: a session, minus its intra-session halt, which is shrunk by one minute at each
+    // edge (a bar stamped at the halt start or at its last minute is a stamp artifact, not a calendar claim).
+    // (trade date, open, close, true if this span follows the halt of the same session)
+    let mut segs: Vec<(NaiveDate, i64, i64, bool)> = Vec::with_capacity(sessions.len() + 8);
+    for &(d, open, close) in &sessions {
+        match cal.session_halt(d) {
+            Some((hs, he)) => {
+                segs.push((d, open, hs.timestamp() + 60, false));
+                segs.push((d, he.timestamp() - 60, close, true));
+            }
+            // A bar stamped at the era's Friday 16:15 close is a closing-print stamp artifact, tolerated like the halt edges.
+            None if d.weekday() == chrono::Weekday::Fri && close == hour_ts(d, 16, 15) => segs.push((d, open, close + 60, false)),
+            None => segs.push((d, open, close, false)),
+        }
+    }
     let range_lo = ymd_start(&cal);
     let range_hi = ymd_end(&cal);
     let mut out = Vec::new();
@@ -146,17 +166,26 @@ fn findings_for(root: &'static str, fx: &Loaded) -> Vec<Finding> {
             continue;
         }
         let mut cur = a;
-        let mut i = sessions.partition_point(|s| s.2 <= a);
+        let mut i = segs.partition_point(|s| s.2 <= a);
         while cur < b {
-            if i < sessions.len() && sessions[i].1 < b {
-                let (_, open, close) = sessions[i];
+            if i < segs.len() && segs[i].1 < b {
+                let (sd, open, close, after_halt) = segs[i];
                 if cur < open {
-                    push_frag(&cal, &mut out, cur, open.min(b));
+                    if after_halt && i > 0 && cur >= segs[i - 1].2 {
+                        push_halt(&mut out, sd, cur, open.min(b));
+                    } else {
+                        push_frag(&cal, &mut out, cur, open.min(b));
+                    }
                 }
                 cur = close.max(cur);
                 i += 1;
             } else {
-                push_frag(&cal, &mut out, cur, b);
+                // the rest of the island ends before the next span: inside a halt gap, or plain outside
+                if i < segs.len() && segs[i].3 && i > 0 && cur >= segs[i - 1].2 {
+                    push_halt(&mut out, segs[i].0, cur, b);
+                } else {
+                    push_frag(&cal, &mut out, cur, b);
+                }
                 cur = b;
             }
         }
@@ -173,6 +202,25 @@ fn findings_for(root: &'static str, fx: &Loaded) -> Vec<Finding> {
         while k < fx.islands.len() && fx.islands[k].0 < close {
             last_end = Some(fx.islands[k].1.min(close));
             k += 1;
+        }
+        // (f) a session the calendar runs straight through 16:15-16:30 ET whose data has the halt: bars on both sides,
+        // none inside. Only for sessions that span the whole 16:00-16:45 ET stretch.
+        if cal.session_halt(d).is_none() && cal.is_early_halt(d).unwrap() == false {
+            let (w0, w1) = (hour_ts(d, 16, 15), hour_ts(d, 16, 30));
+            if open <= hour_ts(d, 16, 0) && close >= hour_ts(d, 16, 45) {
+                let n = |a: i64, b: i64| -> i64 {
+                    let mut c = 0;
+                    let mut k = fx.islands.partition_point(|x| x.1 <= a);
+                    while k < fx.islands.len() && fx.islands[k].0 < b {
+                        c += (fx.islands[k].1.min(b) - fx.islands[k].0.max(a)) / 60;
+                        k += 1;
+                    }
+                    c
+                };
+                if n(hour_ts(d, 16, 0), w0) >= 8 && n(w1, hour_ts(d, 16, 45)) >= 8 && n(w0, w1) == 0 {
+                    out.push(Finding { kind: "unmodelled-halt", date: d, detail: "bars before and after 16:15-16:30 ET, none inside".into() });
+                }
+            }
         }
         match last_end {
             None => out.push(Finding { kind: "no-bars", date: d, detail: format!("{} .. {}", utc(open), utc(close)) }),
@@ -208,6 +256,15 @@ fn findings_for(root: &'static str, fx: &Loaded) -> Vec<Finding> {
     out
 }
 
+fn hour_ts(d: NaiveDate, h: u32, m: u32) -> i64 {
+    use chrono::TimeZone;
+    chrono_tz::America::New_York
+        .from_local_datetime(&d.and_hms_opt(h, m, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp()
+}
+
 fn ny_midnight(d: NaiveDate) -> i64 {
     use chrono::TimeZone;
     chrono_tz::America::New_York
@@ -223,6 +280,10 @@ fn ymd_start(cal: &GlobexCalendar) -> i64 {
 
 fn ymd_end(cal: &GlobexCalendar) -> i64 {
     ny_midnight(cal.last_date() + Duration::days(1))
+}
+
+fn push_halt(out: &mut Vec<Finding>, d: NaiveDate, s: i64, e: i64) {
+    out.push(Finding { kind: "in-halt", date: d, detail: format!("{} .. {} ({} min)", utc(s), utc(e), (e - s) / 60) });
 }
 
 fn push_frag(cal: &GlobexCalendar, out: &mut Vec<Finding>, s: i64, e: i64) {
@@ -291,7 +352,6 @@ fn data_oracle_per_root() {
 static ALLOW: &[Allow] = &[
     Allow { root: "CL", kind: "after-halt", from: (2010, 2, 15), to: (2010, 2, 15), reason: "one-minute stamp artifact: a bar stamped at the halt minute" },
     Allow { root: "CL", kind: "after-halt", from: (2014, 12, 24), to: (2014, 12, 24), reason: "one-minute stamp artifact: a bar stamped at the halt minute" },
-    Allow { root: "CL", kind: "friday-1615", from: (2009, 10, 9), to: (2016, 10, 28), reason: "single Friday whose data ends 16:15-16:17 ET (2016-10-28 is the last pre-2016-10-31 Friday; cause not sourced)" },
     Allow { root: "CL", kind: "no-bars", from: (2013, 7, 12), to: (2013, 7, 12), reason: "store gap: the session has no bars in the store" },
     Allow { root: "CL", kind: "no-bars", from: (2014, 1, 27), to: (2014, 1, 31), reason: "store gap: the session has no bars in the store" },
     Allow { root: "ES", kind: "after-halt", from: (2006, 7, 3), to: (2006, 7, 3), reason: "July 3 early halt: bars resume about 16:30 ET (reopen unstated in the CME release/PDF)" },
@@ -310,14 +370,11 @@ static ALLOW: &[Allow] = &[
     Allow { root: "ES", kind: "before-open", from: (2009, 1, 2), to: (2009, 1, 2), reason: "one-minute stamp artifact: a bar stamped the minute before the reopen" },
     Allow { root: "ES", kind: "closed", from: (2007, 1, 2), to: (2007, 1, 2), reason: "Ford day of mourning 2007-01-02: bars to 09:15 ET before the all-day closure; table follows the CME release (closed)" },
     Allow { root: "ES", kind: "closed", from: (2007, 1, 2), to: (2007, 1, 2), reason: "Ford day of mourning 2007-01-02: bars to 09:15 ET before the all-day closure; table follows the CME release (closed)" },
-    Allow { root: "ES", kind: "friday-1615", from: (2006, 1, 6), to: (2016, 10, 28), reason: "Friday regular close 16:15 ET until the 2016-10-28 week (table models 17:00); era hours, not a holiday row" },
     Allow { root: "ES", kind: "no-bars", from: (2006, 2, 6), to: (2006, 2, 6), reason: "store gap: the session has no bars in the store" },
     Allow { root: "ES", kind: "no-bars", from: (2006, 3, 6), to: (2006, 3, 6), reason: "store gap: the session has no bars in the store" },
     Allow { root: "ES", kind: "no-bars", from: (2014, 1, 27), to: (2014, 1, 31), reason: "store gap: the session has no bars in the store" },
     Allow { root: "ES", kind: "unlisted-halt", from: (2023, 1, 16), to: (2023, 1, 16), reason: "equity table has no row for this date (never sourced, see cme_equity_holidays.md gaps); data halts 13:00 ET" },
     Allow { root: "ES", kind: "unlisted-halt", from: (2023, 2, 20), to: (2023, 2, 20), reason: "equity table has no row for this date (never sourced, see cme_equity_holidays.md gaps); data halts 13:00 ET" },
-    Allow { root: "GC", kind: "after-halt", from: (2010, 1, 15), to: (2010, 1, 15), reason: "one-minute stamp artifact: a bar stamped at the halt minute" },
-    Allow { root: "GC", kind: "friday-1615", from: (2016, 10, 28), to: (2016, 10, 28), reason: "single Friday whose data ends 16:15-16:17 ET (2016-10-28 is the last pre-2016-10-31 Friday; cause not sourced)" },
     Allow { root: "GC", kind: "no-bars", from: (2009, 8, 31), to: (2009, 10, 12), reason: "store gap: the session has no bars in the store" },
     Allow { root: "GC", kind: "no-bars", from: (2013, 7, 12), to: (2013, 7, 12), reason: "store gap: the session has no bars in the store" },
     Allow { root: "GC", kind: "no-bars", from: (2014, 1, 27), to: (2014, 1, 30), reason: "store gap: the session has no bars in the store" },
@@ -333,7 +390,6 @@ static ALLOW: &[Allow] = &[
     Allow { root: "NQ", kind: "before-open", from: (2009, 1, 2), to: (2009, 1, 2), reason: "one-minute stamp artifact: a bar stamped the minute before the reopen" },
     Allow { root: "NQ", kind: "closed", from: (2007, 1, 2), to: (2007, 1, 2), reason: "Ford day of mourning 2007-01-02: bars to 09:15 ET before the all-day closure; table follows the CME release (closed)" },
     Allow { root: "NQ", kind: "closed", from: (2007, 1, 2), to: (2007, 1, 2), reason: "Ford day of mourning 2007-01-02: bars to 09:15 ET before the all-day closure; table follows the CME release (closed)" },
-    Allow { root: "NQ", kind: "friday-1615", from: (2006, 1, 6), to: (2016, 10, 28), reason: "Friday regular close 16:15 ET until the 2016-10-28 week (table models 17:00); era hours, not a holiday row" },
     Allow { root: "NQ", kind: "no-bars", from: (2006, 2, 6), to: (2006, 2, 6), reason: "store gap: the session has no bars in the store" },
     Allow { root: "NQ", kind: "no-bars", from: (2006, 3, 6), to: (2006, 3, 6), reason: "store gap: the session has no bars in the store" },
     Allow { root: "NQ", kind: "no-bars", from: (2013, 7, 12), to: (2013, 7, 12), reason: "store gap: the session has no bars in the store" },
@@ -346,10 +402,35 @@ static ALLOW: &[Allow] = &[
     Allow { root: "YM", kind: "after-halt", from: (2008, 7, 3), to: (2008, 7, 3), reason: "July 3 early halt: bars resume about 16:30 ET (reopen unstated in the CME release/PDF)" },
     Allow { root: "YM", kind: "after-halt", from: (2015, 7, 2), to: (2015, 7, 2), reason: "CME 2015 July-4 PDF says early close 13:15 ET, but the data trade to 17:00 ET (unresolved source conflict)" },
     Allow { root: "YM", kind: "before-open", from: (2008, 12, 26), to: (2008, 12, 26), reason: "one-minute stamp artifact: a bar stamped the minute before the reopen" },
-    Allow { root: "YM", kind: "friday-1615", from: (2008, 2, 1), to: (2016, 10, 28), reason: "Friday regular close 16:15 ET until the 2016-10-28 week (table models 17:00); era hours, not a holiday row" },
     Allow { root: "YM", kind: "no-bars", from: (2013, 7, 12), to: (2013, 7, 12), reason: "store gap: the session has no bars in the store" },
     Allow { root: "YM", kind: "no-bars", from: (2014, 1, 27), to: (2014, 1, 31), reason: "store gap: the session has no bars in the store" },
     Allow { root: "YM", kind: "no-bars", from: (2023, 4, 6), to: (2023, 4, 14), reason: "store gap: no bars for 2023-04-06..14 in any file of the root" },
     Allow { root: "YM", kind: "unlisted-halt", from: (2023, 1, 16), to: (2023, 1, 16), reason: "equity table has no row for this date (never sourced, see cme_equity_holidays.md gaps); data halts 13:00 ET" },
     Allow { root: "YM", kind: "unlisted-halt", from: (2023, 2, 20), to: (2023, 2, 20), reason: "equity table has no row for this date (never sourced, see cme_equity_holidays.md gaps); data halts 13:00 ET" },
+    Allow { root: "ES", kind: "friday-1615", from: (2016, 10, 28), to: (2016, 10, 28), reason: "OBSERVED one-off: Friday 2016-10-28 data of ES, NQ, YM, CL and GC all end 16:15-16:17 ET; no CME notice for it in cme_raw, not an era" },
+    Allow { root: "NQ", kind: "friday-1615", from: (2016, 10, 28), to: (2016, 10, 28), reason: "OBSERVED one-off: Friday 2016-10-28 data of ES, NQ, YM, CL and GC all end 16:15-16:17 ET; no CME notice for it in cme_raw, not an era" },
+    Allow { root: "YM", kind: "friday-1615", from: (2016, 10, 28), to: (2016, 10, 28), reason: "OBSERVED one-off: Friday 2016-10-28 data of ES, NQ, YM, CL and GC all end 16:15-16:17 ET; no CME notice for it in cme_raw, not an era" },
+    Allow { root: "CL", kind: "friday-1615", from: (2016, 10, 28), to: (2016, 10, 28), reason: "OBSERVED one-off: Friday 2016-10-28 data of ES, NQ, YM, CL and GC all end 16:15-16:17 ET; no CME notice for it in cme_raw, not an era" },
+    Allow { root: "GC", kind: "friday-1615", from: (2016, 10, 28), to: (2016, 10, 28), reason: "OBSERVED one-off: Friday 2016-10-28 data of ES, NQ, YM, CL and GC all end 16:15-16:17 ET; no CME notice for it in cme_raw, not an era" },
+    Allow { root: "CL", kind: "friday-1615", from: (2009, 10, 9), to: (2009, 10, 9), reason: "OBSERVED one-off: Friday 2009-10-09 CL data end 16:15 ET; no CME notice in cme_raw, not an era" },
+    Allow { root: "ES", kind: "in-halt", from: (2006, 4, 27), to: (2006, 5, 22), reason: "OBSERVED: no 16:15-16:30 ET halt in the data on these 2006 days (bars every minute); the halt returns 2006-05-23; cause not sourced" },
+    Allow { root: "NQ", kind: "in-halt", from: (2006, 4, 27), to: (2006, 5, 22), reason: "OBSERVED: no 16:15-16:30 ET halt in the data on these 2006 days (bars every minute); the halt returns 2006-05-23; cause not sourced" },
+    Allow { root: "ES", kind: "in-halt", from: (2020, 9, 10), to: (2020, 9, 11), reason: "OBSERVED: bars inside the 16:15-16:30 ET halt on 2020-09-10/11 (from 16:21 ET) and 2020-10-19..22 on all four equity roots; cause not found in cme_raw" },
+    Allow { root: "ES", kind: "in-halt", from: (2020, 10, 19), to: (2020, 10, 22), reason: "OBSERVED: bars inside the 16:15-16:30 ET halt on 2020-09-10/11 (from 16:21 ET) and 2020-10-19..22 on all four equity roots; cause not found in cme_raw" },
+    Allow { root: "NQ", kind: "in-halt", from: (2020, 9, 10), to: (2020, 9, 11), reason: "OBSERVED: bars inside the 16:15-16:30 ET halt on 2020-09-10/11 (from 16:21 ET) and 2020-10-19..22 on all four equity roots; cause not found in cme_raw" },
+    Allow { root: "NQ", kind: "in-halt", from: (2020, 10, 19), to: (2020, 10, 22), reason: "OBSERVED: bars inside the 16:15-16:30 ET halt on 2020-09-10/11 (from 16:21 ET) and 2020-10-19..22 on all four equity roots; cause not found in cme_raw" },
+    Allow { root: "YM", kind: "in-halt", from: (2020, 9, 10), to: (2020, 9, 11), reason: "OBSERVED: bars inside the 16:15-16:30 ET halt on 2020-09-10/11 (from 16:21 ET) and 2020-10-19..22 on all four equity roots; cause not found in cme_raw" },
+    Allow { root: "YM", kind: "in-halt", from: (2020, 10, 19), to: (2020, 10, 22), reason: "OBSERVED: bars inside the 16:15-16:30 ET halt on 2020-09-10/11 (from 16:21 ET) and 2020-10-19..22 on all four equity roots; cause not found in cme_raw" },
+    Allow { root: "RTY", kind: "in-halt", from: (2020, 9, 10), to: (2020, 9, 11), reason: "OBSERVED: bars inside the 16:15-16:30 ET halt on 2020-09-10/11 (from 16:21 ET) and 2020-10-19..22 on all four equity roots; cause not found in cme_raw" },
+    Allow { root: "RTY", kind: "in-halt", from: (2020, 10, 19), to: (2020, 10, 22), reason: "OBSERVED: bars inside the 16:15-16:30 ET halt on 2020-09-10/11 (from 16:21 ET) and 2020-10-19..22 on all four equity roots; cause not found in cme_raw" },
+    Allow { root: "ES", kind: "outside", from: (2007, 3, 16), to: (2007, 3, 16), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "ES", kind: "outside", from: (2009, 10, 9), to: (2009, 10, 9), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "ES", kind: "outside", from: (2009, 10, 16), to: (2009, 10, 16), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "ES", kind: "outside", from: (2010, 4, 16), to: (2010, 4, 16), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "NQ", kind: "outside", from: (2007, 3, 16), to: (2007, 3, 16), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "NQ", kind: "outside", from: (2009, 10, 16), to: (2009, 10, 16), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "NQ", kind: "outside", from: (2010, 4, 16), to: (2010, 4, 16), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "YM", kind: "outside", from: (2009, 9, 11), to: (2009, 9, 11), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "YM", kind: "outside", from: (2009, 10, 16), to: (2009, 10, 16), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
+    Allow { root: "YM", kind: "outside", from: (2010, 4, 16), to: (2010, 4, 16), reason: "one stray bar stamped after the era's Friday 16:15 ET close (a lone print); the calendar models the close, not stray prints" },
 ];

@@ -10,7 +10,8 @@ holds the calendar and does the comparing, so a calendar change never needs a ne
 An island is a maximal run of bars that
   - lie on the same side of the daily 17:00 and 18:00 ET boundaries (a bar stamped 17:00-17:59 ET
     is in the maintenance halt and forms its own island, never part of a session's island), and
-  - have no gap longer than GAP_MINUTES between consecutive bars.
+  - have no gap longer than GAP_MINUTES between consecutive bars (10, so that the 15-minute 16:15-16:30 ET
+    equity-index halt of the pre-2021-06-28 eras splits an island and any bar inside it is visible).
 
 Bars are OPEN-stamped (MARKET_DATA_ARCHITECTURE.md 3.2.1): the bar stamped t covers [t, t+1min).
 So an island [first, last] occupies the instants [first, last + 60 s).
@@ -38,7 +39,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 ROOTS = ["ES", "NQ", "YM", "RTY", "CL", "GC"]
-GAP_MINUTES = 30
+GAP_MINUTES = 10
 DEFAULT_STORE = Path(r"C:\Users\vinay\tvDownloadOHLC\data\market\bars\1m")
 ET = ZoneInfo("America/New_York")
 

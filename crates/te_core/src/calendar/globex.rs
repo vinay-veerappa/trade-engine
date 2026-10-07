@@ -7,6 +7,8 @@
 //!   - it opens at 18:00 ET on the previous calendar evening (Sunday 18:00 for Monday);
 //!   - it closes at 17:00 ET on D;
 //!   - there is a daily halt 17:00-18:00 ET, and the weekend runs from Friday 17:00 to Sunday 18:00.
+//! - **Eras (equity group only).** Before 2021-06-28 equity sessions also have a 16:15-16:30 ET halt inside the session, and
+//!   before 2012-11-17 a Friday session closes 16:15 ET (see [`EQUITY_ERAS`]). The rule above is the default after them.
 //! - **`early_halt` on D.** D's session closes at `halt_et` instead of 17:00.
 //!   - The next session opens at `reopen_et` if given (date-qualified if not the same day).
 //!   - Otherwise it opens at the normal 18:00 ET on the evening before the next trade date.
@@ -122,6 +124,23 @@ pub struct SessionInfo {
     pub trade_date: NaiveDate,
     pub open_utc: DateTime<Utc>,
     pub close_utc: DateTime<Utc>,
+    /// An intra-session halt `[start, end)` inside `[open, close)` (the 16:15-16:30 ET equity halt of the early eras).
+    pub halt_utc: Option<(DateTime<Utc>, DateTime<Utc>)>,
+}
+
+/// A dated session-rule era of a product group (P6C review). Trade dates in `[from, to]` follow these rules instead of
+/// the default (open 18:00 ET the evening before, close 17:00 ET, no halt inside the session). A holiday-table row
+/// (closed, early halt, reopen) always wins over an era. The default rule is what applies after the last era.
+#[derive(Debug, Clone, Copy)]
+pub struct Era {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    /// Close of a Friday session, ET (hour, minute); `None` = the default 17:00.
+    pub friday_close_et: Option<(u32, u32)>,
+    /// A halt inside every weekday session of the era, ET `((start h, m), (end h, m))`.
+    pub weekday_halt_et: Option<((u32, u32), (u32, u32))>,
+    /// Provenance, also in `cme_energy_metals_holidays.md`.
+    pub source: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +190,11 @@ fn split_csv_line(line: &str) -> std::result::Result<Vec<String>, String> {
 
 /// Parses the CME holiday CSV text into a validated `HolidayTable`.
 pub fn parse_holiday_table(csv_text: &str) -> Result<HolidayTable> {
+    parse_holiday_table_eras(csv_text, &[])
+}
+
+/// As [`parse_holiday_table`], with dated session-rule eras applied to the trade dates they cover.
+pub fn parse_holiday_table_eras(csv_text: &str, eras: &[Era]) -> Result<HolidayTable> {
     let mut lines = csv_text.lines();
     let header_line = match lines.next() {
         Some(l) => l.trim(),
@@ -385,15 +409,26 @@ pub fn parse_holiday_table(csv_text: &str) -> Result<HolidayTable> {
             ny_to_utc(td - Duration::days(1), 18, 0)
         };
 
+        let era = eras.iter().find(|e| e.from <= td && td <= e.to);
+        let default_close = match era.and_then(|e| e.friday_close_et) {
+            Some((h, m)) if td.weekday() == Weekday::Fri => ny_to_utc(td, h, m),
+            _ => ny_to_utc(td, 17, 0),
+        };
         let close_utc = if let Some(row) = holidays.get(&td) {
             if row.status == HolidayStatus::EarlyHalt {
                 ny_time_to_utc(td, row.halt_et.expect("early_halt has halt_et"))
             } else {
-                ny_to_utc(td, 17, 0)
+                default_close
             }
         } else {
-            ny_to_utc(td, 17, 0)
+            default_close
         };
+        // The halt exists only when the session still runs past it (an early close or a Friday close at the halt
+        // start has no halt inside it).
+        let halt_utc = era.and_then(|e| e.weekday_halt_et).and_then(|((sh, sm), (eh, em))| {
+            let (hs, he) = (ny_to_utc(td, sh, sm), ny_to_utc(td, eh, em));
+            (open_utc <= hs && he < close_utc).then_some((hs, he))
+        });
 
         if open_utc >= close_utc {
             return Err(GlobexError::MalformedRow(format!(
@@ -405,6 +440,7 @@ pub fn parse_holiday_table(csv_text: &str) -> Result<HolidayTable> {
             trade_date: td,
             open_utc,
             close_utc,
+            halt_utc,
         });
         session_map.insert(td, (open_utc, close_utc));
     }
@@ -435,6 +471,45 @@ pub fn parse_holiday_table(csv_text: &str) -> Result<HolidayTable> {
 const EQUITY_CSV: &str = EMBEDDED_CSV;
 const ENERGY_CSV: &str = include_str!("../../data/cme_energy_holidays.csv");
 const METALS_CSV: &str = include_str!("../../data/cme_metals_holidays.csv");
+
+/// Session-rule eras of the equity group (ES, NQ, YM, RTY and their micros). The last era ends 2021-06-25; every trade
+/// date after it follows the default rule (open 18:00 ET, close 17:00 ET, no halt inside), byte for byte.
+///
+/// Evidence: the 1m store (ES, NQ, YM, RTY; per-year and per-root tables in `cme_energy_metals_holidays.md`).
+/// - Friday close 16:15 ET, to trade date 2012-11-16, and a 16:15-16:30 ET halt on Mon-Thu, 2006 to 2021-06-24:
+///   CME's 2009 and 2010 Globex holiday notices call 1515 CT "Regular CME Globex close" and 1530 CT "Regular CME Globex
+///   open" for equity products (`2009-4th-of-july.txt`, `2009-globex-holiday-calendar.txt` in cme_raw). The
+///   later notices (2013 on) print 1615 CT, which contradicts every year of bars, so they lost.
+/// - The Friday 16:15 close ends between 2012-11-17 and 2012-11-30 (2012-11-16 is the last 16:15 Friday, 2012-11-30
+///   the first 17:00 Friday, 2012-11-23 is a holiday row): OBSERVED, boundary set right after 2012-11-16.
+/// - The halt on every weekday, Friday included, from 2012-11-19, ends with trade date 2021-06-25 (Friday): the first
+///   trade date with bars across 16:15-16:30 ET is 2021-06-28: OBSERVED; no CME notice for it is in cme_raw.
+/// Energy and metals have no era: their one-off 16:15 Friday closes (2009-10-09 CL, 2016-10-28 CL and GC) are
+/// allow-listed in the data oracle as OBSERVED, not rules.
+pub const EQUITY_ERAS: &[Era] = &[
+    Era {
+        from: d(2006, 1, 1),
+        to: d(2012, 11, 16),
+        friday_close_et: Some((16, 15)),
+        weekday_halt_et: Some(((16, 15), (16, 30))),
+        source: "CME 2009-2010 Globex holiday notices: 1515 CT regular close, 1530 CT regular open; Friday close OBSERVED in bars",
+    },
+    Era {
+        from: d(2012, 11, 17),
+        to: d(2021, 6, 25),
+        friday_close_et: None,
+        weekday_halt_et: Some(((16, 15), (16, 30))),
+        source: "OBSERVED in ES/NQ/YM/RTY 1m bars: Friday closes 17:00 from 2012-11-30, 16:15-16:30 gap on every weekday",
+    },
+];
+
+/// Eras of a group; energy and metals have none.
+pub fn eras_for(g: Group) -> &'static [Era] {
+    match g {
+        Group::Equity => EQUITY_ERAS,
+        Group::Energy | Group::Metals => &[],
+    }
+}
 
 /// The product group whose holiday table governs a root (P6C).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -472,30 +547,30 @@ struct RootInfo {
     listed_from: Option<NaiveDate>,
 }
 
-/// Roots with a calendar. Listing floors, with sources (details in `cme_energy_metals_holidays.md`):
-/// - MNQ, MES, MYM, M2K: launched 2019-05-06 (CME press release 2019-05-06, "CME Group announces launch of new
-///   Micro E-mini equity index futures"); first session opens Sunday 2019-05-05 18:00 ET.
+/// Roots with a calendar. A micro takes its mini's range, not its own listing date: the web serves mini DATA under
+/// the micro SYMBOL ("Since 2026-09-21 the spoke serves mini DATA under the micro SYMBOL", tv `web/lib/contract-specs.ts`)
+/// and sims size micros on mini history, so a micro listing floor would refuse replays that must work. The listing
+/// dates stay documented as facts in `cme_energy_metals_holidays.md` (MNQ/MES/MYM/M2K 2019-05-06, MCL 2021-07-12,
+/// MGC 2010-10-04); they are not refusals. Floors that remain are the minis' own:
 /// - RTY: returned to CME Group 2017-07-10 (CME press release 2017-04-12, "Russell 2000 index futures and options to
-///   return to CME Group July 10"); before that it was ICE's TF, so there is no CME calendar for it.
-/// - MCL: launched 2021-07-12 (CME press release 2021-05-17, "CME Group to launch Micro WTI crude oil futures on July 12").
-/// - MGC: first trade date 2010-10-04 (CME Special Executive Report S-5391); first session opens Sunday 2010-10-03.
-/// - YM (and so MYM): own floor, not the equity table before it. YM moved from the e-cbot platform (own hours, own
-///   holidays) to CME Globex for financial contracts on 2008-01-27 (trade date 2008-01-28), CBOT migration notice
-///   (CFTC rul121807cbot001, CME "CBOT Migration Trading Hours"). The 1m data confirm CBOT-era divergence (see the .md).
-/// - NQ, ES, CL, GC are listed on Globex before their table's first year (CL on Globex since 2006-09-05).
+///   return to CME Group July 10"); before that it was ICE's TF, so there is no CME calendar for it. M2K follows it.
+/// - YM: moved from the e-cbot platform (own hours, own holidays) to CME Globex for financial contracts on
+///   2008-01-27 (trade date 2008-01-28), CBOT migration notice (CFTC rul121807cbot001, CME "CBOT Migration Trading
+///   Hours"). The 1m data confirm CBOT-era divergence (see the .md). MYM follows it.
+/// - NQ, ES, CL, GC (and MNQ, MES, MCL, MGC) are listed on Globex before their table's first year (CL since 2006-09-05).
 const ROOTS: &[RootInfo] = &[
     RootInfo { root: "NQ", group: Group::Equity, listed_from: None },
-    RootInfo { root: "MNQ", group: Group::Equity, listed_from: Some(d(2019, 5, 5)) },
+    RootInfo { root: "MNQ", group: Group::Equity, listed_from: None },
     RootInfo { root: "ES", group: Group::Equity, listed_from: None },
-    RootInfo { root: "MES", group: Group::Equity, listed_from: Some(d(2019, 5, 5)) },
+    RootInfo { root: "MES", group: Group::Equity, listed_from: None },
     RootInfo { root: "YM", group: Group::Equity, listed_from: Some(d(2008, 1, 27)) },
-    RootInfo { root: "MYM", group: Group::Equity, listed_from: Some(d(2019, 5, 5)) },
+    RootInfo { root: "MYM", group: Group::Equity, listed_from: Some(d(2008, 1, 27)) },
     RootInfo { root: "RTY", group: Group::Equity, listed_from: Some(d(2017, 7, 9)) },
-    RootInfo { root: "M2K", group: Group::Equity, listed_from: Some(d(2019, 5, 5)) },
+    RootInfo { root: "M2K", group: Group::Equity, listed_from: Some(d(2017, 7, 9)) },
     RootInfo { root: "CL", group: Group::Energy, listed_from: None },
-    RootInfo { root: "MCL", group: Group::Energy, listed_from: Some(d(2021, 7, 11)) },
+    RootInfo { root: "MCL", group: Group::Energy, listed_from: None },
     RootInfo { root: "GC", group: Group::Metals, listed_from: None },
-    RootInfo { root: "MGC", group: Group::Metals, listed_from: Some(d(2010, 10, 3)) },
+    RootInfo { root: "MGC", group: Group::Metals, listed_from: None },
 ];
 
 /// Every root that has a calendar, in table order.
@@ -515,7 +590,7 @@ fn get_table() -> &'static HolidayTable {
 pub fn table_for(g: Group) -> &'static HolidayTable {
     match g {
         Group::Equity => {
-            TABLE.get_or_init(|| parse_holiday_table(EQUITY_CSV).expect("valid embedded CME holiday table"))
+            TABLE.get_or_init(|| parse_holiday_table_eras(EQUITY_CSV, EQUITY_ERAS).expect("valid embedded CME holiday table"))
         }
         Group::Energy => ENERGY_TABLE
             .get_or_init(|| parse_holiday_table(ENERGY_CSV).expect("valid embedded CME energy holiday table")),
@@ -639,6 +714,9 @@ impl GlobexCalendar {
         }
     }
 
+    /// The trade date whose session contains `t` (open <= t < close). An intra-session halt does NOT end the session:
+    /// `t` inside it still belongs to that trade date (so an order placed in the halt keeps its trade date);
+    /// [`Self::is_open_at`] is what excludes the halt.
     pub fn session_at(&self, t: DateTime<Utc>) -> Result<Option<NaiveDate>> {
         self.check_instant(t)?;
         let table = self.table();
@@ -654,8 +732,19 @@ impl GlobexCalendar {
         }
     }
 
+    /// True inside a session and outside its intra-session halt (the 16:15-16:30 ET equity halt of the early eras).
     pub fn is_open_at(&self, t: DateTime<Utc>) -> Result<bool> {
-        Ok(self.session_at(t)?.is_some())
+        let Some(td) = self.session_at(t)? else {
+            return Ok(false);
+        };
+        Ok(!matches!(self.session_halt(td), Some((hs, he)) if hs <= t && t < he))
+    }
+
+    /// The intra-session halt `[start, end)` of trade date `dt`, if its era has one and the session runs past it.
+    pub fn session_halt(&self, dt: NaiveDate) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        let table = self.table();
+        let i = table.sessions.binary_search_by_key(&dt, |s| s.trade_date).ok()?;
+        table.sessions[i].halt_utc
     }
 
     pub fn session_or_next(&self, t: DateTime<Utc>) -> Result<NaiveDate> {

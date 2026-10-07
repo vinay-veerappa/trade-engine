@@ -4,7 +4,7 @@
 //! its reopen, and the range edges of every root. Expected instants are written as New York wall-clock times so
 //! they read like the CME notices the tables cite.
 
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use chrono_tz::America::New_York;
 use te_core::calendar::globex::{supported_roots, GlobexCalendar, GlobexError, Group};
 
@@ -135,16 +135,16 @@ mod energy {
         ));
         // the first session cannot step back before the range
         assert!(cl.previous_session(d(2009, 1, 2)).is_err());
-        // MCL's range starts at its listing (first session opens Sunday 2021-07-11 18:00 ET)
+        // MCL takes CL's range, not its own 2021-07-12 listing: mini data is served under the micro symbol and sims
+        // size micros on mini history (P6C review)
         let mcl = cal("MCL");
-        assert_eq!(mcl.first_date(), d(2021, 7, 11));
-        assert_eq!(mcl.last_date(), d(2027, 12, 31));
-        assert!(matches!(mcl.is_session(d(2021, 7, 9)), Err(GlobexError::RootOutOfRange { root: "MCL", .. })));
-        assert!(matches!(mcl.session_open(d(2021, 7, 10)), Err(GlobexError::RootOutOfRange { root: "MCL", .. })));
+        assert_eq!(mcl.first_date(), cl.first_date());
+        assert_eq!(mcl.last_date(), cl.last_date());
+        assert!(mcl.is_session(d(2021, 7, 9)).unwrap());
+        assert!(matches!(mcl.is_session(d(2008, 12, 31)), Err(GlobexError::RootOutOfRange { root: "MCL", .. })));
         assert_eq!(mcl.session_open(d(2021, 7, 12)).unwrap(), et(2021, 7, 11, 18, 0));
-        assert_eq!(mcl.previous_session(d(2021, 7, 13)).unwrap(), d(2021, 7, 12));
-        assert!(mcl.previous_session(d(2021, 7, 12)).is_err());
-        // CL (listed long before) reaches the same dates that MCL refuses
+        assert_eq!(mcl.previous_session(d(2009, 1, 5)).unwrap(), d(2009, 1, 2));
+        assert!(mcl.previous_session(d(2009, 1, 2)).is_err());
         assert!(cl.is_session(d(2021, 7, 9)).unwrap());
     }
 }
@@ -199,12 +199,14 @@ mod metals {
         assert_eq!(gc.last_date(), d(2027, 12, 31));
         assert!(matches!(gc.is_session(d(2008, 12, 31)), Err(GlobexError::RootOutOfRange { root: "GC", .. })));
         assert!(matches!(gc.is_session(d(2028, 1, 1)), Err(GlobexError::RootOutOfRange { root: "GC", .. })));
-        // MGC: first trade date 2010-10-04, first session opens Sunday 2010-10-03 18:00 ET
+        // MGC takes GC's range, not its own 2010-10-04 first trade date (mini data is served under the micro symbol)
         let mgc = cal("MGC");
-        assert_eq!(mgc.first_date(), d(2010, 10, 3));
+        assert_eq!(mgc.first_date(), gc.first_date());
+        assert_eq!(mgc.last_date(), gc.last_date());
+        assert!(mgc.is_session(d(2010, 10, 1)).unwrap());
         assert_eq!(mgc.session_open(d(2010, 10, 4)).unwrap(), et(2010, 10, 3, 18, 0));
-        assert!(matches!(mgc.is_session(d(2010, 10, 1)), Err(GlobexError::RootOutOfRange { root: "MGC", .. })));
-        assert!(mgc.previous_session(d(2010, 10, 4)).is_err());
+        assert!(matches!(mgc.is_session(d(2008, 12, 31)), Err(GlobexError::RootOutOfRange { root: "MGC", .. })));
+        assert!(mgc.previous_session(d(2009, 1, 2)).is_err());
         assert!(gc.is_session(d(2010, 10, 1)).unwrap());
     }
 }
@@ -258,13 +260,18 @@ mod equity {
             assert_eq!(c.first_date(), d(2006, 1, 1), "{root}");
             assert_eq!(c.last_date(), d(2027, 12, 31), "{root}");
         }
-        // the micros open at their 2019-05-06 launch (Sunday 2019-05-05 18:00 ET); MNQ/MES had no floor before P6C
-        for root in ["MNQ", "MES", "MYM", "M2K"] {
-            let c = cal(root);
-            assert_eq!(c.first_date(), d(2019, 5, 5), "{root}");
-            assert_eq!(c.session_open(d(2019, 5, 6)).unwrap(), et(2019, 5, 5, 18, 0), "{root}");
-            assert!(c.session_open(d(2019, 5, 3)).is_err(), "{root}");
+        // a micro takes its mini's range, not its 2019-05-06 listing (mini data is served under the micro symbol)
+        for (micro, mini) in [("MNQ", "NQ"), ("MES", "ES"), ("MYM", "YM"), ("M2K", "RTY")] {
+            let (m, n) = (cal(micro), cal(mini));
+            assert_eq!(m.first_date(), n.first_date(), "{micro}");
+            assert_eq!(m.last_date(), n.last_date(), "{micro}");
+            assert!(m.is_session(d(2019, 5, 3)).unwrap(), "{micro}");
+            assert_eq!(m.session_open(d(2019, 5, 6)).unwrap(), et(2019, 5, 5, 18, 0), "{micro}");
         }
+        assert!(cal("MNQ").is_session(d(2006, 1, 3)).unwrap());
+        assert!(cal("MES").is_session(d(2006, 1, 3)).unwrap());
+        assert!(cal("MYM").is_session(d(2007, 12, 3)).is_err());
+        assert!(cal("M2K").is_session(d(2017, 7, 7)).is_err());
         // RTY on CME since 2017-07-10 (Sunday 2017-07-09 18:00 ET)
         let rty = cal("RTY");
         assert_eq!(rty.first_date(), d(2017, 7, 9));
@@ -289,5 +296,97 @@ fn unknown_roots_refuse_and_all_supported_roots_resolve() {
     for r in roots {
         assert!(GlobexCalendar::for_root(r).is_ok(), "{r}");
         assert!(GlobexCalendar::for_root(&r.to_lowercase()).is_ok(), "{r}");
+    }
+}
+
+/// The dated session-rule eras of the equity group (P6C review): a Friday 16:15 ET close to 2012-11-16, a 16:15-16:30 ET
+/// halt inside weekday sessions to 2021-06-25, the default rule after. Energy and metals have none.
+mod eras {
+    use super::*;
+    use te_core::calendar::globex::{parse_holiday_table, table_for, EQUITY_ERAS};
+
+    #[test]
+    fn friday_closes_1615_until_2012_11_16_then_1700() {
+        for root in ["ES", "NQ", "MES", "YM"] {
+            let c = cal(root);
+            assert_eq!(c.session_close(d(2012, 11, 16)).unwrap(), et(2012, 11, 16, 16, 15), "{root}");
+            assert_eq!(c.session_close(d(2010, 6, 4)).unwrap(), et(2010, 6, 4, 16, 15), "{root}");
+            // the Friday after the change closes 17:00 and nothing else about it moved
+            assert_eq!(c.session_close(d(2012, 11, 30)).unwrap(), et(2012, 11, 30, 17, 0), "{root}");
+            assert_eq!(c.session_open(d(2012, 11, 30)).unwrap(), et(2012, 11, 29, 18, 0), "{root}");
+            // a Mon-Thu session of the first era still closes 17:00
+            assert_eq!(c.session_close(d(2012, 11, 15)).unwrap(), et(2012, 11, 15, 17, 0), "{root}");
+        }
+        // the legacy free functions are the equity calendar
+        assert_eq!(te_core::calendar::globex::session_close(d(2012, 11, 16)).unwrap(), et(2012, 11, 16, 16, 15));
+    }
+
+    #[test]
+    fn a_holiday_row_beats_the_era() {
+        // the day after Thanksgiving 2008 was a Friday: the row's early close wins over the era's 16:15
+        let c = cal("ES");
+        let close = c.session_close(d(2008, 11, 28)).unwrap();
+        assert!(close < et(2008, 11, 28, 16, 0), "{close}");
+        assert_eq!(c.session_halt(d(2008, 11, 28)), None);
+    }
+
+    #[test]
+    fn the_16_15_halt_is_inside_the_session_and_not_open() {
+        let c = cal("ES");
+        // Thursday of the first era, and a Wednesday of the second
+        for td in [d(2012, 11, 15), d(2015, 3, 11), d(2021, 6, 24), d(2021, 6, 25)] {
+            let (hs, he) = c.session_halt(td).unwrap();
+            assert_eq!((hs, he), (et(td.year(), td.month(), td.day(), 16, 15), et(td.year(), td.month(), td.day(), 16, 30)));
+            assert!(c.is_open_at(hs - chrono::Duration::minutes(1)).unwrap(), "{td}");
+            assert!(!c.is_open_at(hs).unwrap(), "{td}");
+            assert!(!c.is_open_at(he - chrono::Duration::minutes(1)).unwrap(), "{td}");
+            assert!(c.is_open_at(he).unwrap(), "{td}");
+            // the halt does not end the session: the trade date is still td, and an order placed in it keeps td
+            assert_eq!(c.session_at(hs).unwrap(), Some(td));
+            assert_eq!(c.session_or_next(hs).unwrap(), td);
+            assert_eq!(c.session_close(td).unwrap(), et(td.year(), td.month(), td.day(), 17, 0));
+        }
+        // no halt in the first era's Friday (it has closed at 16:15), none on an early-close day
+        assert_eq!(c.session_halt(d(2012, 11, 16)), None);
+        assert_eq!(c.session_halt(d(2008, 11, 28)), None);
+    }
+
+    #[test]
+    fn the_default_rule_is_byte_identical_after_the_last_era() {
+        assert_eq!(EQUITY_ERAS.last().unwrap().to, d(2021, 6, 25));
+        let plain = parse_holiday_table(include_str!("../data/cme_equity_holidays.csv")).unwrap();
+        let eras = table_for(Group::Equity);
+        let (mut n, mut differs_before) = (0, 0);
+        for (a, b) in plain.sessions.iter().zip(eras.sessions.iter()) {
+            assert_eq!(a.trade_date, b.trade_date);
+            if a.trade_date > d(2021, 6, 25) {
+                n += 1;
+                assert_eq!((a.open_utc, a.close_utc), (b.open_utc, b.close_utc), "{}", a.trade_date);
+                assert_eq!(b.halt_utc, None, "{}", a.trade_date);
+            } else if a.close_utc != b.close_utc || b.halt_utc.is_some() {
+                differs_before += 1;
+            }
+        }
+        assert!(n > 1000 && differs_before > 3000, "{n} {differs_before}");
+        assert_eq!(plain.sessions.len(), eras.sessions.len());
+        // the era only ever moves a close earlier, to 16:15, and never touches an open
+        for (a, b) in plain.sessions.iter().zip(eras.sessions.iter()) {
+            assert_eq!(a.open_utc, b.open_utc, "{}", a.trade_date);
+            assert!(b.close_utc <= a.close_utc, "{}", a.trade_date);
+        }
+    }
+
+    #[test]
+    fn energy_and_metals_have_no_eras() {
+        for g in [Group::Energy, Group::Metals] {
+            assert!(te_core::calendar::globex::eras_for(g).is_empty());
+            assert!(table_for(g).sessions.iter().all(|s| s.halt_utc.is_none()));
+        }
+        // the 2016-10-28 Friday that CL and GC bars close at 16:15 is an observed one-off, not a rule: the table says 17:00
+        assert_eq!(cal("CL").session_close(d(2016, 10, 28)).unwrap(), et(2016, 10, 28, 17, 0));
+        assert!(cal("CL").is_open_at(et(2016, 10, 28, 16, 20)).unwrap());
+        let c = cal("MES");
+        assert!(!c.is_open_at(et(2012, 11, 15, 16, 20)).unwrap());
+        assert!(cal("CL").is_open_at(et(2012, 11, 15, 16, 20)).unwrap());
     }
 }
