@@ -855,6 +855,28 @@ def test_a_pass_just_after_the_previous_one_runs(rig) -> None:
     assert rig.ledger.event_by_command(pass_marker(S2, "midday")) is not None
 
 
+def test_a_ledgers_first_session_runs_every_pass_and_its_after_close_run(rig) -> None:
+    """The first session begins with a pass: its own marker is not history, so the later
+    passes and the after-close run of that session are not refused for a previous
+    session the ledger never had (I3). The live options ledger began 2026-10-06 with a
+    morning pass, and its midday and late passes and its after-close run were refused."""
+    rig.strategy = Timed()
+    rig.snapshots[S1] = [chain_at(morning_time(S1)), chain_at(midday_time(S1)), chain(S1)]
+    run_morning(rig, S1)
+    run_pass(rig, S1, "midday", midday_time(S1) + timedelta(minutes=5))
+    run_pass(rig, S1, "late", snap_time(S1) + timedelta(minutes=2))
+    new_process(rig, S1)
+    rig.run(S1)
+    for name in ("morning", "midday", "late"):
+        assert rig.ledger.event_by_command(pass_marker(S1, name)) is not None
+    assert rig.ledger.event_by_command(rig_marker("eod", S1)) is not None
+    # The session before it is still not skipped: S2 follows a complete S1 and runs.
+    rig.snapshots[S2] = [chain(S2)]
+    new_process(rig, S2)
+    rig.run(S2)
+    assert rig.ledger.event_by_command(rig_marker("eod", S2)) is not None
+
+
 def test_an_unknown_pass_refuses(rig) -> None:
     passes_rig(rig)
     with pytest.raises(EodRunnerError, match="Unknown pass 'evening'"):

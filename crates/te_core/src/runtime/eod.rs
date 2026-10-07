@@ -74,7 +74,8 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
             if !b[0] { return err("runtime_eod",format!("Exit action '{}' names '{}', which is not an open bracket of '{}' (I8)",s[0],s[1],s[2])); }
             if !b[1] { return err("runtime_eod",format!("Strategy for '{}' returned {}; exit actions are MoveStop, ClosePosition or ReducePosition",s[2],s[3])); }
         }
-        "history" => p.flags.push(b[0] && (s[0] == s[1] || ["morning","midday","late"].iter().any(|v| s[0] == format!("{}-{v}",s[1])))),
+        // s: marker job, this job, marker session, run session (ISO dates order as text): only an earlier session is history.
+        "history" => p.flags.push(b[0] && s[2] < s[3] && (s[0] == s[1] || ["morning","midday","late"].iter().any(|v| s[0] == format!("{}-{v}",s[1])))),
         "previous" => if b[0] && !b[1] {
             return err("runtime_incomplete",format!("Cannot run {} for '{}': the previous session {} has no {} marker; complete it first (I3)",s[0],s[1],s[2],s[3]));
         },
