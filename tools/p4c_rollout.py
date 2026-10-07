@@ -274,16 +274,22 @@ def render_config(spec: RoleSpec, *, binary: Path, capability: Path,
     used, so a staged owner is byte-for-byte the certified composition."""
     folder.mkdir(parents=True, exist_ok=True)
     python = Path(spec.venv_python)
+    # The client repo root is the venv's parent (repo\.venv313\...), so
+    # the client's src/ joins the plugin paths: the job-time interpreter
+    # imports scan_engine from it (the census forbids guessing a repo).
+    client_src = python.parents[2] / "src"
     return {
         "mode": "runtime-owner",
         # python_home is the stdlib home (the interpreter's base prefix),
         # not the venv dir; serve validates it holds the 3.13 stdlib.
         "python_home": str(_base_prefix(python)),
-        "python_dll": str(_base_prefix(python) / "python313.dll"),
+        # python_dll must be bundled beside te.exe (serve validates it is
+        # the binary's neighbor and byte-identical to the home's DLL).
+        "python_dll": str(binary.parent / "python313.dll"),
         "python_executable": str(python),
         "site_packages": str(Path(python).parent.parent / "Lib" / "site-packages"),
         "engine_source": str(ROOT / "src"),
-        "plugin_paths": [str(folder)],
+        "plugin_paths": [str(folder), str(client_src)],
         "plugin_module": "runtime_owner_entry",
         "plugin_factory": "owner_entry",
         "plugin_config": {},
