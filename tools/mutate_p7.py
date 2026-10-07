@@ -99,6 +99,12 @@ def tests():
     return subprocess.run(TEST, cwd=ROOT, env=ENV, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
+def cargo_money():
+    """The Rust arithmetic proptests (Money against the PyDec oracle): a second kill door for money.rs."""
+    return subprocess.run(["cargo", "test", "-q", "-p", "te_core", "--lib", "money"], cwd=ROOT / "crates", env=ENV,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
 def killed(proc):
     failed = [line for line in proc.stdout.splitlines() if line.startswith("FAILED")]
     ok = (proc.returncode == 1 and failed and "ERROR collecting" not in proc.stdout
@@ -143,6 +149,9 @@ def main():
                             continue
                     proc = tests()
                     kill = killed(proc)
+                    if not kill and kind == "rust" and proc.returncode == 0:
+                        proc = cargo_money()
+                        kill = f"cargo test money: {proc.stdout.count('FAILED') or 1} failed" if proc.returncode != 0 and "panicked" in proc.stdout else None
                     if kill:
                         kills.append((name, kill))
                         print(f"KILLED {name}: {kill}", flush=True)

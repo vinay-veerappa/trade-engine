@@ -294,3 +294,20 @@ def test_the_new_spelling_dedupes_in_a_ledger_written_after_the_migration(tmp_pa
         assert desk.ledger.fingerprint_alias("anything") is None  # an unmigrated ledger has no map
     finally:
         desk.ledger.close()
+
+
+def test_every_stored_fingerprint_is_the_mapped_new_one(old) -> None:
+    """Rehashed, not copied: an opaque one is the prefixed hash, a close re-derives from its order."""
+    src, _i, tmp = old
+    pm.migrate(src, tmp / "m.db")
+    mapped = {(r[0], r[2]): (r[1], r[3]) for r in rows(tmp / "m.db", "p7_key_map", "event_seq")}
+    old_fps = {r[0]: json.loads(r[5])["f"]["fingerprint"] for r in rows(src, "events", "seq") if r[3] == "OrdersCreated"}
+    new_fps = {r[0]: json.loads(r[5])["f"] for r in rows(tmp / "m.db", "events", "seq") if r[3] == "OrdersCreated"}
+    assert set(old_fps) == set(new_fps) and old_fps
+    for seq, old_fp in old_fps.items():
+        new, kind = mapped[(old_fp, seq)]
+        assert new_fps[seq]["fingerprint"] == new and new != old_fp
+        if kind == "opaque":
+            assert new == hashlib.sha256(("p7:1:" + old_fp).encode()).hexdigest()
+        else:
+            assert new == pm.order_fp(new_fps[seq]["orders"]["t"][0])
