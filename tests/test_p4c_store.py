@@ -121,6 +121,7 @@ def test_schema_pragmas_and_native_proxy_rows(tmp_path):
         # policy denies file delete/rename; a journal that must be unlinked
         # at commit fails with disk I/O error). The pragma is asserted
         # directly instead.
+        assert old.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert new.conn.execute("PRAGMA journal_mode").fetchone()[0] == "truncate"
         for query in (
             "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -132,10 +133,6 @@ def test_schema_pragmas_and_native_proxy_rows(tmp_path):
                 found = cursor.fetchall()
                 return cursor.description, [r.keys() for r in found], [tuple(r) for r in found]
             assert result(lambda: inspect(old)) == result(lambda: inspect(new)), query
-        # Accepted deviation (a79f3c8): the Rust store journals in TRUNCATE, since data\'s
-        # policy denies the delete/rename that WAL's -wal/-shm need. Pinned exactly.
-        assert old.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert new.conn.execute("PRAGMA journal_mode").fetchone()[0] == "truncate"
         old_row = old.conn.execute("SELECT * FROM events").fetchone()
         new_row = new.conn.execute("SELECT * FROM events").fetchone()
         assert old_row.keys() == new_row.keys()
