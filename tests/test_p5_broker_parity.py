@@ -715,8 +715,7 @@ def test_p5_t9_the_broker_test_module_runs_on_both_sides(monkeypatch) -> None:
     import test_tos_broker as V
     from test_p5_parity import run_module_tests
 
-    plain = {"test_the_fake_is_a_transport_and_the_broker_an_adapter",   # an isinstance check on the class
-             "test_an_inexpressible_queued_ticket_is_rejected_not_raised"}   # pokes the Python _queue (Rust unit test)
+    plain = {"test_the_fake_is_a_transport_and_the_broker_an_adapter"}   # an isinstance check on the class
     monkeypatch.setattr(V, "TosPaperBroker", LockstepBroker)
     names = {n for n in vars(V) if n.startswith("test_")} - plain
     before = sum(OPS.values())
@@ -724,4 +723,4 @@ def test_p5_t9_the_broker_test_module_runs_on_both_sides(monkeypatch) -> None:
     assert ran >= 65, ran
     assert sum(OPS.values()) - before >= 150, sum(OPS.values()) - before
     monkeypatch.setattr(V, "TosPaperBroker", PB.TosPaperBroker)
-    assert run_module_tests(V, only=plain - {"test_an_inexpressible_queued_ticket_is_rejected_not_raised"}) == 1
+    assert run_module_tests(V, only=plain) == 1

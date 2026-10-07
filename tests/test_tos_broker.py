@@ -500,17 +500,18 @@ def test_a_halt_between_queue_and_drain_sends_nothing() -> None:
 
 
 def test_an_inexpressible_queued_ticket_is_rejected_not_raised() -> None:
+    # A GTD ticket cannot be queued at all: netting's MIRRORED_TIFS refuses the order first, so the drain
+    # has nothing to place. (The drain-side UnsupportedCapability rejection of a ticket that did reach the
+    # queue is te_core::tos_paper::broker's unit test an_inexpressible_queued_ticket_is_rejected_not_raised.)
     broker, venue = _connected()
-    broker._queue.append(
-        VenueOrder(
-            venue_order_id="tos:gtd", instrument=P200, order_type=OrderType.LIMIT, side=Side.SELL,
-            quantity=Decimal("1"), submitted_at=T, tif=TimeInForce.GTD, limit_price=Decimal("1.00"),
-            allocations=(VenueOrderAllocation("so-1", "OPT_CSP", Decimal("1")),),
-        )
+    order = Order(
+        order_id="so-1", account_id="OPT_CSP", instrument=P200, order_type=OrderType.LIMIT, side=Side.SELL,
+        quantity=Decimal("1"), command_id="so-1", created_at=T, limit_price=Decimal("1.00"), tif=TimeInForce.GTD,
     )
-    report = broker.drain()
-    assert report.acks[0].status == "REJECTED" and "UnsupportedCapability" in report.acks[0].message
-    assert venue.placed == []
+    batch = broker.mirror_batch([order], holdings={})
+    assert batch.venue_orders == () and [oid for oid, _ in batch.refused] == ["so-1"]
+    assert broker.queued == ()
+    assert broker.drain().acks == () and venue.placed == []
 
 
 # -- the adapter contract -------------------------------------------------------------

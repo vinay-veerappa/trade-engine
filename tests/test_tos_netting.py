@@ -386,17 +386,13 @@ def test_empty_batch_refuses() -> None:
         _net([])
 
 
-def test_a_ticket_error_refuses_its_orders_not_the_batch(monkeypatch) -> None:
-    real = netting._ticket
-
-    def flaky(venue_account, instrument, *args):
-        if instrument == P190:
-            raise ValueError("boom")
-        return real(venue_account, instrument, *args)
-
-    monkeypatch.setattr(netting, "_ticket", flaky)
-    batch = _net([_order("a", "OPT_CSP", Side.SELL, instrument=P200), _order("b", "OPT_CSP", Side.SELL, instrument=P190)])
-    assert "boom" in _reason(batch, "b")
+def test_a_ticket_error_refuses_its_orders_not_the_batch() -> None:
+    # An Order-shaped object that slipped past Order's own check (a LIMIT with no price): the ticket for
+    # its instrument refuses, the other instrument's ticket is still built.
+    bad = _order("b", "OPT_CSP", Side.SELL, instrument=P190)
+    object.__setattr__(bad, "limit_price", None)
+    batch = _net([_order("a", "OPT_CSP", Side.SELL, instrument=P200), bad])
+    assert "LIMIT order must have a limit_price" in _reason(batch, "b")
     assert batch.venue_orders[0].allocations[0].strategy_order_id == "a"
 
 
