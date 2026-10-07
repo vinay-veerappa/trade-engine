@@ -1,5 +1,5 @@
 //! The thinkorswim paperMoney mirror's pure decisions (docs/RUST_PORT.md P5; was
-//! `src/trade_engine/tos_paper/`). Pure: no I/O, no clock (I7), money is `PyDec` carried
+//! `src/trade_engine/tos_paper/`). Pure: no I/O, no clock (I7), money is `Money` carried
 //! as strings (D6). The host transports and the broker's state machine stay Python until
 //! T9/T10; what lives here is what the Python decided from plain data.
 //!

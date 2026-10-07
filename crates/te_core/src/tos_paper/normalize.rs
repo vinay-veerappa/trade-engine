@@ -14,7 +14,7 @@ use super::wire::{jopt_dec, jstr, obj};
 use super::NORMALIZE;
 use crate::ledger::json::Json;
 use crate::ledger::model::{derr, err, R};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::options::{equity_symbol, parse_occ};
 
 fn normalize<T>(msg: impl Into<String>) -> R<T> {
@@ -154,11 +154,11 @@ pub fn book_state_op(doc: &Json) -> R<Json> {
 }
 
 /// `_decimal`: a finite Decimal from a string or an int; a float, a bool or `None` is refused.
-fn decimal(value: &Json, name: &str) -> R<PyDec> {
+fn decimal(value: &Json, name: &str) -> R<Money> {
     if matches!(value, Json::Bool(_) | Json::Float(_) | Json::Null) {
         return normalize(format!("{name} must be a decimal string, got {}", repr(value)));
     }
-    let Some(parsed) = PyDec::parse(&to_str(value)) else {
+    let Some(parsed) = Money::parse(&to_str(value)) else {
         return normalize(format!("{name} is not a number: {}", repr(value)));
     };
     if !parsed.is_finite() {
@@ -222,7 +222,7 @@ fn row_instrument(raw: &Json) -> R<RowInstrument> {
     }
 }
 
-fn whole(d: &PyDec) -> R<bool> {
+fn whole(d: &Money) -> R<bool> {
     d.is_integral().map_err(derr)
 }
 
@@ -244,21 +244,21 @@ pub fn working_order(doc: &Json) -> R<Json> {
     let quantity = decimal(get(raw, "quantity"), "quantity")?;
     let filled_raw = raw.get("filled").cloned().unwrap_or_else(|| jstr("0"));
     let filled = decimal(&filled_raw, "filled")?;
-    let zero = PyDec::zero();
+    let zero = Money::zero();
     if quantity.le(&zero).map_err(derr)? || filled.lt(&zero).map_err(derr)? || filled.gt(&quantity).map_err(derr)? {
         return normalize(format!(
             "working order quantity {} / filled {}",
-            quantity.to_py_string(),
-            filled.to_py_string()
+            quantity.canon(),
+            filled.canon()
         ));
     }
     let instrument = row_instrument(raw)?;
     if matches!(instrument, RowInstrument::Stock(_)) {
         if !whole(&quantity)? {
-            return normalize(format!("stock quantity {} is not a whole number of shares", quantity.to_py_string()));
+            return normalize(format!("stock quantity {} is not a whole number of shares", quantity.canon()));
         }
         if !whole(&filled)? {
-            return normalize(format!("stock filled {} is not a whole number of shares", filled.to_py_string()));
+            return normalize(format!("stock filled {} is not a whole number of shares", filled.canon()));
         }
     }
     let limit = match get(raw, "limit_price") {
@@ -270,8 +270,8 @@ pub fn working_order(doc: &Json) -> R<Json> {
     Ok(obj(vec![
         ("instrument", instrument.json()),
         ("side", jstr(side)),
-        ("quantity", jstr(quantity.to_py_string())),
-        ("filled", jstr(filled.to_py_string())),
+        ("quantity", jstr(quantity.canon())),
+        ("filled", jstr(filled.canon())),
         ("order_type", jstr(order_type)),
         ("limit_price", jopt_dec(&limit)),
         ("state", jstr(state)),
@@ -290,9 +290,9 @@ pub fn order_fill(doc: &Json) -> R<Json> {
         _ => return normalize(format!("order fill row names no all-digit order_id: {}", repr(oid_raw))),
     };
     let filled = decimal(get(raw, "filled"), "filled")?;
-    let zero = PyDec::zero();
+    let zero = Money::zero();
     if filled.lt(&zero).map_err(derr)? || !whole(&filled)? {
-        return normalize(format!("order {oid} filled {}: not a whole non-negative quantity", filled.to_py_string()));
+        return normalize(format!("order {oid} filled {}: not a whole non-negative quantity", filled.canon()));
     }
     let price_raw = get(raw, "avg_price");
     let price = match price_raw {
@@ -309,7 +309,7 @@ pub fn order_fill(doc: &Json) -> R<Json> {
         if bad {
             return normalize(format!(
                 "order {oid} filled {} with no positive average price {}",
-                filled.to_py_string(),
+                filled.canon(),
                 repr(price_raw)
             ));
         }
@@ -320,7 +320,7 @@ pub fn order_fill(doc: &Json) -> R<Json> {
     }
     Ok(obj(vec![
         ("order_id", jstr(oid)),
-        ("filled", jstr(filled.to_py_string())),
+        ("filled", jstr(filled.canon())),
         ("avg_price", if positive { jopt_dec(&price) } else { Json::Null }),
         ("state", jstr(state)),
     ]))
@@ -337,16 +337,16 @@ pub fn position(doc: &Json) -> R<Json> {
     let avg_price = decimal(get(raw, "avg_price"), "avg_price")?;
     if matches!(instrument, RowInstrument::Stock(_)) {
         if !whole(&quantity)? {
-            return normalize(format!("stock quantity {} is not a whole number of shares", quantity.to_py_string()));
+            return normalize(format!("stock quantity {} is not a whole number of shares", quantity.canon()));
         }
-        if avg_price.lt(&PyDec::zero()).map_err(derr)? {
-            return normalize(format!("stock avg_price must not be negative, got {}", avg_price.to_py_string()));
+        if avg_price.lt(&Money::zero()).map_err(derr)? {
+            return normalize(format!("stock avg_price must not be negative, got {}", avg_price.canon()));
         }
     }
     Ok(obj(vec![
         ("instrument", instrument.json()),
-        ("quantity", jstr(quantity.to_py_string())),
-        ("avg_price", jstr(avg_price.to_py_string())),
+        ("quantity", jstr(quantity.canon())),
+        ("avg_price", jstr(avg_price.canon())),
     ]))
 }
 

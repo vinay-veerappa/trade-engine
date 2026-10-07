@@ -14,13 +14,13 @@ use crate::ledger::json::Json;
 use crate::ledger::mirror::{ticket_contracts, MirrorState};
 use crate::ledger::model::{derr, err, Instrument, OptionContract, Side, R};
 use crate::ledger::ops::{abs, add, ge, gt, lt, ne, s, sub, zero, OMap};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::options::Right;
 
 /// The mirror book's holdings, one signed total per contract.
-pub type Held = OMap<Instrument, PyDec>;
+pub type Held = OMap<Instrument, Money>;
 
-fn held_get(held: &Held, instrument: &Instrument) -> PyDec {
+fn held_get(held: &Held, instrument: &Instrument) -> Money {
     held.get(&instrument.hk()).cloned().unwrap_or_else(zero)
 }
 
@@ -87,7 +87,7 @@ fn extend(side: &mut Vec<(String, Vec<OptionContract>)>, c: &OptionContract, uni
 
 /// `uncovered`: per underlying, the short call contracts nothing in `held` covers (only the
 /// counts above zero), in the order the underlyings first appear among the short calls.
-pub fn uncovered(held: &Held) -> R<Vec<(String, PyDec)>> {
+pub fn uncovered(held: &Held) -> R<Vec<(String, Money)>> {
     let mut shorts: Vec<(String, Vec<OptionContract>)> = Vec::new();
     let mut longs: Vec<(String, Vec<OptionContract>)> = Vec::new();
     for (instrument, quantity) in held.iter() {
@@ -115,7 +115,7 @@ pub fn uncovered(held: &Held) -> R<Vec<(String, PyDec)>> {
         left.sort_by(|a, b| b.multiplier.cmp(&a.multiplier));
         let mut count: i128 = 0;
         for call in left {
-            let lot = PyDec::from_i128(call.multiplier);
+            let lot = Money::from_i128(call.multiplier).map_err(derr)?;
             if ge(&shares, &lot)? {
                 shares = sub(&shares, &lot)?;
             } else {
@@ -123,7 +123,7 @@ pub fn uncovered(held: &Held) -> R<Vec<(String, PyDec)>> {
             }
         }
         if count != 0 {
-            found.push((underlying.clone(), PyDec::from_i128(count)));
+            found.push((underlying.clone(), Money::from_i128(count).map_err(derr)?));
         }
     }
     Ok(found)
@@ -155,7 +155,7 @@ pub fn holdings(mirror: &MirrorState) -> R<Held> {
 }
 
 /// What a single-leg SELL of shares or of a call gives up.
-pub type Sold = Option<(Instrument, PyDec)>;
+pub type Sold = Option<(Instrument, Money)>;
 
 /// `_sold` over an order document `{instrument, side, quantity}`.
 pub fn sold_of(order: &Json) -> R<Sold> {
@@ -172,7 +172,7 @@ pub fn sold_of(order: &Json) -> R<Sold> {
     Ok(Some((linstr(instrument)?, req_dec(order, "quantity")?)))
 }
 
-fn lookup(found: &[(String, PyDec)], underlying: &str) -> PyDec {
+fn lookup(found: &[(String, Money)], underlying: &str) -> Money {
     found.iter().find(|(u, _)| u == underlying).map_or_else(zero, |(_, c)| c.clone())
 }
 
@@ -316,9 +316,10 @@ mod tests {
     }
 
     #[test]
-    fn an_infinite_short_is_pythons_overflow_and_a_nan_one_its_invalid_operation() {
+    fn an_infinite_or_nan_quantity_is_refused_at_the_wire() {
+        // P7: Money has no NaN or Infinity (I5); PyDec turned these into overflow / invalid_operation
         let c = call("210", "2026-10-16", 100);
-        assert_eq!(found(&format!(r#"[[{c},"-Infinity"]]"#)).unwrap_err().kind, OVERFLOW_ERROR);
-        assert_eq!(found(&format!(r#"[[{c},"NaN"]]"#)).unwrap_err().kind, "invalid_operation");
+        assert_eq!(found(&format!(r#"[[{c},"-Infinity"]]"#)).unwrap_err().kind, "tos_wire");
+        assert_eq!(found(&format!(r#"[[{c},"NaN"]]"#)).unwrap_err().kind, "tos_wire");
     }
 }

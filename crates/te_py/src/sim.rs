@@ -9,7 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use te_core::ledger::bridge as lb;
 use te_core::ledger::model::{err, Instrument, LErr, Obj, OrderState, OrderType, Side, Tif, R as LR};
-use te_core::ledger::pydec::PyDec;
+use te_core::money::Money;
 use te_core::sim::broker::{self as sb, Alloc, Begin, Book, VFill, VOrder};
 use te_core::sim::snapshot::{self as ss, Origin, Quote, SFill, Snap, Venue};
 use te_core::sim::trailing as tr;
@@ -66,14 +66,14 @@ fn with_clock<T>(now: &Bound<'_, PyAny>, f: impl FnOnce(&mut Clock<'_>) -> LR<T>
     host.finish(r)
 }
 
-pub(crate) fn dec(s: &str) -> LR<PyDec> {
-    match PyDec::parse(s) {
+pub(crate) fn dec(s: &str) -> LR<Money> {
+    match Money::parse(s) {
         Some(d) => Ok(d),
         None => err("value", format!("not a Decimal: {s:?}")),
     }
 }
 
-fn opt_dec(s: &Option<String>) -> LR<Option<PyDec>> {
+fn opt_dec(s: &Option<String>) -> LR<Option<Money>> {
     s.as_deref().map(dec).transpose()
 }
 
@@ -227,7 +227,7 @@ impl SimBook {
         let r = with_clock(now, |c| book.replace_begin(id, opt_dec(&new_quantity)?, c))?;
         Ok(match r {
             Begin::Done(a) => ("ack", ack(a).into_pyobject(py)?.into_any().unbind()),
-            Begin::Go(q) => ("go", q.to_py_string().into_pyobject(py)?.into_any().unbind()),
+            Begin::Go(q) => ("go", q.canon().into_pyobject(py)?.into_any().unbind()),
         })
     }
 
@@ -244,7 +244,7 @@ impl SimBook {
         let rows = with_clock(now, |c| self.book.orders_since(since, c))?;
         Ok(rows
             .into_iter()
-            .map(|(id, st, filled, rem, at)| (id, st.value(), filled.to_py_string(), rem.to_py_string(), at.iso))
+            .map(|(id, st, filled, rem, at)| (id, st.value(), filled.canon(), rem.canon(), at.iso))
             .collect())
     }
 
@@ -266,8 +266,8 @@ impl SimBook {
         (
             f.fill_id.clone(),
             f.order_id.clone(),
-            f.quantity.to_py_string(),
-            f.price.to_py_string(),
+            f.quantity.canon(),
+            f.price.canon(),
             f.filled_at.iso.clone(),
             f.side.value(),
             f.src,
@@ -277,7 +277,7 @@ impl SimBook {
     /// `(instrument hash key, quantity, avg, as_of)` by symbol.
     fn positions(&mut self, now: &Bound<'_, PyAny>) -> PyResult<Vec<PosT>> {
         let rows = with_clock(now, |c| self.book.positions(c))?;
-        Ok(rows.into_iter().map(|p| (p.instr.hk(), p.qty.to_py_string(), p.avg.to_py_string(), p.as_of.iso)).collect())
+        Ok(rows.into_iter().map(|p| (p.instr.hk(), p.qty.canon(), p.avg.canon(), p.as_of.iso)).collect())
     }
 
     fn cash_events(&self, since: &str) -> PyResult<()> {
@@ -395,7 +395,7 @@ impl SnapBook {
         let rows = with_clock(now, |c| self.venue.orders_since(since, c))?;
         Ok(rows
             .into_iter()
-            .map(|(id, st, filled, rem, at)| (id, st.value(), filled.to_py_string(), rem.to_py_string(), at.iso))
+            .map(|(id, st, filled, rem, at)| (id, st.value(), filled.canon(), rem.canon(), at.iso))
             .collect())
     }
 
@@ -419,7 +419,7 @@ impl SnapBook {
     ) -> PyResult<Option<String>> {
         let host = Host::new();
         let v = &self.venue;
-        let r = (|| -> LR<Option<PyDec>> {
+        let r = (|| -> LR<Option<Money>> {
             let mut lookup = |occ: &str| -> LR<Option<Quote>> { lookup_quote(quote, occ, &host) };
             let mut s = Snap {
                 underlying,
@@ -430,7 +430,7 @@ impl SnapBook {
             v.model_price(&instrument(instr)?, side(side_)?, &mut s)
         })();
         match r {
-            Ok(p) => Ok(p.map(|d| d.to_py_string())),
+            Ok(p) => Ok(p.map(|d| d.canon())),
             Err(_) if host.has() => Err(host.take()),
             Err(e) => Err(refuse(e)),
         }
@@ -446,11 +446,11 @@ impl SnapBook {
         (
             f.fill_id.clone(),
             f.order_id.clone(),
-            f.quantity.to_py_string(),
-            f.price.to_py_string(),
+            f.quantity.canon(),
+            f.price.canon(),
             f.filled_at.iso.clone(),
             f.side.value(),
-            f.fee.to_py_string(),
+            f.fee.canon(),
             f.leg_id.clone(),
             f.leg,
             f.src,
@@ -467,7 +467,7 @@ impl SnapBook {
                     Origin::Restored(i) => ("restored", i),
                     Origin::Fill(i) => ("fill", i),
                 };
-                (origin, q.to_py_string())
+                (origin, q.canon())
             })
             .collect();
         Ok((at.iso, rows))
@@ -538,7 +538,7 @@ pub(crate) fn trail_update(
     state: TrailT,
     price: &str,
 ) -> PyResult<(Option<bool>, TrailT, Option<(String, String)>)> {
-    let setup = || -> LR<(tr::Trail, PyDec)> {
+    let setup = || -> LR<(tr::Trail, Money)> {
         let (extreme, stop, triggered) = &state;
         Ok((
             tr::Trail {
@@ -553,7 +553,7 @@ pub(crate) fn trail_update(
     };
     let (mut t, p) = setup().map_err(refuse)?;
     let r = tr::update(&mut t, &p);
-    let out = (t.extreme.map(|d| d.to_py_string()), t.stop_price.map(|d| d.to_py_string()), t.triggered);
+    let out = (t.extreme.map(|d| d.canon()), t.stop_price.map(|d| d.canon()), t.triggered);
     Ok(match r {
         Ok(b) => (Some(b), out, None),
         Err(e) => (None, out, Some((e.kind.to_string(), e.msg))),
@@ -576,9 +576,9 @@ pub(crate) fn oms_open_structures(state: &str) -> PyResult<Vec<OpenT>> {
                 (
                     o.entry_order_id,
                     o.command_id,
-                    o.open_quantities.iter().map(|q| q.to_py_string()).collect(),
-                    o.units.to_py_string(),
-                    o.entry_price.to_py_string(),
+                    o.open_quantities.iter().map(|q| q.canon()).collect(),
+                    o.units.canon(),
+                    o.entry_price.canon(),
                     o.opened_fill,
                     o.target_order_id,
                     o.closing_order_id,
@@ -596,7 +596,7 @@ pub(crate) fn oms_uncovered_calls(state: &str, closing_counts: bool) -> PyResult
         let st = lb::account_from_text(state)?;
         Ok(te_core::oms::structures::uncovered_calls(&st, closing_counts)?
             .into_iter()
-            .map(|(u, a, b)| (u, a.to_py_string(), b.to_py_string()))
+            .map(|(u, a, b)| (u, a.canon(), b.canon()))
             .collect())
     };
     r().map_err(refuse)
@@ -641,7 +641,7 @@ type SnapT = (String, String, bool, Vec<QuoteT>);
 /// (name, passed, measured is a Decimal, measured, threshold is a Decimal, threshold, reason)
 type ResultT = (String, bool, bool, String, bool, String, String);
 
-fn pair(p: &Option<(String, String)>) -> LR<Option<(PyDec, PyDec)>> {
+fn pair(p: &Option<(String, String)>) -> LR<Option<(Money, Money)>> {
     match p {
         Some((a, b)) => Ok(Some((dec(a)?, dec(b)?))),
         None => Ok(None),
@@ -707,7 +707,7 @@ fn snapshot_of(s: &SnapT) -> LR<ro::Snapshot> {
 fn val(v: ro::Val) -> (bool, String) {
     match v {
         ro::Val::S(s) => (false, s),
-        ro::Val::D(d) => (true, d.to_py_string()),
+        ro::Val::D(d) => (true, d.canon()),
     }
 }
 

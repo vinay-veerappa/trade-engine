@@ -13,15 +13,15 @@ use crate::ledger::json::Json;
 use crate::ledger::mirror::{signed_contracts, SignAt};
 use crate::ledger::model::{err, opt_dec_eq, parse_datetime, Instrument, OrderState, OrderType, Side, R};
 use crate::ledger::ops::{add, eq, ne, neg, s, sub, zero, OMap};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 
 pub const UNREADABLE: &str = "<venue unreadable>";
 
 /// One contract's signed total, the first key spelling kept.
-pub type Book = OMap<Instrument, PyDec>;
+pub type Book = OMap<Instrument, Money>;
 
 /// `_signed`: a BUY is the quantity itself, a SELL its negation.
-pub fn signed(side: Side, quantity: &PyDec) -> R<PyDec> {
+pub fn signed(side: Side, quantity: &Money) -> R<Money> {
     if side == Side::Buy {
         Ok(quantity.clone())
     } else {
@@ -32,10 +32,10 @@ pub fn signed(side: Side, quantity: &PyDec) -> R<PyDec> {
 pub struct Row {
     pub instrument: Instrument,
     pub side: Side,
-    pub quantity: PyDec,
-    pub filled: PyDec,
+    pub quantity: Money,
+    pub filled: Money,
     pub order_type: OrderType,
-    pub limit_price: Option<PyDec>,
+    pub limit_price: Option<Money>,
     pub state: OrderState,
 }
 
@@ -44,7 +44,7 @@ impl Row {
         matches!(self.state, OrderState::Submitted | OrderState::Accepted | OrderState::PartiallyFilled)
     }
 
-    pub fn remaining(&self) -> R<PyDec> {
+    pub fn remaining(&self) -> R<Money> {
         sub(&self.quantity, &self.filled)
     }
 }
@@ -82,7 +82,7 @@ pub fn pairs_json(book: &Book) -> Json {
     Json::Arr(book.iter().map(|(i, q)| Json::Arr(vec![linstr_json(i), jstr(s(q))])).collect())
 }
 
-pub fn positions_of(j: &Json) -> R<Vec<(Instrument, PyDec)>> {
+pub fn positions_of(j: &Json) -> R<Vec<(Instrument, Money)>> {
     let mut out = Vec::new();
     for p in req_arr(j, "positions")? {
         out.push((linstr(req(p, "instrument")?)?, req_dec(p, "quantity")?));
@@ -91,7 +91,7 @@ pub fn positions_of(j: &Json) -> R<Vec<(Instrument, PyDec)>> {
 }
 
 /// `position_book`: the venue's positions summed per contract.
-pub fn position_book(positions: &[(Instrument, PyDec)]) -> R<Book> {
+pub fn position_book(positions: &[(Instrument, Money)]) -> R<Book> {
     let mut book = Book::new();
     for (instrument, quantity) in positions {
         let hk = instrument.hk();
@@ -101,7 +101,7 @@ pub fn position_book(positions: &[(Instrument, PyDec)]) -> R<Book> {
     Ok(book)
 }
 
-pub fn get(book: &Book, instrument: &Instrument) -> PyDec {
+pub fn get(book: &Book, instrument: &Instrument) -> Money {
     book.get(&instrument.hk()).cloned().unwrap_or_else(zero)
 }
 
@@ -135,7 +135,7 @@ pub fn reconcile(
     venue: &str,
     as_of: &str,
     expected: &Book,
-    positions: &[(Instrument, PyDec)],
+    positions: &[(Instrument, Money)],
     working: &[Row],
 ) -> R<Json> {
     let held = position_book(positions)?;
@@ -204,8 +204,8 @@ pub struct Ticket {
     pub instrument: Instrument,
     pub order_type: OrderType,
     pub side: Side,
-    pub quantity: PyDec,
-    pub limit_price: Option<PyDec>,
+    pub quantity: Money,
+    pub limit_price: Option<Money>,
 }
 
 fn ticket_of(j: &Json) -> R<Ticket> {
@@ -219,7 +219,7 @@ fn ticket_of(j: &Json) -> R<Ticket> {
 }
 
 /// `ticket_contracts` of the reconcile module: signed contracts `units` (default all) of a ticket.
-pub fn ticket_contracts(ticket: &Ticket, units: Option<&PyDec>) -> R<Book> {
+pub fn ticket_contracts(ticket: &Ticket, units: Option<&Money>) -> R<Book> {
     let units = units.unwrap_or(&ticket.quantity);
     signed_contracts(&ticket.instrument, ticket.side, units, SignAt::Last)
 }
@@ -231,7 +231,7 @@ type Verdict = (&'static str, String);
 pub fn confirm_ticket(
     ticket: &Ticket,
     before: &Book,
-    positions: &[(Instrument, PyDec)],
+    positions: &[(Instrument, Money)],
     working: &[Row],
     claimed: &mut Vec<usize>,
 ) -> R<Verdict> {
@@ -275,7 +275,7 @@ pub fn confirm_ticket(
 fn confirm_combo(
     ticket: &Ticket,
     before: &Book,
-    positions: &[(Instrument, PyDec)],
+    positions: &[(Instrument, Money)],
     working: &[Row],
     claimed: &mut Vec<usize>,
 ) -> R<Verdict> {

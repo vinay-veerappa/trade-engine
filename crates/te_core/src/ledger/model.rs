@@ -14,7 +14,7 @@
 
 use chrono::{Datelike, NaiveDate};
 
-use super::pydec::{DKind, DecErr, PyDec};
+use crate::money::{DecErr, Money};
 use crate::options::pyrules;
 use crate::options::{self, ContractWire, DecWire, OptionError, Right, Special};
 
@@ -383,7 +383,7 @@ pub enum Val {
     Bool(bool),
     Int(i128),
     Str(String),
-    Dec(PyDec),
+    Dec(Money),
     DateTime(DateTime),
     Date(NaiveDate),
     Side(Side),
@@ -427,7 +427,7 @@ impl Val {
 pub struct OptionContract {
     pub underlying: String,
     pub expiry: NaiveDate,
-    pub strike: PyDec,
+    pub strike: Money,
     pub right: Right,
     pub multiplier: i128,
 }
@@ -480,8 +480,8 @@ impl ContractMonth {
 pub struct FutureContract {
     pub root: String,
     pub contract_month: Option<ContractMonth>,
-    pub tick_size: PyDec,
-    pub point_value: PyDec,
+    pub tick_size: Money,
+    pub point_value: Money,
 }
 
 impl FutureContract {
@@ -508,11 +508,11 @@ pub enum Instrument {
     Future(FutureContract),
 }
 
-pub fn dec_eq(a: &PyDec, b: &PyDec) -> bool {
+pub fn dec_eq(a: &Money, b: &Money) -> bool {
     a.eq_num(b).unwrap_or(false)
 }
 
-pub fn opt_dec_eq(a: &Option<PyDec>, b: &Option<PyDec>) -> bool {
+pub fn opt_dec_eq(a: &Option<Money>, b: &Option<Money>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(x), Some(y)) => dec_eq(x, y),
@@ -520,19 +520,13 @@ pub fn opt_dec_eq(a: &Option<PyDec>, b: &Option<PyDec>) -> bool {
     }
 }
 
-pub fn decwire(d: &PyDec) -> DecWire {
-    let special = match d.kind() {
-        DKind::Finite => Special::Finite,
-        DKind::Inf => Special::Inf,
-        DKind::QNan => Special::QuietNan,
-        DKind::SNan => Special::SignalingNan,
-    };
+pub fn decwire(d: &Money) -> DecWire {
     DecWire {
         neg: d.is_negative(),
         digits: d.coefficient().to_string(),
-        exp: if d.is_finite() { d.exponent() } else { 0 },
-        special,
-        text: d.to_py_string(),
+        exp: d.exponent(),
+        special: Special::Finite,
+        text: d.canon(),
     }
 }
 
@@ -645,12 +639,12 @@ pub struct Order {
     pub instrument: Instrument,
     pub order_type: OrderType,
     pub side: Side,
-    pub quantity: PyDec,
+    pub quantity: Money,
     pub command_id: String,
     pub created_at: DateTime,
-    pub limit_price: Option<PyDec>,
-    pub stop_price: Option<PyDec>,
-    pub trail_amount: Option<PyDec>,
+    pub limit_price: Option<Money>,
+    pub stop_price: Option<Money>,
+    pub trail_amount: Option<Money>,
     pub tif: Tif,
     pub state: OrderState,
     pub parent_order_id: Option<String>,
@@ -684,12 +678,12 @@ pub struct Fill {
     pub order_id: String,
     pub account_id: String,
     pub instrument: Instrument,
-    pub quantity: PyDec,
-    pub price: PyDec,
+    pub quantity: Money,
+    pub price: Money,
     pub venue_env: String,
     pub filled_at: DateTime,
     pub side: Side,
-    pub fee: PyDec,
+    pub fee: Money,
     pub leg_id: Option<String>,
     pub venue_order_id: Option<String>,
     pub venue_execution_id: Option<String>,
@@ -698,8 +692,8 @@ pub struct Fill {
 #[derive(Debug, Clone)]
 pub struct Lot {
     pub lot_id: String,
-    pub quantity: PyDec,
-    pub cost_basis: PyDec,
+    pub quantity: Money,
+    pub cost_basis: Money,
     pub acquired_at: DateTime,
     pub side: Side,
 }
@@ -719,7 +713,7 @@ pub struct RiskVerdict {
     pub accepted: bool,
     pub evaluations: Vec<RiskRuleResult>,
     pub refusal_reasons: Vec<String>,
-    pub approved_quantity: Option<PyDec>,
+    pub approved_quantity: Option<Money>,
 }
 
 #[derive(Debug, Clone)]
@@ -775,16 +769,16 @@ pub struct OrderUpdated {
 #[derive(Debug, Clone)]
 pub struct EmulatedOrderState {
     pub order_id: String,
-    pub observed_price: Option<PyDec>,
-    pub extreme: Option<PyDec>,
-    pub stop_price: Option<PyDec>,
+    pub observed_price: Option<Money>,
+    pub extreme: Option<Money>,
+    pub stop_price: Option<Money>,
     pub triggered: bool,
     pub reason: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct CashFlow {
-    pub amount: PyDec,
+    pub amount: Money,
     pub kind: String,
     pub as_of: DateTime,
     pub note: Option<String>,
@@ -793,7 +787,7 @@ pub struct CashFlow {
 #[derive(Debug, Clone)]
 pub struct Mark {
     pub instrument: Instrument,
-    pub price: PyDec,
+    pub price: Money,
     pub as_of: DateTime,
     pub source: Option<String>,
 }
@@ -819,9 +813,9 @@ pub struct VenueHaltCleared {
 pub struct OptionLifecycle {
     pub account_id: String,
     pub contract: OptionContract,
-    pub quantity: PyDec,
+    pub quantity: Money,
     pub held: Side,
-    pub underlying_price: PyDec,
+    pub underlying_price: Money,
     pub price_source: String,
     pub as_of: DateTime,
     pub reason: String,
@@ -841,7 +835,7 @@ pub struct EodRun {
 pub struct MirrorAllocation {
     pub strategy_order_id: String,
     pub strategy_account: String,
-    pub quantity: PyDec,
+    pub quantity: Money,
 }
 
 #[derive(Debug, Clone)]
@@ -850,9 +844,9 @@ pub struct MirrorQueued {
     pub ticket_key: String,
     pub instrument: Instrument,
     pub side: Side,
-    pub quantity: PyDec,
+    pub quantity: Money,
     pub order_type: OrderType,
-    pub limit_price: Option<PyDec>,
+    pub limit_price: Option<Money>,
     pub tif: Tif,
     pub allocations: Vec<MirrorAllocation>,
     pub at: DateTime,
@@ -904,8 +898,8 @@ pub struct MirrorFill {
     pub venue: String,
     pub ticket_key: String,
     pub venue_order_id: String,
-    pub filled: PyDec,
-    pub avg_price: PyDec,
+    pub filled: Money,
+    pub avg_price: Money,
     pub at: DateTime,
 }
 
@@ -1039,13 +1033,13 @@ fn x_int(v: Val, n: &str) -> R<i128> {
         o => bad_type("an int", n, &o),
     }
 }
-fn x_dec(v: Val, n: &str) -> R<PyDec> {
+fn x_dec(v: Val, n: &str) -> R<Money> {
     match v {
         Val::Dec(d) => Ok(d),
         o => bad_type("a Decimal", n, &o),
     }
 }
-fn x_odec(v: Val, n: &str) -> R<Option<PyDec>> {
+fn x_odec(v: Val, n: &str) -> R<Option<Money>> {
     match v {
         Val::None => Ok(None),
         Val::Dec(d) => Ok(Some(d)),
@@ -1111,23 +1105,23 @@ fn x_map(v: Val, n: &str) -> R<Vec<(String, Val)>> {
 }
 
 /// `_as_decimal`: `Decimal(str(value))` unless it already is one; non-finite refuses.
-pub fn as_decimal(v: Val, name: &str) -> R<PyDec> {
+pub fn as_decimal(v: Val, name: &str) -> R<Money> {
     let d = match v {
         Val::Dec(d) => d,
-        Val::Int(i) => PyDec::from_i128(i),
-        Val::Str(s) => match PyDec::parse(&s) {
+        Val::Int(i) => Money::from_i128(i).map_err(derr)?,
+        Val::Str(s) => match Money::parse(&s) {
             Some(d) => d,
             None => return err("invalid_operation", ""),
         },
         _ => return err("invalid_operation", ""),
     };
     if !d.is_finite() {
-        return err("payload", format!("{name} must be finite, got {}", d.to_py_string()));
+        return err("payload", format!("{name} must be finite, got {}", d.canon()));
     }
     Ok(d)
 }
 
-fn as_odecimal(v: Val, name: &str) -> R<Option<PyDec>> {
+fn as_odecimal(v: Val, name: &str) -> R<Option<Money>> {
     match v {
         Val::None => Ok(None),
         o => as_decimal(o, name).map(Some),
@@ -1149,13 +1143,13 @@ fn pnonempty(s: &str, msg: &str) -> R<()> {
 }
 
 /// `x <= 0`, `x < 0`, `x > 0` against zero (a NaN raises `invalid_operation`).
-pub fn cmp0(d: &PyDec) -> R<std::cmp::Ordering> {
+pub fn cmp0(d: &Money) -> R<std::cmp::Ordering> {
     d.cmp_int(0).map_err(derr)
 }
-fn le0(d: &PyDec) -> R<bool> {
+fn le0(d: &Money) -> R<bool> {
     Ok(cmp0(d)? != std::cmp::Ordering::Greater)
 }
-fn lt0(d: &PyDec) -> R<bool> {
+fn lt0(d: &Money) -> R<bool> {
     Ok(cmp0(d)? == std::cmp::Ordering::Less)
 }
 
@@ -1185,8 +1179,8 @@ pub fn make_option(
     // `Decimal(str(strike))` for anything that is not already a Decimal
     let strike = match strike {
         Val::Dec(d) => d,
-        Val::Int(i) => PyDec::from_i128(i),
-        Val::Str(s) => PyDec::parse(&s).map_or_else(|| err("invalid_operation", ""), Ok)?,
+        Val::Int(i) => Money::from_i128(i).map_err(derr)?,
+        Val::Str(s) => Money::parse(&s).map_or_else(|| err("invalid_operation", ""), Ok)?,
         _ => return err("invalid_operation", ""),
     };
     let wire = decwire(&strike);
@@ -1263,9 +1257,9 @@ pub fn build_combo_leg(f: Vec<(String, Val)>) -> R<ComboLeg> {
 /// `validate_order_prices`.
 pub fn validate_order_prices(
     ot: OrderType,
-    limit: &Option<PyDec>,
-    stop: &Option<PyDec>,
-    trail: &Option<PyDec>,
+    limit: &Option<Money>,
+    stop: &Option<Money>,
+    trail: &Option<Money>,
 ) -> R<()> {
     let v = |m: &str| err("value", m);
     match ot {
@@ -1328,12 +1322,12 @@ pub fn validate_order_prices(
     }
     if let Some(l) = limit {
         if le0(l)? {
-            return err("value", format!("limit_price must be positive, got {}", l.to_py_string()));
+            return err("value", format!("limit_price must be positive, got {}", l.canon()));
         }
     }
     if let Some(s) = stop {
         if le0(s)? {
-            return err("value", format!("stop_price must be positive, got {}", s.to_py_string()));
+            return err("value", format!("stop_price must be positive, got {}", s.canon()));
         }
     }
     Ok(())
@@ -1392,7 +1386,7 @@ pub fn build_order(f: Vec<(String, Val)>) -> R<Order> {
     nonempty(&account_id, "account_id must be non-empty")?;
     nonempty(&command_id, "command_id must be non-empty (I3)")?;
     if le0(&quantity)? {
-        return err("value", format!("Order quantity must be positive, got {} (I5)", quantity.to_py_string()));
+        return err("value", format!("Order quantity must be positive, got {} (I5)", quantity.canon()));
     }
     validate_order_prices(order_type, &limit_price, &stop_price, &trail_amount)?;
     Ok(Order {
@@ -1444,7 +1438,7 @@ pub fn build_fill(f: Vec<(String, Val)>) -> R<Fill> {
     let filled_at = x_dt(k.req("filled_at"), "filled_at")?;
     let side = x_side(k.req("side"), "side")?;
     let fee = match k.take("fee") {
-        None => PyDec::zero(),
+        None => Money::zero(),
         Some(v) => x_dec(v, "fee")?,
     };
     let leg_id = k.take("leg_id").map_or(Ok(None), |v| x_ostr(v, "leg_id"))?;
@@ -1454,10 +1448,10 @@ pub fn build_fill(f: Vec<(String, Val)>) -> R<Fill> {
     nonempty(&order_id, "order_id must be non-empty")?;
     nonempty(&account_id, "account_id must be non-empty")?;
     if le0(&quantity)? {
-        return err("value", format!("Fill quantity must be strictly positive, got {}", quantity.to_py_string()));
+        return err("value", format!("Fill quantity must be strictly positive, got {}", quantity.canon()));
     }
     if le0(&price)? {
-        return err("value", format!("Fill price must be strictly positive, got {} (I5)", price.to_py_string()));
+        return err("value", format!("Fill price must be strictly positive, got {} (I5)", price.canon()));
     }
     if !matches!(venue_env.as_str(), "sim" | "paper" | "live") {
         return err("value", format!("Invalid venue_env '{venue_env}'"));
@@ -1480,13 +1474,13 @@ pub fn build_fill(f: Vec<(String, Val)>) -> R<Fill> {
 }
 
 /// `Lot.__post_init__`, shared by the decoder and the fold (which builds lots too).
-pub fn make_lot(lot_id: String, quantity: PyDec, cost_basis: PyDec, acquired_at: DateTime, side: Side) -> R<Lot> {
+pub fn make_lot(lot_id: String, quantity: Money, cost_basis: Money, acquired_at: DateTime, side: Side) -> R<Lot> {
     nonempty(&lot_id, "lot_id must be non-empty")?;
     if le0(&quantity)? {
-        return err("value", format!("Lot quantity must be positive, got {}", quantity.to_py_string()));
+        return err("value", format!("Lot quantity must be positive, got {}", quantity.canon()));
     }
     if le0(&cost_basis)? {
-        return err("value", format!("Lot cost_basis must be positive, got {}", cost_basis.to_py_string()));
+        return err("value", format!("Lot cost_basis must be positive, got {}", cost_basis.canon()));
     }
     Ok(Lot { lot_id, quantity, cost_basis, acquired_at, side })
 }
@@ -1722,7 +1716,7 @@ pub fn build_order_updated(f: Vec<(String, Val)>) -> R<OrderUpdated> {
     Ok(OrderUpdated { order, reason, venue_order_id })
 }
 
-fn positive_opt(v: Val, name: &str, label: &str) -> R<Option<PyDec>> {
+fn positive_opt(v: Val, name: &str, label: &str) -> R<Option<Money>> {
     let d = as_odecimal(v, name)?;
     if let Some(x) = &d {
         if le0(x)? {
@@ -1791,7 +1785,7 @@ pub fn build_mark(f: Vec<(String, Val)>) -> R<Mark> {
     let source = k.take("source").map_or(Ok(None), |v| x_ostr(v, "source"))?;
     let price = as_decimal(price, "Mark.price")?;
     if le0(&price)? {
-        return err("payload", format!("Mark.price must be positive, got {} (I5)", price.to_py_string()));
+        return err("payload", format!("Mark.price must be positive, got {} (I5)", price.canon()));
     }
     Ok(Mark { instrument, price, as_of, source })
 }
@@ -1881,7 +1875,7 @@ pub fn build_lifecycle(f: Vec<(String, Val)>) -> R<OptionLifecycle> {
     if le0(&quantity)? || !quantity.is_integral().map_err(derr)? {
         return err(
             "payload",
-            format!("OptionLifecycle.quantity must be a positive whole number of contracts, got {}", quantity.to_py_string()),
+            format!("OptionLifecycle.quantity must be a positive whole number of contracts, got {}", quantity.canon()),
         );
     }
     let held = match held {
@@ -1892,7 +1886,7 @@ pub fn build_lifecycle(f: Vec<(String, Val)>) -> R<OptionLifecycle> {
     if le0(&underlying_price)? {
         return err(
             "payload",
-            format!("OptionLifecycle.underlying_price must be positive, got {} (I5)", underlying_price.to_py_string()),
+            format!("OptionLifecycle.underlying_price must be positive, got {} (I5)", underlying_price.canon()),
         );
     }
     pnonempty(&price_source, "OptionLifecycle.price_source must be non-empty (I11)")?;
@@ -1921,7 +1915,7 @@ pub fn build_eod_run(f: Vec<(String, Val)>) -> R<EodRun> {
 }
 
 /// `_require_whole`.
-fn require_whole(v: PyDec, name: &str, positive: bool) -> R<PyDec> {
+fn require_whole(v: Money, name: &str, positive: bool) -> R<Money> {
     let value = v;
     let whole = value.is_integral().map_err(derr)?;
     let neg = lt0(&value)?;
@@ -1930,13 +1924,13 @@ fn require_whole(v: PyDec, name: &str, positive: bool) -> R<PyDec> {
         let kind = if positive { "a positive" } else { "a non-negative" };
         return err(
             "payload",
-            format!("{name} must be {kind} whole number of contracts, got {} (I5)", value.to_py_string()),
+            format!("{name} must be {kind} whole number of contracts, got {} (I5)", value.canon()),
         );
     }
     Ok(value)
 }
 
-fn require_whole_val(v: Val, name: &str, positive: bool) -> R<PyDec> {
+fn require_whole_val(v: Val, name: &str, positive: bool) -> R<Money> {
     let d = as_decimal(v, name)?;
     require_whole(d, name, positive)
 }
@@ -2073,7 +2067,7 @@ pub fn build_mirror_queued(f: Vec<(String, Val)>) -> R<MirrorQueued> {
     if ids.len() != allocs.len() {
         return err("payload", "MirrorQueued allocates one strategy order twice (I3)");
     }
-    let mut total = PyDec::zero();
+    let mut total = Money::zero();
     for a in &allocs {
         total = total.add(&a.quantity).map_err(derr)?;
     }
@@ -2082,8 +2076,8 @@ pub fn build_mirror_queued(f: Vec<(String, Val)>) -> R<MirrorQueued> {
             "payload",
             format!(
                 "MirrorQueued allocations total {} but the ticket is {} (I11)",
-                total.to_py_string(),
-                quantity.to_py_string()
+                total.canon(),
+                quantity.canon()
             ),
         );
     }
@@ -2175,7 +2169,7 @@ pub fn build_mirror_fill(f: Vec<(String, Val)>) -> R<MirrorFill> {
     let filled = require_whole_val(filled, "MirrorFill.filled", true)?;
     let avg_price = as_decimal(avg, "MirrorFill.avg_price")?;
     if le0(&avg_price)? {
-        return err("payload", format!("MirrorFill.avg_price must be positive, got {} (I5)", avg_price.to_py_string()));
+        return err("payload", format!("MirrorFill.avg_price must be positive, got {} (I5)", avg_price.canon()));
     }
     Ok(MirrorFill { venue, ticket_key, venue_order_id, filled, avg_price, at })
 }

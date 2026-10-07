@@ -6,75 +6,80 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 use super::model::{derr, R};
-use super::pydec::PyDec;
+use crate::money::Money;
 
-pub fn zero() -> PyDec {
-    PyDec::zero()
+pub fn zero() -> Money {
+    Money::zero()
 }
 
-pub fn add(a: &PyDec, b: &PyDec) -> R<PyDec> {
+/// An integer as a `Money`, refusing past the bound.
+pub fn dint(n: i128) -> R<Money> {
+    Money::from_i128(n).map_err(derr)
+}
+
+pub fn add(a: &Money, b: &Money) -> R<Money> {
     a.add(b).map_err(derr)
 }
 
-pub fn sub(a: &PyDec, b: &PyDec) -> R<PyDec> {
+pub fn sub(a: &Money, b: &Money) -> R<Money> {
     a.sub(b).map_err(derr)
 }
 
-pub fn mul(a: &PyDec, b: &PyDec) -> R<PyDec> {
+pub fn mul(a: &Money, b: &Money) -> R<Money> {
     a.mul(b).map_err(derr)
 }
 
-pub fn mul_i(a: &PyDec, n: i128) -> R<PyDec> {
+pub fn mul_i(a: &Money, n: i128) -> R<Money> {
     a.mul_i128(n).map_err(derr)
 }
 
-pub fn div(a: &PyDec, b: &PyDec) -> R<PyDec> {
+pub fn div(a: &Money, b: &Money) -> R<Money> {
     a.div(b).map_err(derr)
 }
 
-pub fn div_i(a: &PyDec, n: i128) -> R<PyDec> {
-    a.div(&PyDec::from_i128(n)).map_err(derr)
+pub fn div_i(a: &Money, n: i128) -> R<Money> {
+    a.div(&dint(n)?).map_err(derr)
 }
 
-pub fn neg(a: &PyDec) -> R<PyDec> {
+pub fn neg(a: &Money) -> R<Money> {
     a.neg().map_err(derr)
 }
 
-pub fn abs(a: &PyDec) -> R<PyDec> {
+pub fn abs(a: &Money) -> R<Money> {
     a.abs().map_err(derr)
 }
 
-pub fn cmp(a: &PyDec, b: &PyDec) -> R<Ordering> {
+pub fn cmp(a: &Money, b: &Money) -> R<Ordering> {
     a.cmp_ord(b).map_err(derr)
 }
 
-pub fn lt(a: &PyDec, b: &PyDec) -> R<bool> {
+pub fn lt(a: &Money, b: &Money) -> R<bool> {
     a.lt(b).map_err(derr)
 }
 
-pub fn le(a: &PyDec, b: &PyDec) -> R<bool> {
+pub fn le(a: &Money, b: &Money) -> R<bool> {
     a.le(b).map_err(derr)
 }
 
-pub fn gt(a: &PyDec, b: &PyDec) -> R<bool> {
+pub fn gt(a: &Money, b: &Money) -> R<bool> {
     a.gt(b).map_err(derr)
 }
 
-pub fn ge(a: &PyDec, b: &PyDec) -> R<bool> {
+pub fn ge(a: &Money, b: &Money) -> R<bool> {
     a.ge(b).map_err(derr)
 }
 
-pub fn eq(a: &PyDec, b: &PyDec) -> R<bool> {
+pub fn eq(a: &Money, b: &Money) -> R<bool> {
     a.eq_num(b).map_err(derr)
 }
 
-pub fn ne(a: &PyDec, b: &PyDec) -> R<bool> {
+pub fn ne(a: &Money, b: &Money) -> R<bool> {
     eq(a, b).map(|e| !e)
 }
 
 /// `str(d)`.
-pub fn s(d: &PyDec) -> String {
-    d.to_py_string()
+pub fn s(d: &Money) -> String {
+    d.canon()
 }
 
 /// A dict that keeps insertion order, as Python's does: setting an existing key replaces

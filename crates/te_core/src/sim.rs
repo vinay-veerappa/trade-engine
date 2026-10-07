@@ -17,7 +17,7 @@ use chrono_tz::America::New_York;
 
 use crate::calendar::{self as cal, CalendarError};
 use crate::ledger::model::{err, parse_datetime, DateTime, LErr, R};
-use crate::ledger::pydec::{DecErr, PyDec};
+use crate::money::{DecErr, Money};
 
 /// The clock: returns `clock.now_utc().isoformat()`.
 pub type Clock<'a> = dyn FnMut() -> R<String> + 'a;
@@ -161,17 +161,17 @@ pub fn roll_next(d: NaiveDate) -> R<NaiveDate> {
 }
 
 /// Python's `min(a, b)`: `a` unless `b < a`.
-pub fn dmin(a: &PyDec, b: &PyDec) -> R<PyDec> {
+pub fn dmin(a: &Money, b: &Money) -> R<Money> {
     Ok(if b.lt(a).map_err(dk)? { b.clone() } else { a.clone() })
 }
 
 /// Python's `max(a, b)`: `a` unless `b > a`.
-pub fn dmax(a: &PyDec, b: &PyDec) -> R<PyDec> {
+pub fn dmax(a: &Money, b: &Money) -> R<Money> {
     Ok(if b.gt(a).map_err(dk)? { b.clone() } else { a.clone() })
 }
 
-pub fn dec(s: &str) -> PyDec {
-    PyDec::parse(s).expect("a literal Decimal")
+pub fn dec(s: &str) -> Money {
+    Money::parse(s).expect("a literal Decimal")
 }
 
 /// `s.isdecimal()` for the ASCII digits (a non-ASCII decimal digit refuses: see the

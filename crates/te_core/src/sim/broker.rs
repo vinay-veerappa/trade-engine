@@ -15,13 +15,13 @@ use super::{
 };
 pub use crate::calendar::VenueCalendar;
 use crate::ledger::model::{dec_eq, err, opt_dec_eq, Instrument, OrderState, OrderType, Side, Tif, R};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 
 #[derive(Debug, Clone)]
 pub struct Alloc {
     pub soid: String,
     pub account: String,
-    pub qty: PyDec,
+    pub qty: Money,
 }
 
 /// A `VenueOrder`'s fields.
@@ -31,12 +31,12 @@ pub struct VOrder {
     pub instr: Instrument,
     pub otype: OrderType,
     pub side: Side,
-    pub quantity: PyDec,
+    pub quantity: Money,
     pub submitted_at: Ts,
     pub tif: Tif,
-    pub limit: Option<PyDec>,
-    pub stop: Option<PyDec>,
-    pub trail: Option<PyDec>,
+    pub limit: Option<Money>,
+    pub stop: Option<Money>,
+    pub trail: Option<Money>,
     pub allocs: Vec<Alloc>,
     pub parent: Option<String>,
     pub oco: Option<String>,
@@ -73,8 +73,8 @@ pub struct VFill {
     pub fill_id: String,
     pub order_id: String,
     pub instr: Instrument,
-    pub quantity: PyDec,
-    pub price: PyDec,
+    pub quantity: Money,
+    pub price: Money,
     pub filled_at: Ts,
     pub side: Side,
     pub src: Option<usize>,
@@ -85,11 +85,11 @@ pub struct VFill {
 pub struct Bar {
     pub instr: Instrument,
     pub ts: Ts,
-    pub open: PyDec,
-    pub high: PyDec,
-    pub low: PyDec,
-    pub close: PyDec,
-    pub volume: PyDec,
+    pub open: Money,
+    pub high: Money,
+    pub low: Money,
+    pub close: Money,
+    pub volume: Money,
     pub as_of: Ts,
 }
 
@@ -109,14 +109,14 @@ impl Bar {
 #[derive(Debug, Clone)]
 pub struct Pos {
     pub instr: Instrument,
-    pub qty: PyDec,
-    pub avg: PyDec,
+    pub qty: Money,
+    pub avg: Money,
     pub as_of: Ts,
 }
 
 impl Pos {
     /// Contract point value: 1 for equities/options, or `point_value` from the spec for futures.
-    pub fn point_value(&self) -> PyDec {
+    pub fn point_value(&self) -> Money {
         match &self.instr {
             Instrument::Future(c) => c.point_value.clone(),
             _ => dec("1"),
@@ -124,7 +124,7 @@ impl Pos {
     }
 
     /// Unrealized P&L at `mark`: `(mark - avg) * point_value * qty`.
-    pub fn unrealized_pnl(&self, mark: &PyDec) -> R<PyDec> {
+    pub fn unrealized_pnl(&self, mark: &Money) -> R<Money> {
         let diff = d(mark.sub(&self.avg))?;
         let pv = self.point_value();
         d(d(diff.mul(&pv))?.mul(&self.qty))
@@ -135,7 +135,7 @@ impl Pos {
 pub struct Working {
     pub order: VOrder,
     pub state: OrderState,
-    pub filled: PyDec,
+    pub filled: Money,
     pub updated_at: Ts,
     pub triggered: bool,
 }
@@ -152,7 +152,7 @@ pub struct Ack {
 /// replacement `VenueOrder` (whose constructor may refuse) at this quantity.
 pub enum Begin {
     Done(Ack),
-    Go(PyDec),
+    Go(Money),
 }
 
 /// An insertion-ordered map keyed by `Instrument` (a dict's iteration order).
@@ -186,11 +186,11 @@ pub(super) fn working(s: OrderState) -> bool {
     matches!(s, OrderState::Accepted | OrderState::PartiallyFilled)
 }
 
-pub(super) fn d(r: Result<PyDec, crate::ledger::pydec::DecErr>) -> R<PyDec> {
+pub(super) fn d(r: Result<Money, crate::money::DecErr>) -> R<Money> {
     r.map_err(dk)
 }
 
-pub(super) fn zero() -> PyDec {
+pub(super) fn zero() -> Money {
     dec("0")
 }
 
@@ -217,7 +217,7 @@ type Prio = (bool, bool, (usize, String), String);
 pub struct Book {
     pub account_id: String,
     pub venue: VenueCalendar,
-    bps: PyDec,
+    bps: Money,
     pub slippage_ticks: u32,
     connected: bool,
     orders: Vec<Working>,
@@ -230,7 +230,7 @@ pub struct Book {
 
 impl Book {
     /// `SimBroker.__init__`'s checks. `is_decimal`: the slippage was a `Decimal`.
-    pub fn new(account_id: &str, is_decimal: bool, slippage_bps: PyDec) -> R<Book> {
+    pub fn new(account_id: &str, is_decimal: bool, slippage_bps: Money) -> R<Book> {
         if account_id.is_empty() {
             return err("value", "account_id must be non-empty");
         }
@@ -279,7 +279,7 @@ impl Book {
     pub fn new_with_venue(
         account_id: &str,
         is_decimal: bool,
-        slippage_bps: PyDec,
+        slippage_bps: Money,
         slippage_ticks: u32,
         venue: VenueCalendar,
     ) -> R<Book> {
@@ -321,7 +321,7 @@ impl Book {
         self.venue
     }
 
-    pub fn position_pnl(&self, symbol: &str, mark: &PyDec) -> R<Option<PyDec>> {
+    pub fn position_pnl(&self, symbol: &str, mark: &Money) -> R<Option<Money>> {
         for (_, p) in &self.positions.items {
             if p.instr.symbol()? == symbol {
                 if !p.qty.eq_num(&zero()).map_err(dk)? {
@@ -432,8 +432,8 @@ impl Book {
                         "Order '{}' is {} with {} of {} filled",
                         w.order.id,
                         w.state.value(),
-                        filled.to_py_string(),
-                        quantity.to_py_string()
+                        filled.canon(),
+                        quantity.canon()
                     ),
                 );
             }
@@ -495,7 +495,7 @@ impl Book {
     }
 
     /// `replace` up to building the replacement order.
-    pub fn replace_begin(&mut self, id: &str, new_quantity: Option<PyDec>, clock: &mut Clock<'_>) -> R<Begin> {
+    pub fn replace_begin(&mut self, id: &str, new_quantity: Option<Money>, clock: &mut Clock<'_>) -> R<Begin> {
         self.expire_due(clock)?;
         let i = self.require_order(id)?;
         let w = &self.orders[i];
@@ -537,7 +537,7 @@ impl Book {
     }
 
     /// `orders(since)`: `(id, state, filled, remaining, updated_at)` by id.
-    pub fn orders_since(&mut self, since: &str, clock: &mut Clock<'_>) -> R<Vec<(String, OrderState, PyDec, PyDec, Ts)>> {
+    pub fn orders_since(&mut self, since: &str, clock: &mut Clock<'_>) -> R<Vec<(String, OrderState, Money, Money, Ts)>> {
         let since = Ts::aware(since, "since")?;
         self.expire_due(clock)?;
         let mut ids: Vec<&String> = self.index.keys().collect();
@@ -629,13 +629,13 @@ impl Book {
                 active.push(i);
             }
         }
-        let mut candidates: Vec<(usize, PyDec)> = Vec::new();
+        let mut candidates: Vec<(usize, Money)> = Vec::new();
         for i in active {
             if let Some(price) = self.execution_price(i, &bar)? {
                 candidates.push((i, price));
             }
         }
-        let mut by_group: BTreeMap<String, Vec<(usize, PyDec)>> = BTreeMap::new();
+        let mut by_group: BTreeMap<String, Vec<(usize, Money)>> = BTreeMap::new();
         let mut standalone = Vec::new();
         for c in candidates {
             match &self.orders[c.0].order.oco {
@@ -654,7 +654,7 @@ impl Book {
             let keys: Vec<Prio> = choices.iter().map(|(i, _)| self.oco_priority(*i)).collect();
             let mut order: Vec<usize> = (0..choices.len()).collect();
             order.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
-            let sorted: Vec<(usize, PyDec)> = order.into_iter().map(|k| choices[k].clone()).collect();
+            let sorted: Vec<(usize, Money)> = order.into_iter().map(|k| choices[k].clone()).collect();
             choices = sorted;
             let stop = choices.iter().find(|(i, _)| self.orders[*i].order.otype == OrderType::Stop).cloned();
             let selected = match stop {
@@ -672,7 +672,7 @@ impl Book {
         Ok(out)
     }
 
-    fn execution_price(&mut self, i: usize, bar: &Bar) -> R<Option<PyDec>> {
+    fn execution_price(&mut self, i: usize, bar: &Bar) -> R<Option<Money>> {
         let order = self.orders[i].order.clone();
         if bar.ts.le(&order.submitted_at) {
             return Ok(None);
@@ -728,7 +728,7 @@ impl Book {
         Ok(Some(slipped))
     }
 
-    fn stop_limit_base(&mut self, i: usize, bar: &Bar) -> R<Option<PyDec>> {
+    fn stop_limit_base(&mut self, i: usize, bar: &Bar) -> R<Option<Money>> {
         let w = &mut self.orders[i];
         let (Some(stop), Some(limit)) = (w.order.stop.clone(), w.order.limit.clone()) else {
             return err("sim", "Accepted stop-limit order has no stop or limit price");
@@ -763,14 +763,14 @@ impl Book {
         Ok(Some(dmax(&bar.open, &limit)?))
     }
 
-    fn slipped(&self, base: &PyDec, side: Side) -> R<PyDec> {
+    fn slipped(&self, base: &Money, side: Side) -> R<Money> {
         let one = dec("1");
         let frac = d(self.bps.div(&dec("10000")))?;
         let factor = if side == Side::Buy { d(one.add(&frac))? } else { d(one.sub(&frac))? };
         d(base.mul(&factor))
     }
 
-    fn slipped_price(&self, base: &PyDec, order: &VOrder) -> R<PyDec> {
+    fn slipped_price(&self, base: &Money, order: &VOrder) -> R<Money> {
         match &order.instr {
             Instrument::Future(contract) => {
                 if matches!(order.otype, OrderType::Limit | OrderType::StopLimit) {
@@ -858,7 +858,7 @@ impl Book {
         Ok(())
     }
 
-    fn fill(&mut self, i: usize, price: PyDec, filled_at: &Ts) -> R<Option<usize>> {
+    fn fill(&mut self, i: usize, price: Money, filled_at: &Ts) -> R<Option<usize>> {
         if !working(self.orders[i].state) {
             return Ok(None);
         }
@@ -881,11 +881,11 @@ impl Book {
         if quantity.cmp_int(0).map_err(dk)?.is_le() {
             return err(
                 "value",
-                format!("VenueFill quantity must be strictly positive, got {}", quantity.to_py_string()),
+                format!("VenueFill quantity must be strictly positive, got {}", quantity.canon()),
             );
         }
         if price.cmp_int(0).map_err(dk)?.is_le() {
-            return err("value", format!("VenueFill price must be strictly positive, got {} (I5)", price.to_py_string()));
+            return err("value", format!("VenueFill price must be strictly positive, got {} (I5)", price.canon()));
         }
         let fill = VFill {
             fill_id: format!("{}:fill:{}", order.id, n),
@@ -911,7 +911,7 @@ impl Book {
         Ok(Some(at))
     }
 
-    fn bracket_open_quantity(&self, parent: &str) -> R<PyDec> {
+    fn bracket_open_quantity(&self, parent: &str) -> R<Money> {
         let p = self.require_order(parent)?;
         let mut exited = zero();
         for w in &self.orders {
@@ -1319,7 +1319,7 @@ mod tests {
         b.submit(order("o1", OrderType::Market, Side::Buy, "10", "2026-03-02T14:00:00+00:00"), &mut clock).unwrap();
         let fills = b.process_bar(Some(bar("2026-03-02T14:30:00+00:00", "100", "101", "99", "100"))).unwrap();
         assert_eq!(fills.len(), 1);
-        assert_eq!(b.fills[0].price.to_py_string(), "100.100");
+        assert_eq!(b.fills[0].price.canon(), "100.1");
         assert!(b.process_bar(Some(bar("2026-03-02T14:31:00+00:00", "100", "101", "99", "100"))).unwrap().is_empty());
     }
 
@@ -1557,19 +1557,19 @@ mod tests {
         // 1. Buy market order slips UP by 2 ticks (0.50)
         b.submit(f_order("buy_mkt", "NQ", OrderType::Market, Side::Buy, "1", "2020-11-22T22:00:00+00:00"), &mut clock).unwrap();
         b.process_bar(Some(f_bar("NQ", "2020-11-22T23:00:00+00:00", "20000.00", "20010.00", "19990.00", "20005.00"))).unwrap();
-        assert_eq!(b.fills[0].price.to_py_string(), "20000.50");
+        assert_eq!(b.fills[0].price.canon(), "20000.5");
 
         // 2. Sell market order slips DOWN by 2 ticks (0.50)
         b.submit(f_order("sell_mkt", "NQ", OrderType::Market, Side::Sell, "1", "2020-11-22T23:01:00+00:00"), &mut clock).unwrap();
         b.process_bar(Some(f_bar("NQ", "2020-11-22T23:02:00+00:00", "20000.00", "20010.00", "19990.00", "20005.00"))).unwrap();
-        assert_eq!(b.fills[1].price.to_py_string(), "19999.50");
+        assert_eq!(b.fills[1].price.canon(), "19999.5");
 
         // 3. Zero slippage ticks: price is untouched
         let mut b_zero = Book::new_futures("A", 0).unwrap();
         b_zero.connect(&mut || Ok("2020-11-22T22:00:00+00:00".to_string())).unwrap();
         b_zero.submit(f_order("buy_zero", "NQ", OrderType::Market, Side::Buy, "1", "2020-11-22T22:00:00+00:00"), &mut clock).unwrap();
         b_zero.process_bar(Some(f_bar("NQ", "2020-11-22T23:00:00+00:00", "20000.00", "20010.00", "19990.00", "20005.00"))).unwrap();
-        assert_eq!(b_zero.fills[0].price.to_py_string(), "20000.00");
+        assert_eq!(b_zero.fills[0].price.canon(), "20000");
 
         // 4. Limit order with slippage_ticks = 2 does NOT slip (replay-sim.ts rule)
         let mut b_lim = Book::new_futures("A", 2).unwrap();
@@ -1577,12 +1577,12 @@ mod tests {
         // Buy limit at 20000.00; bar opens at 19998.00 (better than limit); fills at 19998.00 without slippage
         b_lim.submit(f_limit_order("buy_lim1", "NQ", Side::Buy, "1", "2020-11-22T22:00:00+00:00", "20000.00"), &mut clock).unwrap();
         b_lim.process_bar(Some(f_bar("NQ", "2020-11-22T23:00:00+00:00", "19998.00", "20005.00", "19995.00", "20000.00"))).unwrap();
-        assert_eq!(b_lim.fills[0].price.to_py_string(), "19998.00");
+        assert_eq!(b_lim.fills[0].price.canon(), "19998");
 
         // Buy limit at 20000.00; bar opens at 20002.00, low reaches 19995.00; fills at 20000.00 without slippage
         b_lim.submit(f_limit_order("buy_lim2", "NQ", Side::Buy, "1", "2020-11-22T23:00:30+00:00", "20000.00"), &mut clock).unwrap();
         b_lim.process_bar(Some(f_bar("NQ", "2020-11-22T23:01:00+00:00", "20002.00", "20003.00", "19995.00", "19998.00"))).unwrap();
-        assert_eq!(b_lim.fills[1].price.to_py_string(), "20000.00");
+        assert_eq!(b_lim.fills[1].price.canon(), "20000");
     }
 
     #[test]
@@ -1595,10 +1595,10 @@ mod tests {
         b_nq.process_bar(Some(f_bar("NQ", "2020-11-22T23:00:00+00:00", "20000.00", "20010.00", "19990.00", "20005.00"))).unwrap();
 
         let pos_nq = &b_nq.positions(&mut clock).unwrap()[0];
-        assert_eq!(pos_nq.point_value().to_py_string(), "20");
+        assert_eq!(pos_nq.point_value().canon(), "20");
         // Long 2 contracts @ 20000.00, mark @ 20010.00: PnL = (20010 - 20000) * 20 * 2 = 400.00
         let pnl_nq = b_nq.position_pnl("NQ", &dec("20010.00")).unwrap().unwrap();
-        assert_eq!(pnl_nq.to_py_string(), "400.00");
+        assert_eq!(pnl_nq.canon(), "400");
 
         // MNQ point value is 2
         let mut b_mnq = Book::new_futures("A", 0).unwrap();
@@ -1607,10 +1607,10 @@ mod tests {
         b_mnq.process_bar(Some(f_bar("MNQ", "2020-11-22T23:00:00+00:00", "20000.00", "20010.00", "19990.00", "20005.00"))).unwrap();
 
         let pos_mnq = &b_mnq.positions(&mut clock).unwrap()[0];
-        assert_eq!(pos_mnq.point_value().to_py_string(), "2");
+        assert_eq!(pos_mnq.point_value().canon(), "2");
         // Short 5 contracts @ 20000.00, mark @ 19950.00: PnL = (19950 - 20000) * 2 * (-5) = 500.00
         let pnl_mnq = b_mnq.position_pnl("MNQ", &dec("19950.00")).unwrap().unwrap();
-        assert_eq!(pnl_mnq.to_py_string(), "500.00");
+        assert_eq!(pnl_mnq.canon(), "500");
 
         // Equity point value is 1
         let mut b_eq = Book::new("A", true, dec("0")).unwrap();
@@ -1619,10 +1619,10 @@ mod tests {
         b_eq.process_bar(Some(bar("2026-03-02T14:30:00+00:00", "100.00", "101.00", "99.00", "100.00"))).unwrap();
 
         let pos_eq = &b_eq.positions(&mut clock).unwrap()[0];
-        assert_eq!(pos_eq.point_value().to_py_string(), "1");
+        assert_eq!(pos_eq.point_value().canon(), "1");
         // Long 10 shares @ 100.00, mark @ 105.00: PnL = (105 - 100) * 1 * 10 = 50.00
         let pnl_eq = b_eq.position_pnl("SPY", &dec("105.00")).unwrap().unwrap();
-        assert_eq!(pnl_eq.to_py_string(), "50.00");
+        assert_eq!(pnl_eq.canon(), "50");
     }
 
     #[test]

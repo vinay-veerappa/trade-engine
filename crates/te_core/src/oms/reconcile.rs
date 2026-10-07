@@ -43,8 +43,8 @@ fn check_fill_event(fill_id: &str, has_seq: bool) -> R<()> {
     err("reconcile", format!("Fill '{fill_id}' was recorded but its ledger event is missing (I1)"))
 }
 
-fn text_of(v: &Option<crate::ledger::pydec::PyDec>) -> String {
-    v.as_ref().map_or_else(|| "None".to_string(), |d| d.to_py_string())
+fn text_of(v: &Option<crate::money::Money>) -> String {
+    v.as_ref().map_or_else(|| "None".to_string(), |d| d.canon())
 }
 
 /// The journal execution one fill becomes, as an ordered JSON object: the asset class,
@@ -69,9 +69,9 @@ pub fn journal_payload(st: &AccountState, fill: &Fill, journal_account: &str, ha
     Ok(Json::Obj(vec![
         ("symbol".into(), Json::Str(fill.instrument.symbol()?)),
         ("side".into(), s(fill.side.value())),
-        ("quantity".into(), Json::Str(fill.quantity.to_py_string())),
-        ("price".into(), Json::Str(fill.price.to_py_string())),
-        ("fee".into(), Json::Str(fill.fee.to_py_string())),
+        ("quantity".into(), Json::Str(fill.quantity.canon())),
+        ("price".into(), Json::Str(fill.price.canon())),
+        ("fee".into(), Json::Str(fill.fee.canon())),
         ("executed_at".into(), Json::Str(fill.filled_at.iso())),
         ("account_id".into(), s(journal_account)),
         (

@@ -2,20 +2,20 @@
 
 use super::{dk, dmax, dmin};
 use crate::ledger::model::{err, Side, R};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 
 /// The emulator's persisted state.
 #[derive(Debug, Clone)]
 pub struct Trail {
     pub side: Side,
-    pub trail_amount: PyDec,
-    pub extreme: Option<PyDec>,
-    pub stop_price: Option<PyDec>,
+    pub trail_amount: Money,
+    pub extreme: Option<Money>,
+    pub stop_price: Option<Money>,
     pub triggered: bool,
 }
 
 /// `TrailingStopEmulator.__init__`'s check.
-pub fn check_trail_amount(trail_amount: &PyDec) -> R<()> {
+pub fn check_trail_amount(trail_amount: &Money) -> R<()> {
     if trail_amount.cmp_int(0).map_err(dk)?.is_le() {
         return err("value", "trail_amount must be positive");
     }
@@ -24,9 +24,9 @@ pub fn check_trail_amount(trail_amount: &PyDec) -> R<()> {
 
 /// `update(price)`: whether the stop triggered. A refusal after the state moved leaves
 /// it moved, as the Python did (the stop of a SELL is written before it is checked).
-pub fn update(t: &mut Trail, price: &PyDec) -> R<bool> {
+pub fn update(t: &mut Trail, price: &Money) -> R<bool> {
     if !price.is_finite() || price.cmp_int(0).map_err(dk)?.is_le() {
-        return err("value", format!("price must be finite and positive, got {}", price.to_py_string()));
+        return err("value", format!("price must be finite and positive, got {}", price.canon()));
     }
     if t.triggered {
         return Ok(true);
@@ -66,7 +66,7 @@ mod tests {
         let mut t = Trail { side: Side::Sell, trail_amount: dec("2"), extreme: None, stop_price: None, triggered: false };
         assert!(!update(&mut t, &dec("100")).unwrap());
         assert!(!update(&mut t, &dec("105")).unwrap());
-        assert_eq!(t.stop_price.as_ref().unwrap().to_py_string(), "103");
+        assert_eq!(t.stop_price.as_ref().unwrap().canon(), "103");
         assert!(update(&mut t, &dec("103")).unwrap());
     }
 

@@ -206,7 +206,7 @@ pub(crate) fn oms_plan_close(state: &str, account_id: &str, entry_order_id: &str
             p.mode.to_string(),
             p.legs,
             p.side.value().to_string(),
-            p.quantity.to_py_string(),
+            p.quantity.canon(),
             p.oco_group,
             p.target_order_id,
         ))

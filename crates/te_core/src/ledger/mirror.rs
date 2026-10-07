@@ -6,7 +6,7 @@ use super::model::{
     derr, err, opt_dec_eq, Instrument, MirrorAck, MirrorFill, MirrorQueued, MirrorRefused, OrderState, Side, R,
 };
 use super::ops::*;
-use super::pydec::{PyDec, Round};
+use crate::money::{Money, Round};
 
 pub const MIRROR_FOLD: &str = "mirror_fold";
 
@@ -16,7 +16,7 @@ fn mfold<T>(msg: impl Into<String>) -> R<T> {
 
 /// `pro_rata`: integer shares of `amount` by weight; floors, then one each to the first
 /// shares still under their weight.
-pub fn pro_rata(weights: &[PyDec], whole: &PyDec, amount: &PyDec) -> R<Vec<PyDec>> {
+pub fn pro_rata(weights: &[Money], whole: &Money, amount: &Money) -> R<Vec<Money>> {
     let mut shares = Vec::new();
     for w in weights {
         let x = div(&mul(w, amount)?, whole)?;
@@ -59,8 +59,8 @@ pub enum SignAt {
 
 /// Signed contracts `units` of a ticket put on the venue, per contract (legs as written).
 /// A repeated contract keeps its first position and its LAST value (dict comprehension).
-pub fn signed_contracts(instrument: &Instrument, side: Side, units: &PyDec, at: SignAt) -> R<OMap<Instrument, PyDec>> {
-    let one = |side: Side, ratio: Option<i128>| -> R<PyDec> {
+pub fn signed_contracts(instrument: &Instrument, side: Side, units: &Money, at: SignAt) -> R<OMap<Instrument, Money>> {
+    let one = |side: Side, ratio: Option<i128>| -> R<Money> {
         match at {
             SignAt::First => {
                 let signed = units_signed(side, units)?;
@@ -82,7 +82,7 @@ pub fn signed_contracts(instrument: &Instrument, side: Side, units: &PyDec, at: 
             }
         }
     };
-    let mut out: OMap<Instrument, PyDec> = OMap::new();
+    let mut out: OMap<Instrument, Money> = OMap::new();
     match instrument {
         Instrument::Combo(legs) => {
             for leg in legs {
@@ -99,13 +99,13 @@ pub fn signed_contracts(instrument: &Instrument, side: Side, units: &PyDec, at: 
 }
 
 /// `ticket_contracts(queued, units)` of the mirror fold.
-pub fn ticket_contracts(q: &MirrorQueued, units: &PyDec) -> R<OMap<Instrument, PyDec>> {
+pub fn ticket_contracts(q: &MirrorQueued, units: &Money) -> R<OMap<Instrument, Money>> {
     signed_contracts(&q.instrument, q.side, units, SignAt::First)
 }
 
 /// `_sign(side) * units`.
-fn units_signed(side: Side, units: &PyDec) -> R<PyDec> {
-    mul(&PyDec::from_i128(sign(side)), units)
+fn units_signed(side: Side, units: &Money) -> R<Money> {
+    mul(&Money::int(sign(side) as i64), units)
 }
 
 #[derive(Debug, Clone)]
@@ -114,10 +114,10 @@ pub struct MirrorTicketState {
     pub ack: Option<MirrorAck>,
     pub venue_order_id: Option<String>,
     pub book_status: Option<OrderState>,
-    pub filled: PyDec,
-    pub avg_price: Option<PyDec>,
+    pub filled: Money,
+    pub avg_price: Option<Money>,
     pub closed: bool,
-    pub allocated: OMap<String, PyDec>,
+    pub allocated: OMap<String, Money>,
 }
 
 impl MirrorTicketState {
@@ -130,7 +130,7 @@ impl MirrorTicketState {
     }
 
     /// `remaining`: units still expected to rest or fill at the venue; zero once terminal.
-    pub fn remaining(&self) -> R<PyDec> {
+    pub fn remaining(&self) -> R<Money> {
         if self.terminal()? {
             return Ok(zero());
         }
@@ -156,7 +156,7 @@ pub struct MirrorState {
     pub venue: Option<String>,
     pub tickets: OMap<String, MirrorTicketState>,
     /// `(strategy account, contract)` to signed contracts.
-    pub book: OMap<(String, Instrument), PyDec>,
+    pub book: OMap<(String, Instrument), Money>,
     pub queued_orders: OMap<String, String>,
     pub refused_orders: OMap<String, String>,
     pub order_ids: OMap<String, String>,
@@ -183,8 +183,8 @@ impl MirrorState {
 
     /// `exposure`: per (strategy account, contract) the book plus each open ticket's unfilled
     /// part, the nonzero entries only.
-    pub fn exposure(&self) -> R<OMap<(String, Instrument), PyDec>> {
-        let mut exposure: OMap<(String, Instrument), PyDec> = OMap::new();
+    pub fn exposure(&self) -> R<OMap<(String, Instrument), Money>> {
+        let mut exposure: OMap<(String, Instrument), Money> = OMap::new();
         for (k, v) in self.book.iter() {
             exposure.insert(book_hk(&k.0, &k.1), k.clone(), v.clone());
         }
@@ -200,7 +200,7 @@ impl MirrorState {
                 }
             }
         }
-        let mut out: OMap<(String, Instrument), PyDec> = OMap::new();
+        let mut out: OMap<(String, Instrument), Money> = OMap::new();
         for (k, v) in exposure.iter() {
             if !eq(v, &zero())? {
                 out.insert(book_hk(&k.0, &k.1), k.clone(), v.clone());
@@ -210,8 +210,8 @@ impl MirrorState {
     }
 
     /// `expected`: per contract the book plus every open ticket's live remainder.
-    pub fn expected(&self) -> R<OMap<Instrument, PyDec>> {
-        let mut expected: OMap<Instrument, PyDec> = OMap::new();
+    pub fn expected(&self) -> R<OMap<Instrument, Money>> {
+        let mut expected: OMap<Instrument, Money> = OMap::new();
         for ((_, contract), quantity) in self.book.iter() {
             let current = expected.get(&contract.hk()).cloned().unwrap_or_else(zero);
             expected.insert(contract.hk(), contract.clone(), add(&current, quantity)?);

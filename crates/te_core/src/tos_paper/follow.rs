@@ -12,7 +12,7 @@ use crate::ledger::json::Json;
 use crate::ledger::mirror::MirrorState;
 use crate::ledger::model::{parse_datetime, DateTime, Instrument, Order, OrderState, Side, R};
 use crate::ledger::ops::{eq, zero, OMap};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::options::Right;
 use chrono::{TimeZone, Timelike};
 use chrono_tz::America::New_York;
@@ -30,7 +30,7 @@ fn micros_between(a: &DateTime, b: &DateTime) -> i128 {
 /// `_flat`: the sim holds none of `order`'s instrument (a vertical by its spreads).
 pub fn flat(state: &AccountState, order: &Order) -> R<bool> {
     if let Instrument::Combo(legs) = &order.instrument {
-        let mut held: OMap<Instrument, PyDec> = OMap::new();
+        let mut held: OMap<Instrument, Money> = OMap::new();
         for (_, p) in state.positions.iter() {
             held.insert(p.instrument.hk(), p.instrument.clone(), p.quantity.clone());
         }
@@ -209,10 +209,10 @@ mod tests {
             instrument: Instrument::Equity("AAPL".into()),
             order_type: OrderType::Limit,
             side: Side::Buy,
-            quantity: PyDec::parse("1").unwrap(),
+            quantity: Money::parse("1").unwrap(),
             command_id: id.into(),
             created_at: parse_datetime(at).unwrap().0,
-            limit_price: Some(PyDec::parse("1").unwrap()),
+            limit_price: Some(Money::parse("1").unwrap()),
             stop_price: None,
             trail_amount: None,
             tif: Tif::Day,

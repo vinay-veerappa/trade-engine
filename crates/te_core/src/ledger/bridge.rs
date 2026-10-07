@@ -21,7 +21,7 @@ use super::json::{self, dumps, Json};
 use super::mirror::{book_hk, MirrorState, MirrorTicketState};
 use super::model::*;
 use super::ops::OMap;
-use super::pydec::PyDec;
+use crate::money::Money;
 
 fn codec<T>(msg: impl Into<String>) -> R<T> {
     err("codec", msg)
@@ -39,7 +39,7 @@ fn check_node(node: &Json) -> R<()> {
     }
     if let Some(d) = node.get("d") {
         if let Json::Str(text) = d {
-            let finite = PyDec::parse(text).map(|p| p.is_finite()).unwrap_or(false);
+            let finite = Money::parse(text).map(|p| p.is_finite()).unwrap_or(false);
             if !finite {
                 return codec(format!("Refusing to persist a non-finite Decimal: {text} (I5)"));
             }
@@ -150,14 +150,14 @@ fn obj_of(node: &Json) -> R<Obj> {
     }
 }
 
-fn dec_of(node: &Json) -> R<PyDec> {
+fn dec_of(node: &Json) -> R<Money> {
     match decode(node)? {
         Val::Dec(d) => Ok(d),
         other => bad(&format!("expected a Decimal, got {}", other.type_name())),
     }
 }
 
-fn odec_of(node: &Json) -> R<Option<PyDec>> {
+fn odec_of(node: &Json) -> R<Option<Money>> {
     match decode(node)? {
         Val::None => Ok(None),
         Val::Dec(d) => Ok(Some(d)),

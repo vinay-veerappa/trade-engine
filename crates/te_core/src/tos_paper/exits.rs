@@ -18,7 +18,7 @@ use crate::ledger::model::{
     parse_datetime, Instrument as LInstrument, LErr, Order, OrderState, OrderType, Side, Tif, R,
 };
 use crate::ledger::ops::{div_i, eq, gt, le, lt, mul, s, sub, zero, OMap};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 
 /// `eod.runner.PASSES`.
 pub const PASSES: [&str; 3] = ["morning", "midday", "late"];
@@ -33,21 +33,17 @@ fn refuse<T>(kind: &'static str, msg: impl Into<String>) -> R<T> {
 }
 
 /// `Decimal.copy_abs()`: the sign cleared, nothing rounded.
-pub fn copy_abs(d: &PyDec) -> PyDec {
-    if d.is_finite() {
-        PyDec::from_parts(false, d.coefficient().clone(), d.exponent())
-    } else {
-        d.clone()
-    }
+pub fn copy_abs(d: &Money) -> Money {
+    Money::from_decimal(d.to_decimal().abs())
 }
 
 /// `min(a, b)`: `a` unless `b` is strictly smaller.
-fn min_of(a: &PyDec, b: &PyDec) -> R<PyDec> {
+fn min_of(a: &Money, b: &Money) -> R<Money> {
     Ok(if lt(b, a)? { b.clone() } else { a.clone() })
 }
 
 /// `max(a, b)`: `a` unless `b` is strictly larger.
-fn max_of(a: &PyDec, b: &PyDec) -> R<PyDec> {
+fn max_of(a: &Money, b: &Money) -> R<Money> {
     Ok(if gt(b, a)? { b.clone() } else { a.clone() })
 }
 
@@ -81,8 +77,8 @@ pub struct XOrder {
     pub account_id: String,
     pub instrument: LInstrument,
     pub side: Side,
-    pub quantity: PyDec,
-    pub limit_price: Option<PyDec>,
+    pub quantity: Money,
+    pub limit_price: Option<Money>,
 }
 
 /// What the inputs of one planning share: the sim's accounts, the venue's mirror, the pass's quotes.
@@ -92,7 +88,7 @@ pub struct Ctx {
     pub empty: AccountState,
     pub mirrored: Vec<String>,
     pub session: String,
-    pub prices: Vec<(String, Side, Option<PyDec>)>,
+    pub prices: Vec<(String, Side, Option<Money>)>,
     pub at: String,
     pub aware: bool,
 }
@@ -173,8 +169,8 @@ pub fn flip(legs: &[crate::ledger::model::ComboLeg]) -> Vec<crate::ledger::model
 }
 
 /// `_units`: the spreads `held` (signed contracts) amounts to; `None` when the legs disagree.
-pub fn units(held: &OMap<LInstrument, PyDec>, legs: &[crate::ledger::model::ComboLeg]) -> R<Option<PyDec>> {
-    let mut per_leg: Vec<PyDec> = Vec::new();
+pub fn units(held: &OMap<LInstrument, Money>, legs: &[crate::ledger::model::ComboLeg]) -> R<Option<Money>> {
+    let mut per_leg: Vec<Money> = Vec::new();
     for leg in legs {
         let have = held.get(&leg.contract.hk()).cloned().unwrap_or_else(zero);
         let sign: i128 = if leg.side == Side::Buy { 1 } else { -1 };
@@ -199,7 +195,7 @@ impl<'a> Planner<'a> {
     }
 
     /// The host's `price(contract, side)`, from the pass's table (a quote it has none for is `None`).
-    fn price(&mut self, contract: &LInstrument, side: Side) -> Option<PyDec> {
+    fn price(&mut self, contract: &LInstrument, side: Side) -> Option<Money> {
         self.out.priced.push((contract.clone(), side));
         let hk = contract.hk();
         self.ctx.prices.iter().find(|(k, sd, _)| *k == hk && *sd == side).and_then(|(_, _, p)| p.clone())
@@ -212,8 +208,8 @@ impl<'a> Planner<'a> {
         account: &str,
         instrument: &LInstrument,
         side: Side,
-        quantity: PyDec,
-        limit: Option<PyDec>,
+        quantity: Money,
+        limit: Option<Money>,
     ) -> R<XOrder> {
         if order_id.is_empty() {
             return refuse(VALUE, "order_id must be non-empty");
@@ -246,7 +242,7 @@ impl<'a> Planner<'a> {
         account: &str,
         instrument: &LInstrument,
         side: Side,
-        mut room: PyDec,
+        mut room: Money,
     ) -> R<()> {
         let ctx = self.ctx;
         let state = ctx.state(account);
@@ -355,8 +351,8 @@ impl<'a> Planner<'a> {
             let state = ctx.state(&account);
             let closing_legs = flip(&opening);
             let closing_combo = LInstrument::Combo(closing_legs.clone());
-            let mut venue_held: OMap<LInstrument, PyDec> = OMap::new();
-            let mut sim_held: OMap<LInstrument, PyDec> = OMap::new();
+            let mut venue_held: OMap<LInstrument, Money> = OMap::new();
+            let mut sim_held: OMap<LInstrument, Money> = OMap::new();
             for c in &contracts {
                 let v = ctx.mirror.book.get(&book_hk(&account, c)).cloned().unwrap_or_else(zero);
                 venue_held.insert(c.hk(), c.clone(), v);
@@ -467,7 +463,7 @@ impl<'a> Planner<'a> {
     pub fn plan(&mut self, name: &str) -> R<()> {
         let ctx = self.ctx;
         let covered = self.plan_verticals(name)?;
-        let mut items: Vec<(&String, String, &LInstrument, &PyDec)> = Vec::new();
+        let mut items: Vec<(&String, String, &LInstrument, &Money)> = Vec::new();
         for ((account, contract), held) in ctx.mirror.book.iter() {
             items.push((account, contract.symbol()?, contract, held));
         }
@@ -697,7 +693,7 @@ pub fn ids_op(doc: &Json) -> R<Json> {
     Ok(obj(vec![("id", jstr(id))]))
 }
 
-fn held_of(doc: &Json) -> R<OMap<LInstrument, PyDec>> {
+fn held_of(doc: &Json) -> R<OMap<LInstrument, Money>> {
     let mut held = OMap::new();
     for row in req_arr(doc, "held")? {
         let Json::Arr(r) = row else { return wire("a held row is not a pair") };
@@ -779,7 +775,7 @@ mod tests {
             contract: LInstrument::Option(crate::ledger::model::OptionContract {
                 underlying: "AAPL".into(),
                 expiry: chrono::NaiveDate::from_ymd_opt(2026, 10, 16).unwrap(),
-                strike: PyDec::parse(strike).unwrap(),
+                strike: Money::parse(strike).unwrap(),
                 right: crate::options::Right::Put,
                 multiplier: 100,
             }),
@@ -788,10 +784,10 @@ mod tests {
         };
         let legs = vec![leg("200", Side::Sell), leg("195", Side::Buy)];
         let mut held = OMap::new();
-        held.insert(legs[0].contract.hk(), legs[0].contract.clone(), PyDec::parse("-2").unwrap());
-        held.insert(legs[1].contract.hk(), legs[1].contract.clone(), PyDec::parse("2").unwrap());
+        held.insert(legs[0].contract.hk(), legs[0].contract.clone(), Money::parse("-2").unwrap());
+        held.insert(legs[1].contract.hk(), legs[1].contract.clone(), Money::parse("2").unwrap());
         assert_eq!(s(&units(&held, &legs).unwrap().unwrap()), "2");
-        held.insert(legs[1].contract.hk(), legs[1].contract.clone(), PyDec::parse("1").unwrap());
+        held.insert(legs[1].contract.hk(), legs[1].contract.clone(), Money::parse("1").unwrap());
         assert!(units(&held, &legs).unwrap().is_none());
     }
 }

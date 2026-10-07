@@ -6,6 +6,7 @@
 pub mod json;
 pub mod model;
 pub mod codec;
+#[cfg(test)]
 pub mod pydec;
 pub mod ops;
 pub mod mirror;

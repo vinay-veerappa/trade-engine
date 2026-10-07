@@ -10,7 +10,7 @@ use crate::ledger::fold::AccountState;
 use crate::ledger::model::{err, ComboLeg, Instrument, LErr, Order, OrderState, Side, R};
 use crate::ledger::ops::{add, div, eq, mul, mul_i, neg, sub, zero};
 use crate::sim::{dmax, dmin};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::options::Right;
 use crate::sim::snapshot::underlying_of;
 
@@ -20,9 +20,9 @@ pub struct Open {
     pub entry_order_id: String,
     pub command_id: String,
     /// Per leg of `legs_of(entry)`, in order: the quantity still open.
-    pub open_quantities: Vec<PyDec>,
-    pub units: PyDec,
-    pub entry_price: PyDec,
+    pub open_quantities: Vec<Money>,
+    pub units: Money,
+    pub entry_price: Money,
     /// Index in `state.fills` of the entry's first earliest fill.
     pub opened_fill: usize,
     pub target_order_id: Option<String>,
@@ -82,7 +82,7 @@ pub fn multiplier(i: &Instrument) -> R<i128> {
     }
 }
 
-fn filled(st: &AccountState, id: &str) -> PyDec {
+fn filled(st: &AccountState, id: &str) -> Money {
     st.filled_quantity.get(id).cloned().unwrap_or_else(zero)
 }
 
@@ -91,7 +91,7 @@ fn target_id(entry: &str) -> String {
 }
 
 /// Net per unit in option points, positive: the credit collected or the debit paid.
-fn entry_price(st: &AccountState, entry: &Order, units: &PyDec) -> R<PyDec> {
+fn entry_price(st: &AccountState, entry: &Order, units: &Money) -> R<Money> {
     let first = legs_of(&entry.instrument, entry.side);
     let scale = match first.first().map(|l| &l.contract) {
         Some(Instrument::Option(c)) => c.multiplier,
@@ -200,7 +200,7 @@ fn expiry(i: &Instrument) -> chrono::NaiveDate {
 }
 
 /// Per underlying, ascending: (shares the short calls no long call covers deliver, shares free).
-pub fn uncovered_calls(st: &AccountState, closing_counts: bool) -> R<Vec<(String, PyDec, PyDec)>> {
+pub fn uncovered_calls(st: &AccountState, closing_counts: bool) -> R<Vec<(String, Money, Money)>> {
     let mut closing: Vec<Instrument> = Vec::new();
     if !closing_counts {
         for s in open_structures(st)? {
@@ -212,8 +212,8 @@ pub fn uncovered_calls(st: &AccountState, closing_counts: bool) -> R<Vec<(String
             }
         }
     }
-    type Book = Vec<(String, Vec<(Instrument, PyDec)>)>;
-    fn book_add(book: &mut Book, key: String, item: (Instrument, PyDec)) {
+    type Book = Vec<(String, Vec<(Instrument, Money)>)>;
+    fn book_add(book: &mut Book, key: String, item: (Instrument, Money)) {
         match book.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => v.push(item),
             None => book.push((key, vec![item])),
@@ -221,8 +221,8 @@ pub fn uncovered_calls(st: &AccountState, closing_counts: bool) -> R<Vec<(String
     }
     let mut shorts: Book = Vec::new();
     let mut longs: Book = Vec::new();
-    let mut shares: Vec<(String, PyDec)> = Vec::new();
-    fn shares_add(shares: &mut Vec<(String, PyDec)>, key: &str, f: impl FnOnce(&PyDec) -> R<PyDec>) -> R<()> {
+    let mut shares: Vec<(String, Money)> = Vec::new();
+    fn shares_add(shares: &mut Vec<(String, Money)>, key: &str, f: impl FnOnce(&Money) -> R<Money>) -> R<()> {
         match shares.iter_mut().find(|(k, _)| k == key) {
             Some((_, v)) => *v = f(v)?,
             None => {
@@ -278,12 +278,12 @@ pub fn uncovered_calls(st: &AccountState, closing_counts: bool) -> R<Vec<(String
         }
     }
     names.sort();
-    let empty: Vec<(Instrument, PyDec)> = Vec::new();
+    let empty: Vec<(Instrument, Money)> = Vec::new();
     let mut result = Vec::new();
     for name in names {
         let long = longs.iter().find(|(k, _)| *k == name).map(|(_, v)| v).unwrap_or(&empty);
-        let mut free: Vec<PyDec> = long.iter().map(|(_, q)| q.clone()).collect();
-        let mut short: Vec<(Instrument, PyDec)> =
+        let mut free: Vec<Money> = long.iter().map(|(_, q)| q.clone()).collect();
+        let mut short: Vec<(Instrument, Money)> =
             shorts.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()).unwrap_or_default();
         // Latest expiry first: a long that covers it covers every earlier short too.
         short.sort_by(|a, b| expiry(&b.0).cmp(&expiry(&a.0)));

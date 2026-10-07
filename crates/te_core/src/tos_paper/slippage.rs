@@ -17,7 +17,7 @@ use crate::ledger::json::Json;
 use crate::ledger::mirror::pro_rata;
 use crate::ledger::model::{derr, err, R};
 use crate::ledger::ops::{add, div as ops_div, gt, lt, mul, sub};
-use crate::ledger::pydec::{PyDec, Round};
+use crate::money::{Money, Round};
 
 fn slippage<T>(msg: impl Into<String>) -> R<T> {
     err(SLIPPAGE, msg)
@@ -25,19 +25,19 @@ fn slippage<T>(msg: impl Into<String>) -> R<T> {
 
 /// `a / b`; a zero over a zero is `DivisionUndefined` (a kind the host maps, not a plain
 /// `InvalidOperation`: the signal list in the message differs).
-fn div(a: &PyDec, b: &PyDec) -> R<PyDec> {
+fn div(a: &Money, b: &Money) -> R<Money> {
     if a.is_finite() && b.is_finite() && a.is_zero() && b.is_zero() {
         return err("tos_division_undefined", String::new());
     }
     ops_div(a, b)
 }
 
-fn zero() -> PyDec {
-    PyDec::zero()
+fn zero() -> Money {
+    Money::zero()
 }
 
 /// `sum(values, ZERO)`: left to right, each add rounded to the context.
-fn sum<'a>(values: impl IntoIterator<Item = &'a PyDec>) -> R<PyDec> {
+fn sum<'a>(values: impl IntoIterator<Item = &'a Money>) -> R<Money> {
     let mut total = zero();
     for v in values {
         total = add(&total, v)?;
@@ -46,12 +46,12 @@ fn sum<'a>(values: impl IntoIterator<Item = &'a PyDec>) -> R<PyDec> {
 }
 
 /// `d.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)`.
-fn floor_to_cent(d: &PyDec) -> R<PyDec> {
+fn floor_to_cent(d: &Money) -> R<Money> {
     d.quantize_round(-2, Round::Floor).map_err(derr)
 }
 
 /// `d.quantize(Decimal("0.0001"))`.
-fn to_bps_places(d: &PyDec) -> R<PyDec> {
+fn to_bps_places(d: &Money) -> R<Money> {
     d.quantize(-4).map_err(derr)
 }
 
@@ -80,7 +80,7 @@ pub fn allocate_venue_fill(doc: &Json) -> R<Json> {
     }
     let fill_qty = req_dec(fill, "quantity")?;
     let ticket_qty = req_dec(ticket, "quantity")?;
-    let mut prior: Vec<(String, PyDec)> = Vec::new();
+    let mut prior: Vec<(String, Money)> = Vec::new();
     match doc.get("already_filled") {
         None | Some(Json::Null) => {}
         Some(Json::Obj(pairs)) => {
@@ -98,14 +98,14 @@ pub fn allocate_venue_fill(doc: &Json) -> R<Json> {
     if gt(&total, &ticket_qty)? {
         return slippage(format!(
             "fill {fill_id} takes the ticket to {} of {}; overfill (I5)",
-            total.to_py_string(),
-            ticket_qty.to_py_string()
+            total.canon(),
+            ticket_qty.canon()
         ));
     }
     struct Alloc {
         strategy_order_id: String,
         account_id: String,
-        quantity: PyDec,
+        quantity: Money,
     }
     let mut allocations = Vec::new();
     for a in req_arr(ticket, "allocations")? {
@@ -125,7 +125,7 @@ pub fn allocate_venue_fill(doc: &Json) -> R<Json> {
         if bad {
             return slippage(format!(
                 "already_filled gives {order_id} {}, which ticket {ticket_order} cannot have allocated (I5)",
-                quantity.to_py_string()
+                quantity.canon()
             ));
         }
     }
@@ -135,7 +135,7 @@ pub fn allocate_venue_fill(doc: &Json) -> R<Json> {
         lacking.push(sub(&a.quantity, &had)?);
     }
     let shares = pro_rata(&lacking, &sub(&ticket_qty, &done)?, &fill_qty)?;
-    let mut pieces: Vec<(usize, PyDec)> = Vec::new();
+    let mut pieces: Vec<(usize, Money)> = Vec::new();
     for (index, piece) in shares.into_iter().enumerate() {
         if gt(&piece, &zero())? {
             pieces.push((index, piece));
@@ -158,12 +158,12 @@ pub fn allocate_venue_fill(doc: &Json) -> R<Json> {
             ("fill_id", jstr(format!("{fill_id}:{}", allocation.strategy_order_id))),
             ("order_id", jstr(allocation.strategy_order_id.clone())),
             ("account_id", jstr(allocation.account_id.clone())),
-            ("quantity", jstr(piece.to_py_string())),
-            ("price", jstr(price.to_py_string())),
+            ("quantity", jstr(piece.canon())),
+            ("price", jstr(price.canon())),
             ("venue_env", jstr("paper")),
             ("filled_at", req(fill, "filled_at")?.clone()),
             ("side", jstr(fill_side)),
-            ("fee", jstr(fee.to_py_string())),
+            ("fee", jstr(fee.canon())),
             ("venue_order_id", jstr(fill_order)),
             ("venue_execution_id", jstr(fill_id)),
         ]));
@@ -176,8 +176,8 @@ struct SimFill {
     order_id: String,
     instrument: Instrument,
     side: String,
-    quantity: PyDec,
-    price: PyDec,
+    quantity: Money,
+    price: Money,
 }
 
 fn fills_of(doc: &Json, key: &str) -> R<Vec<SimFill>> {
@@ -220,7 +220,7 @@ fn group(fills: &[SimFill]) -> Grouped<'_> {
 }
 
 /// `_vwap`: total quantity and the quantity-weighted price.
-fn vwap(fills: &[&SimFill]) -> R<(PyDec, PyDec)> {
+fn vwap(fills: &[&SimFill]) -> R<(Money, Money)> {
     let quantity = sum(fills.iter().map(|f| &f.quantity))?;
     let mut notional = Vec::new();
     for f in fills {
@@ -234,11 +234,11 @@ struct Pair {
     order_id: String,
     instrument: String,
     side: String,
-    quantity: PyDec,
-    sim_price: PyDec,
-    venue_price: PyDec,
-    points: PyDec,
-    bps: Option<PyDec>,
+    quantity: Money,
+    sim_price: Money,
+    venue_price: Money,
+    points: Money,
+    bps: Option<Money>,
 }
 
 fn distinct_instruments(sims: &[&SimFill], venues: &[&SimFill]) -> R<usize> {
@@ -306,8 +306,8 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
                 order_id.to_string(),
                 format!(
                     "sim filled {} but the venue filled {}; mirror drifted (I5)",
-                    sim_qty.to_py_string(),
-                    venue_qty.to_py_string()
+                    sim_qty.canon(),
+                    venue_qty.canon()
                 ),
             ));
             continue;
@@ -316,7 +316,7 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
         // Adverse-only convention: positive always costs money.
         let points = if side == "BUY" { sub(&venue_price, &sim_price)? } else { sub(&sim_price, &venue_price)? };
         let bps = if gt(&sim_price, &zero())? {
-            Some(to_bps_places(&mul(&div(&points, &sim_price)?, &PyDec::from_i128(10000))?)?)
+            Some(to_bps_places(&mul(&div(&points, &sim_price)?, &Money::int(10000))?)?)
         } else {
             None
         };
@@ -338,7 +338,7 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
     let mut unmatched_venue: Vec<String> =
         venue_by.iter().filter(|(id, _)| !sim_by.iter().any(|(s, _)| s == id)).map(|(id, _)| id.to_string()).collect();
     let priced: Vec<&Pair> = pairs.iter().filter(|p| p.bps.is_some()).collect();
-    let mut mean: Option<PyDec> = None;
+    let mut mean: Option<Money> = None;
     if !priced.is_empty() {
         let weight = sum(priced.iter().map(|p| &p.quantity))?;
         let mut weighted = Vec::new();
@@ -366,10 +366,10 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
                             ("order_id", jstr(p.order_id.clone())),
                             ("instrument", jstr(p.instrument.clone())),
                             ("side", jstr(p.side.clone())),
-                            ("quantity", jstr(p.quantity.to_py_string())),
-                            ("sim_price", jstr(p.sim_price.to_py_string())),
-                            ("venue_price", jstr(p.venue_price.to_py_string())),
-                            ("slippage_points", jstr(p.points.to_py_string())),
+                            ("quantity", jstr(p.quantity.canon())),
+                            ("sim_price", jstr(p.sim_price.canon())),
+                            ("venue_price", jstr(p.venue_price.canon())),
+                            ("slippage_points", jstr(p.points.canon())),
                             ("slippage_bps", jopt_dec(&p.bps)),
                         ])
                     })
@@ -386,7 +386,7 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
     ]))
 }
 
-fn le_zero(d: &PyDec) -> R<bool> {
+fn le_zero(d: &Money) -> R<bool> {
     d.le(&zero()).map_err(derr)
 }
 
@@ -429,7 +429,7 @@ mod tests {
     fn a_partial_fill_splits_over_what_each_order_still_lacks() {
         let out = alloc(r#"{"A": "1"}"#, "2", "0").unwrap();
         assert_eq!(column(&out, "order_id"), ["B"]);
-        assert_eq!(column(&out, "fee"), ["0.00"]);
+        assert_eq!(column(&out, "fee"), ["0"]);
         let refused = alloc(r#"{"A": "1"}"#, "3", "0").unwrap_err();
         assert!(refused.msg.contains("takes the ticket to 4 of 3; overfill (I5)"), "{}", refused.msg);
         let unknown = alloc(r#"{"Z": "1"}"#, "1", "0").unwrap_err();
@@ -458,7 +458,7 @@ mod tests {
         };
         let r = report("", "");
         let text = dumps(&r);
-        assert!(text.contains(r#""slippage_points":"0.10""#) && text.contains(r#""slippage_bps":"500.0000""#), "{text}");
+        assert!(text.contains(r#""slippage_points":"0.1""#) && text.contains(r#""slippage_bps":"500""#), "{text}");
         assert!(text.contains(r#""unmatched_sim":["C"]"#));
         assert!(text.contains("sim filled 1 but the venue filled 2; mirror drifted (I5)"));
     }

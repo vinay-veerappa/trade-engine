@@ -1,7 +1,7 @@
 use super::Plan;
 use crate::ledger::model::{err, R};
 use crate::ledger::model::{derr, LErr};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use num_bigint::BigInt;
 
 pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool]) -> R<Plan> {
@@ -47,8 +47,8 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool]) -> R<Plan> {
         },
         "approved" => {
             let resize = if b[0] && b[1] {
-                let left = PyDec::parse(&s[0]).ok_or_else(|| LErr { kind: "value", msg: "invalid runtime decimal".into() })?;
-                let right = PyDec::parse(&s[1]).ok_or_else(|| LErr { kind: "value", msg: "invalid runtime decimal".into() })?;
+                let left = Money::parse(&s[0]).ok_or_else(|| LErr { kind: "value", msg: "invalid runtime decimal".into() })?;
+                let right = Money::parse(&s[1]).ok_or_else(|| LErr { kind: "value", msg: "invalid runtime decimal".into() })?;
                 !left.eq_num(&right).map_err(derr)?
             } else { false };
             p.flags = vec![b[0],resize];

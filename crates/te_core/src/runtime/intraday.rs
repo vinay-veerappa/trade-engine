@@ -1,6 +1,6 @@
 use super::Plan;
 use crate::ledger::model::{derr, err, LErr, R};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 
 pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Plan> {
     let mut p = Plan::default();
@@ -44,8 +44,8 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
             for row in s.chunks_exact(3) {
                 let same = if row[1] == "None" || row[2] == "None" { row[1] == row[2] }
                     else {
-                        let a = PyDec::parse(&row[1]).ok_or_else(|| LErr {kind: "value", msg: "invalid runtime decimal".into()})?;
-                        let b = PyDec::parse(&row[2]).ok_or_else(|| LErr {kind: "value", msg: "invalid runtime decimal".into()})?;
+                        let a = Money::parse(&row[1]).ok_or_else(|| LErr {kind: "value", msg: "invalid runtime decimal".into()})?;
+                        let b = Money::parse(&row[2]).ok_or_else(|| LErr {kind: "value", msg: "invalid runtime decimal".into()})?;
                         a.eq_num(&b).map_err(derr)?
                     };
                 if !same { p.text.push(row[0].clone()); }

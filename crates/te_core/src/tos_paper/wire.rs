@@ -9,7 +9,7 @@
 use super::{pytext, OVERFLOW_ERROR, VALUE, WIRE};
 use crate::ledger::json::Json;
 use crate::ledger::model::{decwire, derr, err, LErr, R};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::options::pyrules::{is_space, strip};
 use crate::options::{ContractWire, Right};
 
@@ -25,9 +25,9 @@ pub fn jstr(s: impl Into<String>) -> Json {
     Json::Str(s.into())
 }
 
-pub fn jopt_dec(d: &Option<PyDec>) -> Json {
+pub fn jopt_dec(d: &Option<Money>) -> Json {
     match d {
-        Some(d) => jstr(d.to_py_string()),
+        Some(d) => jstr(d.canon()),
         None => Json::Null,
     }
 }
@@ -50,16 +50,16 @@ pub fn req_int(j: &Json, key: &str) -> R<i128> {
     }
 }
 
-pub fn dec_of(text: &str) -> R<PyDec> {
-    PyDec::parse(text).map_or_else(|| wire(format!("not a Decimal: {text:?}")), Ok)
+pub fn dec_of(text: &str) -> R<Money> {
+    Money::parse(text).map_or_else(|| wire(format!("not a Decimal: {text:?}")), Ok)
 }
 
-pub fn req_dec(j: &Json, key: &str) -> R<PyDec> {
+pub fn req_dec(j: &Json, key: &str) -> R<Money> {
     dec_of(req_str(j, key)?)
 }
 
 /// A Decimal that may be `null` (or absent).
-pub fn opt_dec(j: &Json, key: &str) -> R<Option<PyDec>> {
+pub fn opt_dec(j: &Json, key: &str) -> R<Option<Money>> {
     match j.get(key) {
         None | Some(Json::Null) => Ok(None),
         Some(Json::Str(s)) => dec_of(s).map(Some),
@@ -87,7 +87,7 @@ pub enum Instrument {
 pub struct OptionC {
     pub underlying: String,
     pub expiry: String,
-    pub strike: PyDec,
+    pub strike: Money,
     pub right: Right,
     pub multiplier: i128,
 }
@@ -196,7 +196,7 @@ impl Instrument {
 }
 
 /// `int(d)` as a JSON int of any size: a Decimal's integral part, truncated toward zero.
-pub fn int_json(d: &PyDec) -> R<Json> {
+pub fn int_json(d: &Money) -> R<Json> {
     if d.is_nan() {
         return err(VALUE, "cannot convert NaN to integer");
     }
@@ -285,7 +285,7 @@ pub fn linstr_json(i: &lm::Instrument) -> Json {
             ("kind", jstr("option")),
             ("underlying", jstr(c.underlying.clone())),
             ("expiry", jstr(lm::date_iso(&c.expiry))),
-            ("strike", jstr(c.strike.to_py_string())),
+            ("strike", jstr(c.strike.canon())),
             ("right", jstr(if c.right == Right::Call { "C" } else { "P" })),
             ("multiplier", Json::Int(c.multiplier)),
         ]),

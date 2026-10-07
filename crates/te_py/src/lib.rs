@@ -454,10 +454,10 @@ use te_core::ledger::fold::{apply_event as fold_apply, AccountState};
 use te_core::ledger::json::dumps as ldumps;
 use te_core::ledger::model::{Event, LErr, Obj, R as LR};
 use te_core::ledger::ops::OMap;
-use te_core::ledger::pydec::PyDec;
+use te_core::money::Money;
 
-fn dec_arg(text: &str) -> LR<PyDec> {
-    PyDec::parse(text).ok_or_else(|| LErr { kind: "invalid_operation", msg: String::new() })
+fn dec_arg(text: &str) -> LR<Money> {
+    Money::parse(text).ok_or_else(|| LErr { kind: "invalid_operation", msg: String::new() })
 }
 
 /// The old encoder's refusals over the walker's tree; its stored (sorted) bytes.
@@ -549,9 +549,9 @@ fn ledger_mirror_step(step: &str, mirror: &str, payload: &str) -> PyResult<Vec<u
 #[pyfunction]
 fn ledger_pro_rata(weights: Vec<String>, whole: &str, amount: &str) -> PyResult<Vec<String>> {
     let run = || -> LR<Vec<String>> {
-        let w: Vec<PyDec> = weights.iter().map(|x| dec_arg(x)).collect::<LR<_>>()?;
+        let w: Vec<Money> = weights.iter().map(|x| dec_arg(x)).collect::<LR<_>>()?;
         let out = te_core::ledger::mirror::pro_rata(&w, &dec_arg(whole)?, &dec_arg(amount)?)?;
-        Ok(out.iter().map(|d| d.to_py_string()).collect())
+        Ok(out.iter().map(|d| d.canon()).collect())
     };
     run().map_err(refuse_ledger)
 }

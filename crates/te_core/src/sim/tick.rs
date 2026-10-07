@@ -33,7 +33,7 @@
 use std::cmp::Ordering;
 
 use crate::ledger::model::{err, ContractMonth, FutureContract, Instrument, LErr, Side, R};
-use crate::ledger::pydec::{DecErr, PyDec, Round};
+use crate::money::{DecErr, Money, Round};
 
 /// Static contract specification definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,8 +64,8 @@ pub const FUTURE_SPECS: &[StaticFutureSpec] = &[
 #[derive(Debug, Clone)]
 pub struct FutureSpec {
     pub root: &'static str,
-    pub tick_size: PyDec,
-    pub point_value: PyDec,
+    pub tick_size: Money,
+    pub point_value: Money,
 }
 
 impl FutureSpec {
@@ -92,7 +92,7 @@ fn derr(e: DecErr) -> LErr {
     }
 }
 
-fn d(r: Result<PyDec, DecErr>) -> R<PyDec> {
+fn d(r: Result<Money, DecErr>) -> R<Money> {
     r.map_err(derr)
 }
 
@@ -102,9 +102,9 @@ pub fn spec_for_root(root: &str) -> R<FutureSpec> {
     let r_upper = root.trim().to_ascii_uppercase();
     for s in FUTURE_SPECS {
         if s.root == r_upper {
-            let tick_size = PyDec::parse(s.tick_size_str)
+            let tick_size = Money::parse(s.tick_size_str)
                 .ok_or_else(|| lerr("value", "internal error: invalid tick_size"))?;
-            let point_value = PyDec::parse(s.point_value_str)
+            let point_value = Money::parse(s.point_value_str)
                 .ok_or_else(|| lerr("value", "internal error: invalid point_value"))?;
             return Ok(FutureSpec {
                 root: s.root,
@@ -275,7 +275,7 @@ pub enum RoundMode {
     Ceil,
 }
 
-/// Snap `price` to multiples of `tick` in checked `PyDec` according to `mode`.
+/// Snap `price` to multiples of `tick` in checked `Money` according to `mode`.
 ///
 /// For `RoundMode::Nearest`:
 /// Ties (exact 0.5 fractions of a tick) break towards positive infinity (+∞),
@@ -286,7 +286,7 @@ pub enum RoundMode {
 ///
 /// For `RoundMode::Ceil`:
 /// Rounds towards +∞ (`-Floor(-x)`).
-pub fn round_to_tick(price: &PyDec, tick: &PyDec, mode: RoundMode) -> R<PyDec> {
+pub fn round_to_tick(price: &Money, tick: &Money, mode: RoundMode) -> R<Money> {
     if !price.is_finite() {
         return err("value", "price must be finite");
     }
@@ -304,7 +304,7 @@ pub fn round_to_tick(price: &PyDec, tick: &PyDec, mode: RoundMode) -> R<PyDec> {
         }
         RoundMode::Nearest => {
             // JS Math.round(x) is floor(x + 0.5), which breaks ties towards +∞.
-            let half = PyDec::parse("0.5").ok_or_else(|| lerr("value", "internal error: 0.5"))?;
+            let half = Money::parse("0.5").ok_or_else(|| lerr("value", "internal error: 0.5"))?;
             let shifted = d(units.add(&half))?;
             d(shifted.to_integral(Round::Floor))?
         }
@@ -324,7 +324,7 @@ pub fn round_to_tick(price: &PyDec, tick: &PyDec, mode: RoundMode) -> R<PyDec> {
 ///
 /// Slipped prices are snapped to the tick grid (matching `replay-sim.ts::applySlippage`).
 /// `n == 0` returns the price untouched, unsnapped, as `applySlippage`'s `if (!ticks) return price`.
-pub fn slip_ticks(price: &PyDec, side: Side, n: u32, tick: &PyDec) -> R<PyDec> {
+pub fn slip_ticks(price: &Money, side: Side, n: u32, tick: &Money) -> R<Money> {
     if n == 0 {
         return Ok(price.clone());
     }
@@ -343,8 +343,8 @@ mod tests {
     use crate::sim::broker::{Alloc, Bar, Book, VOrder};
     use crate::sim::Ts;
 
-    fn p(s: &str) -> PyDec {
-        PyDec::parse(s).unwrap_or_else(|| panic!("failed to parse PyDec: {s}"))
+    fn p(s: &str) -> Money {
+        Money::parse(s).unwrap_or_else(|| panic!("failed to parse Money: {s}"))
     }
 
     fn ts(iso: &str) -> Ts {
@@ -564,9 +564,9 @@ mod tests {
             let floor = round_to_tick(&price, &tick, RoundMode::Floor).unwrap();
             let ceil = round_to_tick(&price, &tick, RoundMode::Ceil).unwrap();
 
-            assert_eq!(nearest.to_py_string(), s, "Nearest for exact multiple {s}");
-            assert_eq!(floor.to_py_string(), s, "Floor for exact multiple {s}");
-            assert_eq!(ceil.to_py_string(), s, "Ceil for exact multiple {s}");
+            assert_eq!(nearest.canon(), p(s).canon(), "Nearest for exact multiple {s}");
+            assert_eq!(floor.canon(), p(s).canon(), "Floor for exact multiple {s}");
+            assert_eq!(ceil.canon(), p(s).canon(), "Ceil for exact multiple {s}");
         }
     }
 
@@ -576,15 +576,15 @@ mod tests {
 
         // 100.10: 400.4 ticks
         let p1 = p("100.10");
-        assert_eq!(round_to_tick(&p1, &tick, RoundMode::Floor).unwrap().to_py_string(), "100.00");
-        assert_eq!(round_to_tick(&p1, &tick, RoundMode::Ceil).unwrap().to_py_string(), "100.25");
-        assert_eq!(round_to_tick(&p1, &tick, RoundMode::Nearest).unwrap().to_py_string(), "100.00");
+        assert_eq!(round_to_tick(&p1, &tick, RoundMode::Floor).unwrap().canon(), "100");
+        assert_eq!(round_to_tick(&p1, &tick, RoundMode::Ceil).unwrap().canon(), "100.25");
+        assert_eq!(round_to_tick(&p1, &tick, RoundMode::Nearest).unwrap().canon(), "100");
 
         // 100.20: 400.8 ticks
         let p2 = p("100.20");
-        assert_eq!(round_to_tick(&p2, &tick, RoundMode::Floor).unwrap().to_py_string(), "100.00");
-        assert_eq!(round_to_tick(&p2, &tick, RoundMode::Ceil).unwrap().to_py_string(), "100.25");
-        assert_eq!(round_to_tick(&p2, &tick, RoundMode::Nearest).unwrap().to_py_string(), "100.25");
+        assert_eq!(round_to_tick(&p2, &tick, RoundMode::Floor).unwrap().canon(), "100");
+        assert_eq!(round_to_tick(&p2, &tick, RoundMode::Ceil).unwrap().canon(), "100.25");
+        assert_eq!(round_to_tick(&p2, &tick, RoundMode::Nearest).unwrap().canon(), "100.25");
     }
 
     #[test]
@@ -594,15 +594,15 @@ mod tests {
         // 100.125: exact tie at 400.5 ticks
         // Nearest tie rule: round half towards +∞ (matching JS Math.round in snapTick)
         let tie1 = p("100.125");
-        assert_eq!(round_to_tick(&tie1, &tick, RoundMode::Floor).unwrap().to_py_string(), "100.00");
-        assert_eq!(round_to_tick(&tie1, &tick, RoundMode::Ceil).unwrap().to_py_string(), "100.25");
-        assert_eq!(round_to_tick(&tie1, &tick, RoundMode::Nearest).unwrap().to_py_string(), "100.25");
+        assert_eq!(round_to_tick(&tie1, &tick, RoundMode::Floor).unwrap().canon(), "100");
+        assert_eq!(round_to_tick(&tie1, &tick, RoundMode::Ceil).unwrap().canon(), "100.25");
+        assert_eq!(round_to_tick(&tie1, &tick, RoundMode::Nearest).unwrap().canon(), "100.25");
 
         // 100.375: exact tie at 401.5 ticks
         let tie2 = p("100.375");
-        assert_eq!(round_to_tick(&tie2, &tick, RoundMode::Floor).unwrap().to_py_string(), "100.25");
-        assert_eq!(round_to_tick(&tie2, &tick, RoundMode::Ceil).unwrap().to_py_string(), "100.50");
-        assert_eq!(round_to_tick(&tie2, &tick, RoundMode::Nearest).unwrap().to_py_string(), "100.50");
+        assert_eq!(round_to_tick(&tie2, &tick, RoundMode::Floor).unwrap().canon(), "100.25");
+        assert_eq!(round_to_tick(&tie2, &tick, RoundMode::Ceil).unwrap().canon(), "100.5");
+        assert_eq!(round_to_tick(&tie2, &tick, RoundMode::Nearest).unwrap().canon(), "100.5");
     }
 
     #[test]
@@ -611,29 +611,29 @@ mod tests {
 
         // -100.10: -400.4 ticks
         let n1 = p("-100.10");
-        assert_eq!(round_to_tick(&n1, &tick, RoundMode::Floor).unwrap().to_py_string(), "-100.25");
-        assert_eq!(round_to_tick(&n1, &tick, RoundMode::Ceil).unwrap().to_py_string(), "-100.00");
-        assert_eq!(round_to_tick(&n1, &tick, RoundMode::Nearest).unwrap().to_py_string(), "-100.00");
+        assert_eq!(round_to_tick(&n1, &tick, RoundMode::Floor).unwrap().canon(), "-100.25");
+        assert_eq!(round_to_tick(&n1, &tick, RoundMode::Ceil).unwrap().canon(), "-100");
+        assert_eq!(round_to_tick(&n1, &tick, RoundMode::Nearest).unwrap().canon(), "-100");
 
         // -100.20: -400.8 ticks
         let n2 = p("-100.20");
-        assert_eq!(round_to_tick(&n2, &tick, RoundMode::Floor).unwrap().to_py_string(), "-100.25");
-        assert_eq!(round_to_tick(&n2, &tick, RoundMode::Ceil).unwrap().to_py_string(), "-100.00");
-        assert_eq!(round_to_tick(&n2, &tick, RoundMode::Nearest).unwrap().to_py_string(), "-100.25");
+        assert_eq!(round_to_tick(&n2, &tick, RoundMode::Floor).unwrap().canon(), "-100.25");
+        assert_eq!(round_to_tick(&n2, &tick, RoundMode::Ceil).unwrap().canon(), "-100");
+        assert_eq!(round_to_tick(&n2, &tick, RoundMode::Nearest).unwrap().canon(), "-100.25");
 
         // -100.125: exact tie at -400.5 ticks
         // Math.round(-400.5) in JS is -400 (half towards +∞), so -400 / 4 = -100.00
         let tie_neg = p("-100.125");
-        assert_eq!(round_to_tick(&tie_neg, &tick, RoundMode::Floor).unwrap().to_py_string(), "-100.25");
-        assert_eq!(round_to_tick(&tie_neg, &tick, RoundMode::Ceil).unwrap().to_py_string(), "-100.00");
-        assert_eq!(round_to_tick(&tie_neg, &tick, RoundMode::Nearest).unwrap().to_py_string(), "-100.00");
+        assert_eq!(round_to_tick(&tie_neg, &tick, RoundMode::Floor).unwrap().canon(), "-100.25");
+        assert_eq!(round_to_tick(&tie_neg, &tick, RoundMode::Ceil).unwrap().canon(), "-100");
+        assert_eq!(round_to_tick(&tie_neg, &tick, RoundMode::Nearest).unwrap().canon(), "-100");
 
         // -100.375: exact tie at -401.5 ticks
         // Math.round(-401.5) in JS is -401, so -401 / 4 = -100.25
         let tie_neg2 = p("-100.375");
-        assert_eq!(round_to_tick(&tie_neg2, &tick, RoundMode::Floor).unwrap().to_py_string(), "-100.50");
-        assert_eq!(round_to_tick(&tie_neg2, &tick, RoundMode::Ceil).unwrap().to_py_string(), "-100.25");
-        assert_eq!(round_to_tick(&tie_neg2, &tick, RoundMode::Nearest).unwrap().to_py_string(), "-100.25");
+        assert_eq!(round_to_tick(&tie_neg2, &tick, RoundMode::Floor).unwrap().canon(), "-100.5");
+        assert_eq!(round_to_tick(&tie_neg2, &tick, RoundMode::Ceil).unwrap().canon(), "-100.25");
+        assert_eq!(round_to_tick(&tie_neg2, &tick, RoundMode::Nearest).unwrap().canon(), "-100.25");
     }
 
     #[test]
@@ -642,21 +642,21 @@ mod tests {
         let base = p("20000.25");
 
         // Buy slips up (adverse), Sell slips down (adverse)
-        assert_eq!(slip_ticks(&base, Side::Buy, 1, &tick).unwrap().to_py_string(), "20000.50");
-        assert_eq!(slip_ticks(&base, Side::Sell, 1, &tick).unwrap().to_py_string(), "20000.00");
+        assert_eq!(slip_ticks(&base, Side::Buy, 1, &tick).unwrap().canon(), "20000.5");
+        assert_eq!(slip_ticks(&base, Side::Sell, 1, &tick).unwrap().canon(), "20000");
 
-        assert_eq!(slip_ticks(&base, Side::Buy, 4, &tick).unwrap().to_py_string(), "20001.25");
-        assert_eq!(slip_ticks(&base, Side::Sell, 4, &tick).unwrap().to_py_string(), "19999.25");
+        assert_eq!(slip_ticks(&base, Side::Buy, 4, &tick).unwrap().canon(), "20001.25");
+        assert_eq!(slip_ticks(&base, Side::Sell, 4, &tick).unwrap().canon(), "19999.25");
 
         // n = 0 keeps price unchanged
-        assert_eq!(slip_ticks(&base, Side::Buy, 0, &tick).unwrap().to_py_string(), "20000.25");
-        assert_eq!(slip_ticks(&base, Side::Sell, 0, &tick).unwrap().to_py_string(), "20000.25");
+        assert_eq!(slip_ticks(&base, Side::Buy, 0, &tick).unwrap().canon(), "20000.25");
+        assert_eq!(slip_ticks(&base, Side::Sell, 0, &tick).unwrap().canon(), "20000.25");
 
         // Unaligned price gets snapped on slippage, but not when n = 0 (applySlippage returns it as is)
         let unaligned = p("20000.10");
-        assert_eq!(slip_ticks(&unaligned, Side::Buy, 0, &tick).unwrap().to_py_string(), "20000.10");
-        assert_eq!(slip_ticks(&unaligned, Side::Buy, 1, &tick).unwrap().to_py_string(), "20000.25");
-        assert_eq!(slip_ticks(&unaligned, Side::Sell, 1, &tick).unwrap().to_py_string(), "19999.75");
+        assert_eq!(slip_ticks(&unaligned, Side::Buy, 0, &tick).unwrap().canon(), "20000.1");
+        assert_eq!(slip_ticks(&unaligned, Side::Buy, 1, &tick).unwrap().canon(), "20000.25");
+        assert_eq!(slip_ticks(&unaligned, Side::Sell, 1, &tick).unwrap().canon(), "19999.75");
     }
 
     #[test]

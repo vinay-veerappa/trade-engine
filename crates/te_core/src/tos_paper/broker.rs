@@ -29,7 +29,7 @@ use crate::ledger::json::{self, Json};
 use crate::ledger::mirror::{self as fold, MirrorState};
 use crate::ledger::model::{err, opt_dec_eq, parse_datetime, Instrument, LErr, MirrorQueued, OrderState, OrderType, R};
 use crate::ledger::ops::{add, eq, gt, le, lt, mul_i, ne, s, zero, OMap};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 
 /// `PREFLIGHT_MAX_AGE`: a preflight read older than this is not used by the drain (microseconds).
 const PREFLIGHT_MAX_AGE_US: i128 = 30_000_000;
@@ -152,14 +152,14 @@ impl Ack {
 struct Sent {
     ticket: Ticket,
     order_id: String,
-    resting: PyDec,
+    resting: Money,
 }
 
 /// `normalize.OrderFill`.
 struct Fill {
     order_id: String,
-    filled: PyDec,
-    avg_price: Option<PyDec>,
+    filled: Money,
+    avg_price: Option<Money>,
     state: OrderState,
 }
 
@@ -190,7 +190,7 @@ fn contracts_of(ticket: &Ticket) -> reconcile::Ticket {
 }
 
 /// `_add`: the ticket's signed contracts (`units`, default all) into `expected`, times `sign`.
-fn add_ticket(expected: &mut Book, ticket: &Ticket, sign: i128, units: Option<&PyDec>) -> R<()> {
+fn add_ticket(expected: &mut Book, ticket: &Ticket, sign: i128, units: Option<&Money>) -> R<()> {
     for (contract, quantity) in reconcile::ticket_contracts(&contracts_of(ticket), units)?.iter() {
         let current = reconcile::get(expected, contract);
         let total = add(&current, &mul_i(quantity, sign)?)?;
@@ -359,7 +359,7 @@ impl Broker {
         Ok(out)
     }
 
-    fn read_positions(&self, h: &mut dyn Host) -> X<Vec<(Instrument, PyDec)>> {
+    fn read_positions(&self, h: &mut dyn Host) -> X<Vec<(Instrument, Money)>> {
         let mut out = Vec::new();
         for doc in self.position_docs(h)? {
             out.push((linstr(req(&doc, "instrument")?)?, req_dec(&doc, "quantity")?));
@@ -904,7 +904,7 @@ impl Broker {
     }
 
     /// `_unexpect`: the ticket's contracts (`units`, default all) leave the expected book.
-    fn unexpect(&mut self, ticket: &Ticket, units: Option<&PyDec>) -> R<()> {
+    fn unexpect(&mut self, ticket: &Ticket, units: Option<&Money>) -> R<()> {
         add_ticket(&mut self.expected, ticket, -1, units)
     }
 

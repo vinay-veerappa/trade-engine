@@ -275,6 +275,16 @@ impl Money {
         Exact { neg, coef: BigUint::from(m), exp }
     }
 
+    /// A `Money` is always a finite number (NaN and Infinity are refused at parse, I5); kept so
+    /// the finite-checks ported from the Python code read the same.
+    pub fn is_finite(&self) -> bool {
+        true
+    }
+
+    pub fn is_nan(&self) -> bool {
+        false
+    }
+
     pub fn is_zero(&self) -> bool {
         self.0.is_zero()
     }

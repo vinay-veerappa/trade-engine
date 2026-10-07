@@ -15,7 +15,7 @@ use super::json::{dumps, Json};
 use super::mirror::{MirrorState, MirrorTicketState};
 use super::model::{Instrument, Obj, Order, R};
 use super::ops::OMap;
-use super::pydec::PyDec;
+use crate::money::Money;
 
 fn jint(n: i128) -> Json {
     Json::Int(n)
@@ -53,7 +53,7 @@ fn k_book(k: &(String, Instrument)) -> R<Json> {
     Ok(jtuple(vec![jstr(&k.0), enc_instrument(&k.1)?]))
 }
 
-fn v_dec(v: &PyDec) -> R<Json> {
+fn v_dec(v: &Money) -> R<Json> {
     jdec(v)
 }
 
@@ -295,6 +295,6 @@ pub fn canon_mirror_pub(m: &MirrorState) -> R<Json> {
 }
 
 /// `ticket_contracts`' result as a `{"m": [[contract, quantity]]}` map.
-pub fn canon_contracts(m: &OMap<Instrument, PyDec>) -> R<Json> {
+pub fn canon_contracts(m: &OMap<Instrument, Money>) -> R<Json> {
     full_map(m, k_instr, v_dec)
 }

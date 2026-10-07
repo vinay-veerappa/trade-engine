@@ -6,7 +6,7 @@
 //! `persistent_kill_switch`): the host appends those, last, as the Python did. The
 //! configuration is validated by the Python dataclasses that carry it; this reads it.
 //!
-//! Python semantics kept on purpose: every comparison and sum is `Decimal`'s (`PyDec`),
+//! Python semantics kept on purpose: every comparison and sum is `Decimal`'s (`Money`),
 //! `all()` stops at its first false, the margin figures come from `te_core::margin` as
 //! `account_margin` returned them, and an attribute the Python read off an `Equity` leg
 //! (`.right`, `.occ`) refuses as the `AttributeError` it raised.
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use crate::ledger::fold::{make_position, AccountState};
 use crate::ledger::model::{derr, err, make_equity, ComboLeg, Instrument, LErr, OrderState, Side, R};
 use crate::ledger::ops::{abs, add, div, eq, ge, gt, le, lt, mul, mul_i, neg, sub, zero, OMap};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::margin::option::{self as mo, Contract, Style};
 use crate::margin::{self as mg, AccountInput, Kind, MarginError};
 use crate::oms::structures::{is_structure, legs_of, multiplier, open_structures, uncovered_calls};
@@ -28,7 +28,7 @@ use crate::sim::snapshot::underlying_of;
 #[derive(Debug, Clone)]
 pub enum Val {
     S(String),
-    D(PyDec),
+    D(Money),
 }
 
 #[derive(Debug, Clone)]
@@ -43,31 +43,31 @@ pub struct RuleResult {
 /// `EntryQuoteRules`, already validated.
 #[derive(Debug, Clone, Default)]
 pub struct EntryQuote {
-    pub short_put_abs_delta: Option<(PyDec, PyDec)>,
-    pub min_short_bid: Option<PyDec>,
-    pub short_bid_return: Option<(PyDec, PyDec)>,
-    pub min_short_implied_vol: Option<PyDec>,
+    pub short_put_abs_delta: Option<(Money, Money)>,
+    pub min_short_bid: Option<Money>,
+    pub short_bid_return: Option<(Money, Money)>,
+    pub min_short_implied_vol: Option<Money>,
     pub min_open_interest: Option<i128>,
-    pub max_leg_spread_frac: Option<PyDec>,
-    pub min_underlying_price: Option<PyDec>,
-    pub min_credit_width_frac: Option<PyDec>,
-    pub min_credit_return: Option<PyDec>,
-    pub max_friction_frac: Option<PyDec>,
+    pub max_leg_spread_frac: Option<Money>,
+    pub min_underlying_price: Option<Money>,
+    pub min_credit_width_frac: Option<Money>,
+    pub min_credit_return: Option<Money>,
+    pub max_friction_frac: Option<Money>,
 }
 
 /// `OptionRiskRules`, already validated.
 #[derive(Debug, Clone)]
 pub struct Rules {
-    pub max_margin_frac: PyDec,
+    pub max_margin_frac: Money,
     pub allowed_regimes: Vec<String>,
     pub no_earnings_before_expiry: bool,
-    pub max_name_margin_frac: Option<PyDec>,
-    pub max_name_collateral_frac: Option<PyDec>,
-    pub put_notional_frac_by_regime: Option<Vec<(String, PyDec)>>,
-    pub max_loss_per_structure_frac: Option<PyDec>,
-    pub max_debit_per_structure_frac: Option<PyDec>,
-    pub max_total_debit_frac: Option<PyDec>,
-    pub max_share_notional_frac: Option<PyDec>,
+    pub max_name_margin_frac: Option<Money>,
+    pub max_name_collateral_frac: Option<Money>,
+    pub put_notional_frac_by_regime: Option<Vec<(String, Money)>>,
+    pub max_loss_per_structure_frac: Option<Money>,
+    pub max_debit_per_structure_frac: Option<Money>,
+    pub max_total_debit_frac: Option<Money>,
+    pub max_share_notional_frac: Option<Money>,
     pub entry_quote: Option<EntryQuote>,
 }
 
@@ -75,27 +75,27 @@ pub struct Rules {
 pub struct Intent {
     pub instrument: Instrument,
     pub side: Side,
-    pub quantity: PyDec,
-    pub limit_price: Option<PyDec>,
+    pub quantity: Money,
+    pub limit_price: Option<Money>,
 }
 
 /// One `OptionQuote`, as far as the rules read it. `occ` is the quoted contract's.
 #[derive(Debug, Clone)]
 pub struct Quote {
     pub occ: String,
-    pub bid: PyDec,
-    pub ask: PyDec,
-    pub implied_vol: Option<PyDec>,
+    pub bid: Money,
+    pub ask: Money,
+    pub implied_vol: Option<Money>,
     /// `Decimal(str(greeks.delta))`; None when the quote carries no greeks.
-    pub delta: Option<PyDec>,
+    pub delta: Option<Money>,
     pub open_interest: Option<i128>,
 }
 
 impl Quote {
-    pub fn mid(&self) -> R<PyDec> {
-        div(&add(&self.bid, &self.ask)?, &PyDec::from_i128(2))
+    pub fn mid(&self) -> R<Money> {
+        div(&add(&self.bid, &self.ask)?, &Money::int(2))
     }
-    pub fn spread(&self) -> R<PyDec> {
+    pub fn spread(&self) -> R<Money> {
         sub(&self.ask, &self.bid)
     }
 }
@@ -105,7 +105,7 @@ impl Quote {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub underlying: String,
-    pub underlying_price: PyDec,
+    pub underlying_price: Money,
     pub quotes: Vec<Quote>,
 }
 
@@ -160,7 +160,7 @@ fn expiry_of(i: &Instrument) -> R<NaiveDate> {
     }
 }
 
-fn strike_of(i: &Instrument) -> R<PyDec> {
+fn strike_of(i: &Instrument) -> R<Money> {
     match i {
         Instrument::Option(c) => Ok(c.strike.clone()),
         other => no_attr(other, "strike"),
@@ -174,15 +174,15 @@ fn occ_strip(i: &Instrument) -> R<String> {
     }
 }
 
-fn ds(d: &PyDec) -> String {
-    d.to_py_string()
+fn ds(d: &Money) -> String {
+    d.canon()
 }
 
 fn is_option(i: &Instrument) -> bool {
     matches!(i, Instrument::Option(_))
 }
 
-fn positive(d: &Option<PyDec>) -> R<Option<PyDec>> {
+fn positive(d: &Option<Money>) -> R<Option<Money>> {
     // `equity if equity is not None and equity > 0`
     match d {
         Some(e) if gt(e, &zero())? => Ok(Some(e.clone())),
@@ -191,21 +191,21 @@ fn positive(d: &Option<PyDec>) -> R<Option<PyDec>> {
 }
 
 /// `equity * frac if equity is not None and equity > 0 else None`
-fn cap_of(equity: &Option<PyDec>, frac: &PyDec) -> R<Option<PyDec>> {
+fn cap_of(equity: &Option<Money>, frac: &Money) -> R<Option<Money>> {
     match positive(equity)? {
         Some(e) => Ok(Some(mul(&e, frac)?)),
         None => Ok(None),
     }
 }
 
-fn d_or(d: &Option<PyDec>, text: &str) -> Val {
+fn d_or(d: &Option<Money>, text: &str) -> Val {
     match d {
         Some(v) => Val::D(v.clone()),
         None => Val::S(text.to_string()),
     }
 }
 
-fn opt_le(a: &Option<PyDec>, b: &Option<PyDec>) -> R<bool> {
+fn opt_le(a: &Option<Money>, b: &Option<Money>) -> R<bool> {
     match (a, b) {
         (Some(a), Some(b)) => le(a, b),
         _ => Ok(false),
@@ -215,13 +215,13 @@ fn opt_le(a: &Option<PyDec>, b: &Option<PyDec>) -> R<bool> {
 // -- the book -------------------------------------------------------------------------
 
 struct Book {
-    equity: Option<PyDec>,
+    equity: Option<Money>,
     after: Option<AccountState>,
     error: Option<String>,
     before: Option<AccountState>,
 }
 
-fn underlying_price(contract: &Instrument, st: &AccountState, snapshot: Option<&Snapshot>) -> R<Option<PyDec>> {
+fn underlying_price(contract: &Instrument, st: &AccountState, snapshot: Option<&Snapshot>) -> R<Option<Money>> {
     let underlying = underlying_of(contract)?;
     if let Some(snap) = snapshot {
         if snap.underlying == underlying {
@@ -231,7 +231,7 @@ fn underlying_price(contract: &Instrument, st: &AccountState, snapshot: Option<&
     Ok(st.marks.get(&make_equity(&underlying)?.hk()).cloned())
 }
 
-fn leg_price(leg: &ComboLeg, net: &PyDec, legs: &[ComboLeg], snapshot: Option<&Snapshot>) -> R<Option<PyDec>> {
+fn leg_price(leg: &ComboLeg, net: &Money, legs: &[ComboLeg], snapshot: Option<&Snapshot>) -> R<Option<Money>> {
     if legs.len() == 1 {
         return Ok(Some(net.clone()));
     }
@@ -245,9 +245,9 @@ fn leg_price(leg: &ComboLeg, net: &PyDec, legs: &[ComboLeg], snapshot: Option<&S
     }
 }
 
-fn book(intent: &Intent, price: &Option<PyDec>, ctx: &Context<'_>) -> R<Book> {
+fn book(intent: &Intent, price: &Option<Money>, ctx: &Context<'_>) -> R<Book> {
     let st = ctx.state;
-    let mut marks: OMap<Instrument, Option<PyDec>> = OMap::default();
+    let mut marks: OMap<Instrument, Option<Money>> = OMap::default();
     for (k, v) in st.marks.iter() {
         marks.insert(k.hk(), k.clone(), Some(v.clone()));
     }
@@ -312,7 +312,7 @@ fn book(intent: &Intent, price: &Option<PyDec>, ctx: &Context<'_>) -> R<Book> {
             }
         }
     }
-    let mut kept: OMap<Instrument, PyDec> = OMap::default();
+    let mut kept: OMap<Instrument, Money> = OMap::default();
     for (k, v) in marks.iter() {
         if let Some(v) = v {
             kept.insert(k.hk(), k.clone(), v.clone());
@@ -332,11 +332,11 @@ fn book(intent: &Intent, price: &Option<PyDec>, ctx: &Context<'_>) -> R<Book> {
 /// What the rules read off an `AccountMargin`.
 #[derive(Debug)]
 pub(crate) struct Margin {
-    used: PyDec,
+    used: Money,
     /// (name, underlying, maintenance, cash_secured)
-    strategies: Vec<(String, String, PyDec, Option<PyDec>)>,
+    strategies: Vec<(String, String, Money, Option<Money>)>,
     /// (symbol, maintenance)
-    positions: Vec<(String, PyDec)>,
+    positions: Vec<(String, Money)>,
 }
 
 fn merr(e: MarginError) -> LErr {
@@ -344,9 +344,9 @@ fn merr(e: MarginError) -> LErr {
 }
 
 /// `Decimal(str)` of a margin figure.
-fn back(d: &rust_decimal::Decimal) -> R<PyDec> {
+fn back(d: &rust_decimal::Decimal) -> R<Money> {
     let t = d.to_string();
-    PyDec::parse(&t).map_or_else(|| err("value", format!("not a Decimal: {t:?}")), Ok)
+    Money::parse(&t).map_or_else(|| err("value", format!("not a Decimal: {t:?}")), Ok)
 }
 
 fn mo_parse(s: &str) -> R<rust_decimal::Decimal> {
@@ -482,7 +482,7 @@ fn caught(e: &LErr) -> bool {
 
 /// `_entry_price`: the limit, else the snapshot's mid (a share purchase: the price the
 /// account is marked at).
-fn entry_price(intent: &Intent, ctx: &Context<'_>) -> R<Option<PyDec>> {
+fn entry_price(intent: &Intent, ctx: &Context<'_>) -> R<Option<Money>> {
     if let Some(p) = &intent.limit_price {
         return Ok(Some(p.clone()));
     }
@@ -506,7 +506,7 @@ fn entry_price(intent: &Intent, ctx: &Context<'_>) -> R<Option<PyDec>> {
 }
 
 /// `_max_loss`: the structure's worst case at expiry, None when it has no bound.
-fn max_loss(intent: &Intent, price: &PyDec) -> R<Option<PyDec>> {
+fn max_loss(intent: &Intent, price: &Money) -> R<Option<Money>> {
     let legs = legs_of(&intent.instrument, intent.side);
     let m = multiplier(&legs[0].contract)?;
     let units = &intent.quantity;
@@ -643,7 +643,7 @@ pub fn evaluate(
         Some(frac) => {
             let (mut on_name, mut was) = (None, None);
             if let (Some(m), Some(p)) = (&margin, &previous) {
-                let measure = |m: &Margin| -> R<PyDec> {
+                let measure = |m: &Margin| -> R<Money> {
                     let mut a = zero();
                     for (_, u, maint, _) in &m.strategies {
                         if *u == underlying {
@@ -942,7 +942,7 @@ pub fn evaluate(
 
 // -- the entry's quotes ---------------------------------------------------------------
 
-fn ratio(v: &Option<PyDec>) -> R<Option<PyDec>> {
+fn ratio(v: &Option<Money>) -> R<Option<Money>> {
     match v {
         Some(d) => Ok(Some(d.quantize(-4).map_err(derr)?)),
         None => Ok(None),
@@ -957,12 +957,12 @@ fn each(values: &[(String, Option<String>)]) -> String {
         .join(", ")
 }
 
-fn shown(v: &Option<PyDec>) -> Option<String> {
+fn shown(v: &Option<Money>) -> Option<String> {
     v.as_ref().map(ds)
 }
 
 /// `low <= d <= high`
-fn between(d: &PyDec, low: &PyDec, high: &PyDec) -> R<bool> {
+fn between(d: &Money, low: &Money, high: &Money) -> R<bool> {
     Ok(le(low, d)? && le(d, high)?)
 }
 

@@ -5,7 +5,7 @@
 
 use super::json::{self, Json};
 use super::model::*;
-use super::pydec::PyDec;
+use crate::money::Money;
 
 /// `repr()` of a str.
 pub fn py_repr(s: &str) -> String {
@@ -76,8 +76,8 @@ pub fn decode(node: &Json) -> R<Val> {
     }
     if let Some(d) = node.get("d") {
         let parsed = match d {
-            Json::Str(s) => PyDec::parse(s),
-            Json::Int(i) => Some(PyDec::from_i128(*i)),
+            Json::Str(s) => Money::parse(s),
+            Json::Int(i) => Money::from_i128(*i).ok(),
             Json::Bool(_) | Json::Float(_) | Json::BigInt(_) => {
                 return err("unsupported", "a non-string Decimal literal")
             }
@@ -273,14 +273,14 @@ pub fn jenum(name: &str, value: &str) -> Json {
     Json::Obj(vec![("e".into(), jstr(name)), ("v".into(), jstr(value))])
 }
 
-pub fn jdec(d: &PyDec) -> R<Json> {
+pub fn jdec(d: &Money) -> R<Json> {
     if !d.is_finite() {
-        return codec(format!("Refusing to persist a non-finite Decimal: {} (I5)", d.to_py_string()));
+        return codec(format!("Refusing to persist a non-finite Decimal: {} (I5)", d.canon()));
     }
-    Ok(tagged("d", jstr(&d.to_py_string())))
+    Ok(tagged("d", jstr(&d.canon())))
 }
 
-pub fn jodec(d: &Option<PyDec>) -> R<Json> {
+pub fn jodec(d: &Option<Money>) -> R<Json> {
     d.as_ref().map_or(Ok(jnone()), jdec)
 }
 

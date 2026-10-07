@@ -2,11 +2,11 @@
 use super::Plan;
 use crate::ledger::model::{err, LErr, R};
 use crate::ledger::ops::*;
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::options::{ContractWire, DecWire, OptionError, Right, Special};
 
-fn dec(value: &str) -> R<PyDec> {
-    PyDec::parse(value).ok_or_else(|| LErr { kind: "value", msg: "invalid lifecycle decimal".into() })
+fn dec(value: &str) -> R<Money> {
+    Money::parse(value).ok_or_else(|| LErr { kind: "value", msg: "invalid lifecycle decimal".into() })
 }
 fn option_error(e: OptionError) -> LErr {
     LErr { kind: e.kind(), msg: e.message().into() }
@@ -20,9 +20,9 @@ fn contract(strike: &str, root: &str, date: &[i64], call: bool) -> R<ContractWir
                           exp: k.exponent(), special: Special::Finite, text: strike.into() },
     })
 }
-fn intrinsic(c: &ContractWire, price: &str) -> R<PyDec> {
+fn intrinsic(c: &ContractWire, price: &str) -> R<Money> {
     // Reuse P1's existing option rule, including its accepted numeric range. P4b's
-    // own arithmetic remains PyDec; expanding P1's range belongs to P7, not this port.
+    // own arithmetic remains Money; expanding P1's range belongs to P7, not this port.
     dec(&crate::options::lifecycle::intrinsic(c,price).map_err(option_error)?)
 }
 pub fn decide(op: &str, t: &[String], n: &[i64], b: &[bool], _f: &[f64]) -> R<Plan> {
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn exact_threshold_and_scale() {
         let p = decide("expiry",&["100".into(),"100.010".into(),"PM".into(),"AAPL".into()],&[2026,10,16],&[true,true],&[]).unwrap();
-        assert_eq!(p.text,["Exercise","exercised at expiry: 0.010 in the money at the PM settlement 100.010"]);
+        assert_eq!(p.text,["Exercise","exercised at expiry: 0.01 in the money at the PM settlement 100.010"]);
         assert!(!decide("early",&["100".into(),"101".into(),"2".into(),"1".into(),"2026-10-19".into(),"AAPL".into()],&[2026,10,16],&[],&[]).unwrap().flags[0]);
     }
 }

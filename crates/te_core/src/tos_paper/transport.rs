@@ -18,7 +18,7 @@ use super::wire::{
 use super::{UNSUPPORTED, VALUE};
 use crate::ledger::json::Json;
 use crate::ledger::model::{derr, err, R};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::options::equity_symbol;
 
 fn value<T>(msg: impl Into<String>) -> R<T> {
@@ -43,10 +43,10 @@ fn is_positive_int(v: &Json) -> bool {
 }
 
 /// `limit_price is None or limit_price <= 0` (a NaN limit refuses: `InvalidOperation`).
-fn missing_or_nonpositive(limit: &Option<PyDec>) -> R<bool> {
+fn missing_or_nonpositive(limit: &Option<Money>) -> R<bool> {
     match limit {
         None => Ok(true),
-        Some(d) => d.le(&PyDec::zero()).map_err(derr),
+        Some(d) => d.le(&Money::zero()).map_err(derr),
     }
 }
 
@@ -172,16 +172,16 @@ fn ticket_tif(tif: &str) -> Option<&'static str> {
     }
 }
 
-fn whole(q: &PyDec) -> R<bool> {
+fn whole(q: &Money) -> R<bool> {
     q.is_integral().map_err(derr)
 }
 
 struct Order {
     order_type: String,
     tif: String,
-    quantity: PyDec,
+    quantity: Money,
     side: String,
-    limit_price: Option<PyDec>,
+    limit_price: Option<Money>,
 }
 
 /// The door's `ticket_for`: `{"instrument", "order_type", "tif", "quantity", "side",
@@ -215,7 +215,7 @@ fn single_checks(order: &Order, noun: &str) -> R<()> {
         return unsupported(format!("TIF {}: DAY/GTC only", order.tif));
     }
     if !whole(&order.quantity)? {
-        return unsupported(format!("quantity {} is not a whole number of {noun} (I5)", order.quantity.to_py_string()));
+        return unsupported(format!("quantity {} is not a whole number of {noun} (I5)", order.quantity.canon()));
     }
     Ok(())
 }
@@ -255,7 +255,7 @@ fn option_ticket(order: &Order, contract: &OptionC) -> R<Json> {
         ("tif", jstr(ticket_tif(&order.tif).expect("checked"))),
         ("underlying", jstr(contract.underlying.clone())),
         ("expiry", jstr(contract.expiry.clone())),
-        ("strike", jstr(contract.strike.to_py_string())),
+        ("strike", jstr(contract.strike.canon())),
         ("right", jstr(contract.right.code())),
     ]);
     check_single(&ticket)?;
@@ -275,7 +275,7 @@ fn combo_ticket(order: &Order, legs: &[ComboLeg]) -> R<Json> {
     if !whole(&order.quantity)? {
         return unsupported(format!(
             "quantity {} is not a whole number of units (I5)",
-            order.quantity.to_py_string()
+            order.quantity.canon()
         ));
     }
     let mut leg_json = Vec::new();
@@ -292,7 +292,7 @@ fn combo_ticket(order: &Order, legs: &[ComboLeg]) -> R<Json> {
             ("side", jstr(leg.side.clone())),
             ("ratio", Json::Int(leg.ratio)),
             ("expiry", jstr(c.expiry.clone())),
-            ("strike", jstr(c.strike.to_py_string())),
+            ("strike", jstr(c.strike.canon())),
             ("right", jstr(c.right.code())),
         ]);
         check_leg(&one)?;
@@ -336,7 +336,7 @@ mod tests {
         let t = ticket_for(&order(P200, "LIMIT", "DAY", "2", "SELL", "\"2.00\"")).unwrap();
         assert_eq!(
             crate::ledger::json::dumps(&t),
-            r#"{"expiry":"2026-10-16","kind":"option","limit_price":"2.00","order_type":"LMT","quantity":2,"right":"P","side":"SELL","strike":"200","symbol":"AAPL  261016P00200000","tif":"DAY","underlying":"AAPL"}"#
+            r#"{"expiry":"2026-10-16","kind":"option","limit_price":"2","order_type":"LMT","quantity":2,"right":"P","side":"SELL","strike":"200","symbol":"AAPL  261016P00200000","tif":"DAY","underlying":"AAPL"}"#
         );
         // a market order carries no limit; "1E+1" is ten contracts
         let m = ticket_for(&order(P200, "MARKET", "GTC", "1E+1", "BUY", "null")).unwrap();

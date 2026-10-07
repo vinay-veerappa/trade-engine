@@ -13,14 +13,14 @@ use super::broker::{d, day_session, working, zero, Ack, VOrder};
 use super::{ascii_decimal, dec, dk, dmin, now, rpartition, session_close, ts_max, Clock, Ts};
 use crate::ledger::codec::py_repr;
 use crate::ledger::model::{err, parse_datetime, ComboLeg, Instrument, LErr, OrderState, OrderType, Side, Tif, R};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::options::option_style;
 
 /// One option quote as the snapshot holds it: `mid`, `spread` and its own quote time.
 #[derive(Debug, Clone)]
 pub struct Quote {
-    pub mid: PyDec,
-    pub spread: PyDec,
+    pub mid: Money,
+    pub spread: Money,
     pub as_of: Ts,
 }
 
@@ -28,7 +28,7 @@ pub struct Quote {
 pub struct Snap<'a> {
     pub underlying: String,
     pub as_of: Ts,
-    pub underlying_price: PyDec,
+    pub underlying_price: Money,
     pub quote: &'a mut dyn FnMut(&str) -> R<Option<Quote>>,
 }
 
@@ -39,11 +39,11 @@ pub struct SFill {
     pub fill_id: String,
     pub order_id: String,
     pub instr: Instrument,
-    pub quantity: PyDec,
-    pub price: PyDec,
+    pub quantity: Money,
+    pub price: Money,
     pub filled_at: Ts,
     pub side: Side,
-    pub fee: PyDec,
+    pub fee: Money,
     pub leg_id: Option<String>,
     pub leg: Option<usize>,
     pub src: Option<usize>,
@@ -61,14 +61,14 @@ pub enum Origin {
 struct Working {
     order: VOrder,
     state: OrderState,
-    filled: PyDec,
+    filled: Money,
     updated_at: Ts,
 }
 
 struct PosRow {
     hk: String,
     instr: Instrument,
-    qty: PyDec,
+    qty: Money,
     origin: Origin,
 }
 
@@ -147,7 +147,7 @@ fn multiplier(order: &VOrder) -> R<i128> {
     Ok(found[0])
 }
 
-fn pos_cmp(x: &PyDec) -> R<std::cmp::Ordering> {
+fn pos_cmp(x: &Money) -> R<std::cmp::Ordering> {
     x.cmp_int(0).map_err(dk)
 }
 
@@ -172,9 +172,9 @@ impl Since {
 
 pub struct Venue {
     pub account_id: String,
-    fraction: PyDec,
-    fee: PyDec,
-    slippage: PyDec,
+    fraction: Money,
+    fee: Money,
+    slippage: Money,
     max_quote_age: f64,
     connected: bool,
     orders: Vec<Working>,
@@ -190,15 +190,15 @@ impl Venue {
     /// age was not an int or float (or was a bool).
     pub fn new(
         account_id: &str,
-        fill_fraction: Option<PyDec>,
-        fee_per_contract: Option<PyDec>,
-        equity_slippage_bps: Option<PyDec>,
+        fill_fraction: Option<Money>,
+        fee_per_contract: Option<Money>,
+        equity_slippage_bps: Option<Money>,
         max_quote_age_seconds: Option<f64>,
     ) -> R<Venue> {
         if account_id.is_empty() {
             return err("value", "account_id must be non-empty");
         }
-        let check = |name: &str, v: Option<PyDec>| -> R<PyDec> {
+        let check = |name: &str, v: Option<Money>| -> R<Money> {
             match v {
                 Some(x) if x.is_finite() && !pos_cmp(&x)?.is_lt() => Ok(x),
                 _ => err("value", format!("{name} must be a finite, non-negative Decimal")),
@@ -236,7 +236,7 @@ impl Venue {
     }
 
     /// Load what the ledger says this venue holds into an empty venue (I2).
-    pub fn restore(&mut self, orders: Vec<(VOrder, OrderState)>, fills: Vec<SFill>, positions: Vec<(Instrument, PyDec)>) -> R<()> {
+    pub fn restore(&mut self, orders: Vec<(VOrder, OrderState)>, fills: Vec<SFill>, positions: Vec<(Instrument, Money)>) -> R<()> {
         if !self.orders.is_empty() || !self.fills.is_empty() || !self.positions.is_empty() {
             return Err(snap("restore() requires an empty SnapshotVenue"));
         }
@@ -260,7 +260,7 @@ impl Venue {
             self.index.insert(order.id.clone(), self.orders.len());
             self.orders.push(Working { order, state, filled: zero(), updated_at });
         }
-        let mut per_leg: Vec<((String, Option<String>), PyDec)> = Vec::new();
+        let mut per_leg: Vec<((String, Option<String>), Money)> = Vec::new();
         let mut sorted = fills;
         sorted.sort_by(|a, b| a.filled_at.key().cmp(&b.filled_at.key()).then_with(|| a.fill_id.cmp(&b.fill_id)));
         for fill in sorted {
@@ -295,11 +295,11 @@ impl Venue {
         }
         for w in &mut self.orders {
             let combo = is_combo(&w.order);
-            let mut least: Option<PyDec> = None;
+            let mut least: Option<Money> = None;
             for (index, leg) in legs(&w.order).iter().enumerate() {
                 let key = (w.order.id.clone(), if combo { Some(index.to_string()) } else { None });
                 let total = per_leg.iter().find(|(k, _)| *k == key).map(|(_, q)| q.clone()).unwrap_or_else(zero);
-                let units = d(total.div(&PyDec::from_i128(leg.ratio)))?;
+                let units = d(total.div(&d(Money::from_i128(leg.ratio))?))?;
                 least = Some(match least {
                     None => units,
                     Some(l) => dmin(&l, &units)?,
@@ -317,8 +317,8 @@ impl Venue {
                     "Order '{}' is {} with {} of {} filled",
                     w.order.id,
                     w.state.value(),
-                    w.filled.to_py_string(),
-                    q.to_py_string()
+                    w.filled.canon(),
+                    q.canon()
                 )));
             }
         }
@@ -377,7 +377,7 @@ impl Venue {
     }
 
     /// `orders(since)`: `(id, state, filled, remaining, updated_at)` by id.
-    pub fn orders_since(&mut self, since: &str, clock: &mut Clock<'_>) -> R<Vec<(String, OrderState, PyDec, PyDec, Ts)>> {
+    pub fn orders_since(&mut self, since: &str, clock: &mut Clock<'_>) -> R<Vec<(String, OrderState, Money, Money, Ts)>> {
         let since = Since::parse(since)?;
         self.expire_due(clock)?;
         let mut ids: Vec<&String> = self.index.keys().collect();
@@ -405,7 +405,7 @@ impl Venue {
     }
 
     /// `positions()`: `(origin, quantity)` by symbol, and the `as_of` (the clock).
-    pub fn positions(&self, clock: &mut Clock<'_>) -> R<(Ts, Vec<(Origin, PyDec)>)> {
+    pub fn positions(&self, clock: &mut Clock<'_>) -> R<(Ts, Vec<(Origin, Money)>)> {
         let at = now(clock)?;
         let mut keyed = Vec::new();
         for p in &self.positions {
@@ -467,14 +467,14 @@ impl Venue {
     }
 
     /// What `side` of `instrument` trades at in the snapshot; None if it can't be priced.
-    pub fn model_price(&self, instrument: &Instrument, side: Side, s: &mut Snap<'_>) -> R<Option<PyDec>> {
+    pub fn model_price(&self, instrument: &Instrument, side: Side, s: &mut Snap<'_>) -> R<Option<Money>> {
         match instrument {
             Instrument::Equity(sym) => {
                 if *sym != s.underlying {
                     return Ok(None);
                 }
                 let price = &s.underlying_price;
-                let moved = d(d(price.mul(&self.slippage))?.div(&PyDec::from_i128(BPS)))?;
+                let moved = d(d(price.mul(&self.slippage))?.div(&d(Money::from_i128(BPS))?))?;
                 Ok(Some(if side == Side::Buy { d(price.add(&moved))? } else { d(price.sub(&moved))? }))
             }
             Instrument::Option(c) => {
@@ -497,7 +497,7 @@ impl Venue {
         }
     }
 
-    fn model_prices(&self, order: &VOrder, s: &mut Snap<'_>) -> R<Option<Vec<PyDec>>> {
+    fn model_prices(&self, order: &VOrder, s: &mut Snap<'_>) -> R<Option<Vec<Money>>> {
         let mut prices = Vec::new();
         for leg in legs(order) {
             match self.model_price(&leg.contract, leg.side, s)? {
@@ -508,7 +508,7 @@ impl Venue {
         Ok(Some(prices))
     }
 
-    fn fill(&mut self, i: usize, prices: Vec<PyDec>, at: &Ts) -> R<Vec<usize>> {
+    fn fill(&mut self, i: usize, prices: Vec<Money>, at: &Ts) -> R<Vec<usize>> {
         let order = self.orders[i].order.clone();
         let units = d(order.quantity.sub(&self.orders[i].filled))?;
         let combo = is_combo(&order);
@@ -520,10 +520,10 @@ impl Venue {
             let fee = if matches!(leg.contract, Instrument::Option(_)) { d(self.fee.mul(&quantity))? } else { zero() };
             // VenueFill.__post_init__
             if pos_cmp(&quantity)?.is_le() {
-                return err("value", format!("VenueFill quantity must be strictly positive, got {}", quantity.to_py_string()));
+                return err("value", format!("VenueFill quantity must be strictly positive, got {}", quantity.canon()));
             }
             if pos_cmp(&price)?.is_le() {
-                return err("value", format!("VenueFill price must be strictly positive, got {} (I5)", price.to_py_string()));
+                return err("value", format!("VenueFill price must be strictly positive, got {} (I5)", price.canon()));
             }
             let hk = leg.contract.hk();
             let change = if leg.side == Side::Buy { quantity.clone() } else { d(quantity.neg())? };
@@ -651,7 +651,7 @@ fn leg_of(order: &VOrder, fill: &SFill) -> R<ComboLeg> {
 }
 
 /// The price each leg fills at, or None if the order does not fill.
-pub fn fill_prices(order: &VOrder, prices: &[PyDec]) -> R<Option<Vec<PyDec>>> {
+pub fn fill_prices(order: &VOrder, prices: &[Money]) -> R<Option<Vec<Money>>> {
     if order.otype == OrderType::Market {
         let mut out = Vec::new();
         for p in prices {
@@ -668,15 +668,15 @@ pub fn fill_prices(order: &VOrder, prices: &[PyDec]) -> R<Option<Vec<PyDec>>> {
         return Ok(if through { Some(vec![limit.clone()]) } else { None });
     }
     let ls = legs(order);
-    let scale = PyDec::from_i128(multiplier(order)?);
+    let scale = d(Money::from_i128(multiplier(order)?))?;
     // The side whose legs are shaded to land on the limit: the legs sold for a credit,
     // the legs bought for a debit. The other side keeps its model prices.
     let shaded = order.side;
-    let net = |leg_prices: &[PyDec]| -> R<PyDec> {
+    let net = |leg_prices: &[Money]| -> R<Money> {
         let mut total = zero();
         for (leg, price) in ls.iter().zip(leg_prices) {
             let sign: i128 = if leg.side == shaded { 1 } else { -1 };
-            let term = d(d(PyDec::from_i128(sign * leg.ratio).mul(price))?.mul_i128(multiplier_of(&leg.contract)))?;
+            let term = d(d(d(Money::from_i128(sign * leg.ratio))?.mul(price))?.mul_i128(multiplier_of(&leg.contract)))?;
             total = d(total.add(&term))?;
         }
         d(total.div(&scale))
@@ -689,7 +689,7 @@ pub fn fill_prices(order: &VOrder, prices: &[PyDec]) -> R<Option<Vec<PyDec>>> {
     let mut kept = zero();
     for (leg, price) in ls.iter().zip(prices) {
         if leg.side != shaded {
-            let term = d(d(PyDec::from_i128(leg.ratio).mul(price))?.mul_i128(multiplier_of(&leg.contract)))?;
+            let term = d(d(d(Money::from_i128(leg.ratio))?.mul(price))?.mul_i128(multiplier_of(&leg.contract)))?;
             kept = d(kept.add(&term))?;
         }
     }
@@ -724,7 +724,7 @@ pub fn fill_prices(order: &VOrder, prices: &[PyDec]) -> R<Option<Vec<PyDec>>> {
             return err("value", "max() iterable argument is empty");
         };
         let leg = &ls[index];
-        let step = d(d(residue.mul(&scale))?.div(&PyDec::from_i128(leg.ratio * multiplier_of(&leg.contract))))?;
+        let step = d(d(residue.mul(&scale))?.div(&d(Money::from_i128(leg.ratio * multiplier_of(&leg.contract)))?))?;
         filled[index] = d(filled[index].add(&step))?;
     }
     for p in &filled {
@@ -761,7 +761,7 @@ mod tests {
     #[test]
     fn market_quantizes_to_the_tick() {
         let p = fill_prices(&order(OrderType::Market, None), &[dec("1.23456")]).unwrap().unwrap();
-        assert_eq!(p[0].to_py_string(), "1.2346");
+        assert_eq!(p[0].canon(), "1.2346");
     }
 
     #[test]

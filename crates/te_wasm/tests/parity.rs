@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::NaiveDate;
 use te_core::calendar::globex;
 use te_core::ledger::model::{Instrument, OrderState, OrderType, Side, Tif};
-use te_core::ledger::pydec::PyDec;
+use te_core::money::Money;
 use te_core::sim::broker::{self as sb, Alloc, Begin, Book, Pos, VFill, VOrder};
 use te_core::sim::tick::parse_future_symbol;
 use te_core::sim::trailing as tr;
@@ -49,8 +49,8 @@ impl Rng {
     }
 }
 
-fn dec(s: &str) -> PyDec {
-    PyDec::parse(s).unwrap()
+fn dec(s: &str) -> Money {
+    Money::parse(s).unwrap()
 }
 
 fn cents(c: i64) -> String {
@@ -360,12 +360,12 @@ impl<'a> WalkContext<'a> {
             let wid = self.rng.choice(&self.working_orders);
             if let Some(w) = self.all_orders.get(wid) {
                 if let Some(lim) = &w.limit {
-                    let cents: i64 = (lim.to_py_string().parse::<f64>().unwrap() * 100.0) as i64;
+                    let cents: i64 = (lim.canon().parse::<f64>().unwrap() * 100.0) as i64;
                     high = high.max(cents + 10);
                     low = low.min(cents - 10);
                 }
                 if let Some(st) = &w.stop {
-                    let cents: i64 = (st.to_py_string().parse::<f64>().unwrap() * 100.0) as i64;
+                    let cents: i64 = (st.canon().parse::<f64>().unwrap() * 100.0) as i64;
                     high = high.max(cents + 10);
                     low = low.min(cents - 10);
                 }
@@ -609,7 +609,7 @@ impl<'a> WalkContext<'a> {
         let mut c = || Ok(now_iso.clone());
         let direct_begin = self.direct.replace_begin(&id, new_qty_val.clone(), &mut c);
 
-        let new_qty_str = new_qty_val.as_ref().map(|d| d.to_py_string());
+        let new_qty_str = new_qty_val.as_ref().map(|d| d.canon());
         let api_begin = self
             .api
             .replace_begin(&id, new_qty_str.as_deref(), &now_iso);
@@ -625,7 +625,7 @@ impl<'a> WalkContext<'a> {
             (Ok(Begin::Go(dq)), Ok(aj)) => {
                 let v: serde_json::Value = serde_json::from_str(&aj).unwrap();
                 assert_eq!(v["outcome"].as_str().unwrap(), "go");
-                assert_eq!(v["quantity"].as_str().unwrap(), dq.to_py_string());
+                assert_eq!(v["quantity"].as_str().unwrap(), dq.canon());
 
                 // Now test either reject or commit
                 if self.rng.gen_bool(0.5) {
@@ -704,8 +704,8 @@ impl<'a> WalkContext<'a> {
                 for (d, a) in drows.iter().zip(&arows) {
                     assert_eq!(d.0, a["id"].as_str().unwrap());
                     assert_eq!(d.1.value(), a["state"].as_str().unwrap());
-                    assert_eq!(d.2.to_py_string(), a["filled"].as_str().unwrap());
-                    assert_eq!(d.3.to_py_string(), a["remaining"].as_str().unwrap());
+                    assert_eq!(d.2.canon(), a["filled"].as_str().unwrap());
+                    assert_eq!(d.3.canon(), a["remaining"].as_str().unwrap());
                     assert_eq!(d.4.iso, a["updated_at"].as_str().unwrap());
                 }
             }
@@ -752,8 +752,8 @@ impl<'a> WalkContext<'a> {
                 assert_eq!(dp.len(), ap.len());
                 for (d, a) in dp.iter().zip(&ap) {
                     assert_eq!(d.instr.symbol().unwrap(), a["symbol"].as_str().unwrap());
-                    assert_eq!(d.qty.to_py_string(), a["quantity"].as_str().unwrap());
-                    assert_eq!(d.avg.to_py_string(), a["avg_price"].as_str().unwrap());
+                    assert_eq!(d.qty.canon(), a["quantity"].as_str().unwrap());
+                    assert_eq!(d.avg.canon(), a["avg_price"].as_str().unwrap());
                     assert_eq!(d.as_of.iso, a["as_of"].as_str().unwrap());
                 }
             }
@@ -778,8 +778,8 @@ impl<'a> WalkContext<'a> {
             let af: serde_json::Value = serde_json::from_str(&af_json).unwrap();
             assert_eq!(df.fill_id, af["fill_id"].as_str().unwrap());
             assert_eq!(df.order_id, af["order_id"].as_str().unwrap());
-            assert_eq!(df.quantity.to_py_string(), af["quantity"].as_str().unwrap());
-            assert_eq!(df.price.to_py_string(), af["price"].as_str().unwrap());
+            assert_eq!(df.quantity.canon(), af["quantity"].as_str().unwrap());
+            assert_eq!(df.price.canon(), af["price"].as_str().unwrap());
             assert_eq!(df.filled_at.iso, af["filled_at"].as_str().unwrap());
             assert_eq!(df.side.value(), af["side"].as_str().unwrap());
         }
@@ -952,11 +952,11 @@ fn test_trailing_parity() {
 
         assert_eq!(direct_trig, api_out["triggered"].as_bool().unwrap());
         assert_eq!(
-            t.extreme.as_ref().map(|d| d.to_py_string()),
+            t.extreme.as_ref().map(|d| d.canon()),
             api_out["state"]["extreme"].as_str().map(|s| s.to_string())
         );
         assert_eq!(
-            t.stop_price.as_ref().map(|d| d.to_py_string()),
+            t.stop_price.as_ref().map(|d| d.canon()),
             api_out["state"]["stop_price"]
                 .as_str()
                 .map(|s| s.to_string())
@@ -1246,7 +1246,7 @@ fn test_refusal_error_kinds() {
 // P6B-T5: 200 Seeded Globex Futures Parity Walks (NQ & MNQ, slippage 0-3)
 // ===========================================================================
 
-fn fut_ticks_to_dec(q: i64) -> PyDec {
+fn fut_ticks_to_dec(q: i64) -> Money {
     let whole = q / 4;
     let rem = (q % 4).abs();
     let frac = match rem {
@@ -1256,7 +1256,7 @@ fn fut_ticks_to_dec(q: i64) -> PyDec {
         3 => "75",
         _ => unreachable!(),
     };
-    PyDec::parse(&format!("{}.{}", whole, frac)).unwrap()
+    Money::parse(&format!("{}.{}", whole, frac)).unwrap()
 }
 
 #[derive(Default)]
@@ -1579,14 +1579,14 @@ impl<'a> FuturesWalkContext<'a> {
             if let Some(w) = self.all_orders.get(wid) {
                 if w.instr.same(&instr) {
                     if let Some(lim) = &w.limit {
-                        if let Ok(val) = lim.to_py_string().parse::<f64>() {
+                        if let Ok(val) = lim.canon().parse::<f64>() {
                             let ticks = (val * 4.0).round() as i64;
                             high = high.max(ticks + 4);
                             low = low.min(ticks - 4);
                         }
                     }
                     if let Some(st) = &w.stop {
-                        if let Ok(val) = st.to_py_string().parse::<f64>() {
+                        if let Ok(val) = st.canon().parse::<f64>() {
                             let ticks = (val * 4.0).round() as i64;
                             high = high.max(ticks + 4);
                             low = low.min(ticks - 4);
@@ -1917,7 +1917,7 @@ impl<'a> FuturesWalkContext<'a> {
         let mut c = || Ok(now_iso.clone());
         let direct_begin = self.direct.replace_begin(&id, new_qty_val.clone(), &mut c);
 
-        let new_qty_str = new_qty_val.as_ref().map(|d| d.to_py_string());
+        let new_qty_str = new_qty_val.as_ref().map(|d| d.canon());
         let api_begin = self
             .api
             .replace_begin(&id, new_qty_str.as_deref(), &now_iso);
@@ -1933,7 +1933,7 @@ impl<'a> FuturesWalkContext<'a> {
             (Ok(Begin::Go(dq)), Ok(aj)) => {
                 let v: serde_json::Value = serde_json::from_str(&aj).unwrap();
                 assert_eq!(v["outcome"].as_str().unwrap(), "go");
-                assert_eq!(v["quantity"].as_str().unwrap(), dq.to_py_string());
+                assert_eq!(v["quantity"].as_str().unwrap(), dq.canon());
 
                 if self.rng.gen_bool(0.5) {
                     let msg = "Rejected by risk check".to_string();
@@ -1999,8 +1999,8 @@ impl<'a> FuturesWalkContext<'a> {
                 for (d, a) in drows.iter().zip(&arows) {
                     assert_eq!(d.0, a["id"].as_str().unwrap());
                     assert_eq!(d.1.value(), a["state"].as_str().unwrap());
-                    assert_eq!(d.2.to_py_string(), a["filled"].as_str().unwrap());
-                    assert_eq!(d.3.to_py_string(), a["remaining"].as_str().unwrap());
+                    assert_eq!(d.2.canon(), a["filled"].as_str().unwrap());
+                    assert_eq!(d.3.canon(), a["remaining"].as_str().unwrap());
                     assert_eq!(d.4.iso, a["updated_at"].as_str().unwrap());
                     if d.1 == OrderState::Expired && !self.prev_expired_ids.contains(&d.0) {
                         self.prev_expired_ids.insert(d.0.clone());
@@ -2044,18 +2044,18 @@ impl<'a> FuturesWalkContext<'a> {
                 for (d, a) in dp.iter().zip(&ap) {
                     let sym = d.instr.symbol().unwrap();
                     assert_eq!(sym, a["symbol"].as_str().unwrap());
-                    assert_eq!(d.qty.to_py_string(), a["quantity"].as_str().unwrap());
-                    assert_eq!(d.avg.to_py_string(), a["avg_price"].as_str().unwrap());
+                    assert_eq!(d.qty.canon(), a["quantity"].as_str().unwrap());
+                    assert_eq!(d.avg.canon(), a["avg_price"].as_str().unwrap());
                     assert_eq!(d.as_of.iso, a["as_of"].as_str().unwrap());
                     if let Instrument::Future(ref fc) = d.instr {
-                        assert_eq!(fc.point_value.to_py_string(), a["point_value"].as_str().unwrap());
-                        assert_eq!(fc.tick_size.to_py_string(), a["tick_size"].as_str().unwrap());
+                        assert_eq!(fc.point_value.canon(), a["point_value"].as_str().unwrap());
+                        assert_eq!(fc.tick_size.canon(), a["tick_size"].as_str().unwrap());
                     }
                     // Test position_pnl
                     let mark = dec("18500.00");
                     let dpnl = self.direct.position_pnl(&sym, &mark).unwrap();
                     let apnl = self.api.position_pnl(&sym, "18500.00").unwrap();
-                    assert_eq!(dpnl.map(|v| v.to_py_string()), apnl);
+                    assert_eq!(dpnl.map(|v| v.canon()), apnl);
                 }
             }
             (Err(de), Err(ae)) => {
@@ -2075,8 +2075,8 @@ impl<'a> FuturesWalkContext<'a> {
             let af: serde_json::Value = serde_json::from_str(&af_json).unwrap();
             assert_eq!(df.fill_id, af["fill_id"].as_str().unwrap());
             assert_eq!(df.order_id, af["order_id"].as_str().unwrap());
-            assert_eq!(df.quantity.to_py_string(), af["quantity"].as_str().unwrap());
-            assert_eq!(df.price.to_py_string(), af["price"].as_str().unwrap());
+            assert_eq!(df.quantity.canon(), af["quantity"].as_str().unwrap());
+            assert_eq!(df.price.canon(), af["price"].as_str().unwrap());
             assert_eq!(df.filled_at.iso, af["filled_at"].as_str().unwrap());
             assert_eq!(df.side.value(), af["side"].as_str().unwrap());
         }

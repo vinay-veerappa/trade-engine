@@ -6,7 +6,7 @@
 
 use te_core::ledger::bridge as lb;
 use te_core::ledger::model::{Instrument, LErr, Obj, OrderState, OrderType, Side, Tif, R};
-use te_core::ledger::pydec::PyDec;
+use te_core::money::Money;
 use te_core::sim::broker::{self as sb, Alloc, Begin, Book, Pos, VFill, VOrder};
 use te_core::sim::trailing as tr;
 use te_core::sim::{Clock, Ts};
@@ -49,8 +49,8 @@ fn fail<T>(kind: &str, msg: impl Into<String>) -> ApiResult<T> {
     Err(ApiError::new(kind, msg))
 }
 
-pub fn parse_dec(s: &str) -> ApiResult<PyDec> {
-    match PyDec::parse(s) {
+pub fn parse_dec(s: &str) -> ApiResult<Money> {
+    match Money::parse(s) {
         Some(d) => Ok(d),
         None => fail("value", format!("not a Decimal: {s:?}")),
     }
@@ -551,8 +551,8 @@ pub fn instrument_to_json_val(i: &Instrument) -> serde_json::Value {
             serde_json::json!({
                 "root": f.root,
                 "contract_month": cm_val,
-                "tick_size": f.tick_size.to_py_string(),
-                "point_value": f.point_value.to_py_string(),
+                "tick_size": f.tick_size.canon(),
+                "point_value": f.point_value.canon(),
             })
         }
         other => {
@@ -570,7 +570,7 @@ pub fn vorder_to_json(order: &VOrder) -> String {
             serde_json::json!({
                 "soid": a.soid,
                 "account": a.account,
-                "qty": a.qty.to_py_string(),
+                "qty": a.qty.canon(),
             })
         })
         .collect();
@@ -582,12 +582,12 @@ pub fn vorder_to_json(order: &VOrder) -> String {
         "instr": instr_val,
         "otype": order.otype.value(),
         "side": order.side.value(),
-        "quantity": order.quantity.to_py_string(),
+        "quantity": order.quantity.canon(),
         "submitted_at": order.submitted_at.iso,
         "tif": order.tif.value(),
-        "limit": order.limit.as_ref().map(|d| d.to_py_string()),
-        "stop": order.stop.as_ref().map(|d| d.to_py_string()),
-        "trail": order.trail.as_ref().map(|d| d.to_py_string()),
+        "limit": order.limit.as_ref().map(|d| d.canon()),
+        "stop": order.stop.as_ref().map(|d| d.canon()),
+        "trail": order.trail.as_ref().map(|d| d.canon()),
         "allocs": allocs,
         "parent": order.parent,
         "oco": order.oco,
@@ -600,11 +600,11 @@ pub fn bar_to_json(bar: &sb::Bar) -> String {
     serde_json::to_string(&serde_json::json!({
         "instr": instr_val,
         "ts": bar.ts.iso,
-        "open": bar.open.to_py_string(),
-        "high": bar.high.to_py_string(),
-        "low": bar.low.to_py_string(),
-        "close": bar.close.to_py_string(),
-        "volume": bar.volume.to_py_string(),
+        "open": bar.open.canon(),
+        "high": bar.high.canon(),
+        "low": bar.low.canon(),
+        "close": bar.close.canon(),
+        "volume": bar.volume.canon(),
         "as_of": bar.as_of.iso,
     }))
     .unwrap()
@@ -878,8 +878,8 @@ impl SimBookApi {
             .unwrap(),
             Begin::Go(q) => serde_json::to_string(&serde_json::json!({
                 "outcome": "go",
-                "quantity": q.to_py_string(),
-                "value": q.to_py_string(),
+                "quantity": q.canon(),
+                "value": q.canon(),
             }))
             .unwrap(),
         })
@@ -913,8 +913,8 @@ impl SimBookApi {
                 serde_json::json!({
                     "id": id,
                     "state": st.value(),
-                    "filled": filled.to_py_string(),
-                    "remaining": rem.to_py_string(),
+                    "filled": filled.canon(),
+                    "remaining": rem.canon(),
                     "updated_at": at.iso,
                 })
             })
@@ -949,23 +949,23 @@ impl SimBookApi {
                         "symbol": sym.clone(),
                         "key": hk,
                         "instrument": sym,
-                        "quantity": p.qty.to_py_string(),
-                        "qty": p.qty.to_py_string(),
-                        "avg_price": p.avg.to_py_string(),
-                        "avg": p.avg.to_py_string(),
+                        "quantity": p.qty.canon(),
+                        "qty": p.qty.canon(),
+                        "avg_price": p.avg.canon(),
+                        "avg": p.avg.canon(),
                         "as_of": p.as_of.iso,
-                        "point_value": fc.point_value.to_py_string(),
-                        "tick_size": fc.tick_size.to_py_string(),
+                        "point_value": fc.point_value.canon(),
+                        "tick_size": fc.tick_size.canon(),
                     })
                 } else {
                     serde_json::json!({
                         "symbol": sym.clone(),
                         "key": hk,
                         "instrument": sym,
-                        "quantity": p.qty.to_py_string(),
-                        "qty": p.qty.to_py_string(),
-                        "avg_price": p.avg.to_py_string(),
-                        "avg": p.avg.to_py_string(),
+                        "quantity": p.qty.canon(),
+                        "qty": p.qty.canon(),
+                        "avg_price": p.avg.canon(),
+                        "avg": p.avg.canon(),
                         "as_of": p.as_of.iso,
                     })
                 }
@@ -1009,8 +1009,8 @@ impl SimBookApi {
             "order_id": f.order_id,
             "instrument": sym.clone(),
             "symbol": sym,
-            "quantity": f.quantity.to_py_string(),
-            "price": f.price.to_py_string(),
+            "quantity": f.quantity.canon(),
+            "price": f.price.canon(),
             "filled_at": f.filled_at.iso,
             "side": f.side.value(),
             "src": f.src,
@@ -1026,7 +1026,7 @@ impl SimBookApi {
     pub fn position_pnl(&self, symbol: &str, mark_str: &str) -> ApiResult<Option<String>> {
         let mark = parse_dec(mark_str)?;
         let pnl = self.book.position_pnl(symbol, &mark)?;
-        Ok(pnl.map(|d| d.to_py_string()))
+        Ok(pnl.map(|d| d.canon()))
     }
 }
 
@@ -1101,8 +1101,8 @@ pub fn trail_update(
     let r = tr::update(&mut t, &p);
 
     let state_out = serde_json::json!({
-        "extreme": t.extreme.as_ref().map(|d| d.to_py_string()),
-        "stop_price": t.stop_price.as_ref().map(|d| d.to_py_string()),
+        "extreme": t.extreme.as_ref().map(|d| d.canon()),
+        "stop_price": t.stop_price.as_ref().map(|d| d.canon()),
         "triggered": t.triggered,
     });
 
@@ -1147,8 +1147,8 @@ mod tests {
             let json_val = instrument_to_json_val(&instr);
             let obj = json_val.as_object().unwrap();
             assert_eq!(obj["root"].as_str().unwrap(), fc.root);
-            assert_eq!(obj["tick_size"].as_str().unwrap(), fc.tick_size.to_py_string());
-            assert_eq!(obj["point_value"].as_str().unwrap(), fc.point_value.to_py_string());
+            assert_eq!(obj["tick_size"].as_str().unwrap(), fc.tick_size.canon());
+            assert_eq!(obj["point_value"].as_str().unwrap(), fc.point_value.canon());
 
             if let Some(ref cm) = fc.contract_month {
                 let expected_cm = format!("{}{:02}", cm.month_code(), cm.year.rem_euclid(100));
@@ -1246,7 +1246,7 @@ mod tests {
         assert_eq!(fills1, "[0]");
         let fill0: serde_json::Value = serde_json::from_str(&api.fill(0).unwrap()).unwrap();
         // Slipped adverse buy: 12000.00 + 2 * 0.25 = 12000.50
-        assert_eq!(fill0["price"].as_str().unwrap(), "12000.50");
+        assert_eq!(fill0["price"].as_str().unwrap(), "12000.5");
         assert_eq!(fill0["side"].as_str().unwrap(), "BUY");
 
         // 2. Sell stop at 12000.00
@@ -1282,7 +1282,7 @@ mod tests {
         assert_eq!(fills2, "[1]");
         let fill1: serde_json::Value = serde_json::from_str(&api.fill(1).unwrap()).unwrap();
         // Slipped adverse sell: 12000.00 - 2 * 0.25 = 11999.50
-        assert_eq!(fill1["price"].as_str().unwrap(), "11999.50");
+        assert_eq!(fill1["price"].as_str().unwrap(), "11999.5");
         assert_eq!(fill1["side"].as_str().unwrap(), "SELL");
     }
 
@@ -1436,7 +1436,7 @@ mod tests {
 
         // PnL query via position_pnl: 2 contracts @ 18000.00, mark at 18010.00 -> (18010 - 18000) * 2 * 2 = 40.00
         let pnl = api_fut.position_pnl("MNQ", "18010.00").unwrap().unwrap();
-        assert_eq!(pnl, "40.00");
+        assert_eq!(pnl, "40");
 
         // Equity book: AAPL should NOT have point_value or tick_size in positions
         let mut api_eq = SimBookApi::new("ACC", true, "0").unwrap();
@@ -1619,6 +1619,6 @@ mod tests {
         let fills = api.process_bar(Some(&bar.to_string())).unwrap();
         assert_eq!(fills, "[0]");
         let f: serde_json::Value = serde_json::from_str(&api.fill(0).unwrap()).unwrap();
-        assert_eq!(f["price"].as_str().unwrap(), "18020.00");
+        assert_eq!(f["price"].as_str().unwrap(), "18020");
     }
 }

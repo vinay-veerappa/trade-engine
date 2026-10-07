@@ -18,7 +18,7 @@ use super::codec::py_repr;
 use super::mirror::{self, MirrorState};
 use super::model::*;
 use super::ops::*;
-use super::pydec::PyDec;
+use crate::money::Money;
 
 fn fe<T>(msg: impl Into<String>) -> R<T> {
     err("fold", msg)
@@ -30,9 +30,9 @@ fn fe<T>(msg: impl Into<String>) -> R<T> {
 pub struct Position {
     pub account_id: String,
     pub instrument: Instrument,
-    pub quantity: PyDec,
-    pub avg_cost: PyDec,
-    pub realized_pnl: PyDec,
+    pub quantity: Money,
+    pub avg_cost: Money,
+    pub realized_pnl: Money,
     pub open_lots: Vec<Lot>,
 }
 
@@ -40,9 +40,9 @@ pub struct Position {
 pub fn make_position(
     account_id: &str,
     instrument: Instrument,
-    quantity: PyDec,
-    avg_cost: PyDec,
-    realized_pnl: PyDec,
+    quantity: Money,
+    avg_cost: Money,
+    realized_pnl: Money,
     open_lots: Vec<Lot>,
 ) -> R<Position> {
     if account_id.is_empty() {
@@ -61,7 +61,7 @@ pub fn make_position(
 }
 
 /// `sum((q if BUY else -q for each lot), ZERO)`.
-fn signed_total(lots: &[Lot]) -> R<PyDec> {
+fn signed_total(lots: &[Lot]) -> R<Money> {
     let mut total = zero();
     for lot in lots {
         let q = if lot.side == Side::Buy { lot.quantity.clone() } else { neg(&lot.quantity)? };
@@ -71,7 +71,7 @@ fn signed_total(lots: &[Lot]) -> R<PyDec> {
 }
 
 /// `sum((cost * qty for each lot), ZERO)`.
-fn cost_total(lots: &[Lot]) -> R<PyDec> {
+fn cost_total(lots: &[Lot]) -> R<Money> {
     let mut total = zero();
     for lot in lots {
         total = add(&total, &mul(&lot.cost_basis, &lot.quantity)?)?;
@@ -82,17 +82,17 @@ fn cost_total(lots: &[Lot]) -> R<PyDec> {
 #[derive(Debug, Clone)]
 pub struct AccountState {
     pub account_id: String,
-    pub cash: PyDec,
+    pub cash: Money,
     pub positions: OMap<Instrument, Position>,
     pub orders: OMap<String, Order>,
-    pub filled_quantity: OMap<String, PyDec>,
-    pub leg_filled: OMap<(String, i128), PyDec>,
+    pub filled_quantity: OMap<String, Money>,
+    pub leg_filled: OMap<(String, i128), Money>,
     pub venue_order_ids: OMap<String, String>,
     pub emulated_orders: OMap<String, EmulatedOrderState>,
     pub fills: Vec<Fill>,
     pub fill_ids: BTreeSet<String>,
-    pub marks: OMap<Instrument, PyDec>,
-    pub realized_pnl: PyDec,
+    pub marks: OMap<Instrument, Money>,
+    pub realized_pnl: Money,
     pub signals_seen: i128,
     pub verdicts: i128,
     pub refusals: i128,
@@ -167,11 +167,11 @@ fn transition_to(order: &Order, to: OrderState) -> R<Order> {
 
 // --- lots and trades -------------------------------------------------------------------------
 
-fn lot_with(lot: &Lot, quantity: PyDec) -> R<Lot> {
+fn lot_with(lot: &Lot, quantity: Money) -> R<Lot> {
     make_lot(lot.lot_id.clone(), quantity, lot.cost_basis.clone(), lot.acquired_at.clone(), lot.side)
 }
 
-fn consume_lots(lots: &[Lot], quantity: &PyDec, exit_price: &PyDec, multiplier: i128) -> R<(Vec<Lot>, PyDec)> {
+fn consume_lots(lots: &[Lot], quantity: &Money, exit_price: &Money, multiplier: i128) -> R<(Vec<Lot>, Money)> {
     let mut remaining = quantity.clone();
     let mut realized = zero();
     let mut kept: Vec<Lot> = Vec::new();
@@ -198,7 +198,7 @@ fn consume_lots(lots: &[Lot], quantity: &PyDec, exit_price: &PyDec, multiplier: 
     Ok((kept, realized))
 }
 
-fn take_lots(lots: &[Lot], quantity: &PyDec) -> R<(Vec<Lot>, Vec<Lot>)> {
+fn take_lots(lots: &[Lot], quantity: &Money) -> R<(Vec<Lot>, Vec<Lot>)> {
     let mut remaining = quantity.clone();
     let mut kept = Vec::new();
     let mut taken = Vec::new();
@@ -220,7 +220,7 @@ fn take_lots(lots: &[Lot], quantity: &PyDec) -> R<(Vec<Lot>, Vec<Lot>)> {
     Ok((kept, taken))
 }
 
-fn remaining_position(position: &Position, lots: Vec<Lot>, realized: PyDec) -> R<Position> {
+fn remaining_position(position: &Position, lots: Vec<Lot>, realized: Money) -> R<Position> {
     let quantity = signed_total(&lots)?;
     let avg = if ne(&quantity, &zero())? { div(&cost_total(&lots)?, &abs(&quantity)?)? } else { zero() };
     make_position(&position.account_id, position.instrument.clone(), quantity, avg, realized, lots)
@@ -232,8 +232,8 @@ fn apply_trade(
     position: Option<&Position>,
     instrument: &Instrument,
     side: Side,
-    quantity: &PyDec,
-    price: &PyDec,
+    quantity: &Money,
+    price: &Money,
     at: &DateTime,
     lot_id: String,
     multiplier: i128,
@@ -296,8 +296,8 @@ pub fn apply_trade_pub(
     position: Option<&Position>,
     instrument: &Instrument,
     side: Side,
-    quantity: &PyDec,
-    price: &PyDec,
+    quantity: &Money,
+    price: &Money,
     at: &DateTime,
     lot_id: String,
     multiplier: i128,
@@ -345,7 +345,7 @@ fn require_order(st: &AccountState, order_id: &str, kind: EventKind) -> R<Order>
     }
 }
 
-fn check_finite(d: &PyDec, name: &str) -> R<()> {
+fn check_finite(d: &Money, name: &str) -> R<()> {
     if !d.is_finite() {
         return fe(format!("{name} must be a finite Decimal, got {} (I5)", s(d)));
     }
@@ -505,7 +505,7 @@ fn on_fill(st: &mut AccountState, fill: &Fill) -> R<()> {
                 Instrument::Combo(legs) => legs,
                 _ => unreachable!("a leg exists only on a combo"),
             };
-            let mut best: Option<PyDec> = None;
+            let mut best: Option<Money> = None;
             for (index, combo_leg) in legs.iter().enumerate() {
                 let filled_leg = st.leg_filled.get(&leg_hk(&fill.order_id, index as i128)).cloned().unwrap_or_else(zero);
                 let units = div_i(&filled_leg, combo_leg.ratio)?;
@@ -640,7 +640,7 @@ fn on_order_updated(st: &mut AccountState, update: &OrderUpdated, kind: EventKin
                     current.order_id
                 ));
             }
-            let opt = |d: &Option<PyDec>| d.clone().map_or(Val::None, Val::Dec);
+            let opt = |d: &Option<Money>| d.clone().map_or(Val::None, Val::Dec);
             let rebuilt = build_emulated(vec![
                 ("order_id".into(), Val::Str(current.order_id.clone())),
                 ("observed_price".into(), opt(&emulation.observed_price)),
@@ -665,8 +665,8 @@ fn on_order_state(st: &mut AccountState, change: &OrderStateChange, kind: EventK
     Ok(())
 }
 
-fn exercise_threshold() -> PyDec {
-    PyDec::parse(lc::exercise_threshold()).expect("constant")
+fn exercise_threshold() -> Money {
+    Money::parse(lc::exercise_threshold()).expect("constant")
 }
 
 /// A `ValueError` or `UnresolvableInstrumentError` becomes a fold refusal; the decimal
@@ -717,7 +717,7 @@ fn on_lifecycle(st: &mut AccountState, notice: &OptionLifecycle, kind: EventKind
     let wire = contract.wire();
     let price_text = s(&notice.underlying_price);
     let value_text = lc::intrinsic(&wire, &price_text).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
-    let value = PyDec::parse(&value_text).ok_or_else(|| LErr { kind: "value", msg: value_text.clone() })?;
+    let value = Money::parse(&value_text).ok_or_else(|| LErr { kind: "value", msg: value_text.clone() })?;
     let cash_settled = lc::is_cash_settled(&wire).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
     let american = lc::can_exercise_early(&wire).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
 
@@ -783,7 +783,7 @@ fn on_lifecycle(st: &mut AccountState, notice: &OptionLifecycle, kind: EventKind
             let (buys, price_text) =
                 lc::delivery(&wire, held == Side::Buy, &s(&lot.cost_basis)).map_err(|e| only_value(oerr(e)))?;
             let side = if buys { Side::Buy } else { Side::Sell };
-            let price = PyDec::parse(&price_text).ok_or_else(|| LErr { kind: "value", msg: price_text.clone() })?;
+            let price = Money::parse(&price_text).ok_or_else(|| LErr { kind: "value", msg: price_text.clone() })?;
             let shares = mul_i(&lot.quantity, mult)?;
             let shares_position = st.positions.get(&shares_hk).cloned();
             let prior = shares_position.as_ref().map_or_else(zero, |p| p.realized_pnl.clone());

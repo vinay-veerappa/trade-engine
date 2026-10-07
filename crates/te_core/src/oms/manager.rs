@@ -12,7 +12,7 @@ use crate::ledger::model::{
     derr, err, parse_datetime, Event, EventKind, Instrument, LErr, Obj, Order, OrderState, OrderType, Side, Tif, R,
 };
 use crate::ledger::ops::*;
-use crate::ledger::pydec::{DKind, DecErr, PyDec, Round};
+use crate::money::{DecErr, Money, Round};
 use crate::oms::options::sha256_hex;
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
@@ -31,45 +31,40 @@ fn array(j: &Json) -> R<&[Json]> {
 fn flag(j: &Json, k: &str) -> R<bool> {
     match field(j,k)? { Json::Bool(b) => Ok(*b), _ => err("value", "manager expected bool") }
 }
-fn dec(j: &Json) -> R<PyDec> {
-    PyDec::parse(text(j)?).ok_or_else(|| LErr {kind: "value", msg: "invalid decimal".into()})
+fn dec(j: &Json) -> R<Money> {
+    Money::parse(text(j)?).ok_or_else(|| LErr {kind: "value", msg: "invalid decimal".into()})
 }
-fn d(j: &Json, k: &str) -> R<PyDec> { dec(field(j,k)?) }
-fn optional(j: &Json, k: &str) -> R<Option<PyDec>> {
+fn d(j: &Json, k: &str) -> R<Money> { dec(field(j,k)?) }
+fn optional(j: &Json, k: &str) -> R<Option<Money>> {
     match field(j,k)? { Json::Null => Ok(None), v => Ok(Some(dec(v)?)) }
 }
 fn order(j: &Json) -> R<Order> {
     match bridge::obj_from_text(&dumps(j))? { Obj::Order(o) => Ok(o), _ => err("value", "manager expected order") }
 }
 fn js(s: impl Into<String>) -> Json { Json::Str(s.into()) }
-fn jd(d: &PyDec) -> Json { js(s(d)) }
-fn jod(d: &Option<PyDec>) -> Json { d.as_ref().map_or(Json::Null, jd) }
-fn ds(a: &[PyDec]) -> Json { Json::Arr(a.iter().map(jd).collect()) }
+fn jd(d: &Money) -> Json { js(s(d)) }
+fn jod(d: &Option<Money>) -> Json { d.as_ref().map_or(Json::Null, jd) }
+fn ds(a: &[Money]) -> Json { Json::Arr(a.iter().map(jd).collect()) }
 fn tuple(a: Vec<Json>) -> Json { Json::Arr(a) }
 
 /// `OrderState` in FILLED, CANCELLED, REJECTED or EXPIRED.
 pub fn terminal(s: OrderState) -> bool {
     matches!(s, OrderState::Filled | OrderState::Cancelled | OrderState::Rejected | OrderState::Expired)
 }
-fn sum(a: &[PyDec]) -> R<PyDec> { a.iter().try_fold(zero(), |n,v| add(&n,v)) }
-fn floor(a: &PyDec) -> R<PyDec> { a.to_integral(Round::Floor).map_err(derr) }
-fn quantity(equity: bool, q: &PyDec) -> R<()> {
-    if equity && q.kind() == DKind::SNan { return Err(derr(DecErr::InvalidOperation)); }
-    if equity && (q.kind() == DKind::QNan || !q.is_integral().map_err(derr)?) {
+fn sum(a: &[Money]) -> R<Money> { a.iter().try_fold(zero(), |n,v| add(&n,v)) }
+fn floor(a: &Money) -> R<Money> { a.to_integral(Round::Floor).map_err(derr) }
+fn quantity(equity: bool, q: &Money) -> R<()> {
+    if equity && !q.is_integral().map_err(derr)? {
         return err("value",format!("Equity order quantity must be a whole number of shares, got {}",s(q)));
     }
     Ok(())
 }
 fn equity(i: &Instrument) -> bool { matches!(i, Instrument::Equity(_)) }
-fn positive(q: &PyDec, message: String) -> R<()> {
+fn positive(q: &Money, message: String) -> R<()> {
     if !q.is_finite() || le(q,&zero())? { return err("value",message); }
     Ok(())
 }
-fn big_integer(q: &PyDec) -> R<BigInt> {
-    if !q.is_finite() {
-        return if q.is_nan() { err("value","cannot convert NaN to integer") }
-            else { err("manager_int_overflow","cannot convert Infinity to integer") };
-    }
+fn big_integer(q: &Money) -> R<BigInt> {
     if q.is_zero() { return Ok(BigInt::from(0u8)); }
     let exp = q.exponent();
     let mut exponent = exp.unsigned_abs();
@@ -85,7 +80,7 @@ fn big_integer(q: &PyDec) -> R<BigInt> {
 }
 
 /// Largest remainder, stable by index. Python integer products remain unbounded.
-fn allocate(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
+fn allocate(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
     if w.is_empty() { return Ok(vec![]); }
     for v in w {
         if le(v,&zero())? { return err("value","target allocation weights must be positive"); }
@@ -121,17 +116,12 @@ fn allocate(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
         for &(_, i) in keyed.iter().take(remaining) {
             if let Some(v) = a.get_mut(i) { *v += 1; }
         }
-        Ok(a.into_iter().map(|v| PyDec::from_parts(v.sign() == Sign::Minus,
-            v.magnitude().clone(), 0)).collect())
+        a.into_iter().map(|v| {
+            let n = v.to_i128().ok_or(derr(DecErr::Overflow))?;
+            Money::from_i128(n).map_err(derr)
+        }).collect()
     } else {
-        // The private Python allocator propagated quiet NaNs; its one-portion
-        // Infinity path never subtracts Infinity from Infinity.
-        if q.kind() == DKind::QNan { return Ok(vec![q.clone(); w.len()]); }
-        if q.kind() == DKind::Inf {
-            return if w.len() == 1 && total.is_finite() { Ok(vec![q.clone()]) }
-                else { Err(derr(DecErr::InvalidOperation)) };
-        }
-        let mut portions: Vec<PyDec> = w.iter().map(|v| div(&mul(q,v)?,&total)).collect::<R<_>>()?;
+        let mut portions: Vec<Money> = w.iter().map(|v| div(&mul(q,v)?,&total)).collect::<R<_>>()?;
         if let Some((last, rest)) = portions.split_last_mut() {
             *last = sub(q,&sum(rest)?)?;
         }
@@ -140,7 +130,7 @@ fn allocate(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
 }
 
 /// `_validate_quantity`: an equity quantity is whole shares.
-pub fn validate_quantity(instrument: &Instrument, q: &PyDec) -> R<()> {
+pub fn validate_quantity(instrument: &Instrument, q: &Money) -> R<()> {
     if matches!(instrument, Instrument::Future(_)) {
         return err("unsupported", "futures not supported in OMS");
     }
@@ -148,7 +138,7 @@ pub fn validate_quantity(instrument: &Instrument, q: &PyDec) -> R<()> {
 }
 
 /// `_allocate_quantity`.
-pub fn allocate_quantity(q: &PyDec, w: &[PyDec], instrument: &Instrument) -> R<Vec<PyDec>> {
+pub fn allocate_quantity(q: &Money, w: &[Money], instrument: &Instrument) -> R<Vec<Money>> {
     if matches!(instrument, Instrument::Future(_)) {
         return err("unsupported", "futures not supported in OMS");
     }
@@ -156,14 +146,14 @@ pub fn allocate_quantity(q: &PyDec, w: &[PyDec], instrument: &Instrument) -> R<V
 }
 
 /// `_split_quantity`: `count` equal weights, each portion positive.
-pub fn split_quantity(q: &PyDec, count: usize, instrument: &Instrument) -> R<Vec<PyDec>> {
+pub fn split_quantity(q: &Money, count: usize, instrument: &Instrument) -> R<Vec<Money>> {
     if matches!(instrument, Instrument::Future(_)) {
         return err("unsupported", "futures not supported in OMS");
     }
-    split(q, &vec![PyDec::from_i128(1); count], equity(instrument))
+    split(q, &vec![Money::int(1); count], equity(instrument))
 }
 
-fn split(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
+fn split(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
     if w.is_empty() { return Ok(vec![]); }
     quantity(equity,q)?;
     let portions=allocate(q,w,equity)?;
@@ -176,29 +166,25 @@ fn split(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
 }
 
 /// `_fraction_quantities`: each target's fraction, the remainder a runner.
-pub fn fraction_quantities(q: &PyDec, w: &[PyDec], instrument: &Instrument) -> R<Vec<PyDec>> {
+pub fn fraction_quantities(q: &Money, w: &[Money], instrument: &Instrument) -> R<Vec<Money>> {
     if matches!(instrument, Instrument::Future(_)) {
         return err("unsupported", "futures not supported in OMS");
     }
     fractions(q, w, equity(instrument))
 }
 
-fn fractions(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
+fn fractions(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
     quantity(equity,q)?;
-    let runner=sub(&PyDec::from_i128(1),&sum(w)?)?;
+    let runner=sub(&Money::int(1),&sum(w)?)?;
     let mut weights=w.to_vec();
     if gt(&runner,&zero())? { weights.push(runner); }
-    if q.kind() == DKind::QNan {
-        return if w.is_empty() { Ok(vec![]) }
-            else { Err(derr(DecErr::InvalidOperation)) };
-    }
-    let exact: Vec<PyDec>=weights.iter().map(|v| mul(q,v)).collect::<R<_>>()?;
+    let exact: Vec<Money>=weights.iter().map(|v| mul(q,v)).collect::<R<_>>()?;
     let mut portions=exact.clone();
     if equity {
         portions=exact.iter().map(floor).collect::<R<_>>()?;
         let remaining=big_integer(&sub(q,&sum(&portions)?)?)?;
         // The values here are finite, so every key compares; a stable index breaks ties.
-        let mut keyed: Vec<(PyDec, usize)>=Vec::new();
+        let mut keyed: Vec<(Money, usize)>=Vec::new();
         for (i,(a,b)) in exact.iter().zip(&portions).enumerate() { keyed.push((neg(&sub(a,b)?)?,i)); }
         keyed.sort_by(|(a,i),(b,k)| a.cmp_ord(b).unwrap_or(Ordering::Equal).then(i.cmp(k)));
         let end = if remaining.sign() == Sign::Minus {
@@ -207,7 +193,7 @@ fn fractions(q: &PyDec, w: &[PyDec], equity: bool) -> R<Vec<PyDec>> {
             remaining.to_usize().unwrap_or(keyed.len())
         };
         for &(_, i) in keyed.iter().take(end) {
-            if let Some(v) = portions.get_mut(i) { *v=add(v,&PyDec::from_i128(1))?; }
+            if let Some(v) = portions.get_mut(i) { *v=add(v,&Money::int(1))?; }
         }
     }
     portions.truncate(w.len());
@@ -294,7 +280,7 @@ pub fn replace_replay(prior: &Prior, mode: ReplayMode, order: &str, account: &st
     Ok(())
 }
 
-pub fn observation_replay(prior: &Prior, account: &str, order: &str, price: &PyDec, command: &str) -> R<()> {
+pub fn observation_replay(prior: &Prior, account: &str, order: &str, price: &Money, command: &str) -> R<()> {
     let matches=prior.kind==Some(EventKind::OrderEmulationUpdated) && prior.account==account &&
         match prior.payload {
             Obj::Emulated(p) => p.order_id==order &&
@@ -315,7 +301,7 @@ pub fn append_replay(prior: &Prior, account: &str, kind: EventKind, payload: &Ob
 }
 
 /// The entry's (limit, stop) and the exits' side.
-pub fn entry_terms(t: OrderType, side: Side, price: &PyDec, limit: Option<&PyDec>) -> (Option<PyDec>, Option<PyDec>, Side) {
+pub fn entry_terms(t: OrderType, side: Side, price: &Money, limit: Option<&Money>) -> (Option<Money>, Option<Money>, Side) {
     let exit=if side==Side::Buy {Side::Sell} else {Side::Buy};
     if t==OrderType::Limit { (Some(price.clone()),None,exit) } else { (limit.cloned(),Some(price.clone()),exit) }
 }
@@ -357,7 +343,7 @@ pub fn observed_action(triggered: bool, state: OrderState, order: &str) -> R<Obs
     }
 }
 
-pub fn observation_reason(t: OrderType, price: &PyDec, triggered: bool) -> String {
+pub fn observation_reason(t: OrderType, price: &Money, triggered: bool) -> String {
     let (t,p)=(t.value(),s(price));
     if triggered {format!("{t} triggered at observed price {p}")} else {format!("Emulated {t} observed price {p}")}
 }
@@ -393,7 +379,7 @@ pub fn stop_rejected(t: OrderType, state: OrderState, order: &str) -> R<()> {
 }
 
 /// A child waits until its parent has a fill.
-pub fn child_hold(parent_filled: &PyDec) -> R<bool> { le(parent_filled,&zero()) }
+pub fn child_hold(parent_filled: &Money) -> R<bool> { le(parent_filled,&zero()) }
 
 pub fn fill_match(fill: &str, order: &str, account: &str, fill_account: &str, env: &str, fill_env: &str) -> R<()> {
     if account!=fill_account || env!=fill_env {
@@ -505,7 +491,7 @@ pub fn reconcile_replace(order: &str, found: OrderState, unresolved: bool) -> R<
 pub fn pending_state(state: OrderState) -> bool { state==OrderState::PendingUnknown }
 
 /// The venue reports more filled than the ledger records.
-pub fn reconcile_fills(found: &PyDec, recorded: &PyDec) -> R<bool> { gt(found,recorded) }
+pub fn reconcile_fills(found: &Money, recorded: &Money) -> R<bool> { gt(found,recorded) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution { Return, Updated, Record(EventKind) }
@@ -527,7 +513,7 @@ pub fn reconcile_result(found: OrderState, state: OrderState, order: &str) -> R<
     }
 }
 
-pub fn ingest_check(found: &PyDec, recorded: &PyDec, order: &str, state: OrderState) -> R<()> {
+pub fn ingest_check(found: &Money, recorded: &Money, order: &str, state: OrderState) -> R<()> {
     if lt(recorded,found)? {
         return err("order_reconciliation",format!("Venue reports {} filled for '{order}' but its fill records account for {}; it remains {}",s(found),s(recorded),state.value()));
     }
@@ -542,7 +528,7 @@ pub fn matching_ids(ids: &[String], venue: &str) -> Vec<usize> {
 pub fn protective_child(parent: Option<&str>, t: OrderType) -> bool { parent.is_some() && t==OrderType::Stop }
 
 /// The limit price of a triggered order's venue order.
-pub fn route_limit(t: OrderType, price: Option<&PyDec>) -> Option<PyDec> {
+pub fn route_limit(t: OrderType, price: Option<&Money>) -> Option<Money> {
     if t==OrderType::Limit {price.cloned()} else {None}
 }
 
@@ -582,10 +568,10 @@ pub fn pending_candidate(order: &str, pending: bool, event_order: &str, reason: 
     command.and_then(|c| c.strip_suffix(":pending")).map(String::from)
 }
 
-pub fn positive_quantity(q: &PyDec) -> R<()> { positive(q,"quantity must be finite and positive".into()) }
-pub fn check_price(p: &PyDec) -> R<()> { positive(p,format!("price must be finite and positive, got {}",s(p))) }
-pub fn check_fraction(f: &PyDec) -> R<()> {
-    if !f.is_finite() || le(f,&zero())? || ge(f,&PyDec::from_i128(1))? {
+pub fn positive_quantity(q: &Money) -> R<()> { positive(q,"quantity must be finite and positive".into()) }
+pub fn check_price(p: &Money) -> R<()> { positive(p,format!("price must be finite and positive, got {}",s(p))) }
+pub fn check_fraction(f: &Money) -> R<()> {
+    if !f.is_finite() || le(f,&zero())? || ge(f,&Money::int(1))? {
         return err("value",format!("fraction must be between 0 and 1 exclusive, got {}",s(f)));
     }
     Ok(())
@@ -594,7 +580,7 @@ pub fn check_fraction(f: &PyDec) -> R<()> {
 /// `_fingerprint_order`: the encoded order's digest.
 pub fn fingerprint_order(o: &Order) -> R<String> { Ok(sha256_hex(dumps(&enc_order(o)?).as_bytes())) }
 
-pub fn reduce_fingerprint(entry: &str, fraction: &PyDec, reason: &str) -> String {
+pub fn reduce_fingerprint(entry: &str, fraction: &Money, reason: &str) -> String {
     let p=Json::Obj(vec![("action".into(),js("reduce")),
         ("entry_order_id".into(),js(entry)),
         ("fraction".into(),jd(fraction)),
@@ -603,7 +589,7 @@ pub fn reduce_fingerprint(entry: &str, fraction: &PyDec, reason: &str) -> String
 }
 
 /// `_bracket_fingerprint` over the intent's wire fields (`_wire(intent)`).
-pub fn bracket_fingerprint(intent: &Json, quantity: &PyDec) -> R<String> {
+pub fn bracket_fingerprint(intent: &Json, quantity: &Money) -> R<String> {
     let mut fields=Vec::new();
     for key in ["intent_id","account_id","instrument","side","quantity_rule",
                 "entry_price","stop_loss","profit_targets","reason","command_id",
@@ -675,17 +661,17 @@ pub fn bracket(orders: &[&Order]) -> R<(String, String, Vec<String>)> {
 
 pub fn is_reduce(entry: &str, order_id: &str) -> bool { order_id.starts_with(&format!("{entry}:reduce:")) }
 
-fn filled(state: &AccountState, id: &str) -> PyDec { state.filled_quantity.get(id).cloned().unwrap_or_else(zero) }
+fn filled(state: &AccountState, id: &str) -> Money { state.filled_quantity.get(id).cloned().unwrap_or_else(zero) }
 /// The entry's children in folded-state order (the `cancel_protective` arm's gate reads it).
 pub fn exits<'a>(state: &'a AccountState, entry: &str) -> Vec<&'a Order> {
     state.orders.values().filter(|o|o.parent_order_id.as_deref()==Some(entry)).collect()
 }
-fn exited(state: &AccountState, children: &[&Order]) -> R<PyDec> {
+fn exited(state: &AccountState, children: &[&Order]) -> R<Money> {
     sum(&children.iter().map(|o|filled(state,&o.order_id)).collect::<Vec<_>>())
 }
 
 /// `_open_bracket_stop`: the working protective stop and the open quantity.
-pub fn open_stop(state: &AccountState, entry: &Order) -> R<(String, PyDec)> {
+pub fn open_stop(state: &AccountState, entry: &Order) -> R<(String, Money)> {
     let children=exits(state,&entry.order_id);
     let stop=children.iter().find(|o|o.order_type==OrderType::Stop).copied();
     if entry.parent_order_id.is_some() {
@@ -713,9 +699,9 @@ pub fn cancel_protective(state: &AccountState, entry: &Order, o: &Order) -> R<bo
 #[derive(Debug, Clone)]
 pub struct SyncPlan {
     pub stop: String,
-    pub entry_filled: PyDec,
-    pub open: PyDec,
-    pub stop_filled: PyDec,
+    pub entry_filled: Money,
+    pub open: Money,
+    pub stop_filled: Money,
     pub entry_terminal: bool,
     pub targets: Vec<String>,
     pub closers: Vec<String>,
@@ -747,13 +733,13 @@ pub fn sync(state: &AccountState, entry: &Order) -> R<Option<SyncPlan>> {
 }
 
 /// True when the bracket holds open quantity to protect; false when it is flat.
-pub fn sync_mode(filled: &PyDec, open: &PyDec) -> R<bool> { Ok(gt(filled,&zero())? && gt(open,&zero())?) }
+pub fn sync_mode(filled: &Money, open: &Money) -> R<bool> { Ok(gt(filled,&zero())? && gt(open,&zero())?) }
 /// True when the targets are re-budgeted: no stop fill and the entry is done.
-pub fn sync_targets(stop_filled: &PyDec, entry_terminal: bool) -> R<bool> { Ok(eq(stop_filled,&zero())? && entry_terminal) }
-pub fn is_positive(q: &PyDec) -> R<bool> { gt(q,&zero()) }
+pub fn sync_targets(stop_filled: &Money, entry_terminal: bool) -> R<bool> { Ok(eq(stop_filled,&zero())? && entry_terminal) }
+pub fn is_positive(q: &Money) -> R<bool> { gt(q,&zero()) }
 
 /// The targets' planned weights, plus the runner the entry's plan leaves.
-pub fn target_weights(weights: &[PyDec], planned: &PyDec) -> R<Vec<PyDec>> {
+pub fn target_weights(weights: &[Money], planned: &Money) -> R<Vec<Money>> {
     let runner=sub(planned,&sum(weights)?)?;
     let mut weights=weights.to_vec();
     if gt(&runner,&zero())? { weights.push(runner); }
@@ -764,7 +750,7 @@ pub fn target_weights(weights: &[PyDec], planned: &PyDec) -> R<Vec<PyDec>> {
 pub enum ChildPlan { Return, Submit, Local, Replace }
 
 /// `_ensure_child_quantity`: the action, and the child's total quantity.
-pub fn child_quantity(o: &Order, filled: &PyDec, q: &PyDec) -> R<(ChildPlan, Option<PyDec>)> {
+pub fn child_quantity(o: &Order, filled: &Money, q: &Money) -> R<(ChildPlan, Option<Money>)> {
     if matches!(o.state,OrderState::Cancelled|OrderState::Filled|OrderState::Rejected) {
         if o.state == OrderState::Rejected {
             if o.order_type == OrderType::Stop {
@@ -783,7 +769,7 @@ pub fn child_quantity(o: &Order, filled: &PyDec, q: &PyDec) -> R<(ChildPlan, Opt
 }
 
 /// True when the stop moves (a replace); false when the price is unchanged.
-pub fn move_stop(o: &Order, price: &PyDec) -> R<bool> {
+pub fn move_stop(o: &Order, price: &Money) -> R<bool> {
     let Some(current)=&o.stop_price else { return management(format!("Protective stop '{}' has no stop price",o.order_id)); };
     if eq(price,current)? { return Ok(false); }
     let loosens=if o.side==Side::Sell { lt(price,current)? } else { gt(price,current)? };
@@ -806,7 +792,7 @@ pub fn close_guard(entry: &str, children: &[&Order]) -> R<()> {
 }
 
 /// The reduce quantity and its order id.
-pub fn reduce(entry: &str, children: &[&Order], open: &PyDec, fraction: &PyDec) -> R<(PyDec, String)> {
+pub fn reduce(entry: &str, children: &[&Order], open: &Money, fraction: &Money) -> R<(Money, String)> {
     let reduces=reduces(entry,children);
     if children.iter().any(|o|o.order_id==format!("{entry}:close") && !terminal(o.state)) {
         return management(format!("Bracket '{entry}' has a close order working; nothing is left to reduce"));
@@ -815,13 +801,13 @@ pub fn reduce(entry: &str, children: &[&Order], open: &PyDec, fraction: &PyDec) 
         return management(format!("Bracket '{entry}' already has a reduce order working"));
     }
     let q=floor(&mul(open,fraction)?)?;
-    if lt(&q,&PyDec::from_i128(1))? {
+    if lt(&q,&Money::int(1))? {
         return management(format!("Reducing bracket '{entry}' by {} of {} rounds down to nothing; refusing to guess a size",s(fraction),s(open)));
     }
     Ok((q,format!("{entry}:reduce:{}",reduces.len()+1)))
 }
 
-pub fn replace_quantity(q: Option<&PyDec>, filled: &PyDec, equity: bool) -> R<()> {
+pub fn replace_quantity(q: Option<&Money>, filled: &Money, equity: bool) -> R<()> {
     if let Some(q)=q {
         if !q.is_finite() || lt(q,filled)? || le(q,&zero())? {
             return err("value",format!("replacement quantity must be finite, positive, and at least filled quantity {}",s(filled)));
@@ -845,7 +831,7 @@ pub fn local_replace(o: &Order, emulated: bool, triggered: bool) -> bool {
 }
 
 /// `_replacement_terms`' order with the changes applied, and whether nothing changed.
-pub fn replace_terms(o: &Order, q: Option<&PyDec>, limit: Option<&PyDec>, stop: Option<&PyDec>) -> (Order, bool) {
+pub fn replace_terms(o: &Order, q: Option<&Money>, limit: Option<&Money>, stop: Option<&Money>) -> (Order, bool) {
     let mut updated=o.clone();
     if let Some(q)=q { updated.quantity=q.clone(); }
     if let Some(p)=limit { updated.limit_price=Some(p.clone()); }
@@ -869,7 +855,7 @@ pub fn stored(created: &Order, candidate: &Order) -> R<()> {
 }
 
 /// True when a triggered STOP_LIMIT goes out at its own limit.
-pub fn trigger_price(o: &Order, price: Option<&PyDec>) -> R<bool> {
+pub fn trigger_price(o: &Order, price: Option<&Money>) -> R<bool> {
     if price.is_none() {
         return management(format!("Triggered emulated order '{}' has no observed price",o.order_id));
     }
@@ -877,7 +863,7 @@ pub fn trigger_price(o: &Order, price: Option<&PyDec>) -> R<bool> {
 }
 
 /// The emulated stop's price and whether `price` triggers it.
-pub fn stop_observation(o: &Order, price: &PyDec) -> R<(PyDec, bool)> {
+pub fn stop_observation(o: &Order, price: &Money) -> R<(Money, bool)> {
     let Some(stop)=&o.stop_price else {
         return management(format!("Emulated {} order '{}' has no stop price",o.order_type.value(),o.order_id));
     };
@@ -898,7 +884,7 @@ fn decision(op: &str, j: &Json) -> R<Json> {
         "allocate" | "split" | "fractions" => {
             let q=d(j,"quantity")?;
             let equity=flag(j,"equity")?;
-            let w: Vec<PyDec>=array(field(j,"weights")?)?.iter().map(dec).collect::<R<_>>()?;
+            let w: Vec<Money>=array(field(j,"weights")?)?.iter().map(dec).collect::<R<_>>()?;
             Ok(ds(&match op { "allocate"=>allocate(&q,&w,equity)?, "split"=>split(&q,&w,equity)?, _=>fractions(&q,&w,equity)? }))
         }
         "fingerprint" => Ok(js(sha256_hex(dumps(field(j,"payload")?).as_bytes()))),
@@ -925,7 +911,7 @@ fn decision(op: &str, j: &Json) -> R<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn p(s:&str)->PyDec {PyDec::parse(s).unwrap()}
+    fn p(s:&str)->Money {Money::parse(s).unwrap()}
     #[test]
     fn allocation_conserves_odd_lots_and_stable_ties() {
         assert_eq!(allocate(&p("7"),&[p("1"),p("1"),p("1")],true).unwrap().iter().map(s).collect::<Vec<_>>(),

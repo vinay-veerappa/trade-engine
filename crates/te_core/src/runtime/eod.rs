@@ -1,13 +1,13 @@
 use super::Plan;
 use crate::ledger::model::{derr, err, LErr, R};
 use crate::ledger::ops::*;
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use num_bigint::BigUint;
 
-fn dec(s: &str) -> R<PyDec> {
-    PyDec::parse(s).ok_or_else(|| LErr { kind: "value", msg: "invalid runtime decimal".into() })
+fn dec(s: &str) -> R<Money> {
+    Money::parse(s).ok_or_else(|| LErr { kind: "value", msg: "invalid runtime decimal".into() })
 }
-fn truncate(value: &PyDec) -> R<String> {
+fn truncate(value: &Money) -> R<String> {
     if !value.is_finite() {
         return value.trunc_i128().map(|n| n.to_string()).map_err(derr);
     }

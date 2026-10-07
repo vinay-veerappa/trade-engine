@@ -15,7 +15,7 @@
 //! IdempotencyConflictError, `unsupported_order` UnsupportedOrderCapabilityError,
 //! `pending_reconciliation` OrderPendingReconciliationError, `broker_unknown`
 //! BrokerOutcomeUnknownError, `oco_unknown` OCOOutcomeUnknownError,
-//! `order_reconciliation` OrderReconciliationError); `Decimal` is `PyDec`; `TimeInForce`
+//! `order_reconciliation` OrderReconciliationError); `Decimal` is `Money`; `TimeInForce`
 //! is `Tif`; `TrailingStopEmulator` is `crate::sim::trailing` (`check_trail_amount`, then
 //! `update` on a `Trail`).
 use crate::ledger::bridge;
@@ -27,7 +27,7 @@ use crate::ledger::model::{
     OrderState, OrderStateChange, OrderType, Side, Tif, R, SCHEMA_VERSION, validate_order_prices, OrdersCreated,
 };
 use crate::ledger::ops::{le, s, zero};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::oms::manager::{self as plan, Prior, Refusal};
 
 /// A broker call's outcome: the venue answered, or the call raised (the host holds the
@@ -51,7 +51,7 @@ pub struct Capabilities {
 #[derive(Debug, Clone)]
 pub struct Context {
     pub order: Order,
-    pub filled: PyDec,
+    pub filled: Money,
     pub venue_order_id: Option<String>,
     pub emulation: Option<EmulatedOrderState>,
 }
@@ -61,7 +61,7 @@ pub struct Context {
 pub struct Allocation {
     pub strategy_order_id: String,
     pub account_id: String,
-    pub quantity: PyDec,
+    pub quantity: Money,
 }
 
 /// `VenueOrder`'s fields. The host constructs the venue's object from them, so its
@@ -72,13 +72,13 @@ pub struct VenueOrder {
     pub instrument: Instrument,
     pub order_type: OrderType,
     pub side: Side,
-    pub quantity: PyDec,
+    pub quantity: Money,
     /// The clock's value as read (not converted to UTC), as `_utc_now()` returned it.
     pub submitted_at: DateTime,
     pub tif: Tif,
-    pub limit_price: Option<PyDec>,
-    pub stop_price: Option<PyDec>,
-    pub trail_amount: Option<PyDec>,
+    pub limit_price: Option<Money>,
+    pub stop_price: Option<Money>,
+    pub trail_amount: Option<Money>,
     pub allocations: Vec<Allocation>,
     pub parent_order_id: Option<String>,
     pub oco_group: Option<String>,
@@ -95,15 +95,15 @@ pub struct VenueAck {
 /// `OrderChanges`.
 #[derive(Debug, Clone, Default)]
 pub struct OrderChanges {
-    pub new_quantity: Option<PyDec>,
-    pub new_limit_price: Option<PyDec>,
-    pub new_stop_price: Option<PyDec>,
+    pub new_quantity: Option<Money>,
+    pub new_limit_price: Option<Money>,
+    pub new_stop_price: Option<Money>,
 }
 
 impl OrderChanges {
     /// `repr(changes)`: the replace reasons quote it.
     pub fn repr(&self) -> String {
-        let f = |v: &Option<PyDec>| v.as_ref().map_or("None".to_string(), |d| format!("Decimal('{}')", s(d)));
+        let f = |v: &Option<Money>| v.as_ref().map_or("None".to_string(), |d| format!("Decimal('{}')", s(d)));
         format!(
             "OrderChanges(new_quantity={}, new_limit_price={}, new_stop_price={})",
             f(&self.new_quantity),
@@ -119,8 +119,8 @@ impl OrderChanges {
 pub struct VenueOrderState {
     pub venue_order_id: String,
     pub state: OrderState,
-    pub filled_quantity: PyDec,
-    pub remaining_quantity: PyDec,
+    pub filled_quantity: Money,
+    pub remaining_quantity: Money,
     pub updated_at: String,
 }
 
@@ -130,11 +130,11 @@ pub struct VenueFill {
     pub venue_fill_id: String,
     pub venue_order_id: String,
     pub instrument: Instrument,
-    pub quantity: PyDec,
-    pub price: PyDec,
+    pub quantity: Money,
+    pub price: Money,
     pub filled_at: DateTime,
     pub side: Side,
-    pub fee: PyDec,
+    pub fee: Money,
     pub leg_id: Option<String>,
 }
 
@@ -155,16 +155,16 @@ pub struct Intent {
     pub account_id: String,
     pub instrument: Instrument,
     pub side: Side,
-    pub entry_price: PyDec,
-    pub stop_loss: PyDec,
-    pub profit_targets: Vec<PyDec>,
+    pub entry_price: Money,
+    pub stop_loss: Money,
+    pub profit_targets: Vec<Money>,
     pub reason: String,
     pub command_id: String,
     pub entry_tif: Tif,
     pub exit_tif: Tif,
     pub entry_type: OrderType,
-    pub entry_limit_price: Option<PyDec>,
-    pub target_fractions: Option<Vec<PyDec>>,
+    pub entry_limit_price: Option<Money>,
+    pub target_fractions: Option<Vec<Money>>,
 }
 
 /// Every effect of the command flow. Each call is one Python statement's effect, made
@@ -340,7 +340,7 @@ pub fn planned_order<H: Host>(h: &H, order_id: &str) -> R<Order> {
 }
 
 /// `_planned_quantity`.
-pub fn planned_quantity<H: Host>(h: &H, order_id: &str) -> R<PyDec> {
+pub fn planned_quantity<H: Host>(h: &H, order_id: &str) -> R<Money> {
     Ok(planned_order(h, order_id)?.quantity)
 }
 
@@ -364,7 +364,7 @@ pub fn planned_refusal<H: Host, T>(h: &H, order: &Order, mode: Refusal, command:
 
 /// `_venue_order`'s fields: the order as it is, or (a triggered emulated order) the
 /// venue type and limit with no stop or trail. The clock is read here.
-pub fn venue_terms<H: Host>(h: &H, order: &Order, trigger: Option<(OrderType, Option<PyDec>)>) -> R<VenueOrder> {
+pub fn venue_terms<H: Host>(h: &H, order: &Order, trigger: Option<(OrderType, Option<Money>)>) -> R<VenueOrder> {
     let submitted_at = utc_now(h)?;
     let (order_type, limit_price, stop_price, trail_amount) = match trigger {
         None => (order.order_type, order.limit_price.clone(), order.stop_price.clone(), order.trail_amount.clone()),
@@ -392,7 +392,7 @@ pub fn venue_terms<H: Host>(h: &H, order: &Order, trigger: Option<(OrderType, Op
 }
 
 /// `_venue_order`: the fields, then the venue object (its constructor validates).
-pub fn venue_order<H: Host>(h: &H, order: &Order, trigger: Option<(OrderType, Option<PyDec>)>) -> R<(VenueOrder, H::Venue)> {
+pub fn venue_order<H: Host>(h: &H, order: &Order, trigger: Option<(OrderType, Option<Money>)>) -> R<(VenueOrder, H::Venue)> {
     let terms = venue_terms(h, order, trigger)?;
     let venue = h.venue_order(&terms)?;
     Ok((terms, venue))
@@ -459,7 +459,7 @@ pub fn bracket_from_orders<H: Host>(h: &H, orders: &[Order]) -> R<Bracket> {
 /// Otherwise the clock is read once (`created_at` of every order), the quantity is
 /// validated, targets are split or fractioned, and ONE ORDERS_CREATED event persists
 /// entry, stop and targets (durable before any venue call).
-pub fn create_bracket<H: Host>(h: &H, intent: &Intent, quantity: &PyDec) -> R<Bracket> {
+pub fn create_bracket<H: Host>(h: &H, intent: &Intent, quantity: &Money) -> R<Bracket> {
     plan::positive_quantity(quantity)?;
     let caps = capabilities(h)?;
     plan::bracket_capabilities(intent.entry_type, intent.entry_tif, intent.exit_tif, &caps.types, &caps.tifs, caps.native_stops)?;
@@ -572,7 +572,7 @@ pub fn submit_trailing<H: Host>(h: &H, order: &Order) -> R<Order> {
 
 /// `update_trailing`: the order, `trailing_check` against the venue's types (a native
 /// trail has no local trail), then `update_emulated_order`.
-pub fn update_trailing<H: Host>(h: &H, order_id: &str, price: &PyDec, command: &str) -> R<Order> {
+pub fn update_trailing<H: Host>(h: &H, order_id: &str, price: &Money, command: &str) -> R<Order> {
     let order = get_order(h, order_id)?;
     let caps = capabilities(h)?;
     plan::trailing_check(order.order_type, "update_trailing", order_id, &caps.types)?;
@@ -583,7 +583,7 @@ pub fn update_trailing<H: Host>(h: &H, order_id: &str, price: &PyDec, command: &
 /// a replayed command id is checked (`observation_replay`) and routes a recorded
 /// trigger that has not been sent. A new observation is recorded (ORDER_EMULATION_UPDATED)
 /// BEFORE the trigger is routed, so a crash after the record re-routes on replay.
-pub fn update_emulated_order<H: Host>(h: &H, order_id: &str, price: &PyDec, command: &str) -> R<Order> {
+pub fn update_emulated_order<H: Host>(h: &H, order_id: &str, price: &Money, command: &str) -> R<Order> {
     plan::check_price(price)?;
     let ctx = context(h, order_id)?;
     let order = ctx.order;
@@ -667,7 +667,7 @@ pub fn update_emulated_order<H: Host>(h: &H, order_id: &str, price: &PyDec, comm
 /// `_route_emulated_trigger`: the venue type (a STOP_LIMIT at its limit, else
 /// `_trigger_order_type`), `_require_tif`, then the OCO siblings are cancelled BEFORE
 /// the triggered order is submitted (`_cancel_emulated_siblings`, then `_submit_emulated`).
-pub fn route_emulated_trigger<H: Host>(h: &H, order: &Order, trigger_price: Option<&PyDec>, command: &str) -> R<Order> {
+pub fn route_emulated_trigger<H: Host>(h: &H, order: &Order, trigger_price: Option<&Money>, command: &str) -> R<Order> {
     let (venue_type, limit_price) = if plan::trigger_price(order, trigger_price)? {
         (OrderType::Limit, order.limit_price.clone())
     } else {
@@ -730,7 +730,7 @@ pub fn cancel<H: Host>(h: &H, order_id: &str, command: &str) -> R<Order> {
 
 /// `move_stop`: `_open_bracket_stop`, then `move_stop` (stops only tighten; an
 /// unchanged price returns the stop), then `replace` with the new stop price.
-pub fn move_stop<H: Host>(h: &H, entry: &str, stop_price: &PyDec, command: &str) -> R<Order> {
+pub fn move_stop<H: Host>(h: &H, entry: &str, stop_price: &Money, command: &str) -> R<Order> {
     let (stop, _open) = open_bracket_stop(h, entry)?;
     if !plan::move_stop(&stop, stop_price)? {
         return Ok(stop);
@@ -796,7 +796,7 @@ pub fn close_bracket<H: Host>(h: &H, entry: &str, command: &str, reason: &str) -
 /// `reduce_bracket`. Refuse a bad fraction, read the entry, fingerprint, then a replay
 /// resumes `_send_reduce` on the stored reduce. Otherwise `_open_bracket_stop`, the
 /// planned `reduce` size and id, ORDERS_CREATED (durable before network), `_send_reduce`.
-pub fn reduce_bracket<H: Host>(h: &H, entry: &str, fraction: &PyDec, command: &str, reason: &str) -> R<Order> {
+pub fn reduce_bracket<H: Host>(h: &H, entry: &str, fraction: &Money, command: &str, reason: &str) -> R<Order> {
     plan::check_fraction(fraction)?;
     let entry_order = get_order(h, entry)?;
     let fingerprint = plan::reduce_fingerprint(entry, fraction, reason);
@@ -858,7 +858,7 @@ pub fn bracket_children<H: Host>(h: &H, entry: &str) -> R<Vec<Order>> {
 }
 
 /// `_open_bracket_stop`: the entry, its account state, then `open_stop`.
-pub fn open_bracket_stop<H: Host>(h: &H, entry: &str) -> R<(Order, PyDec)> {
+pub fn open_bracket_stop<H: Host>(h: &H, entry: &str) -> R<(Order, Money)> {
     let entry_order = get_order(h, entry)?;
     let state = h.account_state(&entry_order.account_id)?;
     let (stop_id, open) = plan::open_stop(&state, &entry_order)?;
@@ -1210,10 +1210,10 @@ pub fn start_emulation<H: Host>(h: &H, order: &Order) -> R<Order> {
 pub fn submit_emulated<H: Host>(
     h: &H,
     order: &Order,
-    trigger_price: Option<&PyDec>,
+    trigger_price: Option<&Money>,
     command: &str,
     venue_type: OrderType,
-    limit_price: Option<&PyDec>,
+    limit_price: Option<&Money>,
 ) -> R<Order> {
     use crate::ledger::model::OrderUpdated;
     let current = get_order(h, &order.order_id)?;
@@ -1318,7 +1318,7 @@ pub fn synchronize_bracket<H: Host>(h: &H, changed: &Order, cause: &str) -> R<()
             &format!("{cause}:{stop_id}:protective-stop", stop_id = stop.order_id),
         )?;
         if plan::sync_targets(&plan.stop_filled, plan.entry_terminal)? {
-            let weights: Vec<PyDec> = targets
+            let weights: Vec<Money> = targets
                 .iter()
                 .map(|t| planned_quantity(h, &t.order_id))
                 .collect::<R<_>>()?;
@@ -1366,7 +1366,7 @@ pub fn synchronize_bracket<H: Host>(h: &H, changed: &Order, cause: &str) -> R<()
 
 /// `_ensure_child_quantity`: `child_quantity` plans return, submit, a local resize
 /// (ORDER_UPDATED under `:local-size`, then `_submit_child`) or a venue `replace`.
-pub fn ensure_child_quantity<H: Host>(h: &H, child: &Order, quantity: &PyDec, command: &str) -> R<()> {
+pub fn ensure_child_quantity<H: Host>(h: &H, child: &Order, quantity: &Money, command: &str) -> R<()> {
     use crate::ledger::model::OrderUpdated;
     let ctx = context(h, &child.order_id)?;
     let current = ctx.order;
@@ -1608,16 +1608,16 @@ fn flag(j: &Json, k: &str) -> R<bool> {
         _ => err("value", format!("flow request {k} is not a bool")),
     }
 }
-fn decimal(v: &str) -> R<PyDec> {
-    PyDec::parse(v).ok_or_else(|| LErr { kind: "value", msg: format!("flow request: not a Decimal: {v:?}") })
+fn decimal(v: &str) -> R<Money> {
+    Money::parse(v).ok_or_else(|| LErr { kind: "value", msg: format!("flow request: not a Decimal: {v:?}") })
 }
-fn dec(j: &Json, k: &str) -> R<PyDec> {
+fn dec(j: &Json, k: &str) -> R<Money> {
     decimal(text(j, k)?)
 }
-fn odec(j: &Json, k: &str) -> R<Option<PyDec>> {
+fn odec(j: &Json, k: &str) -> R<Option<Money>> {
     otext(j, k)?.map(decimal).transpose()
 }
-fn decs(j: &Json) -> R<Vec<PyDec>> {
+fn decs(j: &Json) -> R<Vec<Money>> {
     match j {
         Json::Arr(a) => a
             .iter()
@@ -1719,10 +1719,10 @@ fn js(v: impl Into<String>) -> Json {
 fn ojs(v: &Option<String>) -> Json {
     v.as_ref().map_or(Json::Null, |s| js(s.as_str()))
 }
-fn jdec(v: &PyDec) -> Json {
+fn jdec(v: &Money) -> Json {
     js(s(v))
 }
-fn ojdec(v: &Option<PyDec>) -> Json {
+fn ojdec(v: &Option<Money>) -> Json {
     v.as_ref().map_or(Json::Null, jdec)
 }
 
@@ -1916,8 +1916,8 @@ mod tests {
 
     #[test]
     fn changes_repr_quotes_decimals_as_python_does() {
-        let c = OrderChanges { new_quantity: PyDec::parse("5"), new_limit_price: None, new_stop_price: PyDec::parse("99.50") };
-        assert_eq!(c.repr(), "OrderChanges(new_quantity=Decimal('5'), new_limit_price=None, new_stop_price=Decimal('99.50'))");
+        let c = OrderChanges { new_quantity: Money::parse("5"), new_limit_price: None, new_stop_price: Money::parse("99.50") };
+        assert_eq!(c.repr(), "OrderChanges(new_quantity=Decimal('5'), new_limit_price=None, new_stop_price=Decimal('99.5'))");
         assert_eq!(OrderChanges::default().repr(), "OrderChanges(new_quantity=None, new_limit_price=None, new_stop_price=None)");
     }
 }

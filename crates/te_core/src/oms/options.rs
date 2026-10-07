@@ -9,7 +9,7 @@ use crate::ledger::fold::{make_position, AccountState};
 use crate::ledger::json::{self, dumps, Json};
 use crate::ledger::model::{err, Instrument, LErr, Order, OrderState, OrderType, Side, Tif, R};
 use crate::ledger::ops::{add, eq, gt, mul_i, ne, zero};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::oms::structures::{is_structure, legs_of, open_structures, uncovered_calls, Open};
 use crate::options::pyrules::strip;
 use crate::options::Right;
@@ -227,7 +227,7 @@ fn is_short_call(leg: &crate::ledger::model::ComboLeg) -> bool {
 }
 
 /// `state` as if the intent had filled, for the cover check only.
-fn with_intent(st: &AccountState, instrument: &Instrument, side: Side, quantity: &PyDec) -> R<AccountState> {
+fn with_intent(st: &AccountState, instrument: &Instrument, side: Side, quantity: &Money) -> R<AccountState> {
     let mut out = st.clone();
     for leg in legs_of(instrument, side) {
         let change = mul_i(&mul_i(quantity, leg.ratio)?, if leg.side == Side::Buy { 1 } else { -1 })?;
@@ -240,7 +240,7 @@ fn with_intent(st: &AccountState, instrument: &Instrument, side: Side, quantity:
 }
 
 /// C3 / I8: a short call needs this account's shares or a long call behind it.
-fn refuse_uncovered(st: &AccountState, account_id: &str, instrument: &Instrument, side: Side, quantity: &PyDec) -> R<()> {
+fn refuse_uncovered(st: &AccountState, account_id: &str, instrument: &Instrument, side: Side, quantity: &Money) -> R<()> {
     let legs = legs_of(instrument, side);
     let Some(first) = legs.iter().find(|l| is_short_call(l)) else { return Ok(()) };
     let underlying = underlying_of(&first.contract)?;
@@ -255,8 +255,8 @@ fn refuse_uncovered(st: &AccountState, account_id: &str, instrument: &Instrument
             "uncovered",
             format!(
                 "'{account_id}' would be short calls delivering {} {underlying} shares with {} of its own and no long call behind the rest; an account writes calls only on what it holds (C3, I8)",
-                needed.to_py_string(),
-                shares.to_py_string()
+                needed.canon(),
+                shares.canon()
             ),
         );
     }
@@ -265,7 +265,7 @@ fn refuse_uncovered(st: &AccountState, account_id: &str, instrument: &Instrument
 
 /// The refusals of a new entry: duplicate (C4), then uncovered (C3), both only for an
 /// options structure.
-pub fn plan_open(st: &AccountState, account_id: &str, instrument: &Instrument, side: Side, quantity: &PyDec) -> R<()> {
+pub fn plan_open(st: &AccountState, account_id: &str, instrument: &Instrument, side: Side, quantity: &Money) -> R<()> {
     if is_structure(instrument) {
         refuse_duplicate(st, account_id, instrument, side)?;
         refuse_uncovered(st, account_id, instrument, side, quantity)?;
@@ -284,7 +284,7 @@ pub struct ClosePlan {
     /// Indices into `legs_of(entry)` of the legs the close trades.
     pub legs: Vec<usize>,
     pub side: Side,
-    pub quantity: PyDec,
+    pub quantity: Money,
     pub oco_group: String,
     pub target_order_id: Option<String>,
 }
@@ -342,7 +342,7 @@ pub fn plan_close(st: &AccountState, account_id: &str, entry_order_id: &str) -> 
                 shown.push(format!(
                     "({}, Decimal('{}'))",
                     py_repr(strip(&occ)),
-                    structure.open_quantities[i].to_py_string()
+                    structure.open_quantities[i].canon()
                 ));
             }
             return option_err(format!(
@@ -372,7 +372,7 @@ pub fn plan_holding(
     st: &AccountState,
     account_id: &str,
     instrument: &Instrument,
-    quantity: &PyDec,
+    quantity: &Money,
     command_id: &str,
 ) -> R<Side> {
     let held = st.positions.get(&instrument.hk()).map_or_else(zero, |p| p.quantity.clone());
@@ -380,8 +380,8 @@ pub fn plan_holding(
     if eq(&held, &zero())? || gt(quantity, &crate::ledger::ops::abs(&held)?)? {
         return option_err(format!(
             "'{account_id}' holds {} {symbol}; it cannot close {} (I8)",
-            held.to_py_string(),
-            quantity.to_py_string()
+            held.canon(),
+            quantity.canon()
         ));
     }
     let side = if gt(&held, &zero())? { Side::Sell } else { Side::Buy };
@@ -415,9 +415,9 @@ pub fn plan_holding(
                 "uncovered",
                 format!(
                     "Selling {} {symbol} would leave short calls in '{account_id}' delivering {} shares with {} behind them; close the calls first or with it (C3, I8)",
-                    quantity.to_py_string(),
-                    needed.to_py_string(),
-                    shares.to_py_string()
+                    quantity.canon(),
+                    needed.canon(),
+                    shares.canon()
                 ),
             );
         }

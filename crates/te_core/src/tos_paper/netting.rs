@@ -12,10 +12,8 @@ use crate::ledger::model::{
     derr, parse_datetime, Instrument as LInstrument, LErr, OrderType, Side, Tif, R,
 };
 use crate::ledger::ops::{add, gt, le, mul_i, ne, neg, s, zero, OMap};
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 use crate::oms::options::sha256_hex;
-use num_bigint::BigUint;
-use num_traits::Zero;
 
 /// `vertical_reason`: why `legs` is not a mirrorable 2-leg 1:1 vertical, or `None` when it is.
 pub fn vertical_reason(legs: &[ComboLeg]) -> R<Option<String>> {
@@ -72,22 +70,9 @@ pub fn vertical_reason_op(doc: &Json) -> R<Json> {
 
 
 /// `Decimal.normalize()` under the default context: round to 28 digits, strip trailing zeros.
-pub fn normalize(d: &PyDec) -> R<PyDec> {
-    let fixed = d.fix().map_err(derr)?;
-    if !fixed.is_finite() {
-        return Ok(fixed);
-    }
-    if fixed.is_zero() {
-        return Ok(PyDec::from_parts(fixed.is_negative(), BigUint::zero(), 0));
-    }
-    let mut digits = fixed.coefficient().to_str_radix(10);
-    let mut exp = fixed.exponent();
-    while digits.ends_with('0') && exp < crate::ledger::pydec::EMAX {
-        digits.pop();
-        exp += 1;
-    }
-    let coef = BigUint::parse_bytes(digits.as_bytes(), 10).expect("digits");
-    Ok(PyDec::from_parts(fixed.is_negative(), coef, exp))
+pub fn normalize(d: &Money) -> R<Money> {
+    // a Money is already canonical (<= 28 digits, no trailing zeros)
+    Ok(d.clone())
 }
 
 /// `ticket_key`: the stable idempotency key of one ticket's full contents (I3).
@@ -96,9 +81,9 @@ pub fn ticket_key(
     venue_account: &str,
     instrument: &LInstrument,
     side: Side,
-    quantity: &PyDec,
+    quantity: &Money,
     order_type: OrderType,
-    limit_price: &Option<PyDec>,
+    limit_price: &Option<Money>,
     tif: Tif,
     order_ids: &[String],
 ) -> R<String> {
@@ -129,9 +114,9 @@ pub struct NOrder {
     pub model: Option<LInstrument>,
     pub order_type: OrderType,
     pub side: Side,
-    pub quantity: PyDec,
+    pub quantity: Money,
     pub tif: Tif,
-    pub limit_price: Option<PyDec>,
+    pub limit_price: Option<Money>,
 }
 
 pub fn norder_of(j: &Json) -> R<NOrder> {
@@ -209,7 +194,7 @@ pub fn screen(order: &NOrder, mirrored: &[String]) -> R<Option<String>> {
 }
 
 /// `_mixed_signs`: whether the nonzero holdings of one contract hold both signs.
-pub fn mixed_signs(book: &[(String, PyDec)]) -> R<bool> {
+pub fn mixed_signs(book: &[(String, Money)]) -> R<bool> {
     let mut signs: Vec<bool> = Vec::new();
     for (_, q) in book {
         if ne(q, &zero())? {
@@ -223,7 +208,7 @@ pub fn mixed_signs(book: &[(String, PyDec)]) -> R<bool> {
 }
 
 /// `_signed`.
-fn signed(side: Side, quantity: &PyDec) -> R<PyDec> {
+fn signed(side: Side, quantity: &Money) -> R<Money> {
     if side == Side::Buy {
         Ok(quantity.clone())
     } else {
@@ -232,7 +217,7 @@ fn signed(side: Side, quantity: &PyDec) -> R<PyDec> {
 }
 
 /// `_legs`: (contract, side, contracts) of every contract an order trades, legs as written.
-fn legs_of(order: &NOrder) -> R<Vec<(LInstrument, Side, PyDec)>> {
+fn legs_of(order: &NOrder) -> R<Vec<(LInstrument, Side, Money)>> {
     match order.model.as_ref() {
         Some(LInstrument::Combo(legs)) => {
             let mut out = Vec::new();
@@ -246,7 +231,7 @@ fn legs_of(order: &NOrder) -> R<Vec<(LInstrument, Side, PyDec)>> {
     }
 }
 
-type Account = Vec<(String, PyDec)>;
+type Account = Vec<(String, Money)>;
 
 #[derive(Clone)]
 pub struct Ticket {
@@ -254,14 +239,14 @@ pub struct Ticket {
     pub instrument: LInstrument,
     pub order_type: OrderType,
     pub side: Side,
-    pub quantity: PyDec,
+    pub quantity: Money,
     pub submitted_at: String,
     pub tif: Tif,
-    pub limit_price: Option<PyDec>,
-    pub allocations: Vec<(String, String, PyDec)>,
+    pub limit_price: Option<Money>,
+    pub allocations: Vec<(String, String, Money)>,
 }
 
-fn positive(q: &PyDec) -> R<bool> {
+fn positive(q: &Money) -> R<bool> {
     Ok(!le(q, &zero())?)
 }
 
@@ -272,7 +257,7 @@ pub fn make_ticket(
     instrument: &LInstrument,
     order_type: OrderType,
     tif: Tif,
-    limit: &Option<PyDec>,
+    limit: &Option<Money>,
     group: &[&NOrder],
     at: &str,
 ) -> R<Ticket> {
@@ -355,7 +340,7 @@ pub fn net_strategy_orders(
     venue_account: &str,
     mirrored: &[String],
     at: &str,
-    holdings: &OMap<(String, LInstrument), PyDec>,
+    holdings: &OMap<(String, LInstrument), Money>,
 ) -> R<Batch> {
     if orders.is_empty() {
         return nerr(NETTING, "no strategy orders to net");
@@ -461,7 +446,7 @@ pub fn net_strategy_orders(
 
     let mut venue_orders: Vec<Ticket> = Vec::new();
     for (instrument, members) in accepted.iter() {
-        let mut groups: OMap<(OrderType, Tif, Option<PyDec>), Vec<usize>> = OMap::new();
+        let mut groups: OMap<(OrderType, Tif, Option<Money>), Vec<usize>> = OMap::new();
         for &m in members {
             let leg = &orders[m];
             let limit = if leg.order_type == OrderType::Limit { leg.limit_price.clone() } else { None };
@@ -540,8 +525,8 @@ fn strings_of(doc: &Json, key: &str) -> R<Vec<String>> {
 }
 
 /// The `holdings` rows, `[account, instrument, "qty"]` triples in order, keyed `(account, instrument)`.
-pub fn holdings_of(rows: &[Json]) -> R<OMap<(String, LInstrument), PyDec>> {
-    let mut holdings: OMap<(String, LInstrument), PyDec> = OMap::new();
+pub fn holdings_of(rows: &[Json]) -> R<OMap<(String, LInstrument), Money>> {
+    let mut holdings: OMap<(String, LInstrument), Money> = OMap::new();
     for row in rows {
         let Json::Arr(r) = row else { return wire("a holdings row is not a triple") };
         let [Json::Str(acct), inst, Json::Str(q)] = r.as_slice() else { return wire("a holdings row is not a triple") };
@@ -592,7 +577,7 @@ pub fn screen_op(doc: &Json) -> R<Json> {
 }
 
 pub fn mixed_signs_op(doc: &Json) -> R<Json> {
-    let mut book: Vec<(String, PyDec)> = Vec::new();
+    let mut book: Vec<(String, Money)> = Vec::new();
     for row in req_arr(doc, "book")? {
         let Json::Arr(r) = row else { return wire("a book row is not a pair") };
         let [Json::Str(a), Json::Str(q)] = r.as_slice() else { return wire("a book row is not a pair") };

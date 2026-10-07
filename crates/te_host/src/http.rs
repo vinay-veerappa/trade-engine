@@ -15,8 +15,8 @@ use te_core::ledger::{
     fold::{self, AccountState},
     json::{self, Json},
     model::{Event, LErr},
-    pydec::PyDec,
 };
+use te_core::money::Money;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -77,10 +77,10 @@ fn string(value: &str) -> Json {
 fn object(fields: Vec<(&str, Json)>) -> Json {
     Json::Obj(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
 }
-fn decimal(value: &PyDec) -> Json {
-    string(&value.to_py_string())
+fn decimal(value: &Money) -> Json {
+    string(&value.canon())
 }
-fn optional(value: &Option<PyDec>) -> Json {
+fn optional(value: &Option<Money>) -> Json {
     value.as_ref().map_or(Json::Null, decimal)
 }
 
@@ -1060,10 +1060,10 @@ mod tests {
         ));
     }
     #[test]
-    fn reduced_projection_keeps_decimal_spelling_and_no_internal_fields() {
+    fn reduced_projection_uses_the_canonical_decimal_spelling_and_no_internal_fields() {
         let mut state = AccountState::new("synthetic");
-        state.cash = PyDec::parse("-0.00").unwrap();
-        assert_eq!(json::dumps(&account(&state).unwrap()), "{\"account_id\":\"synthetic\",\"cash\":\"-0.00\",\"last_seq\":0,\"orders\":{},\"positions\":{},\"realized_pnl\":\"0\"}");
+        state.cash = Money::parse("-0.00").unwrap();
+        assert_eq!(json::dumps(&account(&state).unwrap()), "{\"account_id\":\"synthetic\",\"cash\":\"0\",\"last_seq\":0,\"orders\":{},\"positions\":{},\"realized_pnl\":\"0\"}");
     }
     #[test]
     fn legacy_error_escaping_and_head_length_are_exact() {

@@ -9,7 +9,7 @@ use crate::ledger::codec::py_repr;
 use crate::ledger::fold::AccountState;
 use crate::ledger::model::{err, LErr, OrderState, R};
 use crate::ledger::ops::eq;
-use crate::ledger::pydec::PyDec;
+use crate::money::Money;
 
 /// States in which the ledger says the venue holds the order.
 fn venue_working(s: OrderState) -> bool {
@@ -164,7 +164,7 @@ pub fn restorable(
 pub fn positions_plan(st: &AccountState) -> R<Vec<(usize, Option<usize>)>> {
     let mut out = Vec::new();
     for (i, (instrument, position)) in st.positions.iter().enumerate() {
-        if eq(&position.quantity, &PyDec::zero())? {
+        if eq(&position.quantity, &Money::zero())? {
             continue;
         }
         let mut latest: Option<usize> = None;
