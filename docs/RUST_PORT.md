@@ -53,7 +53,7 @@ dependency. A phase's gate must be green before the next one starts.
 | **P4a Runtime decisions** | `eod/runner.py`, `eod/options_routing.py`, `intraday/service.py` decisions into `te_core::runtime`; one binding in `trade_engine_rs`, thin Python shims | 2,388 pre-port | Frozen-oracle lockstep, refusal counterparts, Rust hand mutants, unchanged tests, lockstep session replay | **done**: `tests/test_p4a_parity.py`, `tools/mutate_p4a.py`; measured evidence and boundaries below |
 | **P4b Lifecycle and journal decisions** | After-close expiry/assignment, source value validation and journal mapping/read-back decisions; Python keeps ordered ledger/source/network effects | 819 pre-port | Frozen lockstep with ordered ledger/source/HTTP effects, asserted refusal counterparts, compiling hand mutants and realistic-book timing <= 1.25x | **done**: `tests/test_p4b_parity.py`, `tools/mutate_p4b.py`, `tools/time_p4b.py`; evidence and ownership below |
 | **P4c Runtime flip** | `server` (axum), the single-instance lock, process ownership; Python callers become clients | ~2.5k | A paper session run side by side with the Python engine produces the same ledger | pending; after P3b-2b |
-| **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | last (most active module) |
+| **P5 TOS mirror** | `tos_paper` logic; the UI-automation transport stays Python behind a callback | ~3.4k | mirror tests unchanged; a paper round trip matches | **done except the live round trip**: see "P5 verification and boundary" |
 | **P6 Browser & retire** | `web/engine`, `replay-sim` → wasm; delete the Python package | ~1.5k | browser replay matches the engine | **web half landed** (tvDownloadOHLC main ba935583, bfe51308; `SIM_TE_WASM` default OFF); retiring the Python package waits for P4c and P5 |
 | **P6b Futures in te_core** | `Instrument::Future` and tick arithmetic, the CME Globex equity-futures calendar, `Book::new_futures`, te_wasm futures books | — (additive: the Python engine has no futures book) | P3a equity parity unchanged; seeded Globex walks agree te_core vs the te_wasm API; the browser differential agrees replay-sim vs te_wasm on MNQ/MES/ES | **done**: see "P6b verification and boundary" |
 | **P6C Globex calendars per root** | CME energy/metals holiday tables; the Globex calendar chosen by root; YM/MYM/RTY/M2K/CL/MCL/GC/MGC specs | — (additive) | P6b equity table byte-identical; the 1m store agrees with every calendar (allow-listed deviations with reasons); pmc energy/metals disagreements allow-listed | **done**: see "P6C verification and boundary" |
@@ -544,6 +544,36 @@ Remaining/out of scope: OMS orchestration, `eod`, `intraday`, server/axum, ledge
 lock, `tos_paper`, all process/connection ownership and the final P4 paper-session
 flip. Rollback is a checkout of the base branch with a rebuild of its private
 extension: **no ledger rewrite or decimal migration**.
+
+### P5 verification and boundary
+
+Commits: 64afa1c (frozen Python oracle); T1-T8 77783c1..d95d629 (transport, normalize, slippage, reconcile, cover, netting, exits, follow decisions in te_core, each in lockstep with the frozen oracle); T9 5d4573a (the broker state machine); T10 76b26c4 (production `tos_paper` runs on `trade_engine_rs`); hand mutants 90874bf, 1c823f5, 7680e21, 0415eb8, 6c68e86; 73213c9 and a7e2f6e (test move and rebase fix, below).
+- **T10.** `src/trade_engine/tos_paper/*.py` are thin doors over `trade_engine_rs`. The ported Python logic is deleted (D3), and the public API is unchanged.
+  - `tos_paper/_rs.py` imports the extension unconditionally (D5: a missing extension is an error).
+  - It maps each Rust error kind to the existing exception (NormalizeError, SlippageError, UnsupportedCapability, NettingError, ExitPlanError, TosPaperBrokerError, VenueUnreadable, OverflowError, InvalidOperation).
+  - The UI-automation transport stays Python, behind the host callback.
+- **Accepted deviations from the oracle** (T9 and T10; each was grepped against the callers, and none is reachable from them):
+  - the preflight reads the clock through the host;
+  - naive and aware datetimes are handled the same way;
+  - a non-mapping row is refused earlier;
+  - MirrorFill and MirrorAck validate their fields in a different order;
+  - rows are JSON-native (`default=str`);
+  - `plan_exits` asks for prices lazily (only for the legs it prices).
+
+Gates:
+- The P5 lockstep parity tests against the frozen oracle, plus the existing `tos_paper` tests, run on the production path.
+- Hand mutants `tools/mutate_p5.py`: 40 of 40 KILLED. Each kill is read twice, through the door and through production. One mutant (`cover-kuhn-short-order-reversed`) is door-only, with its reason recorded: which shorts a long covers can't be seen through `uncovered()`.
+- On the tree rebased onto c336915: `cargo test --workspace` 189 green, the wasm32 release build green, ci_local 1989 passed.
+- Existing tests changed:
+  - `tests/p5_broker_host.py` is deleted; the Python host it emulated is gone.
+  - Two tests that poked deleted private state (`_queue`, `netting._ticket`) now go through the public path:
+    - `test_an_inexpressible_queued_ticket_is_rejected_not_raised`, via `mirror_batch` with a GTD order (its Rust twin is in `broker.rs`);
+    - `test_a_ticket_error_refuses_its_orders_not_the_batch`, via fault injection (`object.__setattr__` sets `limit_price=None`).
+- a7e2f6e adds the `Instrument::Future` arms in cover, follow and wire that P6b's new variant needed.
+
+Boundary:
+- **Not yet done:** a live paperMoney round trip (read, send-cancel) on the PM accounts with this tree; the live plugins still pin the engine at 1d2d029. Bump the pin only after that round trip passes.
+- P4c (unpushed when P5 landed) conflicts with this commit only in `crates/te_py/src/lib.rs`'s module register list. Keep both.
 
 ### P6b verification and boundary
 
