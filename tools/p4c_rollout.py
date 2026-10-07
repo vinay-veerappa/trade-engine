@@ -40,6 +40,8 @@ SELECTOR_PATH = ROOT / "launch" / "runtime" / "runtime_selector.json"
 LAUNCHER = ROOT / "launch" / "runtime" / "run_runtime_owner.ps1"
 LEGACY = "legacy"
 RUNTIME = "runtime"
+# The env prefix a client reads its owner's endpoint from (runtime_client.OwnerEndpoint.from_env).
+OWNER_ENV_PREFIXES = ("TE_RUNTIME", "TE_OPT_OWNER")
 
 ROLLBACK_NOTE = (
     "the selector is never switched while the runtime owner still holds the "
@@ -150,7 +152,10 @@ def check_selector(selector: dict) -> list[str]:
     'legacy' or 'runtime', and no ledger may appear twice. The optional
     'tasks' index maps each scheduled-task name to its ledger path (the
     client seam knows the task name, not the ledger); every task row
-    must name a ledger consistently. Returns the sorted ledger paths."""
+    must name a ledger consistently. The optional 'owners' index maps a
+    ledger path to the owner's published endpoint file and the env prefix
+    its clients read (TE_RUNTIME for the scan, TE_OPT_OWNER for the
+    options). Returns the sorted ledger paths."""
     problems: list[str] = []
     ledgers = selector.get("ledgers")
     if not isinstance(ledgers, dict):
@@ -175,6 +180,17 @@ def check_selector(selector: dict) -> list[str]:
     for task, ledger in sorted(tasks.items()):
         if not str(ledger).strip():
             problems.append(f"the task '{task}' names an empty ledger")
+    owners = selector.get("owners", {})
+    if not isinstance(owners, dict):
+        problems.append("the selector's 'owners' index must be an object")
+        owners = {}
+    for ledger, row in sorted(owners.items()):
+        if not isinstance(row, dict) or not str(row.get("endpoint", "")).strip():
+            problems.append(f"the owner row for '{ledger}' names no endpoint file")
+        elif row.get("prefix") not in OWNER_ENV_PREFIXES:
+            problems.append(
+                f"the owner row for '{ledger}' has the client prefix "
+                f"'{row.get('prefix')}', not one of {list(OWNER_ENV_PREFIXES)}")
     if selector.get("default", LEGACY) not in (LEGACY, RUNTIME):
         problems.append(f"the selector default is not '{LEGACY}' or '{RUNTIME}'")
     if problems:

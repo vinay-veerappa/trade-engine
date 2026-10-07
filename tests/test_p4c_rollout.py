@@ -87,6 +87,22 @@ def test_selector_mutual_exclusion():
         kit.check_selector({"default": "maybe", "ledgers": {}})
 
 
+def test_selector_owner_rows_name_an_endpoint_and_a_client_prefix():
+    """An owner row says where the owner published its address and which env
+    prefix the ledger's clients read it from; anything else is refused."""
+    good = {"default": "legacy", "ledgers": {"C:\\a\\book.db": "runtime"}, "owners": {
+        "C:\\a\\book.db": {"endpoint": "C:\\a\\logs\\scan.json", "prefix": "TE_RUNTIME"}}}
+    assert kit.check_selector(good) == ["C:\\a\\book.db"]
+    with pytest.raises(kit.RolloutError, match="names no endpoint file"):
+        kit.check_selector({"default": "legacy", "ledgers": {}, "owners": {
+            "C:\\a\\book.db": {"prefix": "TE_RUNTIME"}}})
+    with pytest.raises(kit.RolloutError, match="client prefix 'TE_SCAN'"):
+        kit.check_selector({"default": "legacy", "ledgers": {}, "owners": {
+            "C:\\a\\book.db": {"endpoint": "C:\\a\\x.json", "prefix": "TE_SCAN"}}})
+    with pytest.raises(kit.RolloutError, match="'owners' index must be an object"):
+        kit.check_selector({"default": "legacy", "ledgers": {}, "owners": []})
+
+
 def test_owner_of_matches_ledgers_case_and_separator_insensitive():
     """A staged config and a selector row that name the same file agree."""
     selector = {"default": "legacy", "ledgers": {

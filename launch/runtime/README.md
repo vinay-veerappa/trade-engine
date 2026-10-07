@@ -7,16 +7,29 @@ section 7, Stage D). The kit's own tests fake every Task Scheduler command.
 
 ## What is staged
 
-- `run_runtime_owner.ps1` — the launcher template. It runs the certified
-  `te.exe serve --config <absolute config>` with stdin attached (the
-  owner serves until stdin closes, then drains and exits 0), appends all
-  output to `logs\trade_engine\RuntimeOwner_<role>_<date>.log` and exits
-  with the owner's code. It refuses relative config paths and a missing
-  `TE_BINARY`.
+- `run_runtime_owner.ps1` — hosts one owner. It starts the certified
+  `te.exe serve --config <absolute config>` with a PIPE for stdin and holds
+  the write end for as long as the launcher lives (a scheduled task's NUL
+  stdin would end the serve at once; the owner drains and exits 0 when the
+  pipe closes). The owner's output is appended to
+  `<config dir>\logs\trade_engine\RuntimeOwner_<role>_<date>.log`: the config
+  sits in an ancestor of its ledger, i.e. the client repo root. Once the
+  owner reports it is serving, the launcher publishes
+  `<LogDir>\runtime-owners\<role>.json` (port, generation, config, pid; no
+  secret: the capability stays in the file the config names). A graceful
+  stop is `<role>.stop` in that folder (the launcher closes stdin, the
+  owner drains the active job); Stop-ScheduledTask kills the tree with no
+  drain and the next start marks the unfinished job `uncertain`. It refuses
+  relative config paths and a missing `TE_BINARY`.
 - `runtime_selector.json` — the per-ledger owner selector, default
   `legacy`. This file is the only switch the rollback procedure touches.
   A ledger with no row uses the default. `runtime` never falls back
-  mid-job: if the staged owner cannot start, the job fails loudly.
+  mid-job: if the staged owner cannot start, the job fails loudly. The
+  optional `owners` index maps a ledger to the owner's published endpoint
+  file and the env prefix its clients read (`TE_RUNTIME` for the scan,
+  `TE_OPT_OWNER` for the options): the client's task wrapper sets that env
+  from the endpoint file and the config's capability file, then runs the
+  task's own command, which is already an owner client.
 
 ## How the kit is used (all dry-run by default)
 
