@@ -1,0 +1,26 @@
+<<<RULINGS>>>
+- [KEEP] #1: no rejection criterion met
+- [KEEP] #2: no rejection criterion met
+- [KEEP] #3: no rejection criterion met
+- [KEEP] #4: no rejection criterion met
+- [KEEP] #5: no rejection criterion met
+- [KEEP] #6: no rejection criterion met
+- [KEEP] #7: no rejection criterion met
+- [KEEP] #8: no rejection criterion met
+- [KEEP] #9: no rejection criterion met
+- [KEEP] #10: no rejection criterion met
+- [KEEP] #11: no rejection criterion met
+- [KEEP] #12: no rejection criterion met
+- [KEEP] #13: no rejection criterion met
+- [KEEP] #14: no rejection criterion met
+- [KEEP] #15: no rejection criterion met
+<<<END RULINGS>>>
+<<<RECOMMENDATION>>>
+REVISE
+<<<END RECOMMENDATION>>>
+<<<RATIONALE>>>
+All 15 findings reference code that exists in the patch and describe mechanisms that are mechanically plausible given the code as written; none contradict the gate results, touch out-of-scope code, or restate a settled decision. The most serious (#1, #10) identify a concrete reachable failure: `_single_sell` does not reject negative quantities, so a SELL with `quantity=-1` subtracts a negative in the accepted loop and mints phantom holdings, suppressing a legitimate wait — the exact H1 hazard this module exists to prevent. Whether negative quantities are "ordinary input" the module must handle is a semantic judgment for the implementer and human reviewer, not a demonstrable error I can rule on. The remaining findings (zero quantity, id() key collisions, unbounded list expansion, type-unsafe comparisons, unguarded unpacking, and test-completeness gaps) are all grounded in the actual code and cannot be demonstrably rejected.
+<<<END RATIONALE>>>
+<<<SETTLED>>>
+- NONE
+<<<END SETTLED>>>

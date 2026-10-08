@@ -1,0 +1,33 @@
+{
+    "mode":  "runtime-owner",
+    "python_home":  "C:\\Users\\vinay\\AppData\\Local\\Programs\\Python\\Python313",
+    "python_dll":  "C:\\Users\\vinay\\trade-engine\\crates\\target\\release\\python313.dll",
+    "python_executable":  "C:\\Users\\vinay\\tvDownloadOHLC\\.venv313\\Scripts\\python.exe",
+    "site_packages":  "C:\\Users\\vinay\\tvDownloadOHLC\\.venv313\\Lib\\site-packages",
+    "engine_source":  "C:\\Users\\vinay\\trade-engine\\src",
+    "plugin_paths":  [
+                         "C:\\Users\\vinay\\trade-engine\\staging\\p4c",
+                         "C:\\Users\\vinay\\tvDownloadOHLC\\src"
+                     ],
+    "plugin_module":  "runtime_owner_entry",
+    "plugin_factory":  "owner_entry",
+    "plugin_config":  {
+
+                      },
+    "owner":  {
+                  "ledger_path":  "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\scan-ledger.db",
+                  "clock":  "wall"
+              },
+    "runtime":  {
+                    "role":  "scan",
+                    "jobs":  [
+                                 "eod"
+                             ],
+                    "record_limit":  512,
+                    "stop_timeout_seconds":  30.0,
+                    "capability":  "C:\\Users\\vinay\\trade-engine\\staging\\p4c\\capability.txt",
+                    "port":  8391,
+                    "entry_module":  "scan_engine.runtime_owner_entry",
+                    "entry":  "owner_entry"
+                }
+}
