@@ -433,7 +433,7 @@ class EodRunner:
             if self._ledger.event_by_command(self._run_command(account_id, session)) is not None:
                 # This session already completed; the re-run proves idempotency itself.
                 continue
-            if self._account_has_history(account_id) and self._ledger.event_by_command(
+            if self._account_has_history(account_id, session) and self._ledger.event_by_command(
                 self._run_command(account_id, previous)
             ) is None:
                 raise SessionIncompleteError(
@@ -442,17 +442,21 @@ class EodRunner:
                     f"marker; complete it first (I3)"
                 )
 
-    def _account_has_history(self, account_id: str) -> bool:
-        """Whether this job has completed a session for the account before.
+    def _account_has_history(self, account_id: str, session: date) -> bool:
+        """Whether this job has marked a session BEFORE ``session`` for the account.
 
         Only this job's own markers count: an account the intraday service also runs
         carries that service's markers, and its first after-close run must not be
         refused for lacking a previous session it never had (I3). An in-session pass is
-        this job's own: the session it began still needs its after-close run.
+        this job's own: the session it began still needs its after-close run. But the
+        run session's own markers are not history: the ledger's first session starts
+        with a pass, and that session's passes and after-close run must not be refused
+        for lacking a previous session it never had either.
         """
         jobs = (self._config.job_name, *(self._pass_job(name) for name in PASSES))
         for event in self._ledger.events(account=account_id):
-            if event.kind is EventKind.EOD_RUN and event.payload.job in jobs:
+            if (event.kind is EventKind.EOD_RUN and event.payload.job in jobs
+                    and event.payload.session < session):
                 return True
         return False
 

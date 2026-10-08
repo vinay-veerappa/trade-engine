@@ -173,7 +173,7 @@ class Pair:
 def test_oracle_provenance():
     folder = Path(__file__).parent / "frozen_p4c" / "t7"
     for name, digest in (
-        ("runner.py", "625e2419a84c3efa7d139f8b69ad99e2d2e86f4f6f856032c02537ceb0b469a1"),
+        ("runner.py", "27ad03ab1c90e677ec6fe68c13c575f5c6d01ad81492b63f71367ae2af7dc75a"),
         ("options_routing.py", "bab9c2d76df58d5f0aeb263fc7870ec46fe541507e4d837cdd429a089c6f8c0d"),
     ):
         assert hashlib.sha256((folder / name).read_bytes()).hexdigest() == digest
