@@ -172,11 +172,14 @@ class Pair:
 
 def test_oracle_provenance():
     folder = Path(__file__).parent / "frozen_p4c" / "t7"
+    # The digests are of the committed (LF) bytes: a Windows checkout with autocrlf has CRLF in
+    # the working copy, and the pin must hold in both.
     for name, digest in (
         ("runner.py", "27ad03ab1c90e677ec6fe68c13c575f5c6d01ad81492b63f71367ae2af7dc75a"),
-        ("options_routing.py", "bab9c2d76df58d5f0aeb263fc7870ec46fe541507e4d837cdd429a089c6f8c0d"),
+        ("options_routing.py", "8bedafd8edb3a1e5f311fefaea37045708671d22418a26a8cca269d7d5fd0c03"),
     ):
-        assert hashlib.sha256((folder / name).read_bytes()).hexdigest() == digest
+        committed = (folder / name).read_bytes().replace(b"\r\n", b"\n")
+        assert hashlib.sha256(committed).hexdigest() == digest
     for name in ("eod_run", "eod_pass", "eod_replay", "eod_finish",
                  "options_manage", "options_apply", "options_enter"):
         assert callable(getattr(trade_engine_rs, name))
