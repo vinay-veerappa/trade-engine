@@ -3,19 +3,10 @@ use crate::config::{Config, OwnerConfig};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 use serde_json::Value;
 
-fn compose(py: Python<'_>, config: &Config, owner: &OwnerConfig) -> PyResult<Value> {
-    let native = py.import("trade_engine_rs")?;
-    if native
-        .getattr("__spec__")?
-        .getattr("origin")?
-        .extract::<String>()?
-        != "built-in"
-        || native.hasattr("__file__")?
-    {
-        return Err(PyRuntimeError::new_err(
-            "trade_engine_rs must be the built-in module",
-        ));
-    }
+/// The imported `trade_engine` is the configured `engine_source` checkout, never an installed copy.
+/// The proof and the owner's serve both refuse otherwise: until serve checked, an owner ran a stale
+/// copy installed in the client's venv beside the checkout it was configured to run.
+pub fn verify_engine_source(py: Python<'_>, config: &Config) -> PyResult<()> {
     let engine = py.import("trade_engine")?;
     let actual: std::path::PathBuf = engine.getattr("__file__")?.extract()?;
     if std::fs::canonicalize(actual)?
@@ -30,6 +21,23 @@ fn compose(py: Python<'_>, config: &Config, owner: &OwnerConfig) -> PyResult<Val
             "trade_engine source provenance mismatch",
         ));
     }
+    Ok(())
+}
+
+fn compose(py: Python<'_>, config: &Config, owner: &OwnerConfig) -> PyResult<Value> {
+    let native = py.import("trade_engine_rs")?;
+    if native
+        .getattr("__spec__")?
+        .getattr("origin")?
+        .extract::<String>()?
+        != "built-in"
+        || native.hasattr("__file__")?
+    {
+        return Err(PyRuntimeError::new_err(
+            "trade_engine_rs must be the built-in module",
+        ));
+    }
+    verify_engine_source(py, config)?;
     let clock = match owner.clock.as_str() {
         "replay" => {
             let initial = py

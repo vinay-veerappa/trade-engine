@@ -140,6 +140,8 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
                 // factory execution composes over it without a second writer.
                 crate::python::initialize_for_serve(&config)
                     .map_err(|e| jobs::refusal("RuntimePythonError", e))?;
+                pyo3::Python::with_gil(|py| crate::plugins::verify_engine_source(py, &config))
+                    .map_err(|e: pyo3::PyErr| jobs::refusal("RuntimePythonError", e.to_string()))?;
                 let owner_parts = owner
                     .store_parts
                     .take()

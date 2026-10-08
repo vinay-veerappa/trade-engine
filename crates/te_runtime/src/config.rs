@@ -301,11 +301,13 @@ impl Config {
     }
 
     pub fn search_paths(&self) -> Vec<PathBuf> {
+        // The configured checkout comes BEFORE site-packages: a `trade_engine` installed there
+        // (an older copy, built from another commit) must never shadow the source this config names.
         let mut paths = vec![
             self.python_home.join("Lib"),
             self.python_home.join("DLLs"),
-            self.site_packages.clone(),
             self.engine_source.clone(),
+            self.site_packages.clone(),
         ];
         paths.extend(self.plugin_paths.clone());
         paths

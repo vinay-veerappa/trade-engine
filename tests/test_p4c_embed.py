@@ -58,7 +58,7 @@ STANDALONE = """
 import importlib, json, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8"))
 sys.path[:] = [cfg["python_home"] + "\\\\Lib", cfg["python_home"] + "\\\\DLLs",
-               cfg["site_packages"], cfg["engine_source"], *cfg["plugin_paths"]]
+               cfg["engine_source"], cfg["site_packages"], *cfg["plugin_paths"]]
 try:
     m = importlib.import_module(cfg["plugin_module"])
     result = getattr(m, cfg["plugin_factory"])(cfg["plugin_config"])
@@ -140,7 +140,7 @@ def test_release_builtin_private_paths_and_repeat(package):
     assert report["python_prefix"] == cfg["python_home"]
     assert report["search_paths"] == [str(Path(cfg["python_home"]) / "Lib"),
                                      str(Path(cfg["python_home"]) / "DLLs"),
-                                     cfg["site_packages"], cfg["engine_source"],
+                                     cfg["engine_source"], cfg["site_packages"],
                                      *cfg["plugin_paths"]]
     assert report["plugin_file"] == str(Path(cfg["plugin_paths"][0]) / "fake_plugin.py")
     assert report["reinitialize"] == {"type": "RuntimeConfigError",
@@ -319,8 +319,9 @@ def test_private_native_bundle_independent_of_path_and_missing_dll(package):
         ctypes.windll.kernel32.SetErrorMode(old)
 
 
-def test_unicode_home_source_and_site_packages(package):
-    cfg, path, _, plugins = package
+def private_runtime(package):
+    """A private Python home, venv and source checkout under unicode names; the config points at them."""
+    cfg, path, _, _ = package
     home = path.parent / "home café 🚀 space"
     home.mkdir()
     original = Path(cfg["python_home"])
@@ -340,6 +341,12 @@ def test_unicode_home_source_and_site_packages(package):
                     ignore=shutil.ignore_patterns("__pycache__"))
     cfg.update(python_home=str(home), python_executable=str(prefix / "Scripts" / "python.exe"),
                site_packages=str(site), engine_source=str(source))
+    return home, site, source
+
+
+def test_unicode_home_source_and_site_packages(package):
+    cfg, path, _, plugins = package
+    home, site, source = private_runtime(package)
     code, report = run(package)
     assert code == 0, report
     assert report["python_home"] == str(home)
@@ -348,6 +355,17 @@ def test_unicode_home_source_and_site_packages(package):
     assert report["plugin_file"] == str(plugins / "fake_plugin.py")
     (home / "python313.dll").write_bytes(b"wrong DLL")
     refusal(package, "bundled Python DLL differs from configured home")
+
+
+def test_the_configured_checkout_shadows_an_installed_trade_engine(package):
+    """An owner ran the older trade_engine installed in the client's venv instead of the checkout
+    its config names, because site-packages came first on the search path."""
+    _, site, source = private_runtime(package)
+    (site / "trade_engine").mkdir()
+    (site / "trade_engine" / "__init__.py").write_text("DECOY = 'installed copy'\n", encoding="utf-8")
+    code, report = run(package)
+    assert code == 0, report
+    assert report["result"]["engine"] == str(source / "trade_engine" / "__init__.py")
 
 
 def test_missing_corrupt_config_and_cli(package):
