@@ -250,7 +250,7 @@ def default_roles(repo: Path, binary: Path) -> list[RoleSpec]:
         RoleSpec(
             name="DailyScanners", role="scan",
             jobs=["eod"],
-            ledger=str(repo / "data" / "trade_engine" / "scan-ledger.db"),
+            ledger=str(repo / "data" / "trade_engine" / "scan-ledger-p7.db"),
             venv_python=str(repo / ".venv313" / "Scripts" / "python.exe"),
             entry_module="scan_engine.runtime_owner_entry",
             entry="owner_entry",
@@ -258,7 +258,7 @@ def default_roles(repo: Path, binary: Path) -> list[RoleSpec]:
         RoleSpec(
             name="OptionsEod", role="options-eod",
             jobs=["options-eod"],
-            ledger=str(repo / "data" / "trade_engine" / "options-ledger.db"),
+            ledger=str(repo / "data" / "trade_engine" / "options-ledger-p7.db"),
             venv_python=str(repo / ".venv313" / "Scripts" / "python.exe"),
             entry_module="scan_engine.runtime_owner_entry",
             entry="owner_entry",

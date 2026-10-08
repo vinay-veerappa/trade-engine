@@ -53,15 +53,15 @@ def test_the_shipped_selector_routes_each_live_client_task_to_its_owner():
     kit.check_selector(selector)
     assert set(selector["tasks"].values()) <= set(selector["ledgers"]), "a task names a ledger with no row"
     assert {name: ledger.rsplit("\\", 1)[-1] for name, ledger in selector["tasks"].items()} == {
-        "OptionsMorning": "options-ledger.db", "OptionsMidday": "options-ledger.db",
-        "OptionsLate": "options-ledger.db", "OptionsEod": "options-ledger.db",
-        "OptionsMirrorFollow": "options-ledger.db", "OptionsMirrorCollect": "options-ledger.db",
-        "ScanEod": "scan-ledger.db",
+        "OptionsMorning": "options-ledger-p7.db", "OptionsMidday": "options-ledger-p7.db",
+        "OptionsLate": "options-ledger-p7.db", "OptionsEod": "options-ledger-p7.db",
+        "OptionsMirrorFollow": "options-ledger-p7.db", "OptionsMirrorCollect": "options-ledger-p7.db",
+        "ScanEod": "scan-ledger-p7.db",
     }
     for ledger, mode in selector["ledgers"].items():
         assert mode == "runtime"
         owner = selector["owners"][ledger]
-        role = "scan" if ledger.endswith("scan-ledger.db") else "batch"
+        role = "scan" if ledger.endswith("scan-ledger-p7.db") else "batch"
         assert owner["endpoint"].endswith(f"logs\\trade_engine\\runtime-owners\\{role}.json")
         assert owner["prefix"] == ("TE_RUNTIME" if role == "scan" else "TE_OPT_OWNER")
 
