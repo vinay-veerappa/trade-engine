@@ -1184,7 +1184,10 @@ Boundary:
 - CL/MCL refuse: there is no energy holiday table yet.
 - With the flag ON, a bar outside the venue's scope (an unmodelled root, a sub-minute bar or a non-minute clock, a year outside 2006-2027) runs the pure TypeScript rules.
 - The browser book is built frictionless, and replay-sim applies the tick slippage once.
-- The web's Day order expires at 16:00 ET, te_core's at the Globex close (17:00 ET). The web check fires first.
+- The web's Day order and te_core's expire at the same moment: the real Globex session close (17:00 ET on a normal day, the
+  early-halt time on an early-halt date, the next session when placed at or after it), from te_core's per-root tables
+  (tv 5e7bd672 and 8379cc87; `web/lib/orders/tif.ts`, `cme-calendar.ts`). ADR-020's 16:00 ET hard exit is a separate
+  strategy/risk rule about positions and is unchanged. (This line said 16:00 ET before those two commits.)
 - Plan Gate 3 (golden fills recorded on NinjaTrader 8) is not built.
 
 ### P6C verification and boundary
@@ -1359,16 +1362,22 @@ the backup.
 |---|---|---|---|
 | options | 26 | `options-ledger-p7.db` | restores |
 | scan | 967 | `scan-ledger-p7.db` | restores |
-| 0DTE | 1499 | NOT migrated (below) | not applicable |
+| 0DTE | 1500 | `options-0dte-ledger-p7.db` (applied the same night, below) | restores |
 
 Re-gate of the landed branch (cargo workspace and the wasm32 build ok; `ci_local` 2750 passed;
 `mutate_p7` 22/22 KILLED; `time_p7` new/old fold 0.991, append 0.989, bracket 1.006).
 
-- *0DTE ledger stays on the old spelling.* Its only writer, the IntradayZeroDte job, runs
-  directly in the client on the tv `.venv313`'s installed `trade_engine`, which is not this
-  commit's engine; its writes to a migrated ledger are untested. To migrate it: refresh that
-  venv's engine (`trade_engine` and `trade_engine_rs`), stop the writer, migrate to a new file,
-  point `intraday:` in `rules.yaml` at it. The old name stays in `rules.yaml` with a comment.
+- *The 0DTE ledger was migrated the same night (20:00 PT, outside market hours).* Its only
+  writer, the IntradayZeroDte job, runs directly in the client on the tv `.venv313`'s installed
+  `trade_engine`, so the order was: disable the task; refresh that venv's engine from main
+  (`pip install --no-deps --force-reinstall` of `crates/te_py` and of the repo root, built into
+  the P7 target dir; both were the pre-P7 build of 2026-10-06 23:57 before); migrate
+  `options-0dte-ledger.db` to `options-0dte-ledger-p7.db` (1,500 events, 19 rows respelled, 9 map
+  rows of which 7 opaque, value-equal) and prove `--reverse` (sha256 `b2520d1c...` restored);
+  repoint `intraday:` in `rules.yaml` (tv 888a2184); smoke the service against a copy (the
+  2026-10-07 session reads as already settled; the 2026-10-08 one starts and waits for the
+  open); re-enable the task (next run 06:30 PT). The old file is untouched and is the rollback.
+  The tv scan_engine suite passes under the refreshed venv (1,187 passed, 1 skipped).
 - *Found in the window: the owners ran the wrong engine.* `te serve` listed `site-packages`
   before the configured checkout on `sys.path`, and only `--proof` checked provenance, so the
   owners imported the old `trade_engine` installed in `.venv313` instead of the checkout. With
@@ -1401,7 +1410,21 @@ Re-gate of the landed branch (cargo workspace and the wasm32 build ok; `ci_local
   (ascending, then descending by Ticker; up to 2,000 rows, otherwise it refuses rather than
   truncate). Live run: 1,360 CSP names in 82 s. The first scheduled use is the 2026-10-08
   DailyScanners.
-- Rollback: repoint the selector keys and the owner configs at the old ledger files (untouched).
+- *A third Finviz cause, found by reading the whole universe: the per-name quote pages are
+  rate limited.* The CSP scan reads one `quote.ashx` page per name after the screen. Run back
+  to back at about 3.5 a second, 170 of 1,360 drew HTTP 429 from the 14th request on, the
+  caller read a 429 as "no profile", and the name was dropped without a word (1,184 profiles
+  read, 130 names past the EPS / price / SMA200 / earnings gates). Unlike the challenge, a rate
+  limit is cured by waiting. Fixed in tv 6cfa1c58: the shared transport spaces request starts
+  0.35 s apart (about 2.8 a second, process-wide) and waits out a 429 or 503 (Retry-After, else
+  2/4/8/16/30 s with jitter; a 403 is never retried), and `check_profiles_read` names the
+  unreadable names and refuses a scan that lost more than 5% of its universe. Same 1,360 names
+  after the fix: 1,360 of 1,360 profiles, no 429, 494 s, 149 pass the gates. The 1,360 is the
+  stage-0 universe; the stages that follow (profile gates, fresh quotes, the chain-liquidity
+  prefilter, the chain filters) are what cut it to a handful (2026-09-29: 1,377 -> 167 -> 110 ->
+  8 contracts on 3 tickers -> 1 ranked CSP).
+- *The live :3000 web was rebuilt and restarted* (`quant stop web`, `quant build web`, `quant start web`, 20:00 PT): it now expires a Day order at the Globex close (17:00 ET), like te_core.
+- Rollback: repoint the selector keys, the owner configs and `ledgers.intraday` at the old ledger files (untouched).
 
 ### Costs of phasing (accepted)
 
