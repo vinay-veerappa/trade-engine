@@ -174,10 +174,23 @@ def build_extension() -> bool:
     return True
 
 
+# Tests that need files only the owner's machine has. They stay mandatory there (a missing
+# input is a failure, never a skip); a GitHub-hosted runner does not run them.
+HOSTED_RUNNER_EXCLUDED = (
+    # The flip drives the client repo's scan_engine over the recorded SPX chain tape.
+    "tests/test_p4c_flip.py",
+)
+
+
 def run_tests() -> bool:
     py_exe = resolve_python()
-    say(f"Running test suite ({py_exe} -m pytest -q)...")
-    code, out = run_command([py_exe, "-m", "pytest", "-q"])
+    pytest_args = ["-q"]
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        for path in HOSTED_RUNNER_EXCLUDED:
+            pytest_args.append(f"--ignore={path}")
+        say(f"Hosted runner: not running {', '.join(HOSTED_RUNNER_EXCLUDED)} (needs the owner's machine).")
+    say(f"Running test suite ({py_exe} -m pytest {' '.join(pytest_args)})...")
+    code, out = run_command([py_exe, "-m", "pytest", *pytest_args])
     print(out.strip())
     if code != 0:
         say(f"FAIL: pytest returned exit code {code}")
