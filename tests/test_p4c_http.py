@@ -95,6 +95,15 @@ def next_frame(reader):
     return bytes(result)
 
 
+def next_event(reader):
+    """The next frame that is not an idle keep-alive. A busy machine can take longer than the
+    fixture's 20 ms ping interval between two reads of a burst, and a ping then lands between events
+    (seen on a GitHub-hosted runner); the tests that count events are not about the ping."""
+    while (frame := next_frame(reader)) == b": ping\n\n":
+        pass
+    return frame
+
+
 def wait(predicate):
     deadline = time.monotonic() + 5
     while not predicate():
@@ -215,7 +224,7 @@ def test_lifecycle_handover_dedup_shutdown(tmp_path):
             event = ledgers[1].append(Event("ACC-\u00e9", EventKind.ORDER_SUBMITTED, order, T, command_id="race"))
             native.broadcast(events[1][0])
             view.pause_backlog(False)
-            frames = [next_frame(reader) for _ in range(5)]
+            frames = [next_event(reader) for _ in range(5)]
             assert [int(frame.split(b"\n", 1)[0][4:]) for frame in frames] == [1, 2, 3, 4, 5]
             native.broadcast(event)
             assert next_frame(reader) == b": ping\n\n"
@@ -241,7 +250,7 @@ def test_slow_subscriber_and_reconnect(tmp_path):
                 order = Order(f"live-{index}", "ACC-\u00e9", Equity("AAPL"), OrderType.MARKET,
                     Side.BUY, Decimal("1"), f"live-{index}", T)
                 ledgers[1].append(Event("ACC-\u00e9", EventKind.ORDER_SUBMITTED, order, T, command_id=f"live-{index}"))
-            frames = [next_frame(reader) for _ in range(121)]
+            frames = [next_event(reader) for _ in range(121)]
             assert [int(frame.split(b"\n", 1)[0][4:]) for frame in frames] == list(range(1, 122))
         wait(lambda: native._server.subscriber_count == 0)
         with stream(native, request("/events?after=119")) as (_, reader, header):

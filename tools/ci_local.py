@@ -180,6 +180,12 @@ HOSTED_RUNNER_EXCLUDED = (
     # The flip drives the client repo's scan_engine over the recorded SPX chain tape.
     "tests/test_p4c_flip.py",
 )
+# Individual tests that render the rollout for the owner's own client checkout (its .venv313): the kit reads
+# that venv's pyvenv.cfg, which exists only on the owner's machine.
+HOSTED_RUNNER_DESELECTED = (
+    "tests/test_p4c_rollout.py::test_rendered_configs_are_absolute_and_certified_shaped",
+    "tests/test_p4c_rollout.py::test_the_cli_renders_and_checks",
+)
 
 
 def run_tests() -> bool:
@@ -188,7 +194,9 @@ def run_tests() -> bool:
     if os.environ.get("GITHUB_ACTIONS") == "true":
         for path in HOSTED_RUNNER_EXCLUDED:
             pytest_args.append(f"--ignore={path}")
-        say(f"Hosted runner: not running {', '.join(HOSTED_RUNNER_EXCLUDED)} (needs the owner's machine).")
+        for node in HOSTED_RUNNER_DESELECTED:
+            pytest_args.append(f"--deselect={node}")
+        say(f"Hosted runner: not running {', '.join(HOSTED_RUNNER_EXCLUDED + HOSTED_RUNNER_DESELECTED)} (needs the owner's machine).")
     say(f"Running test suite ({py_exe} -m pytest {' '.join(pytest_args)})...")
     code, out = run_command([py_exe, "-m", "pytest", *pytest_args])
     print(out.strip())

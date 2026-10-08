@@ -170,8 +170,11 @@ def test_aliases_pid_stale_and_context(tmp_path, owner_cls, contender_cls):
     assert owner.__enter__() is owner
     try:
         owner.acquire()
-        for alias in (path, tmp_path / "." / "book.db", tmp_path / "x" / ".." / "book.db",
-                      Path(os.path.relpath(path, ROOT))):
+        aliases = [path, tmp_path / "." / "book.db", tmp_path / "x" / ".." / "book.db"]
+        if os.path.splitdrive(str(path))[0].lower() == os.path.splitdrive(str(ROOT))[0].lower():
+            # A relative spelling exists only on the checkout's own drive (a hosted runner: temp on C:, checkout on D:).
+            aliases.append(Path(os.path.relpath(path, ROOT)))
+        for alias in aliases:
             (tmp_path / "x").mkdir(exist_ok=True)
             contender = contender_cls(alias)
             value = outcome(contender.acquire)
