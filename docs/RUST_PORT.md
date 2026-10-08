@@ -1349,6 +1349,45 @@ Copies taken 13:54 PT (outside market hours), source opened `mode=ro`:
 `time_p7` against the pre-P7 build on the 0DTE copy (new/old medians, gate 1.25): fold 0.956,
 append 0.980, bracket 1.003.
 
+**Applied (2026-10-07, evening window, PT).** P7 is on main (11920cd) and the stored ledgers
+were migrated that night, outside market hours, with both owners stopped (their tasks disabled,
+`<role>.stop` files): fresh sqlite-backup copies, each migrated to a NEW file, `--reverse` proved
+sha256-equal, the owner configs and the selector pointed at the new names, the old files kept as
+the backup.
+
+| ledger | events | new file | reverse sha256 |
+|---|---|---|---|
+| options | 26 | `options-ledger-p7.db` | restores |
+| scan | 967 | `scan-ledger-p7.db` | restores |
+| 0DTE | 1499 | NOT migrated (below) | not applicable |
+
+Re-gate of the landed branch (cargo workspace and the wasm32 build ok; `ci_local` 2750 passed;
+`mutate_p7` 22/22 KILLED; `time_p7` new/old fold 0.991, append 0.989, bracket 1.006).
+
+- *0DTE ledger stays on the old spelling.* Its only writer, the IntradayZeroDte job, runs
+  directly in the client on the tv `.venv313`'s installed `trade_engine`, which is not this
+  commit's engine; its writes to a migrated ledger are untested. To migrate it: refresh that
+  venv's engine (`trade_engine` and `trade_engine_rs`), stop the writer, migrate to a new file,
+  point `intraday:` in `rules.yaml` at it. The old name stays in `rules.yaml` with a comment.
+- *Found in the window: the owners ran the wrong engine.* `te serve` listed `site-packages`
+  before the configured checkout on `sys.path`, and only `--proof` checked provenance, so the
+  owners imported the old `trade_engine` installed in `.venv313` instead of the checkout. With
+  the P7 build, Rust's `eod:history` rule wants a 4-tuple that the old Python does not send, and
+  the first EOD panicked ("execution thread did not answer"). Fixed in adb5a7d: the checkout
+  comes first, `serve` runs `verify_engine_source` and refuses on a mismatch, and
+  `test_the_configured_checkout_shadows_an_installed_trade_engine` pins it.
+- *A request id is durable even when the job failed or was refused.* `options-eod:batch:<D>`
+  returns the stored record on resubmit; the task cannot retry a session. A catch-up uses a
+  suffixed id (`options-eod:batch:<D>:catchup3`). There is no task-level retry path yet.
+- *EOD inputs the window had to fix by hand* (none are P7): the dividend snapshots predated
+  `holdings.yaml` (a held name missing from the newest snapshot refuses, I5), fixed by writing a
+  close-stamped snapshot; and RIVN's 2026-10-07 daily bar was missing because an early fetch
+  touched the parquet before the vendor had the bar, after which the provider's mtime rule
+  (`is_cache_fresh`) treats the file as asked-and-answered until the next session; fixed with a
+  `force_refresh` for that name. The Schwab batch fetch in the client venv also fails
+  ("No module named 'httpx'") and falls back to yfinance.
+- Rollback: repoint the selector keys and the owner configs at the old ledger files (untouched).
+
 ### Costs of phasing (accepted)
 
 - Until P4 Python calls Rust across pyo3 with plain values or JSON; most of that
