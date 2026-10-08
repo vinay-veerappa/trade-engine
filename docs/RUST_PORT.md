@@ -1377,15 +1377,30 @@ Re-gate of the landed branch (cargo workspace and the wasm32 build ok; `ci_local
   comes first, `serve` runs `verify_engine_source` and refuses on a mismatch, and
   `test_the_configured_checkout_shadows_an_installed_trade_engine` pins it.
 - *A request id is durable even when the job failed or was refused.* `options-eod:batch:<D>`
-  returns the stored record on resubmit; the task cannot retry a session. A catch-up uses a
-  suffixed id (`options-eod:batch:<D>:catchup3`). There is no task-level retry path yet.
+  returns the stored record on resubmit, so a refused session could not be run again under its
+  own id. A catch-up used a suffixed id (`options-eod:batch:<D>:catchup3`). Fixed client-side in
+  tv 1ae08566: `attempt_request_id` walks `<id>`, `<id>:retry1`, ... and the options and scan EOD
+  jobs submit under the first id the owner can act on (failed and refused move on; completed,
+  queued, running and uncertain are reused, never run twice).
 - *EOD inputs the window had to fix by hand* (none are P7): the dividend snapshots predated
   `holdings.yaml` (a held name missing from the newest snapshot refuses, I5), fixed by writing a
   close-stamped snapshot; and RIVN's 2026-10-07 daily bar was missing because an early fetch
   touched the parquet before the vendor had the bar, after which the provider's mtime rule
   (`is_cache_fresh`) treats the file as asked-and-answered until the next session; fixed with a
-  `force_refresh` for that name. The Schwab batch fetch in the client venv also fails
-  ("No module named 'httpx'") and falls back to yfinance.
+  `force_refresh` for that name. Fixed in tv 1ae08566: the bar sync refetches a short name once
+  with `force_refresh=True` before it gives up. The Schwab batch fetch in the client venv also
+  failed ("No module named 'httpx'") and fell back to yfinance; `httpx` is installed in
+  `.venv313` and listed in the tv `requirements.txt`.
+- *Finviz was refused (Cloudflare) and DailyScanners wrote no scan files.* Two causes, both
+  measured on 2026-10-07: finvizfinance's plain `requests` client is answered 403
+  `cf-mitigated: challenge` from its first request, and Finviz challenges any screener offset
+  past row 1000 (`r=1001`) even for a browser-fingerprinted client on a fresh session, so
+  pacing, retrying and recycling the session cannot help. The CSP universe is 68 pages of 20
+  rows. Fixed in tv 5a8263d2: `scripts/utils/finviz_http.py` swaps in a `curl_cffi` session that
+  presents Chrome's TLS fingerprint, and a screen over 50 pages is read from both ends
+  (ascending, then descending by Ticker; up to 2,000 rows, otherwise it refuses rather than
+  truncate). Live run: 1,360 CSP names in 82 s. The first scheduled use is the 2026-10-08
+  DailyScanners.
 - Rollback: repoint the selector keys and the owner configs at the old ledger files (untouched).
 
 ### Costs of phasing (accepted)
