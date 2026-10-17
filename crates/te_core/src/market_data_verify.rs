@@ -569,19 +569,26 @@ pub fn verify_bars_series(
     now: &Ts,
     future_tolerance_seconds: f64,
     raw_bars: &[Bar],
-) -> Result<Vec<Bar>, MarketDataVerifyError> {
+    strict: bool,
+) -> Result<(Vec<Bar>, Vec<String>), MarketDataVerifyError> {
     let effective_end = validate_bars_request(start, end, max_age_seconds, now)?;
     validate_future_tolerance(future_tolerance_seconds)?;
 
+    let mut warnings = Vec::new();
     let mut prev_ts: Option<&Ts> = None;
     for b in raw_bars {
         // Instrument match
         if !b.instr.same(instrument) {
             let actual_sym = b.instr.symbol().unwrap_or_else(|_| "UNKNOWN".into());
             let exp_sym = instrument.symbol().unwrap_or_else(|_| "UNKNOWN".into());
-            return Err(MarketDataVerifyError::malformed_data(format!(
+            let msg = format!(
                 "Provider returned bar with instrument {actual_sym} for requested {exp_sym} (I5)"
-            )));
+            );
+            if strict {
+                return Err(MarketDataVerifyError::malformed_data(msg));
+            } else {
+                warnings.push(msg);
+            }
         }
 
         // Shape invariants
@@ -597,26 +604,41 @@ pub fn verify_bars_series(
 
         // Interval checks: start <= b.ts <= effective_end
         if b.ts.lt(start) {
-            return Err(MarketDataVerifyError::malformed_data(format!(
+            let msg = format!(
                 "Bar timestamp {} is before requested start {} (I5)",
                 b.ts.iso, start.iso
-            )));
+            );
+            if strict {
+                return Err(MarketDataVerifyError::malformed_data(msg));
+            } else {
+                warnings.push(msg);
+            }
         }
         if b.ts.gt(&effective_end) {
-            return Err(MarketDataVerifyError::malformed_data(format!(
+            let msg = format!(
                 "Bar timestamp {} is after effective end {} (I5)",
                 b.ts.iso, effective_end.iso
-            )));
+            );
+            if strict {
+                return Err(MarketDataVerifyError::malformed_data(msg));
+            } else {
+                warnings.push(msg);
+            }
         }
 
         // Chronological ordering check
         if let Some(prev) = prev_ts {
             if b.ts.lt(prev) {
                 let sym = instrument.symbol().unwrap_or_else(|_| "UNKNOWN".into());
-                return Err(MarketDataVerifyError::malformed_data(format!(
+                let msg = format!(
                     "Bar series for {sym} is not in chronological order: {} followed by {}",
                     prev.iso, b.ts.iso
-                )));
+                );
+                if strict {
+                    return Err(MarketDataVerifyError::malformed_data(msg));
+                } else {
+                    warnings.push(msg);
+                }
             }
         }
         prev_ts = Some(&b.ts);
@@ -648,7 +670,7 @@ pub fn verify_bars_series(
         }
     }
 
-    Ok(raw_bars.to_vec())
+    Ok((raw_bars.to_vec(), warnings))
 }
 
 /// Verify quote shape invariants (I5).
@@ -779,25 +801,37 @@ pub fn verify_chain(
     now: &Ts,
     future_tolerance_seconds: f64,
     raw_chain: &[OptionQuote],
-) -> Result<Vec<OptionQuote>, MarketDataVerifyError> {
+    strict: bool,
+) -> Result<(Vec<OptionQuote>, Vec<String>), MarketDataVerifyError> {
     if underlying.trim().is_empty() {
         return Err(MarketDataVerifyError::invalid_input("underlying must be non-empty"));
     }
     validate_chain_request(expiry_start, expiry_end, max_age_seconds)?;
     validate_future_tolerance(future_tolerance_seconds)?;
 
+    let mut warnings = Vec::new();
     for q in raw_chain {
         if q.contract.underlying != underlying {
-            return Err(MarketDataVerifyError::malformed_data(format!(
+            let msg = format!(
                 "Option quote underlying {} does not match requested underlying {} (I5)",
                 q.contract.underlying, underlying
-            )));
+            );
+            if strict {
+                return Err(MarketDataVerifyError::malformed_data(msg));
+            } else {
+                warnings.push(msg);
+            }
         }
         if q.contract.expiry < expiry_start || q.contract.expiry > expiry_end {
-            return Err(MarketDataVerifyError::malformed_data(format!(
+            let msg = format!(
                 "Option quote expiry {} is outside requested range [{}, {}] (I5)",
                 q.contract.expiry, expiry_start, expiry_end
-            )));
+            );
+            if strict {
+                return Err(MarketDataVerifyError::malformed_data(msg));
+            } else {
+                warnings.push(msg);
+            }
         }
 
         verify_option_quote_shape(q)?;
@@ -814,7 +848,7 @@ pub fn verify_chain(
         )?;
     }
 
-    Ok(raw_chain.to_vec())
+    Ok((raw_chain.to_vec(), warnings))
 }
 
 /// Verify corporate action shape invariants.
@@ -837,20 +871,27 @@ pub fn verify_corporate_actions(
     now: &Ts,
     future_tolerance_seconds: f64,
     raw_actions: &[CorporateAction],
-) -> Result<Vec<CorporateAction>, MarketDataVerifyError> {
+    strict: bool,
+) -> Result<(Vec<CorporateAction>, Vec<String>), MarketDataVerifyError> {
     if symbol.trim().is_empty() {
         return Err(MarketDataVerifyError::invalid_input("symbol must be non-empty"));
     }
     validate_max_age(max_age_seconds)?;
     validate_future_tolerance(future_tolerance_seconds)?;
 
+    let mut warnings = Vec::new();
     for a in raw_actions {
         verify_corporate_action_shape(a)?;
         if a.symbol != symbol {
-            return Err(MarketDataVerifyError::malformed_data(format!(
+            let msg = format!(
                 "Corporate action symbol {} does not match requested symbol {} (I5)",
                 a.symbol, symbol
-            )));
+            );
+            if strict {
+                return Err(MarketDataVerifyError::malformed_data(msg));
+            } else {
+                warnings.push(msg);
+            }
         }
         verify_item_freshness(
             &a.symbol,
@@ -861,7 +902,7 @@ pub fn verify_corporate_actions(
         )?;
     }
 
-    Ok(raw_actions.to_vec())
+    Ok((raw_actions.to_vec(), warnings))
 }
 
 /// Configured verifier holding future tolerance, providing stateful verification calls.
@@ -919,7 +960,8 @@ impl MarketDataVerifier {
         max_age_seconds: f64,
         now: &Ts,
         raw_bars: &[Bar],
-    ) -> Result<Vec<Bar>, MarketDataVerifyError> {
+        strict: bool,
+    ) -> Result<(Vec<Bar>, Vec<String>), MarketDataVerifyError> {
         verify_bars_series(
             instrument,
             tf,
@@ -929,6 +971,7 @@ impl MarketDataVerifier {
             now,
             self.future_tolerance_seconds,
             raw_bars,
+            strict,
         )
     }
 
@@ -956,7 +999,8 @@ impl MarketDataVerifier {
         max_age_seconds: f64,
         now: &Ts,
         raw_chain: &[OptionQuote],
-    ) -> Result<Vec<OptionQuote>, MarketDataVerifyError> {
+        strict: bool,
+    ) -> Result<(Vec<OptionQuote>, Vec<String>), MarketDataVerifyError> {
         verify_chain(
             underlying,
             expiry_start,
@@ -965,6 +1009,7 @@ impl MarketDataVerifier {
             now,
             self.future_tolerance_seconds,
             raw_chain,
+            strict,
         )
     }
 
@@ -974,13 +1019,15 @@ impl MarketDataVerifier {
         max_age_seconds: f64,
         now: &Ts,
         raw_actions: &[CorporateAction],
-    ) -> Result<Vec<CorporateAction>, MarketDataVerifyError> {
+        strict: bool,
+    ) -> Result<(Vec<CorporateAction>, Vec<String>), MarketDataVerifyError> {
         verify_corporate_actions(
             symbol,
             max_age_seconds,
             now,
             self.future_tolerance_seconds,
             raw_actions,
+            strict,
         )
     }
 }

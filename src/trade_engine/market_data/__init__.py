@@ -11,7 +11,7 @@ from trade_engine.interfaces.market_data import (
     StaleDataError,
 )
 from trade_engine.market_data.chains import ChainSnapshot, ChainSnapshotStore
-from trade_engine.market_data.wrapper import StampingMarketDataWrapper
+from trade_engine.market_data.wrapper_native import StampingMarketDataWrapper
 
 MarketDataWrapper = StampingMarketDataWrapper
 
