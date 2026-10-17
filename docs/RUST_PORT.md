@@ -1453,3 +1453,20 @@ Re-gate of the landed branch (cargo workspace and the wasm32 build ok; `ci_local
 - Each phase is one commit series: Rust + oracle test, then the shim and the
   taking the Python logic out of service (kept as reference, never deleted), then this table's status. A row turns **done**
   only in the commit that adds the enforcing test, which the row names.
+
+## Status 2026-10-17: the three no-twin modules are ported, wired and out of service
+
+Verified as if written for the first time (spec tests, proptest, hand mutants), not against the Python's output. The old Python files stay in the tree byte-identical as reference; each has a gate (`tests/test_<stem>_out_of_service.py`: an AST scan that fails if live code imports it, plus a behavioural test through the Rust door, mutation-checked by re-pointing one import).
+
+| Module | Rust | Native shim | Gate |
+|---|---|---|---|
+| `metrics/snapshot.py` | `te_core::snapshot` | `metrics/snapshot_native.py` | `test_snapshot_out_of_service.py` |
+| `tos_paper/session.py` | `te_core::tos_paper::session` | `tos_paper/session_native.py` (`exits.py`, `follow.py` rewired) | `test_session_out_of_service.py`, `test_session_halt_id_contract.py` |
+| `market_data/wrapper.py` | `te_core::market_data_verify` | `market_data/wrapper_native.py` (`__init__.py` rewired) | `test_wrapper_out_of_service.py` |
+
+Findings:
+- `snapshot.py` had no live importer (tests only); the port fixes a Python defect: `_protective_stop` ignored order side despite its docstring. A BUY stop on a long is not protective; pinned in the native path.
+- The reconcile (halt) command id is contract (replayed against ledgers). It is pinned byte-for-byte to the retired derivation (sha256 of compact sorted-key JSON, first 16 hex) including unicode and microsecond cases.
+- The Rust market-data verifiers are stricter than the Python (bar window, ordering, symbol/underlying/expiry match). `strict=false` (default) reports those as warnings on `trade_engine.market_data`; `TE_MARKET_DATA_STRICT=1` makes them errors. Every check the Python also made stays a hard error in both modes. Run non-strict in shadow first and read the warnings before turning strict on.
+- `ci_local` on the merged tree: 2791 passed, 1 failed: `tests/test_p4c_flip.py` (needs the `scan_engine` client path, gone; pre-existing, identical on main). Fixing it means repointing and settling a close-reason format divergence (`0.2200` vs `0.22`); demote it with the other frozen lockstep gates.
+- Owner restart: the wiring changes what the live owners import, so it takes effect at the next restart. Do it outside market hours.
