@@ -55,7 +55,7 @@ from trade_engine.ledger import Ledger, codec
 from trade_engine.ledger.events import MirrorRefused
 from trade_engine.tos_paper import _rs
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
-from trade_engine.tos_paper.session import (
+from trade_engine.tos_paper.session_native import (
     MirrorRunReport,
     _append,
     _with,

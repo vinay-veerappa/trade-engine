@@ -39,7 +39,7 @@ from trade_engine.ledger.state import AccountState
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
 from trade_engine.tos_paper import _rs
 from trade_engine.tos_paper.exits import FOLLOW_PREFIX, Express, Price, run_pass_mirror
-from trade_engine.tos_paper.session import MirrorRunReport, _append, _with, mirror_of
+from trade_engine.tos_paper.session_native import MirrorRunReport, _append, _with, mirror_of
 
 ET = ZoneInfo("America/New_York")
 MAX_AGE = timedelta(minutes=5)
