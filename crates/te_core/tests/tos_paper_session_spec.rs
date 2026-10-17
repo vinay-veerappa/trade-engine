@@ -713,4 +713,28 @@ fn test_door_session_ops() {
         _ => panic!("missing holders"),
     };
     assert_eq!(holders.len(), 1);
+
+    // 3. reconcile_command_id via decide
+    let rec_doc = r#"{
+        "venue": "paper-venue",
+        "phase": "collect",
+        "as_of": "2026-01-02T10:30:00+00:00",
+        "event": {"dc": "VenueReconcile", "f": {"venue": "paper-venue", "as_of": {"T": "2026-01-02T10:30:00+00:00"}, "reconciled": true, "drift": {"t": []}, "note": {"n": true}}}
+    }"#;
+    let res = decide("session_reconcile_command_id", rec_doc).unwrap();
+    let parsed = parse(&res).unwrap();
+    assert!(parsed.get("command_id").is_some());
+
+    // 4. build_cancel_ack via decide
+    let cancel_doc = r#"{
+        "venue": "paper-venue",
+        "ticket_key": "t-1",
+        "order_id": "v-101",
+        "ack_status": "ACCEPTED",
+        "ack_message": "cancelled",
+        "ack_timestamp": "2026-01-02T10:30:00+00:00"
+    }"#;
+    let res = decide("session_build_cancel_ack", cancel_doc).unwrap();
+    let parsed = parse(&res).unwrap();
+    assert!(parsed.get("ack").is_some());
 }

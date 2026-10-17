@@ -96,9 +96,7 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "pass_name" => follow::pass_name_op(&doc)?,
         "follow_flat" => follow::flat_op(&doc)?,
         "text_probe" => wire::text_probe(&doc)?,
-        "session_deferred_why" => session::deferred_why_op(&doc)?,
-        "session_halt_unproven" => session::halt_unproven_op(&doc)?,
-        "session_clear_halt" => session::clear_halt_op(&doc)?,
+        s if s.starts_with("session_") => return session::decide(s, text),
         _ => return err(WIRE, format!("unknown tos_paper op {op:?}")),
     };
     Ok(json::dumps(&out))

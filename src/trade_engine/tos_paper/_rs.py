@@ -71,6 +71,7 @@ for _kind, _module, _name in (
     ("tos_netting_error", "trade_engine.tos_paper.netting", "NettingError"),
     ("tos_exit_plan_error", "trade_engine.tos_paper.exits", "ExitPlanError"),
     ("tos_broker_error", "trade_engine.tos_paper.broker", "TosPaperBrokerError"),
+    ("tos_session_error", "trade_engine.tos_paper.session_native", "MirrorSessionError"),
 ):
     bridge.register(_kind, _lazy(_module, _name))
 bridge.register("tos_venue_unreadable", _unreadable)
@@ -88,6 +89,11 @@ def decide(op: str, doc: Mapping[str, Any]) -> Any:
     ``Decimal`` or ``date``) reaches the core as its text, never as a crash on the host.
     """
     return json.loads(call(rs.tos_paper_decide, op, json.dumps(doc, default=str)))
+
+
+def session_decide(op: str, doc: Mapping[str, Any]) -> Any:
+    """``op`` over ``doc`` through the tos_paper_session pyo3 door; the answer as parsed JSON."""
+    return json.loads(call(rs.tos_paper_session_decide, op, json.dumps(doc, default=str)))
 
 
 # -- the wire: domain objects <-> the core's JSON ------------------------------------------------
@@ -171,6 +177,6 @@ def ack(d: Mapping) -> VenueAck:
 
 
 __all__ = [
-    "ack", "call", "dec", "decide", "event", "holdings_doc", "order_doc", "pairs", "refusal", "rs", "text",
+    "ack", "call", "dec", "decide", "event", "holdings_doc", "order_doc", "pairs", "refusal", "rs", "session_decide", "text",
     "ticket_doc", "unpairs", "unwire", "venue_order", "venue_order_doc", "wire",
 ]
