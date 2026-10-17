@@ -791,8 +791,10 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     factory_run::register(m)?;
     mirror_loop::register(m)?;
     tos_paper::register(m)?;
+    market_data::register(m)?;
     Ok(())
 }
 
+mod market_data;
 mod runtime;
 mod tos_paper;
