@@ -16,3 +16,4 @@ pub mod runtime;
 pub use sim::tick as futures;
 pub mod tos_paper;
 pub mod snapshot;
+pub mod market_data_verify;
