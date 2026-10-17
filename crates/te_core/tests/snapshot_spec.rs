@@ -204,11 +204,29 @@ fn test_one_snapshot_per_session_close() {
 
 #[test]
 fn test_peak_margin_monotone() {
-    let snaps = daily_snapshots(&events_two_days(), "ACC").expect("daily_snapshots ok");
-    // day 1: 0.25 * 11000 = 2750; day 2: 0.25 * 12000 = 3000 -> peak 3000
+    let mut events = events_two_days();
+    let d3 = dt("2026-09-24T21:00:00+00:00");
+    events.push(Event {
+        account: "ACC".to_string(),
+        kind: EventKind::Mark,
+        payload: Obj::Mark(Mark {
+            instrument: aapl(),
+            price: money("80"),
+            as_of: d3.clone(),
+            source: None,
+        }),
+        ts_utc: d3,
+        command_id: Some("cmd-m3".to_string()),
+        schema_version: 1,
+        seq: Some(7),
+    });
+    let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
+    // day 1: 0.25 * 11000 = 2750; day 2: 0.25 * 12000 = 3000 -> peak 3000; day 3: 0.25 * 8000 = 2000 -> peak 3000
     assert_eq!(snaps[0].margin_used, dec("2750"));
     assert_eq!(snaps[1].margin_used, dec("3000"));
     assert_eq!(snaps[1].margin_peak, dec("3000"));
+    assert_eq!(snaps[2].margin_used, dec("2000"));
+    assert_eq!(snaps[2].margin_peak, dec("3000"));
     assert_eq!(peak_margin(&snaps).unwrap(), dec("3000"));
 }
 
