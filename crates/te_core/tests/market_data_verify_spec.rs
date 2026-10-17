@@ -370,7 +370,8 @@ fn mdv_4_bar_shape_invariants() {
         "98.5",
         "100",
     );
-    assert!(verify_bar_shape(&b_bad_hl).is_err());
+    let err_hl = verify_bar_shape(&b_bad_hl).unwrap_err();
+    assert!(err_hl.message().contains("cannot be lower than low"));
 
     // Negative price
     let b_neg = sample_bar(
@@ -383,7 +384,8 @@ fn mdv_4_bar_shape_invariants() {
         "95",
         "100",
     );
-    assert!(verify_bar_shape(&b_neg).is_err());
+    let err_neg = verify_bar_shape(&b_neg).unwrap_err();
+    assert!(err_neg.message().contains("Bar prices must be strictly positive"));
 
     // Open outside [low, high]
     let b_open_high = sample_bar(
@@ -396,7 +398,8 @@ fn mdv_4_bar_shape_invariants() {
         "95",
         "100",
     );
-    assert!(verify_bar_shape(&b_open_high).is_err());
+    let err_open = verify_bar_shape(&b_open_high).unwrap_err();
+    assert!(err_open.message().contains("Bar open and close must lie within [low, high]"));
 
     // Negative volume
     let b_neg_vol = sample_bar(
@@ -409,7 +412,8 @@ fn mdv_4_bar_shape_invariants() {
         "95",
         "-1",
     );
-    assert!(verify_bar_shape(&b_neg_vol).is_err());
+    let err_vol = verify_bar_shape(&b_neg_vol).unwrap_err();
+    assert!(err_vol.message().contains("Bar volume must be non-negative"));
 }
 
 #[test]
