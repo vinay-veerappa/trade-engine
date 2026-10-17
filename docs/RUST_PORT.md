@@ -182,7 +182,8 @@ Preserved pre-existing behavior/defects, not silently repaired:
 - Status-only read-back cannot resolve working pending-replace terms; terminal
   read-back can resolve them.
 - Replace treats any acknowledgement other than PENDING/REJECTED as accepted,
-  including an unrecognized status.
+  including an unrecognized status (FIXED: defect OMS-2, an unrecognized status now
+  leaves the order PENDING per I10; enforced by test `test_oms_2_unknown_ack_leaves_replace_pending`).
 - Replayed close ignores a changed reason once the same command has been sent.
 - Native submit replay returns persisted non-NEW state, including pending state,
   without resubmission; emulated pending submissions have their separate refusal

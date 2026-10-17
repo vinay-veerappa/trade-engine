@@ -446,16 +446,21 @@ pub struct AckPlan {
 }
 
 pub fn replace_ack(status: &str, message: &str, order: &str, command: &str) -> AckPlan {
-    // Preserved defect: any status other than PENDING/REJECTED is accepted.
-    if status=="PENDING" {
-        return AckPlan {action: Ack::Pending, reason: format!("Venue replace remains pending: {}",if message.is_empty() {"no status message"}else{message}), refusal: None};
+    if status == "ACCEPTED" {
+        return AckPlan { action: Ack::Accepted, reason: format!("Venue confirmed replace: {command}"), refusal: None };
     }
-    if status=="REJECTED" {
-        let m=if message.is_empty() {"reason not supplied"}else{message};
-        return AckPlan {action: Ack::Rejected, reason: format!("Venue rejected replace: {m}"),
-            refusal: Some(LErr {kind: "order_management", msg: format!("Venue rejected replace for '{order}': {m}")})};
+    if status == "REJECTED" {
+        let m = if message.is_empty() { "reason not supplied" } else { message };
+        return AckPlan { action: Ack::Rejected, reason: format!("Venue rejected replace: {m}"),
+            refusal: Some(LErr { kind: "order_management", msg: format!("Venue rejected replace for '{order}': {m}") }) };
     }
-    AckPlan {action: Ack::Accepted, reason: format!("Venue confirmed replace: {command}"), refusal: None}
+    // Fixed OMS-2 / I10: unrecognized or PENDING status leaves the order PENDING, never ACCEPTED.
+    let m = if message.is_empty() {
+        if status == "PENDING" { "no status message" } else { "unrecognized status" }
+    } else {
+        message
+    };
+    AckPlan { action: Ack::Pending, reason: format!("Venue replace remains pending: {m}"), refusal: None }
 }
 
 pub fn cancel_ack(status: &str, reason: &str, message: &str, order: &str, oco: bool) -> R<AckPlan> {
@@ -926,5 +931,20 @@ mod tests {
     #[test]
     fn floor_reduce_never_guesses_zero() {
         assert_eq!(s(&floor(&mul(&p("3"),&p("0.5")).unwrap()).unwrap()),"1");
+    }
+    #[test]
+    fn test_oms_2_unknown_ack_leaves_replace_pending() {
+        assert_eq!(replace_ack("ACCEPTED", "", "o1", "cmd1").action, Ack::Accepted);
+        assert_eq!(replace_ack("REJECTED", "bad", "o1", "cmd1").action, Ack::Rejected);
+        assert_eq!(replace_ack("PENDING", "", "o1", "cmd1").action, Ack::Pending);
+
+        // Defect OMS-2: unrecognized status must leave the order PENDING, not ACCEPTED (I10)
+        let unknown = replace_ack("UNKNOWN_STATUS", "", "o1", "cmd1");
+        assert_eq!(unknown.action, Ack::Pending);
+        assert!(unknown.reason.contains("remains pending"));
+
+        let other = replace_ack("FOOBAR", "unrecognized", "o1", "cmd1");
+        assert_eq!(other.action, Ack::Pending);
+        assert!(other.reason.contains("remains pending"));
     }
 }
