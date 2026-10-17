@@ -258,9 +258,9 @@ fn mdv_3_bars_series_fresh_and_stale() {
     );
 
     // Fresh within 60s
-    let res = verify_bars_series(&eq, "1m", &start, &end, 60.0, &now, 0.0, &[bar1.clone(), bar2]);
+    let res = verify_bars_series(&eq, "1m", &start, &end, 60.0, &now, 0.0, &[bar1.clone(), bar2], true);
     assert!(res.is_ok());
-    assert_eq!(res.unwrap().len(), 2);
+    assert_eq!(res.unwrap().0.len(), 2);
 
     // Stale when max_age is 5s (newest is 10s old)
     let bar3 = sample_bar(
@@ -273,13 +273,13 @@ fn mdv_3_bars_series_fresh_and_stale() {
         "100.5",
         "1000",
     );
-    let err = verify_bars_series(&eq, "1m", &start, &end, 60.0, &now, 0.0, &[bar1, bar3]).unwrap_err();
+    let err = verify_bars_series(&eq, "1m", &start, &end, 60.0, &now, 0.0, &[bar1, bar3], true).unwrap_err();
     assert!(matches!(err, MarketDataVerifyError::StaleData { .. }));
     assert!(err.message().contains("is stale: latest as_of"));
 
     // Empty bar series returns Ok(vec![])
-    let empty = verify_bars_series(&eq, "1m", &start, &end, 60.0, &now, 0.0, &[]).unwrap();
-    assert!(empty.is_empty());
+    let empty = verify_bars_series(&eq, "1m", &start, &end, 60.0, &now, 0.0, &[], true).unwrap();
+    assert!(empty.0.is_empty());
 }
 
 #[test]
@@ -315,6 +315,7 @@ fn mdv_3_chain_fresh_and_stale() {
         &now,
         0.0,
         &[q.clone()],
+        true,
     );
     assert!(res.is_ok());
 
@@ -327,6 +328,7 @@ fn mdv_3_chain_fresh_and_stale() {
         &now,
         0.0,
         &[q],
+        true,
     )
     .unwrap_err();
     assert!(matches!(err, MarketDataVerifyError::StaleData { .. }));
@@ -344,10 +346,10 @@ fn mdv_3_corporate_actions_fresh_and_stale() {
     };
 
     // Fresh with max_age 100s
-    assert!(verify_corporate_actions("AAPL", 100.0, &now, 0.0, &[act.clone()]).is_ok());
+    assert!(verify_corporate_actions("AAPL", 100.0, &now, 0.0, &[act.clone()], true).is_ok());
 
     // Stale with max_age 20s
-    let err = verify_corporate_actions("AAPL", 20.0, &now, 0.0, &[act]).unwrap_err();
+    let err = verify_corporate_actions("AAPL", 20.0, &now, 0.0, &[act], true).unwrap_err();
     assert!(matches!(err, MarketDataVerifyError::StaleData { .. }));
 }
 
@@ -532,7 +534,7 @@ fn mdv_5_bar_series_chronological_ordering() {
         "1000",
     );
 
-    let err = verify_bars_series(&eq, "1m", &start, &end, 60.0, &now, 0.0, &[b1, b2]).unwrap_err();
+    let err = verify_bars_series(&eq, "1m", &start, &end, 60.0, &now, 0.0, &[b1, b2], true).unwrap_err();
     assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
     assert!(err.message().contains("chronological order"));
 }
@@ -556,7 +558,7 @@ fn mdv_5_bar_series_instrument_mismatch() {
         "1000",
     );
 
-    let err = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b]).unwrap_err();
+    let err = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b], true).unwrap_err();
     assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
     assert!(err.message().contains("instrument"));
 }
@@ -592,6 +594,7 @@ fn mdv_5_chain_underlying_and_expiry_scope() {
         &now,
         0.0,
         &[q_wrong_und],
+        true,
     )
     .unwrap_err();
     assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
@@ -626,10 +629,215 @@ fn mdv_5_chain_underlying_and_expiry_scope() {
         &now,
         0.0,
         &[q_out_exp],
+        true,
     )
     .unwrap_err();
     assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
     assert!(err.message().contains("outside requested range"));
+}
+
+// =============================================================================
+// MDV-6: Strict vs Non-Strict Verification
+// =============================================================================
+
+#[test]
+fn mdv_6_strict_mode_series_warnings_and_errors() {
+    let now = ts("2026-09-23T14:30:00Z");
+    let spy = Instrument::Equity("SPY".to_string());
+    let aapl = Instrument::Equity("AAPL".to_string());
+    let start = ts("2026-09-23T14:10:00Z");
+    let end = ts("2026-09-23T14:20:00Z");
+
+    // 1. Bar window violation (before start)
+    let b_early = sample_bar(
+        spy.clone(),
+        "2026-09-23T14:05:00Z", // before start 14:10
+        "2026-09-23T14:29:00Z",
+        "100", "101", "99", "100.5", "1000",
+    );
+    // Non-strict: returns Ok with warning
+    let (bars, warnings) = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_early.clone()], false).unwrap();
+    assert_eq!(bars.len(), 1);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("before requested start"));
+    // Strict: returns Err
+    let err = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_early], true).unwrap_err();
+    assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
+
+    // 2. Bar window violation (after effective_end)
+    let b_late = sample_bar(
+        spy.clone(),
+        "2026-09-23T14:25:00Z", // after end 14:20
+        "2026-09-23T14:29:00Z",
+        "100", "101", "99", "100.5", "1000",
+    );
+    // Non-strict: returns Ok with warning
+    let (bars, warnings) = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_late.clone()], false).unwrap();
+    assert_eq!(bars.len(), 1);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("after effective end"));
+    // Strict: returns Err
+    let err = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_late], true).unwrap_err();
+    assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
+
+    // 3. Chronological ordering violation
+    let b1 = sample_bar(
+        spy.clone(),
+        "2026-09-23T14:15:00Z",
+        "2026-09-23T14:29:00Z",
+        "100", "101", "99", "100.5", "1000",
+    );
+    let b2 = sample_bar(
+        spy.clone(),
+        "2026-09-23T14:12:00Z", // before b1!
+        "2026-09-23T14:29:00Z",
+        "100", "101", "99", "100.5", "1000",
+    );
+    // Non-strict: returns Ok with warning
+    let (bars, warnings) = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b1.clone(), b2.clone()], false).unwrap();
+    assert_eq!(bars.len(), 2);
+    assert!(warnings.iter().any(|w| w.contains("chronological order")));
+    // Strict: returns Err
+    let err = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b1, b2], true).unwrap_err();
+    assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
+
+    // 4. Instrument mismatch
+    let b_mismatch = sample_bar(
+        aapl,
+        "2026-09-23T14:15:00Z",
+        "2026-09-23T14:29:00Z",
+        "100", "101", "99", "100.5", "1000",
+    );
+    // Non-strict: returns Ok with warning
+    let (bars, warnings) = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_mismatch.clone()], false).unwrap();
+    assert_eq!(bars.len(), 1);
+    assert!(warnings.iter().any(|w| w.contains("instrument")));
+    // Strict: returns Err
+    let err = verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_mismatch], true).unwrap_err();
+    assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
+
+    // 5. Hard error in BOTH modes: shape check (high < low)
+    let b_bad_shape = sample_bar(
+        spy.clone(),
+        "2026-09-23T14:15:00Z",
+        "2026-09-23T14:29:00Z",
+        "100", "90", "95", "92", "1000", // high 90 < low 95
+    );
+    assert!(verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_bad_shape.clone()], false).is_err());
+    assert!(verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_bad_shape], true).is_err());
+
+    // 6. Hard error in BOTH modes: stale series
+    let b_stale = sample_bar(
+        spy.clone(),
+        "2026-09-23T14:15:00Z",
+        "2026-09-23T14:15:00Z", // 15 mins old
+        "100", "101", "99", "100.5", "1000",
+    );
+    assert!(matches!(
+        verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_stale.clone()], false).unwrap_err(),
+        MarketDataVerifyError::StaleData { .. }
+    ));
+    assert!(matches!(
+        verify_bars_series(&spy, "1m", &start, &end, 60.0, &now, 0.0, &[b_stale], true).unwrap_err(),
+        MarketDataVerifyError::StaleData { .. }
+    ));
+}
+
+#[test]
+fn mdv_6_strict_mode_chain_warnings_and_errors() {
+    let now = ts("2026-09-23T14:30:00Z");
+
+    // 1. Underlying mismatch
+    let q_mismatch = OptionQuote {
+        contract: OptionContract {
+            underlying: "QQQ".to_string(), // Mismatch
+            expiry: date(2026, 10, 16),
+            strike: money("500"),
+            right: Right::Call,
+            multiplier: 100,
+        },
+        bid: money("5.00"), ask: money("5.50"),
+        bid_size: money("10"), ask_size: money("10"),
+        as_of: ts("2026-09-23T14:29:50Z"),
+        underlying_price: None, implied_vol: None, greeks: None, open_interest: None,
+    };
+    // Non-strict: returns Ok with warning
+    let (quotes, warnings) = verify_chain("SPY", date(2026, 10, 1), date(2026, 10, 30), 60.0, &now, 0.0, &[q_mismatch.clone()], false).unwrap();
+    assert_eq!(quotes.len(), 1);
+    assert!(warnings.iter().any(|w| w.contains("does not match requested underlying")));
+    // Strict: returns Err
+    assert!(verify_chain("SPY", date(2026, 10, 1), date(2026, 10, 30), 60.0, &now, 0.0, &[q_mismatch], true).is_err());
+
+    // 2. Expiry out of range
+    let q_exp = OptionQuote {
+        contract: OptionContract {
+            underlying: "SPY".to_string(),
+            expiry: date(2026, 11, 20), // Outside
+            strike: money("500"),
+            right: Right::Call,
+            multiplier: 100,
+        },
+        bid: money("5.00"), ask: money("5.50"),
+        bid_size: money("10"), ask_size: money("10"),
+        as_of: ts("2026-09-23T14:29:50Z"),
+        underlying_price: None, implied_vol: None, greeks: None, open_interest: None,
+    };
+    // Non-strict: returns Ok with warning
+    let (quotes, warnings) = verify_chain("SPY", date(2026, 10, 1), date(2026, 10, 30), 60.0, &now, 0.0, &[q_exp.clone()], false).unwrap();
+    assert_eq!(quotes.len(), 1);
+    assert!(warnings.iter().any(|w| w.contains("outside requested range")));
+    // Strict: returns Err
+    assert!(verify_chain("SPY", date(2026, 10, 1), date(2026, 10, 30), 60.0, &now, 0.0, &[q_exp], true).is_err());
+
+    // 3. Hard error in BOTH modes: shape check (bid > ask)
+    let q_bad_shape = OptionQuote {
+        contract: OptionContract {
+            underlying: "SPY".to_string(),
+            expiry: date(2026, 10, 16),
+            strike: money("500"),
+            right: Right::Call,
+            multiplier: 100,
+        },
+        bid: money("6.00"), ask: money("5.50"), // bid > ask
+        bid_size: money("10"), ask_size: money("10"),
+        as_of: ts("2026-09-23T14:29:50Z"),
+        underlying_price: None, implied_vol: None, greeks: None, open_interest: None,
+    };
+    assert!(verify_chain("SPY", date(2026, 10, 1), date(2026, 10, 30), 60.0, &now, 0.0, &[q_bad_shape.clone()], false).is_err());
+    assert!(verify_chain("SPY", date(2026, 10, 1), date(2026, 10, 30), 60.0, &now, 0.0, &[q_bad_shape], true).is_err());
+}
+
+#[test]
+fn mdv_6_strict_mode_corporate_actions_warnings_and_errors() {
+    let now = ts("2026-09-23T14:30:00Z");
+
+    let act_mismatch = CorporateAction {
+        symbol: "MSFT".to_string(), // Mismatch for requested AAPL
+        action_type: "DIVIDEND".to_string(),
+        effective_date: date(2026, 10, 1),
+        as_of: ts("2026-09-23T14:29:50Z"),
+        details: None,
+    };
+
+    // Non-strict: returns Ok with warning
+    let (actions, warnings) = verify_corporate_actions("AAPL", 60.0, &now, 0.0, &[act_mismatch.clone()], false).unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(warnings.iter().any(|w| w.contains("Corporate action symbol MSFT does not match")));
+
+    // Strict: returns Err
+    let err = verify_corporate_actions("AAPL", 60.0, &now, 0.0, &[act_mismatch], true).unwrap_err();
+    assert!(matches!(err, MarketDataVerifyError::MalformedData { .. }));
+
+    // Hard error in BOTH modes: empty action_type
+    let act_bad = CorporateAction {
+        symbol: "AAPL".to_string(),
+        action_type: "".to_string(),
+        effective_date: date(2026, 10, 1),
+        as_of: ts("2026-09-23T14:29:50Z"),
+        details: None,
+    };
+    assert!(verify_corporate_actions("AAPL", 60.0, &now, 0.0, &[act_bad.clone()], false).is_err());
+    assert!(verify_corporate_actions("AAPL", 60.0, &now, 0.0, &[act_bad], true).is_err());
 }
 
 #[test]
