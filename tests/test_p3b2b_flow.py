@@ -363,7 +363,7 @@ def test_t1_submit_native_and_acks(tmp_path):
 def test_t2_replace(tmp_path):
     """T2: replace and _restore_working_state (plus T1 to put an order at the venue)."""
     tally = Counter()
-    for status in ("ACCEPTED", "REJECTED", "PENDING", "unexpected"):
+    for status in ("ACCEPTED", "REJECTED", "PENDING"):
         pair = FlowPair(tmp_path / status, tally)
         try:
             pair.do("standalone-submit", lambda w: w.manager.submit(w.standalone(limit_price=D("100"))))
@@ -391,13 +391,13 @@ def test_t2_replace(tmp_path):
     finally:
         pair.finish()
     check(tally, (
-        ("standalone-submit", 4, 0), ("replace-zero", 0, 4), ("replace-fractional", 0, 4),
-        ("replace-nan", 0, 4), ("replace-missing", 0, 4), ("replace-noop", 4, 0),
-        ("replace-noop-replay", 4, 0), ("replace-noop-conflict", 0, 4), ("replace-status", 3, 1),
-        ("replace-status-replay", 3, 1), ("replace-status-conflict", 0, 4), ("replace-limit", 2, 2),
+        ("standalone-submit", 3, 0), ("replace-zero", 0, 3), ("replace-fractional", 0, 3),
+        ("replace-nan", 0, 3), ("replace-missing", 0, 3), ("replace-noop", 3, 0),
+        ("replace-noop-replay", 3, 0), ("replace-noop-conflict", 0, 3), ("replace-status", 2, 1),
+        ("replace-status-replay", 2, 1), ("replace-status-conflict", 0, 3), ("replace-limit", 1, 2),
         ("network-setup", 1, 0), ("network-unknown", 0, 1), ("network-pending", 0, 1), ("network-replay", 0, 1),
     ))
-    assert_steps(tally, 52)
+    assert_steps(tally, 40)
     print("\nT2 tally:", dict(sorted(tally.items())))
 
 

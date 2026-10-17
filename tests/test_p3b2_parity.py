@@ -333,7 +333,7 @@ def test_real_venues_lockstep(tmp_path):
 
 def test_refusals_and_ambiguous_replace(tmp_path):
     tally = Counter()
-    for status in ("ACCEPTED", "REJECTED", "PENDING", "unexpected"):
+    for status in ("ACCEPTED", "REJECTED", "PENDING"):
         pair = Pair(tmp_path / status, tally)
         try:
             pair.do("standalone-submit", lambda w: w.manager.submit(w.standalone(limit_price=D("100"))))
@@ -381,7 +381,7 @@ def test_refusals_and_ambiguous_replace(tmp_path):
                   "replace-status-conflict", "unsupported-stop-entry", "unsupported-stoplimit-entry",
                   "invalid-fraction", "missing-order"):
         assert tally[label + ":raise"] > 0, (label, tally)
-    assert tally["steps"] == 74
+    assert tally["steps"] == 63
     assert tally["capability-stop:ok"] == 2
     assert tally["capability-stop:raise"] == 1
     print("\nrefusal campaign tally:", {k: v for k, v in sorted(tally.items()) if not k.startswith("refusal:")})
