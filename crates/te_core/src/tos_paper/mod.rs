@@ -18,6 +18,7 @@ pub mod normalize;
 pub mod pytables;
 pub mod pytext;
 pub mod reconcile;
+pub mod session;
 pub mod slippage;
 pub mod transport;
 pub mod wire;
@@ -45,6 +46,8 @@ pub const VENUE_UNREADABLE: &str = "tos_venue_unreadable";
 /// An exception the host transport raised and the broker lets through (`TransportUnavailable`):
 /// the host re-raises its own exception object.
 pub const RAISED: &str = "tos_raised";
+/// `MirrorSessionError`.
+pub const SESSION: &str = "tos_session_error";
 
 /// `op` over the JSON document `text`; the answer as JSON text.
 pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
@@ -93,6 +96,9 @@ pub fn decide(op: &str, text: &str) -> Result<String, LErr> {
         "pass_name" => follow::pass_name_op(&doc)?,
         "follow_flat" => follow::flat_op(&doc)?,
         "text_probe" => wire::text_probe(&doc)?,
+        "session_deferred_why" => session::deferred_why_op(&doc)?,
+        "session_halt_unproven" => session::halt_unproven_op(&doc)?,
+        "session_clear_halt" => session::clear_halt_op(&doc)?,
         _ => return err(WIRE, format!("unknown tos_paper op {op:?}")),
     };
     Ok(json::dumps(&out))
