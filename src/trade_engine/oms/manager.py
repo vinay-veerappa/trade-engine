@@ -28,6 +28,7 @@ from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import EmulatedOrderState, Event, EventKind, Ledger, codec
 from trade_engine.ledger.codec import DecimalRangeError, canon_decimal, encode_payload
 from trade_engine.oms.models import Bracket
+from trade_engine.oms.precheck import Precheck, PrecheckConfig
 from trade_engine.sim import _rs
 
 
@@ -129,11 +130,12 @@ def _changes(changes: OrderChanges):
 class _Host:
     """The flow's effects, one call each."""
 
-    def __init__(self, manager: OrderManager, broker, clock, ledger) -> None:
+    def __init__(self, manager: OrderManager, broker, clock, ledger, gate: Precheck | None = None) -> None:
         self._manager = manager
         self._broker = broker
         self._clock = clock
         self._ledger = ledger
+        self._gate = gate
 
     def now(self):
         return self._clock.now_utc().isoformat()
@@ -203,6 +205,8 @@ class _Host:
         return ack.venue_order_id, ack.status, ack.message
 
     def submit(self, venue_order):
+        if self._gate is not None:
+            return self._ack(self._gate.submit(venue_order, self._broker.submit))
         return self._ack(self._broker.submit(venue_order))
 
     def cancel(self, venue_order_id):
@@ -210,6 +214,8 @@ class _Host:
 
     def replace(self, venue_order_id, text):
         changes = {key: _dec(value) for key, value in json.loads(text).items()}
+        if self._gate is not None:
+            return self._ack(self._gate.replace(venue_order_id, OrderChanges(**changes), self._broker.replace))
         return self._ack(self._broker.replace(venue_order_id, OrderChanges(**changes)))
 
     def orders(self, since):
@@ -239,11 +245,14 @@ class _Host:
 class OrderManager:
     """Manage orders using the E1 ledger as the sole source of local state."""
 
-    def __init__(self, broker: BrokerAdapter, clock: Clock, ledger: Ledger) -> None:
+    def __init__(
+        self, broker: BrokerAdapter, clock: Clock, ledger: Ledger, precheck: PrecheckConfig | None = None
+    ) -> None:
         self._broker = broker
         self._clock = clock
         self._ledger = ledger
-        self._host = _Host(self, broker, clock, ledger)
+        gate = Precheck(precheck, clock, ledger) if precheck is not None and precheck.mode != "off" else None
+        self._host = _Host(self, broker, clock, ledger, gate)
 
     def _flow(self, operation: str, **request):
         try:
