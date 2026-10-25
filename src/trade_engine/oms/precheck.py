@@ -26,7 +26,7 @@ from urllib.parse import quote, urlsplit
 
 from trade_engine.domain.instruments import Instrument, Side
 from trade_engine.domain.orders import Order
-from trade_engine.interfaces.broker import OrderChanges, VenueAck, VenueOrder
+from trade_engine.interfaces.broker import OrderChanges, VenueAck, VenueOrder, VenueOrderAllocation
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import Ledger
 
@@ -216,45 +216,62 @@ class Precheck:
         return self._config.mode == "enforce"
 
     def submit(self, order: VenueOrder, send: Callable[[VenueOrder], VenueAck]) -> VenueAck:
-        account = _single_account(order)
-        position = self._position(account, order.instrument) if account is not None else Decimal("0")
-        reducing, opening = split_quantity(order.quantity, order.side, position)
+        reducing_allocs, opening_allocs, openings = _split_allocations(
+            order, lambda account: self._position(account, order.instrument))
+        reducing = _total(reducing_allocs)
+        opening = _total(opening_allocs)
         if not self.enforcing:
             ack = send(order)
-            if opening > 0:
-                result = self._check(account, order.instrument, order.side, opening)
+            for account, quantity in openings.items():
+                result = self._check(account, order.instrument, order.side, quantity)
                 if not result.allowed:
-                    _LOG.warning("riskguard precheck would refuse (warn): venue_order=%s kind=%s qty=%s",
-                                 order.venue_order_id, result.kind, opening)
+                    _LOG.warning("riskguard precheck would refuse (warn): venue_order=%s account=%s kind=%s qty=%s",
+                                 order.venue_order_id, account, result.kind, quantity)
             return ack
         if opening == 0:
             return send(order)
         if reducing == 0:
-            result = self._check(account, order.instrument, order.side, order.quantity)
-            if not result.allowed:
+            result = self._first_refusal(order, openings)
+            if result is not None:
                 return self._refuse(order.venue_order_id, result)
             return send(order)
-        return self._submit_split(order, account, reducing, opening, send)
+        return self._submit_split(order, reducing_allocs, opening_allocs, openings, send)
 
-    def _submit_split(self, order, account, reducing, opening, send) -> VenueAck:
+    def _submit_split(self, order, reducing_allocs, opening_allocs, openings, send) -> VenueAck:
         # The reducing part goes at once, under the strategy order's own venue id, and never waits.
-        reduce_ack = send(replace(order, quantity=reducing, allocations=_part(order, reducing)))
+        reducing = _total(reducing_allocs)
+        opening = _total(opening_allocs)
+        reduce_ack = send(replace(order, quantity=reducing, allocations=reducing_allocs))
         if reduce_ack.status == "REJECTED":
             return reduce_ack
-        result = self._check(account, order.instrument, order.side, opening)
-        if not result.allowed:
+        result = self._first_refusal(order, openings)
+        if result is not None:
             _LOG.warning("riskguard precheck refused opening part: venue_order=%s kind=%s qty=%s",
                          order.venue_order_id, result.kind, opening)
             return replace(reduce_ack, message=f"opening {opening} refused: {result.kind}")
         open_ack = send(replace(order, venue_order_id=order.venue_order_id + OPEN_SUFFIX,
-                                quantity=opening, allocations=_part(order, opening)))
+                                quantity=opening, allocations=opening_allocs))
         if open_ack.status == "REJECTED":
             return replace(reduce_ack, message=f"opening {opening} rejected by the venue")
         return reduce_ack
 
+    def _first_refusal(self, order: VenueOrder, openings: Mapping[str, Decimal]) -> CheckResult | None:
+        # Each account with an opening part is checked once, in order; the first refusal stops the rest.
+        for account, quantity in openings.items():
+            result = self._check(account, order.instrument, order.side, quantity)
+            if not result.allowed:
+                return result
+        return None
+
     def replace(self, venue_order_id: str, changes: OrderChanges,
                 send: Callable[[str, OrderChanges], VenueAck]) -> VenueAck:
-        order = self._working_order(venue_order_id)
+        orders = self._working_orders(venue_order_id)
+        if len(orders) > 1:
+            # A netted venue order: a venue-level change does not say how it splits across the accounts.
+            _LOG.warning("riskguard precheck: replace of a netted order not checked: venue_order=%s accounts=%s",
+                         venue_order_id, ",".join(sorted({item.account_id for item in orders})))
+            return send(venue_order_id, changes)
+        order = orders[0] if orders else None
         if order is None:
             if self.enforcing:
                 return self._refuse(venue_order_id, CheckResult(False, "unknown_order"))
@@ -304,24 +321,50 @@ class Precheck:
         position = self._ledger.state(account_id).positions.get(instrument)
         return Decimal("0") if position is None else position.quantity
 
-    def _working_order(self, venue_order_id: str) -> Order | None:
+    def _working_orders(self, venue_order_id: str) -> list[Order]:
+        found: list[Order] = []
         for account in self._ledger.accounts():
             state = self._ledger.state(account)
             for order_id, order in state.orders.items():
                 if state.venue_order_ids.get(order_id, order_id) == venue_order_id:
-                    return order
-        return None
+                    found.append(order)
+        return found
 
 
-def _single_account(order: VenueOrder) -> str | None:
-    # A netted or multi-allocation order has no single account to check against: it is not split.
-    if len(order.allocations) != 1:
-        return None
-    return order.allocations[0].account_id
+def _split_allocations(order: VenueOrder, position_of: Callable[[str], Decimal]) -> tuple[
+        tuple[VenueOrderAllocation, ...], tuple[VenueOrderAllocation, ...], dict[str, Decimal]]:
+    """Split a venue order's allocations into the reducing and the opening parts, per account.
+
+    Each account's quantity is the sum of its allocations (all share the order's side), classified
+    against that account's own position. Inside one account the reducing quantity goes to its
+    allocations in order, first come first served, cutting one in two where the boundary falls.
+    Returns ``(reducing_allocations, opening_allocations, opening_quantity_by_account)``; the
+    last holds only the accounts with an opening part, in first-appearance order.
+    """
+    totals: dict[str, Decimal] = {}
+    for item in order.allocations:
+        totals[item.account_id] = totals.get(item.account_id, Decimal("0")) + item.quantity
+    reducing_left: dict[str, Decimal] = {}
+    openings: dict[str, Decimal] = {}
+    for account, total in totals.items():
+        reducing, opening = split_quantity(total, order.side, position_of(account))
+        reducing_left[account] = reducing
+        if opening > 0:
+            openings[account] = opening
+    reducing_allocs: list[VenueOrderAllocation] = []
+    opening_allocs: list[VenueOrderAllocation] = []
+    for item in order.allocations:
+        take = min(item.quantity, reducing_left[item.account_id])
+        reducing_left[item.account_id] -= take
+        if take > 0:
+            reducing_allocs.append(replace(item, quantity=take))
+        if item.quantity > take:
+            opening_allocs.append(replace(item, quantity=item.quantity - take))
+    return tuple(reducing_allocs), tuple(opening_allocs), openings
 
 
-def _part(order: VenueOrder, quantity: Decimal) -> tuple:
-    return tuple(replace(item, quantity=quantity) for item in order.allocations)
+def _total(allocations: tuple[VenueOrderAllocation, ...]) -> Decimal:
+    return sum((item.quantity for item in allocations), Decimal("0"))
 
 
 def _root(instrument: Instrument) -> str | None:
