@@ -42,7 +42,6 @@ This is ACCT-REGISTRY-1 decision 2, unchanged:
   "class": null,
   "firm": null,
   "account_type": "margin|ira|cash|null",
-  "api_ref": "<broker handle, never shown or logged>",
   "routes": [{"platform": "tradingview", "local_name": "D<id>"},
              {"platform": "nt8", "local_name": "<name>"}],
   "source": "tradovate:ntx",
@@ -55,8 +54,8 @@ This is ACCT-REGISTRY-1 decision 2, unchanged:
 | `key` | `broker:accountId`. Case is kept. An empty id, or one with whitespace, is refused (`bad_key`). The `local:` prefix is riskguard-only and is refused from the engine. |
 | `display` | Masked to the last 3 characters. It is the only form that is logged or shown. |
 | `class`, `firm` | The engine always sends `null`. riskguard computes these overlays and never pushes them back. A non-null value is refused (`overlay_from_engine`). |
-| `api_ref` | Opaque. riskguard stores it but never logs it, puts it in an event, or returns it from `/v1/accounts`. |
-| `routes[]` | At most 8 per record. Platforms: `nt8`, `tradingview`, `tradovate`, `tos`, `ibkr`. |
+| `api_ref` | **Not part of this contract (D-13).** The broker handle (Tradovate numeric id, Schwab hashValue) stays inside trade-engine. A record carrying `api_ref`, or any other unknown field, is refused (`bad_shape`). |
+| `routes[]` | Objects `{platform, local_name}`, at most 8 per record. Platforms: `nt8`, `tradingview`, `tradovate`, `tos`, `ibkr`. For diffing they compare as a set, sorted by `(platform, local_name)`. |
 | `confirmed_at` | RFC 3339 UTC, with a `Z`. |
 
 ## 3. Account events (phase 2)
@@ -70,6 +69,8 @@ This is ACCT-REGISTRY-1 decision 2, unchanged:
 - `seq` is a u64 that rises strictly **per broker**, never globally. It survives restarts, because it is kept in the engine ledger.
 - `changed.fields` is a partial record. It may not contain `key`, `class` or `firm`.
 - `removed` means that a successful snapshot no longer lists the account. A failed read never emits `removed` (design 6.3).
+- `changed.fields` carries the new values only. The engine ledger keeps old and new; the wire sends new.
+- The engine ledger stores these same events, `seq` included, with `display` added. `added.record` is stored whole (no `api_ref`, as above), so a restart can rebuild the set from the ledger.
 
 ## 4. Ingest envelope (phase 4, `POST /v1/registry/ingest`)
 
@@ -120,5 +121,6 @@ The connector token goes in the `Authorization: Bearer` header. The content type
 
 ## 6. Privacy
 
-- Logs, events and `/v1/accounts` responses carry only `display`. No full id and no `api_ref`.
+- Log lines and `/v1/accounts` responses carry only `display`. Events and the ledger carry `key`, which they need to identify the account, and never `api_ref`.
+- `api_ref` never leaves trade-engine (D-13). Inside the engine it is excluded from `repr`, logs and serialization.
 - The token is never logged by either side.

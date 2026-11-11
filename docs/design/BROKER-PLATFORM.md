@@ -187,7 +187,6 @@ The record shape is fixed by riskguard ACCT-REGISTRY-1 decision 2:
   "class": null,
   "firm": null,
   "account_type": "margin|ira|cash|null",
-  "api_ref": "<broker handle, never shown>",
   "routes": [{"platform": "tradingview", "local_name": "D<id>"},
              {"platform": "nt8", "local_name": "<name>"}],
   "source": "tradovate:ntx",
@@ -228,7 +227,7 @@ Account events are appended to the ledger, so a restart replays membership.
   The bearer token is read from `daemon-token.txt` and never logged.
 - **Mapping:**
   - each ntx identity becomes a `VenueIdentity`, with env from the connect;
-  - each account becomes `tradovate:<name>`, with the numeric id in `api_ref`;
+  - each account becomes `tradovate:<name>`; the numeric id is kept engine-side as `api_ref` and never leaves the engine (D-13);
   - `build_alias_entries` (numeric, `D<id>`, name) supplies `routes[]`;
   - positions and fills get canonical instruments.
 - **Money:** ntx f64 values are converted to `Decimal` through their shortest repr.
@@ -350,8 +349,8 @@ Performance and memory for the hub:
 
 - Tokens (`daemon-token.txt`, the connector token) are read from files and never
   logged.
-- Only `display` (last 3 digits) leaves the registry file. `api_ref` is never shown in
-  any UI.
+- Only `display` (last 3 digits) appears in logs and UIs. `api_ref` never leaves
+  trade-engine (D-13): not on the wire, not in the ledger, not in any log.
 - Cloud AI may see prop data (owner decision 2026-11-07), but full account numbers are
   still masked.
 
@@ -382,6 +381,7 @@ Performance and memory for the hub:
 | D-10 | LUCID is a Tradovate account. Its key is `tradovate:<name>`, sourced from ntx like every other Tradovate account. | 2026-11-11 | owner |
 | D-11 | The Schwab hub change (P5b) needs no weekend window. It still deploys flat only, with the owner present. | 2026-11-11 | owner |
 | D-12 | Performance and memory are designed in at every step: each component has a budget and a cap with an enforcing test (B7, 6.8a). | 2026-11-11 | owner |
+| D-13 | Contract `broker-account/1` settled after BP-2 found brief and contract disagreeing: `routes` are `{platform, local_name}` objects; `api_ref` stays inside trade-engine and is dropped from the contract (riskguard has no broker client, B1, so it has no use for it); ledger events carry `seq`, `key`, `display` and the record or changed fields (old and new), and the wire sends new values only. | 2026-11-11 | Opus (design call; owner may revisit) |
 
 ## 9. Rollout and verification
 
