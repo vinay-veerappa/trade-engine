@@ -15,6 +15,12 @@
 //!
 //! Values match `tvDownloadOHLC/web/lib/contract-specs.ts` (L48-57) exactly; checked against CME contract specs in P6C.
 //!
+//! BP-1 (BROKER_PLATFORM phase 1) added `exchange`, `currency` and `tick_value`
+//! (= `tick_size * point_value`) to the same rows: NQ 5.00, MNQ 0.50, ES 12.50 per tick.
+//! The edge symbol map, the decade rule and the dated expiry/roll table are in
+//! `crate::futures_symbols`, which reads this one table. `spec_row` is the borrowed,
+//! allocation-free lookup (B7 budget: 1 M lookups, 0 allocations, table under 64 KB).
+//!
 //! # Rounding and Slippage
 //!
 //! `round_to_tick(price, tick, mode)` rounds a price to the discrete tick grid.
@@ -36,43 +42,65 @@ use crate::ledger::model::{err, ContractMonth, FutureContract, Instrument, LErr,
 use crate::money::{DecErr, Money, Round};
 
 /// Static contract specification definitions.
+///
+/// `tick_value_str` is one tick in cash (`tick_size * point_value`, D6: money as text):
+/// NQ 5.00, MNQ 0.50, ES 12.50, MES 1.25, YM 5.00, MYM 0.50, RTY 5.00, M2K 0.50,
+/// CL 10.00, MCL 1.00, GC 10.00, MGC 1.00. `exchange` is the CME Group exchange that
+/// lists the root and `currency` the contract currency; the session itself comes from
+/// `calendar::globex` (`GlobexCalendar::for_root`), never from this table (BP-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StaticFutureSpec {
     pub root: &'static str,
+    pub exchange: &'static str,
+    pub currency: &'static str,
     pub tick_size_str: &'static str,
     pub point_value_str: &'static str,
+    pub tick_value_str: &'static str,
 }
 
 /// System-of-record specifications for supported CME futures roots (equity index, energy, metals).
-/// Refuses unknown roots.
-pub const FUTURE_SPECS: &[StaticFutureSpec] = &[
-    StaticFutureSpec { root: "NQ", tick_size_str: "0.25", point_value_str: "20" },
-    StaticFutureSpec { root: "MNQ", tick_size_str: "0.25", point_value_str: "2" },
-    StaticFutureSpec { root: "ES", tick_size_str: "0.25", point_value_str: "50" },
-    StaticFutureSpec { root: "MES", tick_size_str: "0.25", point_value_str: "5" },
-    StaticFutureSpec { root: "YM", tick_size_str: "1.0", point_value_str: "5" },
-    StaticFutureSpec { root: "MYM", tick_size_str: "1.0", point_value_str: "0.5" },
-    StaticFutureSpec { root: "RTY", tick_size_str: "0.1", point_value_str: "50" },
-    StaticFutureSpec { root: "M2K", tick_size_str: "0.1", point_value_str: "5" },
-    StaticFutureSpec { root: "CL", tick_size_str: "0.01", point_value_str: "1000" },
-    StaticFutureSpec { root: "MCL", tick_size_str: "0.01", point_value_str: "100" },
-    StaticFutureSpec { root: "GC", tick_size_str: "0.1", point_value_str: "100" },
-    StaticFutureSpec { root: "MGC", tick_size_str: "0.1", point_value_str: "10" },
+/// Refuses unknown roots. One table: the symbol map (`futures_symbols`) and the wire
+/// table both read this one. It is `static`, so every lookup reads the same copy in
+/// place (no allocation, no second table, never grown: BP-1 budget).
+pub static FUTURE_SPECS: &[StaticFutureSpec] = &[
+    StaticFutureSpec { root: "NQ", exchange: "CME", currency: "USD", tick_size_str: "0.25", point_value_str: "20", tick_value_str: "5.00" },
+    StaticFutureSpec { root: "MNQ", exchange: "CME", currency: "USD", tick_size_str: "0.25", point_value_str: "2", tick_value_str: "0.50" },
+    StaticFutureSpec { root: "ES", exchange: "CME", currency: "USD", tick_size_str: "0.25", point_value_str: "50", tick_value_str: "12.50" },
+    StaticFutureSpec { root: "MES", exchange: "CME", currency: "USD", tick_size_str: "0.25", point_value_str: "5", tick_value_str: "1.25" },
+    StaticFutureSpec { root: "YM", exchange: "CBOT", currency: "USD", tick_size_str: "1.0", point_value_str: "5", tick_value_str: "5.00" },
+    StaticFutureSpec { root: "MYM", exchange: "CBOT", currency: "USD", tick_size_str: "1.0", point_value_str: "0.5", tick_value_str: "0.50" },
+    StaticFutureSpec { root: "RTY", exchange: "CME", currency: "USD", tick_size_str: "0.1", point_value_str: "50", tick_value_str: "5.00" },
+    StaticFutureSpec { root: "M2K", exchange: "CME", currency: "USD", tick_size_str: "0.1", point_value_str: "5", tick_value_str: "0.50" },
+    StaticFutureSpec { root: "CL", exchange: "NYMEX", currency: "USD", tick_size_str: "0.01", point_value_str: "1000", tick_value_str: "10.00" },
+    StaticFutureSpec { root: "MCL", exchange: "NYMEX", currency: "USD", tick_size_str: "0.01", point_value_str: "100", tick_value_str: "1.00" },
+    StaticFutureSpec { root: "GC", exchange: "COMEX", currency: "USD", tick_size_str: "0.1", point_value_str: "100", tick_value_str: "10.00" },
+    StaticFutureSpec { root: "MGC", exchange: "COMEX", currency: "USD", tick_size_str: "0.1", point_value_str: "10", tick_value_str: "1.00" },
 ];
 
 /// A resolved futures contract specification with parsed decimal fields.
 #[derive(Debug, Clone)]
 pub struct FutureSpec {
     pub root: &'static str,
+    pub exchange: &'static str,
+    pub currency: &'static str,
     pub tick_size: Money,
     pub point_value: Money,
+    pub tick_value: Money,
 }
 
 impl FutureSpec {
     pub fn same(&self, o: &FutureSpec) -> bool {
         self.root == o.root
+            && self.exchange == o.exchange
+            && self.currency == o.currency
             && crate::ledger::model::dec_eq(&self.tick_size, &o.tick_size)
             && crate::ledger::model::dec_eq(&self.point_value, &o.point_value)
+            && crate::ledger::model::dec_eq(&self.tick_value, &o.tick_value)
+    }
+
+    /// Cash value of `ticks` whole ticks for this root: `tick_value * ticks`.
+    pub fn value_of_ticks(&self, ticks: i128) -> crate::ledger::model::R<Money> {
+        self.tick_value.mul_i128(ticks).map_err(derr)
     }
 }
 
@@ -96,24 +124,34 @@ fn d(r: Result<Money, DecErr>) -> R<Money> {
     r.map_err(derr)
 }
 
+/// The static row for a futures root, borrowed from the one table: a hit reads the table
+/// in place, with no allocation and no growing structure (BP-1 budget, B7). Case is
+/// ignored without folding into an owned string.
+pub fn spec_row(root: &str) -> Option<&'static StaticFutureSpec> {
+    let text = root.trim();
+    FUTURE_SPECS.iter().find(|s| {
+        s.root.len() == text.len() && s.root.as_bytes().eq_ignore_ascii_case(text.as_bytes())
+    })
+}
+
 /// Lookup contract specification for a futures root.
 /// Refuses unknown roots.
 pub fn spec_for_root(root: &str) -> R<FutureSpec> {
-    let r_upper = root.trim().to_ascii_uppercase();
-    for s in FUTURE_SPECS {
-        if s.root == r_upper {
-            let tick_size = Money::parse(s.tick_size_str)
-                .ok_or_else(|| lerr("value", "internal error: invalid tick_size"))?;
-            let point_value = Money::parse(s.point_value_str)
-                .ok_or_else(|| lerr("value", "internal error: invalid point_value"))?;
-            return Ok(FutureSpec {
-                root: s.root,
-                tick_size,
-                point_value,
-            });
-        }
-    }
-    err("unsupported", format!("Unknown futures root: '{root}'"))
+    let s = spec_row(root).ok_or_else(|| lerr("unsupported", format!("Unknown futures root: '{root}'")))?;
+    let tick_size = Money::parse(s.tick_size_str)
+        .ok_or_else(|| lerr("value", "internal error: invalid tick_size"))?;
+    let point_value = Money::parse(s.point_value_str)
+        .ok_or_else(|| lerr("value", "internal error: invalid point_value"))?;
+    let tick_value = Money::parse(s.tick_value_str)
+        .ok_or_else(|| lerr("value", "internal error: invalid tick_value"))?;
+    Ok(FutureSpec {
+        root: s.root,
+        exchange: s.exchange,
+        currency: s.currency,
+        tick_size,
+        point_value,
+        tick_value,
+    })
 }
 
 /// Standard CME month codes:
@@ -417,6 +455,48 @@ mod tests {
         assert_eq!(parse_future_symbol("GCG27").unwrap().root, "GC");
         assert_eq!(parse_future_symbol("MYMM27").unwrap().root, "MYM");
         assert_eq!(parse_future_symbol("YMM27").unwrap().root, "YM");
+    }
+
+    /// BP-1: `tick_value` is one tick in cash, and `tick_value * ticks` matches the
+    /// published CME contract specs for all 12 roots. Figures: NQ 5.00, MNQ 0.50,
+    /// ES 12.50, MES 1.25, YM 5.00, MYM 0.50, RTY 5.00, M2K 0.50, CL 10.00, MCL 1.00,
+    /// GC 10.00, MGC 1.00 per tick; 4 ticks are NQ 20.00, MNQ 2.00, ES 50.00, MES 5.00,
+    /// YM 20.00, MYM 2.00, RTY 20.00, M2K 2.00, CL 40.00, MCL 4.00, GC 40.00, MGC 4.00.
+    #[test]
+    fn test_tick_value_matches_published_specs() {
+        let want = [
+            ("NQ", "CME", "0.25", "20", "5.00", "20.00"),
+            ("MNQ", "CME", "0.25", "2", "0.50", "2.00"),
+            ("ES", "CME", "0.25", "50", "12.50", "50.00"),
+            ("MES", "CME", "0.25", "5", "1.25", "5.00"),
+            ("YM", "CBOT", "1.0", "5", "5.00", "20.00"),
+            ("MYM", "CBOT", "1.0", "0.5", "0.50", "2.00"),
+            ("RTY", "CME", "0.1", "50", "5.00", "20.00"),
+            ("M2K", "CME", "0.1", "5", "0.50", "2.00"),
+            ("CL", "NYMEX", "0.01", "1000", "10.00", "40.00"),
+            ("MCL", "NYMEX", "0.01", "100", "1.00", "4.00"),
+            ("GC", "COMEX", "0.1", "100", "10.00", "40.00"),
+            ("MGC", "COMEX", "0.1", "10", "1.00", "4.00"),
+        ];
+        assert_eq!(want.len(), FUTURE_SPECS.len(), "one row per published root");
+        for (root, exchange, tick, pv, tv, four) in want {
+            let s = spec_for_root(root).unwrap();
+            assert_eq!(s.root, root);
+            assert_eq!(s.exchange, exchange, "{root} exchange");
+            assert_eq!(s.currency, "USD", "{root} currency");
+            assert!(dec_eq(&s.tick_size, &p(tick)), "{root} tick size");
+            assert!(dec_eq(&s.point_value, &p(pv)), "{root} point value");
+            assert!(dec_eq(&s.tick_value, &p(tv)), "{root} tick value");
+            // tick_value = tick_size * point_value, so the table cannot drift from itself.
+            assert_eq!(
+                d(s.tick_size.mul(&s.point_value)).unwrap().canon(),
+                s.tick_value.canon(),
+                "{root}: tick_size * point_value must equal tick_value"
+            );
+            assert_eq!(s.value_of_ticks(4).unwrap().canon(), p(four).canon(), "{root}: 4 ticks");
+            assert_eq!(s.value_of_ticks(0).unwrap().canon(), "0", "{root}: 0 ticks");
+            assert_eq!(s.value_of_ticks(-2).unwrap().canon(), d(p(tv).mul_i128(-2)).unwrap().canon(), "{root}: negative ticks");
+        }
     }
 
     /// Every spec root has a Globex calendar, and every calendar root has a spec.

@@ -14,6 +14,7 @@ pub mod risk_options;
 pub mod sim;
 pub mod runtime;
 pub use sim::tick as futures;
+pub mod futures_symbols;
 pub mod tos_paper;
 pub mod snapshot;
 pub mod market_data_verify;

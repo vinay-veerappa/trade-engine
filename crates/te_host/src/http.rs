@@ -673,6 +673,10 @@ fn handle(api: &Api, raw: &Raw) -> Result<Reply, String> {
             .into_bytes();
         }
         "/snapshot" => reply.body = snapshot(&api.path)?,
+        // BP-1: the canonical instrument table, as strings, from the one te_core table.
+        "/v1/instruments/futures" => {
+            reply.body = te_core::futures_symbols::instruments_json().into_bytes()
+        }
         _ => {
             return Ok(error(
                 404,
@@ -1229,8 +1233,7 @@ mod tests {
 
     #[test]
     fn without_control_the_legacy_outcomes_are_unchanged() {
-        let api = test_api(None);
-        // POST /v1/runtime/jobs without an attached control keeps 501.
+        let api = test_api(None);        // POST /v1/runtime/jobs without an attached control keeps 501.
         let reply = handle(
             &api,
             &raw_request("POST", "/v1/runtime/jobs", &[("Host", "localhost")], Vec::new()),
@@ -1241,6 +1244,36 @@ mod tests {
         let reply = handle(
             &api,
             &raw_request("GET", "/v1/runtime/status", &[("Host", "localhost")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 404);
+    }
+
+    /// BP-1: the read route serves the one `te_core` table, as strings, and keeps the
+    /// legacy Host refusal and the 404 for anything else.
+    #[test]
+    fn instrument_read_route_serves_the_one_table_as_strings() {
+        let api = test_api(None);
+        let reply = handle(
+            &api,
+            &raw_request("GET", "/v1/instruments/futures", &[("Host", "127.0.0.1")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 200);
+        let body = String::from_utf8(reply.body).unwrap();
+        assert_eq!(body, te_core::futures_symbols::instruments_json());
+        assert!(body.contains(r#""root":"NQ""#));
+        assert!(body.contains(r#""tick_value":"5.00""#));
+        assert!(body.contains(r#""exchange":"NYMEX""#));
+        let reply = handle(
+            &api,
+            &raw_request("GET", "/v1/instruments/futures", &[("Host", "attacker.test")], Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(reply.code, 403);
+        let reply = handle(
+            &api,
+            &raw_request("GET", "/v1/instruments/equities", &[("Host", "localhost")], Vec::new()),
         )
         .unwrap();
         assert_eq!(reply.code, 404);

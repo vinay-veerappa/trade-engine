@@ -737,6 +737,138 @@ impl LedgerFold {
     }
 }
 
+// --- futures (BP-1) -------------------------------------------------------------------
+// The canonical futures instrument, the edge symbol map and the dated expiry/roll table
+// live once, in `te_core::futures_symbols`. These wrappers take and give plain values:
+// dates as ISO text, years and months as integers, money and ticks as strings (D6). A
+// refusal crosses as ValueError(kind, message), as `instruments.rs_call` expects.
+
+use te_core::futures_symbols as fs;
+use te_core::ledger::model::ContractMonth;
+
+fn refuse_futures(e: te_core::ledger::model::LErr) -> PyErr {
+    PyValueError::new_err((e.kind.to_string(), e.msg))
+}
+
+fn month_of(year: i64, month: u32) -> PyResult<ContractMonth> {
+    let year = i32::try_from(year)
+        .map_err(|_| PyValueError::new_err(("value".to_string(), format!("year {year} does not fit"))))?;
+    ContractMonth::new(year, month).map_err(refuse_futures)
+}
+
+#[pyfunction]
+fn futures_table_json() -> String {
+    fs::instruments_json()
+}
+
+/// `(root, canonical text)`; `NQ`, 2026, 12 -> `("NQ", "NQZ6")`.
+#[pyfunction]
+fn futures_canonical(root: &str, year: i64, month: u32) -> PyResult<(String, String)> {
+    let contract = fs::contract_for(root, month_of(year, month)?).map_err(refuse_futures)?;
+    let text = fs::canonical_text(&contract).map_err(refuse_futures)?;
+    Ok((contract.root.clone(), text))
+}
+
+/// The contract as `platform` spells it (`NQ 12-26`, `NQZ6`, `NQZ2026`, `/NQZ26`, `NQZ6`).
+#[pyfunction]
+fn futures_to_platform(platform: &str, root: &str, year: i64, month: u32) -> PyResult<String> {
+    let platform = fs::Platform::from_name(platform).map_err(refuse_futures)?;
+    let contract = fs::contract_for(root, month_of(year, month)?).map_err(refuse_futures)?;
+    fs::to_platform(platform, &contract).map_err(refuse_futures)
+}
+
+/// The dated contract behind a platform spelling: `("NQ", 2026, 12)`. A continuous spelling
+/// (`NQ`, `NQ1!`, `/NQ`) is refused with kind `continuous`.
+#[pyfunction]
+fn futures_from_platform(platform: &str, text: &str, reference: &str) -> PyResult<(String, i64, u32)> {
+    let platform = fs::Platform::from_name(platform).map_err(refuse_futures)?;
+    let contract = fs::from_platform_contract(platform, text, date(reference)?).map_err(refuse_futures)?;
+    match contract.contract_month {
+        Some(month) => Ok((contract.root.clone(), month.year as i64, month.month)),
+        None => Err(PyValueError::new_err((
+            "continuous".to_string(),
+            format!("{} has no contract month", contract.root),
+        ))),
+    }
+}
+
+/// The root of a continuous spelling (`NQ`, `NQ1!`, `/NQ`), or `None` for a dated one.
+#[pyfunction]
+fn futures_continuous_root(platform: &str, text: &str, reference: &str) -> PyResult<Option<String>> {
+    let platform = fs::Platform::from_name(platform).map_err(refuse_futures)?;
+    match fs::from_platform(platform, text, date(reference)?).map_err(refuse_futures)? {
+        fs::SymbolRef::Continuous(root) => Ok(Some(root)),
+        fs::SymbolRef::Contract(_) => Ok(None),
+    }
+}
+
+/// The continuous spelling of a root: TradingView `NQ1!`, Schwab `/NQ`, else `NQ`.
+#[pyfunction]
+fn futures_continuous_text(platform: &str, root: &str) -> PyResult<String> {
+    let platform = fs::Platform::from_name(platform).map_err(refuse_futures)?;
+    fs::continuous_text(platform, root).map_err(refuse_futures)
+}
+
+/// The front month on `as_of` (an argument, never a clock): `("NQ", 2026, 3)`.
+#[pyfunction]
+fn futures_front_month(root: &str, as_of: &str) -> PyResult<(String, i64, u32)> {
+    let contract = fs::front_month_contract(root, date(as_of)?).map_err(refuse_futures)?;
+    match contract.contract_month {
+        Some(month) => Ok((contract.root.clone(), month.year as i64, month.month)),
+        None => unreachable!("front_month_contract always returns a dated contract"),
+    }
+}
+
+/// The front month as `platform` spells it on `as_of`.
+#[pyfunction]
+fn futures_front_month_symbol(platform: &str, root: &str, as_of: &str) -> PyResult<String> {
+    let platform = fs::Platform::from_name(platform).map_err(refuse_futures)?;
+    let contract = fs::front_month_contract(root, date(as_of)?).map_err(refuse_futures)?;
+    fs::to_platform(platform, &contract).map_err(refuse_futures)
+}
+
+/// `(expiry, roll_date)` as ISO dates for one dated row of the table.
+#[pyfunction]
+fn futures_schedule(root: &str, year: i64, month: u32) -> PyResult<(String, String)> {
+    let row = fs::contract_schedule(root, month_of(year, month)?).map_err(refuse_futures)?;
+    Ok((iso(row.expiry), iso(row.roll_date)))
+}
+
+/// `(tick_size, point_value, tick_value, exchange, currency)` as text.
+#[pyfunction]
+fn futures_spec(root: &str) -> PyResult<(String, String, String, String, String)> {
+    let spec = te_core::futures::spec_for_root(root).map_err(refuse_futures)?;
+    Ok((
+        spec.tick_size.canon(),
+        spec.point_value.canon(),
+        spec.tick_value.canon(),
+        spec.exchange.to_string(),
+        spec.currency.to_string(),
+    ))
+}
+
+/// IBKR's `lastTradeDateOrContractMonth` for a dated contract: `202612`.
+#[pyfunction]
+fn futures_ibkr_last_trade_date(root: &str, year: i64, month: u32) -> PyResult<String> {
+    let contract = fs::contract_for(root, month_of(year, month)?).map_err(refuse_futures)?;
+    fs::ibkr_last_trade_date(&contract).map_err(refuse_futures)
+}
+
+fn register_futures(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(futures_table_json, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_canonical, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_to_platform, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_from_platform, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_continuous_root, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_continuous_text, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_front_month, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_front_month_symbol, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_schedule, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_spec, m)?)?;
+    m.add_function(wrap_pyfunction!(futures_ibkr_last_trade_date, m)?)?;
+    Ok(())
+}
+
 #[pymodule]
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -778,6 +910,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ledger_ticket_contracts, m)?)?;
     m.add_class::<LedgerFold>()?;
     register_options(m)?;
+    register_futures(m)?;
     m.add_function(wrap_pyfunction!(risk_rules_from_mapping, m)?)?;
     m.add_function(wrap_pyfunction!(risk_validate_rules, m)?)?;
     m.add_function(wrap_pyfunction!(risk_validate_rails, m)?)?;

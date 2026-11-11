@@ -175,6 +175,124 @@ class OptionContract(Instrument):
         )
 
 
+class Platform(StrEnum):
+    """A platform whose futures spelling is converted at the edge (B2).
+
+    The spellings, the decade rule, the expiry and roll table and the front-month rule
+    live once, in `te_core::futures_symbols`; this enum only names the platform.
+    """
+
+    NT8 = "nt8"
+    TRADOVATE = "tradovate"
+    TRADINGVIEW = "tradingview"
+    SCHWAB = "schwab"
+    IBKR = "ibkr"
+
+
+@dataclass(frozen=True)
+class Future(Instrument):
+    """A dated futures contract: root plus contract month (canonical text `NQZ6`).
+
+    A data carrier only. The root, the contract month, the decade rule, the expiry and
+    roll dates and every platform spelling come back from `trade_engine_rs`
+    (`te_core::futures_symbols`); nothing is computed or tabulated here.
+    """
+
+    root: str
+    year: int
+    month: int
+
+    def __post_init__(self) -> None:
+        root, _text = rs_call(_rs.futures_canonical, self.root, self.year, self.month)
+        object.__setattr__(self, "root", root)
+
+    @property
+    def symbol(self) -> str:
+        """The canonical text, root + month code + one-digit year: `NQZ6`."""
+        return rs_call(_rs.futures_canonical, self.root, self.year, self.month)[1]
+
+    @property
+    def expiry(self) -> date:
+        """The contract's expiry, from the dated table."""
+        return date.fromisoformat(rs_call(_rs.futures_schedule, self.root, self.year, self.month)[0])
+
+    @property
+    def roll_date(self) -> date:
+        """The contract's roll date, from the dated table."""
+        return date.fromisoformat(rs_call(_rs.futures_schedule, self.root, self.year, self.month)[1])
+
+    @property
+    def tick_size(self) -> Decimal:
+        return Decimal(rs_call(_rs.futures_spec, self.root)[0])
+
+    @property
+    def point_value(self) -> Decimal:
+        return Decimal(rs_call(_rs.futures_spec, self.root)[1])
+
+    @property
+    def tick_value(self) -> Decimal:
+        return Decimal(rs_call(_rs.futures_spec, self.root)[2])
+
+    @property
+    def exchange(self) -> str:
+        return rs_call(_rs.futures_spec, self.root)[3]
+
+    @property
+    def currency(self) -> str:
+        return rs_call(_rs.futures_spec, self.root)[4]
+
+    @property
+    def ibkr_last_trade_date(self) -> str:
+        """IBKR's `lastTradeDateOrContractMonth` for this contract: `202612`."""
+        return rs_call(_rs.futures_ibkr_last_trade_date, self.root, self.year, self.month)
+
+    def to_platform(self, platform: Platform | str) -> str:
+        """This contract as `platform` spells it (`NQ 12-26`, `NQZ6`, `NQZ2026`, `/NQZ26`)."""
+        return rs_call(_rs.futures_to_platform, f"{platform}", self.root, self.year, self.month)
+
+    @classmethod
+    def from_platform(cls, platform: Platform | str, text: str, reference: date) -> Future:
+        """Read a platform spelling. `reference` disambiguates a one-digit year (never a clock).
+
+        A continuous spelling (`NQ`, `NQ1!`, `/NQ`) is refused: resolve it with `front_month`.
+        """
+        root, year, month = rs_call(
+            _rs.futures_from_platform,
+            f"{platform}",
+            text if isinstance(text, str) else None,
+            reference.isoformat() if isinstance(reference, date) else None,
+        )
+        return cls(root=root, year=year, month=month)
+
+    @classmethod
+    def continuous_root(cls, platform: Platform | str, text: str, reference: date) -> str | None:
+        """The root of a continuous spelling, or None when the spelling names a contract."""
+        return rs_call(
+            _rs.futures_continuous_root,
+            f"{platform}",
+            text if isinstance(text, str) else None,
+            reference.isoformat() if isinstance(reference, date) else None,
+        )
+
+    @classmethod
+    def front_month(cls, root: str, as_of: date) -> Future:
+        """The front month on `as_of`: the date is an argument (I7), never wall time."""
+        root_out, year, month = rs_call(
+            _rs.futures_front_month, root, as_of.isoformat() if isinstance(as_of, date) else None
+        )
+        return cls(root=root_out, year=year, month=month)
+
+    @classmethod
+    def front_month_symbol(cls, platform: Platform | str, root: str, as_of: date) -> str:
+        """The front month on `as_of` as `platform` spells it."""
+        return rs_call(
+            _rs.futures_front_month_symbol,
+            f"{platform}",
+            root,
+            as_of.isoformat() if isinstance(as_of, date) else None,
+        )
+
+
 @dataclass(frozen=True)
 class ComboLeg:
     """A single leg in a multi-leg combo order or position."""
