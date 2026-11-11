@@ -412,13 +412,23 @@ The phases are in [the plan](../BROKER_PLATFORM_PLAN.md):
 
 ## 10. Open questions
 
-1. Do ntx `props` events cover account entities, or only cash and position? Answered
-   by P3's first commit, or by riskguard sub-slice B check 1. It decides between push
-   and diff-on-snapshot.
-2. Does ntx hold every Tradovate login the owner trades? Answered by B check 2 and P3
-   G3. It blocks auto-closing missing accounts.
-3. How do NT8 names, ntx names and TV `D<id>` map onto each other? Answered by B check
-   3. It sets the `routes[]` derivation.
+1. ~~Do ntx `props` events cover account entities?~~ Answered 2026-11-11 by B check 1:
+   partly. `props` carries account entities (Created/Updated/Deleted, folded into a
+   portfolio delta), but it has no typed add/remove/update diff. trade-engine diffs
+   on every snapshot and reconnect; `props` can at most trigger an early re-read.
+2. ~~Does ntx hold every Tradovate login the owner trades?~~ Answered 2026-11-11 by B
+   check 2: no. There are four ntx identities. On 2026-11-11 the live `/snapshot` returned
+   0 accounts, with all four degraded by 401. The last known lists held 14 Apex, 1 LUCID
+   and 5 TPT. Absent from them: Apex ...173-179, 181, 182, 185, 187; TPT ...979 and
+   ...666; LUCID LFF...001; FundedNext FNFTCH...669/055/701 (unconfirmed). Auto-close of
+   missing accounts stays off. A missing account is reported and never closed, until
+   every identity reads 200 and P3 G3 shows the lists are complete. The 401s are an
+   owner re-login item.
+3. ~~How do NT8 names, ntx names and TV `D<id>` map onto each other?~~ Answered
+   2026-11-11 by B check 3. The NT8 account name equals the ntx account name exactly
+   (e.g. `APEX...194`). The numeric Tradovate id is separate and stays engine-only
+   (D-13). The TradingView route is `D<id>`. Derivation: `nt8` local_name = the ntx
+   name, and `tradingview` local_name = `D` + the TV account id.
 4. ~~Is LUCID a Tradovate account?~~ Resolved 2026-11-11: yes (D-10).
 5. ~~Should the Schwab 5b hub change be scheduled for a weekend?~~ Resolved
    2026-11-11: no (D-11).

@@ -122,5 +122,6 @@ The connector token goes in the `Authorization: Bearer` header. The content type
 ## 6. Privacy
 
 - Log lines and `/v1/accounts` responses carry only `display`. Events and the ledger carry `key`, which they need to identify the account, and never `api_ref`.
+  Here "events" are the wire events and the engine ledger. riskguard's own `account.*` journal is display-only (riskguard decision 10).
 - `api_ref` never leaves trade-engine (D-13). Inside the engine it is excluded from `repr`, logs and serialization.
 - The token is never logged by either side.
