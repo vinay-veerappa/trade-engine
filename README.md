@@ -417,6 +417,12 @@ pytest -q
 python tools/ci_local.py
 ```
 
+Notes on local CI failures that are not code defects:
+
+- Run it with the repo's private Python 3.13 venv. `te_runtime/build.rs` refuses any other interpreter (a Python 3.14 shell makes `cargo test` fail with "te requires the explicitly pinned private CPython 3.13").
+- The release build replaces `crates\target\release\te.exe`. If that file is held by a running `te serve` process (for example the p4c owner services started from tvDownloadOHLC), the build fails with "failed to remove file ... Access is denied" and CI stops at "building the embedded release runtime failed". Do not kill those services to clear it. Run `ci_local.py` from a separate worktree (own `.venv` and `crates\target`), and rebuild the main-checkout `te.exe` from main with `tools/build_p4c_t3.py` when the owner services are next restarted.
+- `tests/test_p4c_flip.py` needs the sibling `tvDownloadOHLC` repo (its `src\scan_engine` and the recorded SPX tape under `data\trade_engine\chains\SPX`), expected next to this repo. It also needs PyYAML in the venv (`scan_engine` imports it) and a `te.exe` built from the current tree: a stale binary shows up as an event divergence in a reason string, not as a missing file. It skips with a reason if `scan_engine` or PyYAML is missing.
+
 ### Package Version Check
 
 ```powershell

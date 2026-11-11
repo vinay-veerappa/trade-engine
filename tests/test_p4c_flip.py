@@ -32,8 +32,10 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 BINARY = ROOT / "crates" / "target" / "release" / "te.exe"
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
-CLIENT_SRC = Path(r"C:\Users\vinay\tvDownloadOHLC\.claude\worktrees\p4c-t11-client\src")
-TAPE_DIR = Path(r"C:\Users\vinay\tvDownloadOHLC\data\trade_engine\chains\SPX")
+# The scan client (scan_engine) and the recorded tape live in the sibling tvDownloadOHLC repo.
+TVD_ROOT = ROOT.parent / "tvDownloadOHLC"
+CLIENT_SRC = TVD_ROOT / "src"
+TAPE_DIR = TVD_ROOT / "data" / "trade_engine" / "chains" / "SPX"
 SESSION = date(2026, 10, 6)
 
 FLIP_ENTRY = '''
@@ -185,6 +187,9 @@ def _run_flip(ledger, clock, source, calendar, session):
 def test_paper_session_flip_classic_vs_runtime_owner(tmp_path):
     """The same recorded session through both ownership shapes produces the
     same ledger events, folded states and result."""
+    if not (CLIENT_SRC / "scan_engine").is_dir():
+        pytest.skip(f"sibling repo not present: no scan_engine under {CLIENT_SRC}")
+    pytest.importorskip("yaml", reason="scan_engine (sibling repo) needs PyYAML in this venv")
     assert BINARY.is_file(), f"missing mandatory release executable: {BINARY}"
     assert Path(sys.executable).resolve() == PYTHON.resolve()
 
