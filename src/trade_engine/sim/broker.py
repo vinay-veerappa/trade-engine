@@ -19,6 +19,9 @@ from typing import Any
 from trade_engine.domain.instruments import Instrument
 from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
 from trade_engine.interfaces.broker import (
+    AccountEvent,
+    AccountRecord,
+    AccountSnapshot,
     BrokerAdapter,
     Capabilities,
     OrderChanges,
@@ -105,6 +108,7 @@ class SimBroker(BrokerAdapter):
 
     name = "SimBroker"
     env = "sim"
+    stale_after = 120
     capabilities = Capabilities(
         supported_order_types=frozenset(
             {OrderType.MARKET, OrderType.LIMIT, OrderType.STOP, OrderType.STOP_LIMIT}
@@ -326,6 +330,26 @@ class SimBroker(BrokerAdapter):
 
     def cash_events(self, since: datetime) -> list[VenueCashEvent]:
         self._call("cash_events", since.isoformat())
+        return []
+
+    def accounts(self) -> AccountSnapshot:
+        """The single simulated account, proven by connect; the sim never changes it."""
+        confirmed_at = self._clock.now_utc()
+        return AccountSnapshot(
+            records=(
+                AccountRecord.of(
+                    "sim",
+                    self.account_id,
+                    env=self.env,
+                    source="sim",
+                    confirmed_at=confirmed_at,
+                ),
+            ),
+            confirmed_at=confirmed_at,
+        )
+
+    def account_events(self, since: datetime) -> list[AccountEvent]:
+        """A single fixed account emits no membership changes."""
         return []
 
     def process_bar(self, bar: Bar | None) -> tuple[VenueFill, ...]:

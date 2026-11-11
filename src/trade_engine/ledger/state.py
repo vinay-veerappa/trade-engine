@@ -150,6 +150,9 @@ HANDLERS: Mapping[EventKind, Callable[[AccountState, Event], AccountState]] = Ma
             EventKind.MIRROR_REFUSED,
             EventKind.MIRROR_ACK,
             EventKind.MIRROR_FILL,
+            EventKind.ACCOUNT_ADDED,
+            EventKind.ACCOUNT_REMOVED,
+            EventKind.ACCOUNT_CHANGED,
         )
     }
 )

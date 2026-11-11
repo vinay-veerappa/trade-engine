@@ -1,7 +1,11 @@
 """Interfaces and protocols for trade_engine."""
 
 from trade_engine.interfaces.broker import (
+    AccountEvent,
+    AccountRecord,
+    AccountSnapshot,
     BrokerAdapter,
+    Route,
     Capabilities,
     OrderChanges,
     VenueAck,
@@ -28,6 +32,9 @@ from trade_engine.interfaces.sinks import Sink
 from trade_engine.interfaces.strategy import Strategy
 
 __all__ = [
+    "AccountEvent",
+    "AccountRecord",
+    "AccountSnapshot",
     "Bar",
     "BrokerAdapter",
     "Capabilities",
@@ -38,6 +45,7 @@ __all__ = [
     "OptionQuote",
     "OrderChanges",
     "Quote",
+    "Route",
     "SignalAdapter",
     "Sink",
     "StaleDataError",

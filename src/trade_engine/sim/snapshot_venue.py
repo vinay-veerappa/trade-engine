@@ -50,6 +50,9 @@ from trade_engine.domain.instruments import (
 )
 from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
 from trade_engine.interfaces.broker import (
+    AccountEvent,
+    AccountRecord,
+    AccountSnapshot,
     BrokerAdapter,
     Capabilities,
     OrderChanges,
@@ -128,6 +131,7 @@ class SnapshotVenue(BrokerAdapter):
 
     name = "SnapshotVenue"
     env = "sim"
+    stale_after = 120
     capabilities = Capabilities(
         supported_order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}),
         supported_tifs=frozenset({TimeInForce.DAY, TimeInForce.GTC}),
@@ -330,6 +334,26 @@ class SnapshotVenue(BrokerAdapter):
         return out
 
     def cash_events(self, since: datetime) -> list[VenueCashEvent]:
+        return []
+
+    def accounts(self) -> AccountSnapshot:
+        """The single simulated account; the snapshot venue never changes the list."""
+        confirmed_at = self._clock.now_utc()
+        return AccountSnapshot(
+            records=(
+                AccountRecord.of(
+                    "sim",
+                    self.account_id,
+                    env=self.env,
+                    source="snapshot_venue",
+                    confirmed_at=confirmed_at,
+                ),
+            ),
+            confirmed_at=confirmed_at,
+        )
+
+    def account_events(self, since: datetime) -> list[AccountEvent]:
+        """A single fixed account emits no membership changes."""
         return []
 
     # -- matching ---------------------------------------------------------------------

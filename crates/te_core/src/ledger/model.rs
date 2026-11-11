@@ -125,7 +125,10 @@ str_enum!(
         (MirrorQueued, "MirrorQueued"),
         (MirrorRefused, "MirrorRefused"),
         (MirrorAck, "MirrorAck"),
-        (MirrorFill, "MirrorFill")
+        (MirrorFill, "MirrorFill"),
+        (AccountAdded, "AccountAdded"),
+        (AccountRemoved, "AccountRemoved"),
+        (AccountChanged, "AccountChanged")
     ]
 );
 
@@ -133,6 +136,9 @@ pub const SCHEMA_VERSION: i128 = 1;
 pub const CASH_FLOW_KINDS: [&str; 6] = ["interest", "borrow", "fee", "deposit", "withdrawal", "dividend"];
 pub const MIRROR_ACK_STATUSES: [&str; 3] = ["ACCEPTED", "REJECTED", "PENDING"];
 pub const MIRROR_ACCOUNT_PREFIX: &str = "__venue__:";
+/// The ledger account the account-registry events are filed under (BROKER_PLATFORM P2):
+/// membership is not any one broker account's state, so it has its own ledger account.
+pub const ACCOUNTS_ACCOUNT: &str = "__accounts__";
 
 pub fn mirror_account(venue: &str) -> R<String> {
     if venue.is_empty() {
@@ -903,6 +909,36 @@ pub struct MirrorFill {
     pub at: DateTime,
 }
 
+/// A record as the ledger stores it (contract section 2): the whole record without
+/// `api_ref`, so a restart rebuilds the set and a diff can still see every field.
+#[derive(Debug, Clone)]
+pub struct AccountLedgerRecord {
+    pub key: String,
+    pub display: String,
+    pub env: String,
+    pub status: String,
+    pub class_: Option<String>,
+    pub firm: Option<String>,
+    pub account_type: Option<String>,
+    pub routes: Vec<crate::accounts::Route>,
+    pub source: String,
+    pub confirmed_at: DateTime,
+}
+
+/// One account-membership event's payload (BROKER_PLATFORM P2, contract section 3): the
+/// per-broker `seq`, the account `key` and masked `display`, `at`, and either the whole
+/// record (`added`) or the changed fields as `(name, old, new)` (`changed`). It never
+/// carries `api_ref` (D-13).
+#[derive(Debug, Clone)]
+pub struct AccountMembership {
+    pub key: String,
+    pub display: String,
+    pub seq: i128,
+    pub at: DateTime,
+    pub record: Option<AccountLedgerRecord>,
+    pub changes: Vec<(String, Val, Val)>,
+}
+
 /// Every tagged dataclass the codec knows.
 #[derive(Debug, Clone)]
 pub enum Obj {
@@ -931,6 +967,9 @@ pub enum Obj {
     MRefused(MirrorRefused),
     MAck(MirrorAck),
     MFill(MirrorFill),
+    Route(crate::accounts::Route),
+    LRecord(AccountLedgerRecord),
+    Membership(AccountMembership),
 }
 
 impl Obj {
@@ -962,6 +1001,9 @@ impl Obj {
             Obj::MRefused(_) => "MirrorRefused",
             Obj::MAck(_) => "MirrorAck",
             Obj::MFill(_) => "MirrorFill",
+            Obj::Route(_) => "AccountRoute",
+            Obj::LRecord(_) => "AccountLedgerRecord",
+            Obj::Membership(_) => "AccountMembership",
         }
     }
 }
@@ -2174,6 +2216,162 @@ pub fn build_mirror_fill(f: Vec<(String, Val)>) -> R<MirrorFill> {
     Ok(MirrorFill { venue, ticket_key, venue_order_id, filled, avg_price, at })
 }
 
+/// A dataclass constructor's refusal: the codec wraps `payload` as `codec`, as Python's
+/// builder does for any `ValueError` from `__post_init__`.
+fn as_payload(e: LErr) -> LErr {
+    LErr { kind: "payload", msg: e.msg }
+}
+
+/// `Route.__post_init__`: a platform from the contract's list and a non-empty local name.
+pub fn build_account_route(f: Vec<(String, Val)>) -> R<crate::accounts::Route> {
+    let mut k = Kw::bind("Route", f, &[("platform", true), ("local_name", true)])?;
+    let platform = x_str(k.req("platform"), "platform")?;
+    let local_name = x_str(k.req("local_name"), "local_name")?;
+    crate::accounts::normalize_routes(vec![crate::accounts::Route { platform, local_name }])
+        .map(|mut routes| routes.remove(0))
+        .map_err(as_payload)
+}
+
+/// `AccountLedgerRecord.__post_init__`: the contract record's fields, checked by the one
+/// account rule set. `api_ref` is not a field (D-13).
+pub fn build_account_ledger_record(f: Vec<(String, Val)>) -> R<AccountLedgerRecord> {
+    let mut k = Kw::bind(
+        "AccountLedgerRecord",
+        f,
+        &[
+            ("key", true),
+            ("display", true),
+            ("env", true),
+            ("status", true),
+            ("class_", true),
+            ("firm", true),
+            ("account_type", true),
+            ("routes", true),
+            ("source", true),
+            ("confirmed_at", true),
+        ],
+    )?;
+    let key = x_str(k.req("key"), "key")?;
+    let display = x_str(k.req("display"), "display")?;
+    let env = x_str(k.req("env"), "env")?;
+    let status = x_str(k.req("status"), "status")?;
+    let class_ = match k.req("class_") {
+        Val::None => None,
+        Val::Str(s) => Some(s),
+        _ => return err("payload", "AccountLedgerRecord.class must be a string or null"),
+    };
+    let firm = match k.req("firm") {
+        Val::None => None,
+        Val::Str(s) => Some(s),
+        _ => return err("payload", "AccountLedgerRecord.firm must be a string or null"),
+    };
+    let account_type = match k.req("account_type") {
+        Val::None => None,
+        Val::Str(s) => Some(s),
+        _ => return err("payload", "AccountLedgerRecord.account_type must be a string or null"),
+    };
+    let routes_val = k.req("routes");
+    let routes = match routes_val {
+        // Python iterates the field, so an empty string or mapping is the empty list.
+        Val::Str(s) if s.is_empty() => Vec::new(),
+        Val::Map(items) if items.is_empty() => Vec::new(),
+        Val::Tuple(items) => {
+            let mut routes = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Val::Obj(boxed) => match *boxed {
+                        Obj::Route(r) => routes.push(r),
+                        other => {
+                            return err(
+                                "payload",
+                                format!("AccountLedgerRecord.routes entry was {}", other.tag()),
+                            )
+                        }
+                    },
+                    _ => return err("payload", "AccountLedgerRecord.routes entries must be Routes"),
+                }
+            }
+            routes
+        }
+        _ => return err("payload", "AccountLedgerRecord.routes must be a tuple of Routes"),
+    };
+    let source = x_str(k.req("source"), "source")?;
+    let confirmed_at = x_dt(k.req("confirmed_at"), "confirmed_at")?;
+    crate::accounts::ledger_record(
+        key, display, env, status, class_, firm, account_type, routes, source, confirmed_at,
+    )
+    .map_err(as_payload)
+}
+
+/// `AccountMembership.__post_init__`: the seq, key, display and at, and the record or the
+/// changed fields the event kind requires.
+pub fn build_account_membership(f: Vec<(String, Val)>) -> R<AccountMembership> {
+    let mut k = Kw::bind(
+        "AccountMembership",
+        f,
+        &[
+            ("key", true),
+            ("display", true),
+            ("seq", true),
+            ("at", true),
+            ("record", false),
+            ("changes", false),
+        ],
+    )?;
+    let key = x_str(k.req("key"), "key")?;
+    let display = x_str(k.req("display"), "display")?;
+    let seq = match k.req("seq") {
+        Val::Int(n) if n > 0 => n,
+        _ => return err("payload", "AccountMembership.seq must be a positive integer"),
+    };
+    let at = x_dt(k.req("at"), "at")?;
+    let record = match k.req("record") {
+        Val::None => None,
+        Val::Obj(boxed) => match *boxed {
+            Obj::LRecord(r) => Some(r),
+            other => return err("payload", format!("AccountMembership.record was {}", other.tag())),
+        },
+        _ => return err("payload", "AccountMembership.record must be an AccountLedgerRecord or null"),
+    };
+    let changes_val = k.req("changes");
+    let mut changes = Vec::new();
+    // Python iterates the field, so an empty string (and None) is an empty sequence; a
+    // non-empty string fails its own unpack there, which the codec reports as a refusal.
+    let empty = matches!(changes_val, Val::None)
+        || matches!(&changes_val, Val::Str(s) if s.is_empty())
+        || matches!(&changes_val, Val::Map(items) if items.is_empty());
+    if !empty {
+        let Val::Tuple(items) = changes_val else {
+            return err("payload", "AccountMembership.changes must be a tuple of (name, old, new)");
+        };
+        for item in items {
+            let Val::Tuple(triple) = item else {
+                return err("payload", "AccountMembership.changes entries must be (name, old, new)");
+            };
+            if triple.len() != 3 {
+                return err("payload", "AccountMembership.changes entries must be (name, old, new)");
+            }
+            let mut it = triple.into_iter();
+            let name = match it.next() {
+                Some(Val::Str(s)) => s,
+                _ => return err("payload", "AccountMembership.changes names must be strings"),
+            };
+            changes.push((name, it.next().unwrap(), it.next().unwrap()));
+        }
+    }
+    crate::accounts::ledger_key(&key).map_err(as_payload)?;
+    let (_, id) = key.split_once(':').expect("ledger_key checked the shape");
+    let want = crate::accounts::display(id);
+    if display != want {
+        return err(
+            "payload",
+            format!("AccountMembership.display must be the masked id ({want}), got {display:?}"),
+        );
+    }
+    crate::accounts::check_changes(&changes).map_err(as_payload)?;
+    Ok(AccountMembership { key, display, seq, at, record, changes })
+}
+
 /// `isinstance(payload, expected)` for an event kind: the dataclass the kind must carry.
 pub fn expected_payload(kind: EventKind) -> &'static str {
     use EventKind::*;
@@ -2200,6 +2398,7 @@ pub fn expected_payload(kind: EventKind) -> &'static str {
         MirrorRefused => "MirrorRefused",
         MirrorAck => "MirrorAck",
         MirrorFill => "MirrorFill",
+        AccountAdded | AccountRemoved | AccountChanged => "AccountMembership",
     }
 }
 
@@ -2288,6 +2487,45 @@ pub fn check_event(e: &Event) -> R<()> {
     if let Obj::OrdersCreated(c) = &e.payload {
         if c.orders.iter().any(|o| o.account_id != e.account) {
             return err("payload", format!("{} contains orders for a different account (I8)", e.kind.value()));
+        }
+    }
+    if let Obj::Membership(m) = &e.payload {
+        if e.account != ACCOUNTS_ACCOUNT {
+            return err(
+                "payload",
+                format!(
+                    "{} must be filed under '{ACCOUNTS_ACCOUNT}', not '{}' (I8)",
+                    e.kind.value(),
+                    e.account
+                ),
+            );
+        }
+        match e.kind {
+            EventKind::AccountAdded => {
+                let Some(record) = &m.record else {
+                    return err("payload", "AccountAdded must carry the whole record (contract section 3)");
+                };
+                if record.key != m.key {
+                    return err("payload", "AccountAdded.record.key must equal the event key");
+                }
+                if !m.changes.is_empty() {
+                    return err("payload", "AccountAdded carries no changed fields (I5)");
+                }
+            }
+            EventKind::AccountChanged => {
+                if m.record.is_some() {
+                    return err("payload", "AccountChanged carries changed fields, not a record (I5)");
+                }
+                if m.changes.is_empty() {
+                    return err("payload", "AccountChanged must name at least one changed field (I5)");
+                }
+            }
+            EventKind::AccountRemoved => {
+                if m.record.is_some() || !m.changes.is_empty() {
+                    return err("payload", "AccountRemoved carries neither a record nor fields (I5)");
+                }
+            }
+            _ => {}
         }
     }
     Ok(())

@@ -870,6 +870,10 @@ pub fn apply_event(st: &mut AccountState, event: &Event) -> R<()> {
         Obj::MRefused(r) => mirror_step(st, kind, |m| mirror::on_refused(m, r))?,
         Obj::MAck(a) => mirror_step(st, kind, |m| mirror::on_ack(m, a))?,
         Obj::MFill(f) => mirror_step(st, kind, |m| mirror::on_fill(m, f))?,
+        // Registry membership is rebuilt by `te_core::accounts::replay` from the ledger's
+        // account events; it is not any one broker account's state, so the per-account
+        // fold only records the event (like EodRun) and never invents a field for it (I5).
+        Obj::Membership(_) => {}
         Obj::Corp(_) => {
             return err(
                 "unhandled",

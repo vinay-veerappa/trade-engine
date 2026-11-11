@@ -22,7 +22,9 @@ from trade_engine.domain.instruments import Combo, Equity, Instrument, OptionCon
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.risk import RiskControlChange, RiskVerdict
+from trade_engine.accounts import _rs as _account_rules
 from trade_engine.domain.signals import Signal
+from trade_engine.interfaces.broker import Route
 from trade_engine.interfaces.market_data import CorporateAction
 
 SCHEMA_VERSION = 1
@@ -61,6 +63,9 @@ class EventKind(StrEnum):
     MIRROR_REFUSED = "MirrorRefused"
     MIRROR_ACK = "MirrorAck"
     MIRROR_FILL = "MirrorFill"
+    ACCOUNT_ADDED = "AccountAdded"
+    ACCOUNT_REMOVED = "AccountRemoved"
+    ACCOUNT_CHANGED = "AccountChanged"
 
 
 class EventPayloadError(ValueError):
@@ -338,6 +343,9 @@ class EodRun:
 # -- the venue mirror (T2, §4.7) -----------------------------------------------------
 
 MIRROR_ACCOUNT_PREFIX = "__venue__:"
+# The registry's membership events are filed under their own ledger account: membership is
+# not any one broker account's state, and every account key already names its broker.
+ACCOUNTS_ACCOUNT = "__accounts__"
 MIRROR_ACK_STATUSES = ("ACCEPTED", "REJECTED", "PENDING")
 MIRROR_ORDER_TYPES = frozenset({OrderType.MARKET, OrderType.LIMIT})
 MIRROR_TIFS = frozenset({TimeInForce.DAY, TimeInForce.GTC})
@@ -353,6 +361,136 @@ def mirror_account(venue: str) -> str:
     if not venue:
         raise EventPayloadError("a mirror venue must be non-empty")
     return f"{MIRROR_ACCOUNT_PREFIX}{venue}"
+
+
+ACCOUNT_CHANGE_FIELDS = ("account_type", "env", "routes", "status")
+ACCOUNT_ENVS = ("sim", "paper", "live")
+ACCOUNT_STATUSES = ("active", "closed")
+ACCOUNT_TYPES = ("margin", "ira", "cash")
+ACCOUNT_PLATFORMS = ("nt8", "tradingview", "tradovate", "tos", "ibkr")
+MAX_ACCOUNT_ROUTES = 8
+
+
+@dataclass(frozen=True)
+class AccountLedgerRecord:
+    """The contract record as the ledger stores it: no `api_ref` (D-13), whole record kept
+    so a restart rebuilds the set and a diff can still see every field."""
+
+    key: str
+    display: str
+    env: str
+    status: str
+    class_: str | None
+    firm: str | None
+    account_type: str | None
+    routes: tuple[Route, ...]
+    source: str
+    confirmed_at: datetime
+
+    def __post_init__(self) -> None:
+        if ":" not in self.key:
+            raise EventPayloadError("an account key must be 'broker:accountId'")
+        broker, account_id = self.key.split(":", 1)
+        _account_rules.key(broker, account_id)
+        want_display = _account_rules.mask(account_id)
+        if self.display != want_display:
+            raise EventPayloadError(
+                f"display must be the last three characters of the account id "
+                f"({want_display}), got {self.display!r}"
+            )
+        if self.class_ is not None or self.firm is not None:
+            raise EventPayloadError(
+                "AccountLedgerRecord.class and .firm are riskguard overlays; the engine sends null"
+            )
+        object.__setattr__(self, "routes", tuple(self.routes))
+        if len(self.routes) > MAX_ACCOUNT_ROUTES:
+            raise EventPayloadError(
+                f"AccountLedgerRecord holds {len(self.routes)} routes, over the "
+                f"{MAX_ACCOUNT_ROUTES}-route cap (contract section 5)"
+            )
+        if self.env not in ACCOUNT_ENVS:
+            raise EventPayloadError(f"AccountLedgerRecord.env must be one of {ACCOUNT_ENVS}")
+        if self.status not in ACCOUNT_STATUSES:
+            raise EventPayloadError(f"AccountLedgerRecord.status must be one of {ACCOUNT_STATUSES}")
+        if self.account_type is not None and self.account_type not in ACCOUNT_TYPES:
+            raise EventPayloadError(
+                f"AccountLedgerRecord.account_type must be null or one of {ACCOUNT_TYPES}"
+            )
+        for route in self.routes:
+            if not isinstance(route, Route):
+                raise EventPayloadError("AccountLedgerRecord.routes entries must be Routes")
+            if route.platform not in ACCOUNT_PLATFORMS:
+                raise EventPayloadError(
+                    f"AccountLedgerRecord route platform must be one of {ACCOUNT_PLATFORMS}"
+                )
+            if not route.local_name:
+                raise EventPayloadError("AccountLedgerRecord route.local_name must be non-empty")
+        if not self.source:
+            raise EventPayloadError("AccountLedgerRecord.source must be non-empty")
+        _require_utc(self.confirmed_at, "AccountLedgerRecord.confirmed_at")
+
+
+@dataclass(frozen=True)
+class AccountMembership:
+    """One account-membership event's payload (BROKER_PLATFORM phase 2, contract section 3).
+
+    The ledger carries the per-broker `seq`, the account `key` and masked `display`, `at`,
+    and either the whole record (`added`) or the changed fields with old and new values
+    (`changed`). It never carries `api_ref` (D-13).
+    """
+
+    key: str
+    display: str
+    seq: int
+    at: datetime
+    record: AccountLedgerRecord | None = None
+    changes: tuple[tuple[str, Any, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if ":" not in self.key:
+            raise EventPayloadError("an account key must be 'broker:accountId'")
+        broker, account_id = self.key.split(":", 1)
+        # The one Rust key rule, so a stored key is never trusted by shape alone.
+        _account_rules.key(broker, account_id)
+        want = _account_rules.mask(account_id)
+        if self.display != want:
+            raise EventPayloadError(
+                f"display must be the last three characters of the account id ({want}), "
+                f"got {self.display!r}"
+            )
+        if not isinstance(self.seq, int) or isinstance(self.seq, bool) or self.seq <= 0:
+            raise EventPayloadError(
+                f"AccountMembership.seq must be a positive int, got {self.seq!r}"
+            )
+        _require_utc(self.at, "AccountMembership.at")
+        if self.record is not None and not isinstance(self.record, AccountLedgerRecord):
+            raise EventPayloadError("AccountMembership.record must be an AccountLedgerRecord or None")
+        # An explicit None means "no changes", as the dataclass default does; the Rust
+        # builder binds a missing `changes` the same way.
+        raw = () if self.changes is None else self.changes
+        object.__setattr__(self, "changes", tuple(tuple(c) for c in raw))
+        seen: set[str] = set()
+        for change in self.changes:
+            if len(change) != 3:
+                raise EventPayloadError("AccountMembership.changes entries must be (name, old, new)")
+            name, old, new = change
+            if name not in ACCOUNT_CHANGE_FIELDS:
+                raise EventPayloadError(
+                    f"AccountMembership change {name!r} is not a diff field; "
+                    f"expected one of {ACCOUNT_CHANGE_FIELDS}"
+                )
+            if name in seen:
+                raise EventPayloadError(f"AccountMembership names {name!r} twice")
+            seen.add(name)
+            for side, value in (("old", old), ("new", new)):
+                if value is None or isinstance(value, str):
+                    continue
+                if isinstance(value, tuple) and all(isinstance(item, Route) for item in value):
+                    continue
+                raise EventPayloadError(
+                    f"AccountMembership {name} {side} must be a string, null or a list of routes, "
+                    f"got {type(value).__name__}"
+                )
 
 
 def _require_whole(value: Decimal, name: str, *, positive: bool) -> Decimal:
@@ -585,6 +723,9 @@ PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.MIRROR_REFUSED: MirrorRefused,
     EventKind.MIRROR_ACK: MirrorAck,
     EventKind.MIRROR_FILL: MirrorFill,
+    EventKind.ACCOUNT_ADDED: AccountMembership,
+    EventKind.ACCOUNT_REMOVED: AccountMembership,
+    EventKind.ACCOUNT_CHANGED: AccountMembership,
 }
 
 
@@ -646,6 +787,34 @@ class Event:
                 f"{self.kind.value} for venue '{self.payload.venue}' must be filed under "
                 f"'{mirror_account(self.payload.venue)}', not '{self.account}' (I8)"
             )
+        if isinstance(self.payload, AccountMembership):
+            if self.account != ACCOUNTS_ACCOUNT:
+                raise EventPayloadError(
+                    f"{self.kind.value} must be filed under '{ACCOUNTS_ACCOUNT}', not "
+                    f"'{self.account}' (I8)"
+                )
+            if self.kind is EventKind.ACCOUNT_ADDED:
+                if self.payload.record is None:
+                    raise EventPayloadError(
+                        "AccountAdded must carry the whole record (contract section 3)"
+                    )
+                if self.payload.record.key != self.payload.key:
+                    raise EventPayloadError("AccountAdded.record.key must equal the event key")
+                if self.payload.changes:
+                    raise EventPayloadError("AccountAdded carries no changed fields (I5)")
+            elif self.kind is EventKind.ACCOUNT_CHANGED:
+                if self.payload.record is not None:
+                    raise EventPayloadError(
+                        "AccountChanged carries changed fields, not a record (I5)"
+                    )
+                if not self.payload.changes:
+                    raise EventPayloadError(
+                        "AccountChanged must name at least one changed field (I5)"
+                    )
+            elif self.payload.record is not None or self.payload.changes:
+                raise EventPayloadError(
+                    "AccountRemoved carries neither a record nor fields (I5)"
+                )
         if isinstance(self.payload, OrdersCreated) and any(
             order.account_id != self.account for order in self.payload.orders
         ):

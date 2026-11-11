@@ -34,7 +34,10 @@ from trade_engine.domain.risk import RiskControlChange, RiskRuleResult, RiskVerd
 from trade_engine.domain.signals import Signal
 from trade_engine.interfaces.market_data import CorporateAction
 
+from trade_engine.interfaces.broker import Route
 from trade_engine.ledger.events import (
+    AccountLedgerRecord,
+    AccountMembership,
     CashFlow,
     EodRun,
     EmulatedOrderState,
@@ -97,6 +100,9 @@ _TAG_TO_TYPE: dict[str, type] = {
     "MirrorRefused": MirrorRefused,
     "MirrorAck": MirrorAck,
     "MirrorFill": MirrorFill,
+    "Route": Route,
+    "AccountLedgerRecord": AccountLedgerRecord,
+    "AccountMembership": AccountMembership,
 }
 _TYPE_TO_TAG: dict[type, str] = {v: k for k, v in _TAG_TO_TYPE.items()}
 
