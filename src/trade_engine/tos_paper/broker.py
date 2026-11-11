@@ -28,12 +28,18 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Literal
 
+from trade_engine.accounts.poll import PollAndDiff
 from trade_engine.domain.instruments import Instrument
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.interfaces.broker import (
+    AccountEvent,
+    AccountRecord,
+    AccountSnapshot,
     BrokerAdapter,
+    Route,
     Capabilities,
     OrderChanges,
     VenueAck,
@@ -187,6 +193,7 @@ class TosPaperBroker(BrokerAdapter):
 
     name = "TosPaperBroker"
     env: Literal["paper"] = "paper"
+    stale_after = 120
 
     def __init__(
         self,
@@ -197,10 +204,18 @@ class TosPaperBroker(BrokerAdapter):
         balance_reader: BalanceReader | None = None,
         balance_unproven_ok: bool = False,
         halted_venues: Collection[str] = (),
+        mirror_path: str | Path | None = None,
+        account_ledger=None,
     ) -> None:
         self.transport = transport
         self.binding = binding
         self._clock = clock
+        # The fixed account list: `mirror.json` when the host provides its path (each
+        # paperMoney entry becomes one record), else the one account this mirror binds.
+        self._mirror_path = None if mirror_path is None else Path(mirror_path)
+        self._account_ledger = account_ledger
+        self._last_accounts: AccountSnapshot | None = None
+        self._poller: PollAndDiff | None = None
         self._balance_reader = balance_reader
         self._balance_unproven_ok = balance_unproven_ok
         self._identity: VenueIdentity | None = None
@@ -406,6 +421,90 @@ class TosPaperBroker(BrokerAdapter):
 
     def cash_events(self, since: datetime) -> list[VenueCashEvent]:
         raise TosPaperBrokerError("venue cash events (assignment/exercise) cannot be read yet")
+
+    # -- the account port (BROKER_PLATFORM phase 2) -------------------------------------
+
+    def accounts(self) -> AccountSnapshot:
+        """The paperMoney fixed list: `mirror.json` when wired, else this mirror's account.
+
+        A failed or malformed read keeps the last good list (B3) instead of emptying it.
+        """
+        try:
+            confirmed_at = self._clock.now_utc()
+            if self._mirror_path is None:
+                records = (
+                    AccountRecord.of(
+                        "tos_paper",
+                        self.binding.venue_account,
+                        env=self.env,
+                        status="active",
+                        account_type=self.binding.account_type,
+                        routes=(Route("tos", self.binding.venue_account),),
+                        source="tos_paper",
+                        confirmed_at=confirmed_at,
+                    ),
+                )
+            else:
+                records = tuple(load_mirror_accounts(self._mirror_path, clock=self._clock))
+            snapshot = AccountSnapshot(records=records, confirmed_at=confirmed_at)
+        except Exception:
+            if self._last_accounts is not None:
+                return self._last_accounts
+            raise
+        self._last_accounts = snapshot
+        return snapshot
+
+    def account_events(self, since: datetime) -> list[AccountEvent]:
+        """The poll helper's diff: this venue cannot push account changes."""
+        if self._poller is None:
+            self._poller = PollAndDiff(
+                self,
+                clock=self._clock,
+                ledger=self._account_ledger,
+                stale_after=self.stale_after,
+            )
+        return self._poller.account_events(since)
+
+
+def load_mirror_accounts(path: str | Path, *, clock) -> list[AccountRecord]:
+    """Read `mirror.json`'s `venues[]` as the fixed paperMoney account list.
+
+    The file is the host's hand-maintained list (`venue_account`, `account_type`,
+    `mirrored_accounts`, `minimum_balance`). Every entry becomes one record with
+    `env: paper`, `source: tos_paper`, `status: active` and a `tos` route. A malformed
+    file refuses (I5); the adapter keeps its last good list (B3).
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf8"))
+    except (OSError, ValueError) as exc:
+        raise TosPaperBrokerError(f"cannot read the account mirror list ({type(exc).__name__})") from exc
+    venues = data.get("venues") if isinstance(data, dict) else None
+    if not isinstance(venues, list) or not venues:
+        raise TosPaperBrokerError("the account mirror list must hold a non-empty 'venues' list")
+    confirmed_at = clock.now_utc()
+    records: list[AccountRecord] = []
+    for entry in venues:
+        if not isinstance(entry, dict):
+            raise TosPaperBrokerError("every 'venues' entry must be an object")
+        venue_account = entry.get("venue_account")
+        account_type = entry.get("account_type")
+        if not isinstance(venue_account, str) or not venue_account.startswith("D-"):
+            raise TosPaperBrokerError("venue_account must be a paperMoney id ('D-…')")
+        if not isinstance(account_type, str) or account_type not in ("ira", "margin", "cash"):
+            raise TosPaperBrokerError(f"account_type must be ira, margin or cash, got {account_type!r}")
+        records.append(
+            AccountRecord.of(
+                "tos_paper",
+                venue_account,
+                env="paper",
+                status="active",
+                account_type=account_type,
+                routes=(Route("tos", venue_account),),
+                source="tos_paper",
+                confirmed_at=confirmed_at,
+            )
+        )
+    return records
 
 
 def venue_order_of(queued: MirrorQueued) -> VenueOrder:

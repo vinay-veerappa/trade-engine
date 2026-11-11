@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json as _json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
+from trade_engine.accounts import _rs as _accounts_rs
+from trade_engine.accounts.errors import AccountRuleError
 from trade_engine.domain.instruments import Instrument, Side
 from trade_engine.domain.orders import OrderState, OrderType, TimeInForce, validate_order_prices
 
@@ -197,16 +200,273 @@ class VenueCashEvent:
             object.__setattr__(self, "details", MappingProxyType({}))
 
 
+# --- the account port (BROKER_PLATFORM phase 2, design §6.2-6.3) -------------------------
+
+AccountEnv = Literal["sim", "paper", "live"]
+AccountStatus = Literal["active", "closed"]
+AccountEventKind = Literal["added", "removed", "changed"]
+
+
+def _aware(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise ValueError(f"{name} must be timezone-aware UTC datetime (I7)")
+
+
+def _iso_z(value: datetime) -> str:
+    """RFC 3339 UTC with a `Z` (contract section 2)."""
+    text = value.astimezone(timezone.utc).isoformat()
+    return f"{text[:-6]}Z" if text.endswith("+00:00") else text
+
+
+ACCOUNT_PLATFORMS = ("nt8", "tradingview", "tradovate", "tos", "ibkr")
+
+
+@dataclass(frozen=True)
+class Route:
+    """One route to a broker account: the platform and the name that platform uses."""
+
+    platform: str
+    local_name: str
+
+    def __post_init__(self) -> None:
+        if self.platform not in ACCOUNT_PLATFORMS:
+            raise AccountRuleError(
+                "bad_shape",
+                "route.platform must be one of "
+                f"{_json.dumps(list(ACCOUNT_PLATFORMS))}, got {_json.dumps(self.platform)}",
+            )
+        if not self.local_name:
+            raise AccountRuleError("bad_shape", "route.local_name must be non-empty")
+
+    def as_contract(self) -> dict[str, str]:
+        return {"platform": self.platform, "local_name": self.local_name}
+
+
+@dataclass(frozen=True)
+class AccountRecord:
+    """One broker account (contract section 2, ACCT-REGISTRY-1 decision 2).
+
+    `class_` and `firm` are riskguard's overlays: this side sends `None` and never guesses.
+    `api_ref` is engine-internal (D-13): it is excluded from `repr` and from the contract
+    serializer, and never reaches an event, the ledger or a log line.
+    """
+
+    key: str
+    display: str
+    env: AccountEnv
+    status: AccountStatus
+    class_: str | None
+    firm: str | None
+    account_type: str | None
+    api_ref: str | None = field(repr=False)
+    source: str
+    confirmed_at: datetime
+    routes: tuple[Route, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.routes, tuple):
+            object.__setattr__(self, "routes", tuple(self.routes))
+        if self.class_ is not None or self.firm is not None:
+            raise AccountRuleError(
+                "overlay_from_engine",
+                "record.class and record.firm are riskguard overlays; this side sends null",
+            )
+        _aware(self.confirmed_at, "confirmed_at")
+        # The key, the display, routes and the rest are validated by the one Rust rule set.
+        _accounts_rs.check_snapshot(
+            {"records": [self.as_contract()], "confirmed_at": _iso_z(self.confirmed_at)}
+        )
+
+    @classmethod
+    def of(
+        cls,
+        broker: str,
+        account_id: str,
+        *,
+        env: AccountEnv,
+        source: str,
+        confirmed_at: datetime,
+        status: AccountStatus = "active",
+        account_type: str | None = None,
+        api_ref: str | None = None,
+        routes: Sequence[Route | tuple[str, str]] = (),
+    ) -> "AccountRecord":
+        """Build a record from a broker and an account id: the key and mask are Rust's."""
+        return cls(
+            key=_accounts_rs.key(broker, account_id),
+            display=_accounts_rs.mask(account_id),
+            env=env,
+            status=status,
+            class_=None,
+            firm=None,
+            account_type=account_type,
+            api_ref=api_ref,
+            routes=tuple(
+                route if isinstance(route, Route) else Route(*route) for route in routes
+            ),
+            source=source,
+            confirmed_at=confirmed_at,
+        )
+
+    def as_contract(self) -> dict[str, Any]:
+        """Contract section 2's shape: no `api_ref`, and `confirmed_at` with a `Z`."""
+        return {
+            "key": self.key,
+            "display": self.display,
+            "env": self.env,
+            "status": self.status,
+            "class": self.class_,
+            "firm": self.firm,
+            "account_type": self.account_type,
+            "routes": [route.as_contract() for route in self.routes],
+            "source": self.source,
+            "confirmed_at": _iso_z(self.confirmed_at),
+        }
+
+
+@dataclass(frozen=True)
+class AccountSnapshot:
+    """A broker's full account list at `confirmed_at` (the adapter's own freshness clock)."""
+
+    records: tuple[AccountRecord, ...]
+    confirmed_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.records, tuple):
+            object.__setattr__(self, "records", tuple(self.records))
+        _aware(self.confirmed_at, "confirmed_at")
+        _accounts_rs.check_snapshot(
+            {"records": [r.as_contract() for r in self.records], "confirmed_at": _iso_z(self.confirmed_at)}
+        )
+
+    def as_contract(self) -> dict[str, Any]:
+        return {
+            "records": [r.as_contract() for r in self.records],
+            "confirmed_at": _iso_z(self.confirmed_at),
+        }
+
+    def is_stale(self, now: datetime, stale_after: int = 120) -> bool:
+        """Stale at exactly `stale_after` and after it (I7: `now` is an argument)."""
+        return _accounts_rs.is_stale(self.as_contract(), now, stale_after)
+
+
+@dataclass(frozen=True)
+class AccountEvent:
+    """One membership change: added, removed or changed (contract section 3, D-13).
+
+    `key` and `display` identify the account; `api_ref` never appears. `added` carries the
+    whole record without `api_ref`, so a restart can rebuild the set. `changed` carries the
+    changed fields' old and new values in memory and on the ledger; the contract wire sends
+    the new values only. `seq` rises strictly per broker and is kept in the ledger.
+    """
+
+    kind: AccountEventKind
+    key: str
+    display: str
+    at: datetime
+    seq: int
+    record: AccountRecord | None = None
+    changes: tuple[tuple[str, Any, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("added", "removed", "changed"):
+            raise AccountRuleError("bad_shape", f"unknown account event kind {self.kind!r}")
+        if not self.key:
+            raise AccountRuleError("bad_key", "an account event key must be non-empty")
+        if not self.display.startswith("*"):
+            raise AccountRuleError("bad_shape", f"an account event display must be masked, got {self.display!r}")
+        if not isinstance(self.seq, int) or isinstance(self.seq, bool) or self.seq <= 0:
+            raise AccountRuleError("bad_shape", f"an account event seq must be a positive int, got {self.seq!r}")
+        _aware(self.at, "at")
+        object.__setattr__(self, "changes", tuple(tuple(change) for change in self.changes))
+        if self.kind == "added":
+            if self.record is None:
+                raise AccountRuleError("bad_shape", "an added event carries the whole record")
+            if self.changes:
+                raise AccountRuleError("bad_shape", "an added event carries no changed fields")
+        elif self.kind == "changed":
+            if self.record is not None:
+                raise AccountRuleError("bad_shape", "a changed event carries fields, not a record")
+            if not self.changes:
+                raise AccountRuleError("bad_shape", "a changed event names at least one field")
+        elif self.record is not None or self.changes:
+            raise AccountRuleError("bad_shape", "a removed event carries neither a record nor fields")
+
+    @classmethod
+    def from_internal(cls, data: Mapping[str, Any]) -> "AccountEvent":
+        """Build from the Rust diff's internal event JSON (record and old/new changes)."""
+        record = data.get("record")
+        changes = tuple(
+            (name, _change_value(old), _change_value(new)) for name, old, new in data.get("changes", ())
+        )
+        return cls(
+            kind=data["kind"],
+            key=data["key"],
+            display=data["display"],
+            at=datetime.fromisoformat(data["at"]),
+            seq=int(data["seq"]),
+            record=None if record is None else AccountRecord(
+                key=record["key"],
+                display=record["display"],
+                env=record["env"],
+                status=record["status"],
+                class_=record["class"],
+                firm=record["firm"],
+                account_type=record["account_type"],
+                api_ref=None,
+                routes=tuple(Route(r["platform"], r["local_name"]) for r in record["routes"]),
+                source=record["source"],
+                confirmed_at=datetime.fromisoformat(record["confirmed_at"].replace("Z", "+00:00")),
+            ),
+            changes=changes,
+        )
+
+    def as_wire(self) -> dict[str, Any]:
+        """Contract section 3's shape: `added.record`, or `changed.fields` new values."""
+        wire: dict[str, Any] = {
+            "kind": self.kind,
+            "key": self.key,
+            "display": self.display,
+            "seq": self.seq,
+            "at": _iso_z(self.at),
+        }
+        if self.kind == "added":
+            assert self.record is not None
+            wire["record"] = self.record.as_contract()
+        elif self.kind == "changed":
+            wire["fields"] = {name: _contract_value(new) for name, _, new in self.changes}
+        return wire
+
+
+def _change_value(value: Any) -> Any:
+    if isinstance(value, list):
+        if value and isinstance(value[0], dict):
+            return tuple(Route(item["platform"], item["local_name"]) for item in value)
+        return tuple(value)
+    return value
+
+
+def _contract_value(value: Any) -> Any:
+    if isinstance(value, tuple):
+        if value and isinstance(value[0], Route):
+            return [route.as_contract() for route in value]
+        return list(value)
+    return value
+
+
 @runtime_checkable
 class BrokerAdapter(Protocol):
     """Protocol for all broker adapters (Architecture §4.5, I13).
 
-    No strategy knowledge belongs in this adapter.
+    No strategy knowledge belongs in this adapter. The account port (phase 2) is the
+    adapter's authority on which accounts exist at its broker and on their changes.
     """
 
     name: str
-    env: Literal["sim", "paper", "live"]
+    env: AccountEnv
     capabilities: Capabilities
+    #: The per-broker freshness window; a snapshot older than this is stale (§6.3).
+    stale_after: int
 
     def connect(self) -> VenueIdentity:
         """Prove environment and account identity. Live requires explicit ack token."""
@@ -238,4 +498,12 @@ class BrokerAdapter(Protocol):
 
     def cash_events(self, since: datetime) -> list[VenueCashEvent]:
         """Fetch cash events (dividends, assignments, exercises) since given timestamp."""
+        ...
+
+    def accounts(self) -> AccountSnapshot:
+        """The full account list for this broker, one record per account."""
+        ...
+
+    def account_events(self, since: datetime) -> list[AccountEvent]:
+        """Membership changes (`added | removed | changed`) since the given timestamp."""
         ...

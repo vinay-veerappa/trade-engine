@@ -188,7 +188,7 @@ pub fn decode(node: &Json) -> R<Val> {
     codec(format!("Unrecognised encoded object with keys [{}]", shown.join(", ")))
 }
 
-const TAGS: [&str; 27] = [
+const TAGS: [&str; 30] = [
     "Equity",
     "OptionContract",
     "Combo",
@@ -216,6 +216,9 @@ const TAGS: [&str; 27] = [
     "MirrorRefused",
     "MirrorAck",
     "MirrorFill",
+    "Route",
+    "AccountLedgerRecord",
+    "AccountMembership",
 ];
 
 fn obj(o: Obj) -> Val {
@@ -251,6 +254,9 @@ fn build(tag: &str, f: Vec<(String, Val)>) -> R<Val> {
         "MirrorRefused" => obj(Obj::MRefused(build_mirror_refused(f)?)),
         "MirrorAck" => obj(Obj::MAck(build_mirror_ack(f)?)),
         "MirrorFill" => obj(Obj::MFill(build_mirror_fill(f)?)),
+        "Route" => obj(Obj::Route(build_account_route(f)?)),
+        "AccountLedgerRecord" => obj(Obj::LRecord(build_account_ledger_record(f)?)),
+        "AccountMembership" => obj(Obj::Membership(build_account_membership(f)?)),
         other => return codec(format!("Unknown payload type tag '{other}' (I5)")),
     })
 }
@@ -645,6 +651,60 @@ pub fn enc_obj(o: &Obj) -> R<Json> {
                 ("filled", jdec(&f.filled)?),
                 ("avg_price", jdec(&f.avg_price)?),
                 ("at", jdt(&f.at)),
+            ],
+        ),
+        Obj::Route(r) => dc(
+            "Route",
+            vec![("platform", jstr(&r.platform)), ("local_name", jstr(&r.local_name))],
+        ),
+        Obj::LRecord(r) => dc(
+            "AccountLedgerRecord",
+            vec![
+                ("key", jstr(&r.key)),
+                ("display", jstr(&r.display)),
+                ("env", jstr(&r.env)),
+                ("status", jstr(&r.status)),
+                ("class_", jostr(&r.class_)),
+                ("firm", jostr(&r.firm)),
+                ("account_type", jostr(&r.account_type)),
+                (
+                    "routes",
+                    jtuple(
+                        r.routes
+                            .iter()
+                            .map(|route| enc_obj(&Obj::Route(route.clone())))
+                            .collect::<R<_>>()?,
+                    ),
+                ),
+                ("source", jstr(&r.source)),
+                ("confirmed_at", jdt(&r.confirmed_at)),
+            ],
+        ),
+        Obj::Membership(a) => dc(
+            "AccountMembership",
+            vec![
+                ("key", jstr(&a.key)),
+                ("display", jstr(&a.display)),
+                ("seq", Json::Int(a.seq)),
+                ("at", jdt(&a.at)),
+                (
+                    "record",
+                    match &a.record {
+                        Some(r) => enc_obj(&Obj::LRecord(r.clone()))?,
+                        None => jnone(),
+                    },
+                ),
+                (
+                    "changes",
+                    jtuple(
+                        a.changes
+                            .iter()
+                            .map(|(name, old, new)| {
+                                Ok(jtuple(vec![jstr(name), enc_val(old)?, enc_val(new)?]))
+                            })
+                            .collect::<R<_>>()?,
+                    ),
+                ),
             ],
         ),
     })

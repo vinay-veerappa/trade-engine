@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use te_core::calendar as cal;
 use te_core::greeks as gk;
 
+mod accounts;
 mod flow;
 mod oms;
 mod sim;
@@ -909,6 +910,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ledger_pro_rata, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_ticket_contracts, m)?)?;
     m.add_class::<LedgerFold>()?;
+    accounts::register(m)?;
     register_options(m)?;
     register_futures(m)?;
     m.add_function(wrap_pyfunction!(risk_rules_from_mapping, m)?)?;

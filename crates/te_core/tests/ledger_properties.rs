@@ -68,8 +68,16 @@ fn make_test_option_contract() -> OptionContract {
 }
 
 fn make_sample_event_for_kind(kind: EventKind, seed: u32) -> Event {
-    let account = if matches!(kind, EventKind::MirrorQueued | EventKind::MirrorRefused | EventKind::MirrorAck | EventKind::MirrorFill) {
+    let account = if matches!(
+        kind,
+        EventKind::MirrorQueued | EventKind::MirrorRefused | EventKind::MirrorAck | EventKind::MirrorFill
+    ) {
         "__venue__:paper".to_string()
+    } else if matches!(
+        kind,
+        EventKind::AccountAdded | EventKind::AccountRemoved | EventKind::AccountChanged
+    ) {
+        "__accounts__".to_string()
     } else {
         "ACC_1".to_string()
     };
@@ -294,6 +302,36 @@ fn make_sample_event_for_kind(kind: EventKind, seed: u32) -> Event {
             avg_price: dec("100.50"),
             at: ts.clone(),
         }),
+        EventKind::AccountAdded | EventKind::AccountRemoved => Obj::Membership(AccountMembership {
+            key: "tos_paper:ACCT-TEST-194".into(),
+            display: "*194".into(),
+            seq: 1,
+            at: ts.clone(),
+            record: (kind == EventKind::AccountAdded).then(|| AccountLedgerRecord {
+                key: "tos_paper:ACCT-TEST-194".into(),
+                display: "*194".into(),
+                env: "paper".into(),
+                status: "active".into(),
+                class_: None,
+                firm: None,
+                account_type: Some("margin".into()),
+                routes: vec![te_core::accounts::Route {
+                    platform: "tos".into(),
+                    local_name: "ACCT-TEST-194".into(),
+                }],
+                source: "tos_paper".into(),
+                confirmed_at: ts.clone(),
+            }),
+            changes: vec![],
+        }),
+        EventKind::AccountChanged => Obj::Membership(AccountMembership {
+            key: "tos_paper:ACCT-TEST-194".into(),
+            display: "*194".into(),
+            seq: 2,
+            at: ts.clone(),
+            record: None,
+            changes: vec![("status".into(), Val::Str("active".into()), Val::Str("closed".into()))],
+        }),
     };
 
     Event {
@@ -307,7 +345,7 @@ fn make_sample_event_for_kind(kind: EventKind, seed: u32) -> Event {
     }
 }
 
-const ALL_EVENT_KINDS: [EventKind; 27] = [
+const ALL_EVENT_KINDS: [EventKind; 30] = [
     EventKind::SignalSeen,
     EventKind::RiskVerdict,
     EventKind::OrdersCreated,
@@ -335,6 +373,9 @@ const ALL_EVENT_KINDS: [EventKind; 27] = [
     EventKind::MirrorRefused,
     EventKind::MirrorAck,
     EventKind::MirrorFill,
+    EventKind::AccountAdded,
+    EventKind::AccountRemoved,
+    EventKind::AccountChanged,
 ];
 
 // -------------------------------------------------------------------------------------------------
@@ -342,7 +383,7 @@ const ALL_EVENT_KINDS: [EventKind; 27] = [
 // -------------------------------------------------------------------------------------------------
 
 #[test]
-fn codec_roundtrip_all_27_event_kinds() {
+fn codec_roundtrip_every_event_kind() {
     for (i, &kind) in ALL_EVENT_KINDS.iter().enumerate() {
         let ev = make_sample_event_for_kind(kind, 100 + i as u32);
         let bytes1 = event_to_bytes(&ev).expect("encode should succeed");
@@ -361,7 +402,7 @@ fn codec_roundtrip_all_27_event_kinds() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(54))]
     #[test]
-    fn prop_codec_roundtrip_across_seeds(kind_idx in 0usize..27, seed in 1u32..10_000) {
+    fn prop_codec_roundtrip_across_seeds(kind_idx in 0usize..30, seed in 1u32..10_000) {
         let kind = ALL_EVENT_KINDS[kind_idx];
         let ev = make_sample_event_for_kind(kind, seed);
         let bytes1 = event_to_bytes(&ev).unwrap();

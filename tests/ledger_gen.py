@@ -45,7 +45,11 @@ from trade_engine.domain.risk import RiskControlChange, RiskRuleResult, RiskVerd
 from trade_engine.domain.signals import Signal  # noqa: E402
 from trade_engine.interfaces.market_data import CorporateAction  # noqa: E402
 from frozen_ledger import codec  # noqa: E402  - the frozen oracle (P2b)
+from trade_engine.interfaces.broker import Route  # noqa: E402
 from trade_engine.ledger.events import (  # noqa: E402
+    ACCOUNTS_ACCOUNT,
+    AccountLedgerRecord,
+    AccountMembership,
     CashFlow,
     EodRun,
     EmulatedOrderState,
@@ -340,6 +344,54 @@ def event_zoo() -> list[Event]:
                                     book_status=OrderState.ACCEPTED), account=VA),
         _ev(K.MIRROR_ACK, MirrorAck(V, "tos:a", "PENDING", "wait", T0), account=VA),
         _ev(K.MIRROR_FILL, MirrorFill(V, "tos:a", "5400000001", Decimal("2"), Decimal("2.05"), T0), account=VA),
+        # account registry (BROKER_PLATFORM P2): seq, key, display and the record/fields
+        _ev(
+            K.ACCOUNT_ADDED,
+            AccountMembership(
+                "tos_paper:ACCT-TEST-194",
+                "*194",
+                1,
+                T0,
+                record=AccountLedgerRecord(
+                    "tos_paper:ACCT-TEST-194",
+                    "*194",
+                    "paper",
+                    "active",
+                    None,
+                    None,
+                    "margin",
+                    (Route("tos", "ACCT-TEST-194"),),
+                    "tos_paper",
+                    T0,
+                ),
+            ),
+            account=ACCOUNTS_ACCOUNT,
+        ),
+        _ev(
+            K.ACCOUNT_CHANGED,
+            AccountMembership(
+                "tos_paper:ACCT-TEST-194", "*194", 2, T0,
+                changes=(("status", "active", "closed"),),
+            ),
+            account=ACCOUNTS_ACCOUNT,
+        ),
+        _ev(
+            K.ACCOUNT_CHANGED,
+            AccountMembership(
+                "tos_paper:ACCT-TEST-194", "*194", 3, T0,
+                changes=(
+                    ("routes", (Route("tos", "ACCT-TEST-194"),),
+                     (Route("tos", "ACCT-TEST-194"), Route("tradingview", "D194"))),
+                    ("account_type", None, "margin"),
+                ),
+            ),
+            account=ACCOUNTS_ACCOUNT,
+        ),
+        _ev(
+            K.ACCOUNT_REMOVED,
+            AccountMembership("tos_paper:ACCT-TEST-195", "*195", 4, T0),
+            account=ACCOUNTS_ACCOUNT,
+        ),
     ]
     # envelope variants
     zoo.append(_ev(K.MARK, Mark(AAPL, Decimal("1E-28"), T0), command_id="c-1", seq=7, ts=datetime(2026, 1, 1, tzinfo=ODD)))
@@ -566,6 +618,25 @@ def random_stream(seed: int) -> tuple[list[Event], str]:
         if rnd.random() < 0.5:
             rnd.shuffle(stamped)
         evs = stamped
+    # BROKER_PLATFORM P2: registry membership events. Appended after the stream is built,
+    # drawn from a separate RNG, so every pre-P2 stream keeps its exact prefix and order.
+    acc_rng = random.Random(seed * 7919 + 17)
+    if acc_rng.random() < 0.8:
+        n = acc_rng.randrange(1000)
+        key = f"tos_paper:ACCT-TEST-{n:03}"
+        shown = "*" + key[-3:]
+        at = clock[0] + timedelta(seconds=acc_rng.randint(1, 60))
+        record = AccountLedgerRecord(key, shown, "paper", "active", None, None, "margin",
+                                     (Route("tos", f"local-{n}"),), "tos_paper", at)
+        evs.append(Event(ACCOUNTS_ACCOUNT, K.ACCOUNT_ADDED,
+                         AccountMembership(key, shown, 1, at, record=record), at))
+        if acc_rng.random() < 0.6:
+            evs.append(Event(ACCOUNTS_ACCOUNT, K.ACCOUNT_CHANGED,
+                             AccountMembership(key, shown, 2, at,
+                                               changes=(("status", "active", "closed"),)), at))
+        if acc_rng.random() < 0.3:
+            evs.append(Event(ACCOUNTS_ACCOUNT, K.ACCOUNT_REMOVED,
+                             AccountMembership(key, shown, 3, at), at))
     return evs, acct
 
 

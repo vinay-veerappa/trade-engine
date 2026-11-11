@@ -795,6 +795,12 @@ def _on_risk_control(state: AccountState, event: Event) -> AccountState:
     return _replace(state, risk_controls=MappingProxyType(controls))
 
 
+def _on_account_membership(state: AccountState, event: Event) -> AccountState:
+    """BROKER_PLATFORM P2: membership lives in the account plane (`te_core::accounts`),
+    so the per-account fold records the event and invents no field (like EodRun)."""
+    return state
+
+
 def _on_eod_run(state: AccountState, event: Event) -> AccountState:
     # Scheduler provenance only: "was this session run?" is answered by reading the
     # ledger, so the fold has nothing to add. Returning state unchanged keeps the event
@@ -843,6 +849,9 @@ HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.MIRROR_REFUSED: _mirror_handler(_mirror.on_refused),
     EventKind.MIRROR_ACK: _mirror_handler(_mirror.on_ack),
     EventKind.MIRROR_FILL: _mirror_handler(_mirror.on_fill),
+    EventKind.ACCOUNT_ADDED: _on_account_membership,
+    EventKind.ACCOUNT_REMOVED: _on_account_membership,
+    EventKind.ACCOUNT_CHANGED: _on_account_membership,
 }
 
 
