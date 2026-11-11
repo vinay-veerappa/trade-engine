@@ -43,6 +43,9 @@ leave out, and why. Give sources.
 - Invariants. Name them and say which test enforces each one.
 - Failure modes: what happens when each dependency is slow, down, or wrong.
 - Latency and time budget, in ms, where an order path is involved.
+- Performance and memory budget for every component and phase: CPU or latency budget,
+  a memory ceiling, the cap and drop policy for every queue, map and buffer, and the
+  test that enforces each. Nothing unbounded.
 - Security and privacy: tokens, masking.
 
 ## 7. Alternatives rejected

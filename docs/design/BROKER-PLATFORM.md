@@ -259,6 +259,7 @@ riskguard adds the following:
 | B4 | Freshness per broker. | A stale broker A does not affect broker B; known account allowed while stale; unseen account refused while stale. |
 | B5 | Masked outside the registry. | A log and event scan finds no full id. |
 | B6 | Read before write. | ntx links no order symbols (existing); adapters raise `UnsupportedCapability` on submit until their order brief lands. |
+| B7 | Every step has a latency budget and a memory ceiling, and nothing is unbounded. | The bench and cap tests in 6.8a; RSS recorded in each G3 report. |
 
 All of these also follow I1-I13 and D2/D3/D6.
 
@@ -282,6 +283,68 @@ All of these also follow I1-I13 and D2/D3/D6.
   take under 1 ms. The order path never waits on an engine call.
 - The instrument map is resolved in process from the `te_core` table, with no network
   hop.
+
+### 6.8a Performance and memory budget (every step)
+
+Each component states a CPU/latency budget and a memory ceiling, and each one has a
+test that fails when the budget is broken (invariant B7). Sizes assume up to 200
+broker accounts; the hard cap is 2,000.
+
+| Component | Latency / CPU budget | Memory ceiling | How it stays bounded | Enforcing test |
+|---|---|---|---|---|
+| `te_core::futures` map (P1) | Lookup < 1 µs, no allocation on a hit (returns borrowed data) | Static table < 64 KB | Built once at start, never grows | Bench: 1 M lookups < 50 ms; alloc counter = 0 on hits |
+| Account registry in engine (P2) | Diff of N=200 < 1 ms, O(N) by key | < 256 KB for 200 records (~1 KB each) | Hard cap 2,000 records: above it, ingest is refused and alerted, never grown silently | Cap test; diff bench at N=200 and 2,000 |
+| Account event ring (P2) | Append O(1) | 10,000 events or 24 h, whichever is first | Ring buffer; the ledger on disk is the history | Fill past cap, check size and oldest-drop |
+| ntx SSE client (P3) | One connection. Per-event parse < 100 µs | Line buffer cap 1 MB | Oversize frame dropped and counted; reconnect backoff 1 s → 30 s with jitter; `/snapshot` only on connect and reconnect, never per event | Oversize-frame test; reconnect-storm test (ntx flapping) keeps one socket and bounded memory |
+| Outbox to riskguard (P4) | Delivery adds < 50 ms to the 2 s visibility budget | On disk ≤ 50 MB | Membership is idempotent, so a long outage compacts to the latest snapshot plus tail instead of growing | Outage test: 24 h of events stays under cap and replays in order |
+| riskguard ingest + store (P4) | Ingest < 5 ms for 200 records; gate lookup < 1 ms | Registry < 5 MB RSS | Body cap 1 MB; disk writes coalesced (≤ 1 per 500 ms, atomic); gate reads an immutable snapshot swapped by pointer, so ingest never blocks the order path | Gate latency under concurrent ingest; write-coalesce test |
+| `/v1/accounts?platform=` (P4) | p99 < 20 ms | One response < 32 KB | Scoped only, no full-fleet read on a surface; ETag → 304; surfaces follow `/v1/events` and poll at most every 5 s | Response-size test; 304 test |
+| Schwab hub change (P5b) | Zero added latency on market frames (see 6.10) | Hub RSS + ≤ 2 MB | Separate bounded queue, drop-oldest with counter | Replay bench, see 6.10 |
+| Process totals (G3) | — | Engine account plane + ≤ 20 MB RSS; riskguard + ≤ 5 MB | — | G3 run records RSS before and after, while flat |
+
+Rules that apply to every phase:
+
+- No unbounded queue, map, list or buffer. Each has a cap, a drop policy and a counter.
+- No per-event full snapshot or full-fleet read. Snapshots happen at connect and
+  reconnect only.
+- Nothing on the order path waits on a network call, a disk write or a lock held by
+  ingest.
+- Each phase's G1 or G2 includes its bench, and the G3 report includes RSS and CPU.
+
+### 6.10 Schwab hub change (P5b)
+
+What changes in `tvDownloadOHLC/scripts/streaming/schwab_hub.py`, and nothing else:
+
+1. **One REST allowlist entry.** `providers/rest_policy.py` `READ_METHODS` gains only
+   the accounts-number list read (the account numbers and their hashes). Positions,
+   orders, transactions and every write stay refused by `refusal()`. Cost: one call of
+   about 1 KB every 60 s, on the existing `rest_queue` at the lowest priority, so it
+   never delays a quote or chain request.
+2. **ACCT_ACTIVITY on the existing streamer.** The hub adds the ACCT_ACTIVITY
+   subscription to the one streamer it already holds. Never a second streamer (D-7).
+3. **A separate account channel.** In `_handle_stream_event` (`schwab_hub.py:826`) an
+   ACCT_ACTIVITY event is routed before the market fan-out and is **not** sent to the
+   market `/ws` sockets. That keeps account data away from market consumers (privacy)
+   and means l2d is unchanged (`crates/l2d/src/adapter.rs:229` keeps treating it as
+   Other; its test at line 639 stays). Account events go to a new authenticated
+   endpoint for trade-engine only, through its own queue (maxsize 256, drop-oldest,
+   `acct_dropped` counter). A drop makes the engine re-read the accounts list, so a
+   missed event is repaired by the next snapshot.
+4. **Fallback poll.** If the streamer is down, the 60 s accounts-list poll alone keeps
+   membership current, within B4 freshness.
+
+Performance and memory for the hub:
+
+- The market read loop does one extra string compare per event (the service name it
+  already reads). No new encode, no new await, no lock.
+- The account queue is at most 256 small frames (well under 1 MB). The hub's added RSS
+  must stay ≤ 2 MB.
+- **Test:** replay a recorded market session through the hub with and without the
+  change. p99 `_handle_stream_event` time and `ws_dropped` must not move by more than
+  5%. Run under an ACCT_ACTIVITY burst (1,000 frames in 1 s) with no trade-engine
+  consumer attached, and check the market path is unchanged and memory stays capped.
+- **Deploy:** any day, no weekend window (D-11). Flat only, owner present, and the hub
+  restart is checked against the feed health before and after.
 
 ### 6.9 Security and privacy
 
@@ -316,6 +379,9 @@ All of these also follow I1-I13 and D2/D3/D6.
 | D-7 | No second Schwab streamer. ACCT_ACTIVITY goes through `schwab_hub.py`. | 2026-11-10 | standing constraint |
 | D-8 | IBKR through TWS/Gateway or Client Portal, never Flex. | 2026-11-10 | Opus |
 | D-9 | Borrow patterns from broker-sdk and NautilusTrader. No outside runtime dependency. | 2026-11-11 | Opus, owner agreed with the recommendation |
+| D-10 | LUCID is a Tradovate account. Its key is `tradovate:<name>`, sourced from ntx like every other Tradovate account. | 2026-11-11 | owner |
+| D-11 | The Schwab hub change (P5b) needs no weekend window. It still deploys flat only, with the owner present. | 2026-11-11 | owner |
+| D-12 | Performance and memory are designed in at every step: each component has a budget and a cap with an enforcing test (B7, 6.8a). | 2026-11-11 | owner |
 
 ## 9. Rollout and verification
 
@@ -353,13 +419,12 @@ The phases are in [the plan](../BROKER_PLATFORM_PLAN.md):
    G3. It blocks auto-closing missing accounts.
 3. How do NT8 names, ntx names and TV `D<id>` map onto each other? Answered by B check
    3. It sets the `routes[]` derivation.
-4. Is LUCID a Tradovate account? The owner answers. It decides whether LUCID is
-   `tradovate:` or a separate broker.
-5. Should the Schwab 5b hub change be scheduled for a weekend? The owner answers. It
-   blocks P5b.
+4. ~~Is LUCID a Tradovate account?~~ Resolved 2026-11-11: yes (D-10).
+5. ~~Should the Schwab 5b hub change be scheduled for a weekend?~~ Resolved
+   2026-11-11: no (D-11).
 
 ## 11. Review log
 
 | Date | Reviewer | Comment | Resolution |
 |---|---|---|---|
-| | | | |
+| 2026-11-11 | owner | LUCID is Tradovate; hub change needs no weekend; asked what changes in the hub; perf and memory at every step. | D-10, D-11, D-12; added 6.8a, 6.10 and B7. |

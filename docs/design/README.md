@@ -36,6 +36,9 @@ design doc is updated and agreed again.
 - Record alternatives that were rejected, and why. That is what stops the same debate
   from happening again.
 - No secrets or full account numbers (mask to `*194`).
+- Performance and memory are part of the design, at every step. Each component and
+  phase states its latency budget and memory ceiling, every queue or buffer has a cap
+  and drop policy, and each budget has a test. A plan or brief inherits these budgets.
 
 ## Index
 
