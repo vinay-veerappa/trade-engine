@@ -29,3 +29,15 @@ Read BP-COMMON.md first. Phase 3 (the Tradovate adapter) waits for this phase. T
 - Key rule: case kept, whitespace refused, empty refused. Masking rule: every case above.
 - No full id in any event, ledger record or captured log line (a scan over captured logs and serialized events using a fake id).
 - A contract test that every registered adapter satisfies the protocol, including `accounts` and `account_events`.
+
+## Performance and memory budget (design 6.8a, invariant B7)
+
+Rows copied from `docs/design/BROKER-PLATFORM.md` 6.8a; the general rules are in BP-COMMON. Sizes assume 200 accounts; the hard cap is 2,000.
+
+| Component | Latency / CPU budget | Memory ceiling | How it stays bounded | Enforcing test (add before you report done) |
+|---|---|---|---|---|
+| Account registry in engine (P2) | Diff of N=200 under 1 ms, O(N) by key | Under 256 KB for 200 records (about 1 KB each) | Hard cap 2,000 records: above it, ingest is refused and alerted (a `kind`), never grown silently | Cap test; diff bench at N=200 and N=2,000 |
+| Account event ring (P2) | Append O(1) | 10,000 events or 24 h, whichever comes first | Ring buffer; the ledger on disk is the history | Fill past the cap, check size and oldest-drop |
+
+- The poll-and-diff helper keeps exactly one last-good snapshot, replaced on each good read, never appended.
+- The G3 report records RSS and CPU before and after, while flat (engine account plane budget: at most +20 MB).

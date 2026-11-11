@@ -34,3 +34,14 @@ Extend these. Do not add a second spec table: one table, with exchange, currency
 - `NQ1!` on both sides of a roll date; a front-month request with a date beyond the table is refused.
 - Python: a `Future` round-trip through the pyo3 module; a check that Python holds no table of its own.
 - All existing tests stay green.
+
+## Performance and memory budget (design 6.8a, invariant B7)
+
+Rows copied from `docs/design/BROKER-PLATFORM.md` 6.8a; the general rules are in BP-COMMON.
+
+| Component | Latency / CPU budget | Memory ceiling | How it stays bounded | Enforcing test (add before you report done) |
+|---|---|---|---|---|
+| `te_core::futures` map (P1) | Lookup under 1 microsecond, no allocation on a hit (returns borrowed data) | Static table under 64 KB | Built once at start, never grows | Bench: 1 M lookups under 50 ms; an allocation counter reads 0 on hits |
+
+- The expiry and roll table and the spec table are static data. No cache, no memo map, no growing structure anywhere in this phase.
+- The G3 report records RSS before and after (the pyo3 module loaded, flat).

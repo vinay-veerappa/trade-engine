@@ -17,3 +17,15 @@ Read `docs/BROKER_PLATFORM_PLAN.md` (your phase and the invariants B1-B6) and th
 - When done, delete your cargo target directory if it sits inside the worktree (they are 3-12 GB).
 - Commit trailer: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 - Final reply: at most 8 lines: branch, sha, test counts, anything you could not do.
+
+## Performance and memory budget (every phase; invariant B7, design 6.8a, decision D-12)
+
+Parent rows: `docs/design/BROKER-PLATFORM.md` section 6.8a. Sizes assume up to 200 broker accounts; the hard cap is 2,000.
+
+- **No brief may add an unbounded queue, map, list or buffer.** Each one you add has a cap, a drop policy and a counter, and a test that fills it past the cap and checks size and what was dropped.
+- No per-event full snapshot or full-fleet read. Snapshots happen at connect and reconnect only.
+- Nothing on the order path waits on a network call, a disk write or a lock held by ingest.
+- Each phase ships its bench or cap test before it reports done. Name that test in the commit message and in the RUST_PORT.md row.
+- **Process totals (G3).** The G3 report records RSS and CPU before and after, while flat. Budget: engine account plane at most +20 MB RSS; riskguard at most +5 MB.
+
+Your phase's own rows are in your brief under the same heading.
