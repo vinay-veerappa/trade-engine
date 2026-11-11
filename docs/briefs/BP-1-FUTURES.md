@@ -1,3 +1,5 @@
+Parent design: trade-engine/docs/design/BROKER-PLATFORM.md
+
 # BP-1: canonical futures instrument and the edge symbol map (plan phase 1)
 
 Read BP-COMMON.md first.

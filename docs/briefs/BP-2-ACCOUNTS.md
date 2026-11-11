@@ -1,3 +1,5 @@
+Parent design: trade-engine/docs/design/BROKER-PLATFORM.md
+
 # BP-2: account port on BrokerAdapter (plan phase 2)
 
 Read BP-COMMON.md first. Phase 3 (the Tradovate adapter) waits for this phase. This phase has no network code.

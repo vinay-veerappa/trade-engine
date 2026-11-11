@@ -1,3 +1,5 @@
+Parent design: trade-engine/docs/design/BROKER-PLATFORM.md
+
 # BP-COMMON: rules for every BROKER_PLATFORM brief
 
 Read `docs/BROKER_PLATFORM_PLAN.md` (your phase and the invariants B1-B6) and the
