@@ -193,7 +193,7 @@ fn check_one_of(value: &str, allowed: &[&str], what: &str) -> R<()> {
     Ok(())
 }
 
-fn parse_routes(j: Option<&Json>) -> R<Vec<Route>> {
+pub(crate) fn parse_routes(j: Option<&Json>) -> R<Vec<Route>> {
     let items = match j {
         Some(Json::Arr(items)) => items,
         Some(other) => return bad_shape(format!("record.routes must be a list, got {}", other.type_name())),
@@ -284,7 +284,7 @@ pub fn ledger_record(
     })
 }
 
-fn record_json(r: &Record) -> Json {
+pub(crate) fn record_json(r: &Record) -> Json {
     let opt = |v: &Option<String>| v.as_ref().map_or(Json::Null, |s| Json::Str(s.clone()));
     Json::Obj(vec![
         ("key".into(), Json::Str(r.key.clone())),
@@ -316,7 +316,7 @@ pub fn iso_z(dt: &DateTime) -> String {
     }
 }
 
-fn parse_record(node: &Json) -> R<Record> {
+pub(crate) fn parse_record(node: &Json) -> R<Record> {
     if !matches!(node, Json::Obj(_)) {
         return bad_shape(format!("an account record must be an object, got {}", node.type_name()));
     }
@@ -603,7 +603,7 @@ pub fn replay(events_json: &str) -> R<String> {
     Ok(snapshot_to_json(&snapshot))
 }
 
-fn apply_change(record: &mut Record, name: &str, new: &Json) -> R<()> {
+pub(crate) fn apply_change(record: &mut Record, name: &str, new: &Json) -> R<()> {
     match name {
         "env" => {
             let value = as_str(Some(new), "change.env")?;

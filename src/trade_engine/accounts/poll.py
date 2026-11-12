@@ -126,6 +126,7 @@ class PollAndDiff:
         ledger: "Ledger | None" = None,
         interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
         stale_after: int = 120,
+        on_poll=None,
     ) -> None:
         # The minimum (30 s) is Rust's rule; a smaller interval refuses here (I5).
         self.interval_seconds = _rs.interval(interval_seconds)
@@ -138,6 +139,13 @@ class PollAndDiff:
         self._last_good: AccountSnapshot | None = None
         self._seq = 0
         self._ring = _rs.event_ring()
+        # BP-4a: told after each good read, never allowed to fail it (see `_notify`).
+        self._on_poll = on_poll
+
+    @property
+    def seq(self) -> int:
+        """The highest seq issued so far for this broker (0 before the first event)."""
+        return self._seq
 
     @property
     def last_good(self) -> AccountSnapshot | None:
@@ -186,7 +194,17 @@ class PollAndDiff:
         self._ring.push(
             json.dumps([_internal_event(e) for e in events], separators=(",", ":")), _iso_z(now)
         )
+        self._notify(snapshot, events)
         return events
+
+    def _notify(self, snapshot: AccountSnapshot, events: list[AccountEvent]) -> None:
+        """Hand the good read to the registry sink. A sink failure never fails the poll."""
+        if self._on_poll is None:
+            return
+        try:
+            self._on_poll(snapshot, [_internal_event(e) for e in events], self._seq)
+        except Exception as exc:  # noqa: BLE001 - the sink is best-effort here; it counts its own
+            log.warning("registry sink observe failed (%s)", type(exc).__name__)
 
     def _append(self, events: list[AccountEvent], now: datetime) -> None:
         """Journal the events (I1, I2). No ledger wired: the caller only needs the diff."""
