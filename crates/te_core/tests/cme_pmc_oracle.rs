@@ -11,6 +11,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use te_core::calendar::globex;
 
 const PMC_FIXTURE_CSV: &str = include_str!("fixtures/cme_pmc_fixture.csv");
+/// Last date the pmc fixtures cover: the end of the sourced CME tables.
+const PMC_FIXTURE_LAST: NaiveDate = match NaiveDate::from_ymd_opt(2027, 12, 31) {
+    Some(d) => d,
+    None => panic!(),
+};
 
 struct AllowListEntry {
     date: (i32, u32, u32),
@@ -210,7 +215,8 @@ fn parse_fixture() -> HashMap<NaiveDate, (DateTime<Utc>, DateTime<Utc>)> {
 fn test_cme_vs_pandas_market_calendars_equity() {
     let pmc_sessions = parse_fixture();
     let first = globex::first_date();
-    let last = globex::last_date();
+    // The pmc fixtures end with the sourced tables (2027-12-31); BP-1b rule years are checked in globex.rs.
+    let last = PMC_FIXTURE_LAST;
 
     let all_table_dates = globex::sessions_in_range(first, last).unwrap();
     let table_date_set: HashSet<NaiveDate> = all_table_dates.iter().copied().collect();
@@ -428,7 +434,7 @@ fn test_cme_vs_pandas_market_calendars_energy_metals() {
         let pmc = parse_csv(csv);
         let mut hits = HashSet::new();
         let mut exact = 0usize;
-        let sessions = cal.sessions_in_range(cal.first_date(), cal.last_date()).unwrap();
+        let sessions = cal.sessions_in_range(cal.first_date(), PMC_FIXTURE_LAST).unwrap();
         let table: HashSet<NaiveDate> = sessions.iter().copied().collect();
         for &d in &sessions {
             let t = (cal.session_open(d).unwrap(), cal.session_close(d).unwrap());
@@ -445,7 +451,7 @@ fn test_cme_vs_pandas_market_calendars_energy_metals() {
         }
         // pmc sessions inside the root's range that the table does not have
         for &d in pmc.keys() {
-            if d >= cal.first_date() && d <= cal.last_date() {
+            if d >= cal.first_date() && d <= PMC_FIXTURE_LAST {
                 assert!(table.contains(&d), "{root}: pmc has a session on {d} that the table lacks");
             }
         }

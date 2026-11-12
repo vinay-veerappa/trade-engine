@@ -395,13 +395,19 @@ The phases are in [the plan](../BROKER_PLATFORM_PLAN.md):
 | P1 | Futures instrument |
 | P2 | Account port, with `mirror.json` |
 | P3 | Tradovate adapter, read-only |
-| P4 | Publish to riskguard; observer membership retired after a one-week G3 comparison |
+| P4 | Publish to riskguard; observer membership retired once the G2 event-coverage gate passes and one live G3 check after the owner re-login matches |
 | P5 | Schwab |
 | P6 | NT8 routes and IBKR |
 | P7 | Vela |
 
 - **Grades:** G1 repo tests, G2 against a spawned peer, G3 a live read while flat, with
   masked output.
+- **P4 gate (changed 2026-11-11):** no week of side-by-side running. The risk is missed
+  account events, so the gate tests them directly: G2 against a spawned peer and recorded
+  ntx fixtures covers reconnect, 401 recovery, account add/remove and the session roll.
+  After the owner re-login (Q2), one live G3 read while flat must show the engine-sink
+  account view equal to the observer view. The observer code is kept, so the step is
+  reversible.
 - **Owner gates:** no live config change, deploy or hub change without the owner.
   Deploy only when flat, then check `isArmed`. Order placement needs approval for each
   broker.
@@ -425,7 +431,8 @@ The phases are in [the plan](../BROKER_PLATFORM_PLAN.md):
    ...666; LUCID LFF...001; FundedNext FNFTCH...669/055/701 (unconfirmed). Auto-close of
    missing accounts stays off. A missing account is reported and never closed, until
    every identity reads 200 and P3 G3 shows the lists are complete. The 401s are an
-   owner re-login item.
+   owner re-login item. That re-login is also the precondition for the one live P4 G3
+   check (section 9).
 3. ~~How do NT8 names, ntx names and TV `D<id>` map onto each other?~~ Answered
    2026-11-11 by B check 3. The NT8 account name equals the ntx account name exactly
    (e.g. `APEX...194`). The numeric Tradovate id is separate and stays engine-only

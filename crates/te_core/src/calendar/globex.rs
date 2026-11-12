@@ -1,4 +1,4 @@
-//! CME Globex session calendars: equity index (2006-2027) via the free functions, and per root (equity, energy,
+//! CME Globex session calendars: equity index (2006-2030) via the free functions, and per root (equity, energy,
 //! metals; P6C) via [`GlobexCalendar::for_root`].
 //!
 //! # Semantics
@@ -19,8 +19,10 @@
 //!   - Example, Good Friday closed: Thursday's session closes 17:00 Thursday, and the next opens Sunday 18:00.
 //!   - A `reopen_et` that contradicts the standard rule (e.g. Christmas 2007's "all CME products open 5:00 a.m. Dec 26")
 //!     wins, because the table is what CME published.
-//! - **Range.** Any instant or date outside [first table year 2006-01-01, Dec 31 of the last table year 2027-12-31]
+//! - **Range.** Any instant or date outside [first table year 2006-01-01, Dec 31 of the last table year 2030-12-31]
 //!   refuses (I5), with a clear message, as XNYS does outside 2000-2040.
+//! - **Rule years (BP-1b).** The sourced CSVs end 2027-12-31. For 2028-2030 each group's table appends rows from
+//!   [`rule_rows_csv`], projected from the 2026-2027 CME pattern; one-off exceptions are not modeled.
 //! - **Partial years.** If `cme_equity_holidays.md` lists a year as partly sourced, the calendar still answers for it,
 //!   treating missing dates as normal days. That is the table's known limitation. The deliberately unfilled missing
 //!   dates recorded in `cme_equity_holidays.md` (no CME source found; deliberately not filled) are:
@@ -41,7 +43,7 @@ pub const FIRST: NaiveDate = match NaiveDate::from_ymd_opt(2006, 1, 1) {
     None => panic!(),
 };
 
-pub const LAST: NaiveDate = match NaiveDate::from_ymd_opt(2027, 12, 31) {
+pub const LAST: NaiveDate = match NaiveDate::from_ymd_opt(2030, 12, 31) {
     Some(d) => d,
     None => panic!(),
 };
@@ -472,6 +474,153 @@ const EQUITY_CSV: &str = EMBEDDED_CSV;
 const ENERGY_CSV: &str = include_str!("../../data/cme_energy_holidays.csv");
 const METALS_CSV: &str = include_str!("../../data/cme_metals_holidays.csv");
 
+/// First year of the BP-1b rule projection. The sourced CSVs end 2027-12-31.
+pub const RULE_FIRST_YEAR: i32 = 2028;
+/// Last year of the BP-1b rule projection.
+pub const RULE_LAST_YEAR: i32 = 2030;
+const RULE_SOURCE: &str = "rule: BP-1b projection of 2026-2027 CME pattern";
+
+fn nth_weekday(y: i32, m: u32, wd: Weekday, n: u8) -> NaiveDate {
+    NaiveDate::from_weekday_of_month_opt(y, m, wd, n).expect("nth weekday exists")
+}
+
+fn last_weekday(y: i32, m: u32, wd: Weekday) -> NaiveDate {
+    NaiveDate::from_weekday_of_month_opt(y, m, wd, 5).unwrap_or_else(|| nth_weekday(y, m, wd, 4))
+}
+
+/// Gregorian Easter Sunday (anonymous Gregorian algorithm).
+fn easter(y: i32) -> NaiveDate {
+    let a = y % 19;
+    let b = y / 100;
+    let c = y % 100;
+    let d0 = b / 4;
+    let e = b % 4;
+    let f = (b + 8) / 25;
+    let g = (b - f + 1) / 3;
+    let h = (19 * a + b - d0 - g + 15) % 30;
+    let i = c / 4;
+    let k = c % 4;
+    let l = (32 + 2 * e + 2 * i - h - k) % 7;
+    let m = (a + 11 * h + 22 * l) / 451;
+    let month = (h + l - 7 * m + 114) / 31;
+    let day = (h + l - 7 * m + 114) % 31 + 1;
+    NaiveDate::from_ymd_opt(y, month as u32, day as u32).expect("easter date")
+}
+
+/// Saturday holidays are observed Friday, Sunday holidays Monday.
+fn observed(x: NaiveDate) -> NaiveDate {
+    match x.weekday() {
+        Weekday::Sat => x - Duration::days(1),
+        Weekday::Sun => x + Duration::days(1),
+        _ => x,
+    }
+}
+
+/// The holiday rows of one group for the years `first..=last`, projected from the 2026-2027 CME
+/// pattern (BP-1b), as CSV rows (no header) in date order.
+///
+/// - Observance: Saturday to Friday, Sunday to Monday; New Year's Day on a Saturday has no row.
+/// - Equity: Monday holidays, Juneteenth, July 4 and Thanksgiving halt 13:00; the day after
+///   Thanksgiving and Christmas Eve 13:15; July 3 13:15 when July 4 falls Tuesday-Friday.
+/// - Energy and metals: Monday holidays, Thanksgiving and a Monday-Thursday Juneteenth or July 4
+///   halt 14:30, a Friday one 13:00; the day after Thanksgiving 14:45; Christmas Eve 13:45.
+/// - Good Friday, New Year's Day and Christmas (observed) are closed.
+/// - Reopen: 18:00 the same day on Monday-Thursday unless the next day is closed; none on Friday.
+/// - Not modeled: one-off exceptions such as the 2026-04-03 equity NFP halt at 09:15.
+pub fn rule_rows_csv(g: Group, first: i32, last: i32) -> String {
+    let equity = g == Group::Equity;
+    let mon_halt = if equity { "13:00" } else { "14:30" };
+    let fixed_halt = |x: NaiveDate| -> &'static str {
+        if equity || x.weekday() == Weekday::Fri {
+            "13:00"
+        } else {
+            "14:30"
+        }
+    };
+    // (date, closed, halt)
+    let mut rows: Vec<(NaiveDate, bool, &'static str)> = Vec::new();
+    for y in first..=last {
+        let nyd = d(y, 1, 1);
+        match nyd.weekday() {
+            Weekday::Sat => {}
+            Weekday::Sun => rows.push((d(y, 1, 2), true, "")),
+            _ => rows.push((nyd, true, "")),
+        }
+        rows.push((nth_weekday(y, 1, Weekday::Mon, 3), false, mon_halt));
+        rows.push((nth_weekday(y, 2, Weekday::Mon, 3), false, mon_halt));
+        rows.push((easter(y) - Duration::days(2), true, ""));
+        rows.push((last_weekday(y, 5, Weekday::Mon), false, mon_halt));
+        let june19 = observed(d(y, 6, 19));
+        rows.push((june19, false, fixed_halt(june19)));
+        let july4 = d(y, 7, 4);
+        if equity && matches!(july4.weekday(), Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri) {
+            rows.push((d(y, 7, 3), false, "13:15"));
+        }
+        let july4o = observed(july4);
+        rows.push((july4o, false, fixed_halt(july4o)));
+        rows.push((nth_weekday(y, 9, Weekday::Mon, 1), false, mon_halt));
+        let thanks = nth_weekday(y, 11, Weekday::Thu, 4);
+        rows.push((thanks, false, mon_halt));
+        rows.push((thanks + Duration::days(1), false, if equity { "13:15" } else { "14:45" }));
+        let xmas = d(y, 12, 25);
+        let eve = d(y, 12, 24);
+        match xmas.weekday() {
+            Weekday::Sat => rows.push((eve, true, "")),
+            Weekday::Sun => rows.push((d(y, 12, 26), true, "")),
+            _ => {
+                if eve.weekday() != Weekday::Sun {
+                    rows.push((eve, false, if equity { "13:15" } else { "13:45" }));
+                }
+                rows.push((xmas, true, ""));
+            }
+        }
+    }
+    rows.sort_by_key(|r| r.0);
+    let closed: std::collections::HashSet<NaiveDate> = rows.iter().filter(|r| r.1).map(|r| r.0).collect();
+    let mut out = String::new();
+    for (date, is_closed, halt) in &rows {
+        let mon_thu = !matches!(date.weekday(), Weekday::Fri | Weekday::Sat | Weekday::Sun);
+        let reopen = if mon_thu && !closed.contains(&(*date + Duration::days(1))) { "18:00" } else { "" };
+        let status = if *is_closed { "closed" } else { "early_halt" };
+        out.push_str(&format!("{},{status},{halt},{reopen},,{RULE_SOURCE},\n", date.format("%Y-%m-%d")));
+    }
+    out
+}
+
+/// True on a US exchange holiday (observed): New Year's Day, MLK Day, Presidents Day, Good
+/// Friday, Memorial Day, Juneteenth (from 2022), July 4, Labor Day, Thanksgiving, Christmas.
+/// Globex still trades on most of these (an early halt), but they are not CME business days
+/// for expiry rules (no settlement). A New Year's Day falling on Saturday is not observed.
+pub fn is_us_exchange_holiday(x: NaiveDate) -> bool {
+    let y = x.year();
+    let mut days = vec![
+        nth_weekday(y, 1, Weekday::Mon, 3),
+        nth_weekday(y, 2, Weekday::Mon, 3),
+        easter(y) - Duration::days(2),
+        last_weekday(y, 5, Weekday::Mon),
+        observed(d(y, 7, 4)),
+        nth_weekday(y, 9, Weekday::Mon, 1),
+        nth_weekday(y, 11, Weekday::Thu, 4),
+        observed(d(y, 12, 25)),
+    ];
+    if y >= 2022 {
+        days.push(observed(d(y, 6, 19)));
+    }
+    let nyd = d(y, 1, 1);
+    if nyd.weekday() != Weekday::Sat {
+        days.push(observed(nyd));
+    }
+    days.contains(&x)
+}
+
+/// A group's sourced CSV with the BP-1b rule rows appended.
+pub fn csv_with_rules(csv: &str, g: Group) -> String {
+    let mut text = csv.trim_end().to_string();
+    text.push('\n');
+    text.push_str(&rule_rows_csv(g, RULE_FIRST_YEAR, RULE_LAST_YEAR));
+    text
+}
+
 /// Session-rule eras of the equity group (ES, NQ, YM, RTY and their micros). The last era ends 2021-06-25; every trade
 /// date after it follows the default rule (open 18:00 ET, close 17:00 ET, no halt inside), byte for byte.
 ///
@@ -590,12 +739,17 @@ fn get_table() -> &'static HolidayTable {
 pub fn table_for(g: Group) -> &'static HolidayTable {
     match g {
         Group::Equity => {
-            TABLE.get_or_init(|| parse_holiday_table_eras(EQUITY_CSV, EQUITY_ERAS).expect("valid embedded CME holiday table"))
+            TABLE.get_or_init(|| {
+                parse_holiday_table_eras(&csv_with_rules(EQUITY_CSV, Group::Equity), EQUITY_ERAS)
+                    .expect("valid embedded CME holiday table")
+            })
         }
-        Group::Energy => ENERGY_TABLE
-            .get_or_init(|| parse_holiday_table(ENERGY_CSV).expect("valid embedded CME energy holiday table")),
-        Group::Metals => METALS_TABLE
-            .get_or_init(|| parse_holiday_table(METALS_CSV).expect("valid embedded CME metals holiday table")),
+        Group::Energy => ENERGY_TABLE.get_or_init(|| {
+            parse_holiday_table(&csv_with_rules(ENERGY_CSV, Group::Energy)).expect("valid embedded CME energy holiday table")
+        }),
+        Group::Metals => METALS_TABLE.get_or_init(|| {
+            parse_holiday_table(&csv_with_rules(METALS_CSV, Group::Metals)).expect("valid embedded CME metals holiday table")
+        }),
     }
 }
 
@@ -884,11 +1038,64 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
+    /// The first four CSV fields (date, status, halt, reopen) of rows in `[from, to]`.
+    fn key_rows(csv: &str, from: &str, to: &str) -> Vec<String> {
+        csv.lines()
+            .filter(|l| l.len() >= 10 && &l[..10] >= from && &l[..10] <= to)
+            .map(|l| l.split(',').take(4).collect::<Vec<_>>().join(","))
+            .collect()
+    }
+
+    /// BP-1b: the rules reproduce the sourced 2026-2027 rows of every group, except the one-off
+    /// 2026-04-03 equity NFP halt (09:15) which no rule models.
+    #[test]
+    fn test_rule_rows_reproduce_sourced_2026_2027() {
+        for (g, csv) in [(Group::Equity, EQUITY_CSV), (Group::Energy, ENERGY_CSV), (Group::Metals, METALS_CSV)] {
+            let mut want = key_rows(csv, "2026-01-01", "2027-12-31");
+            if g == Group::Equity {
+                want.retain(|r| !r.starts_with("2026-04-03"));
+            }
+            let got: Vec<String> = key_rows(&rule_rows_csv(g, 2026, 2027), "2026-01-01", "2027-12-31")
+                .into_iter()
+                .filter(|r| !(g == Group::Equity && r.starts_with("2026-04-03")))
+                .collect();
+            assert_eq!(got, want, "{}", g.name());
+        }
+    }
+
+    #[test]
+    fn test_rule_rows_2028_2030_spot_checks() {
+        let eq = rule_rows_csv(Group::Equity, 2028, 2030);
+        let en = rule_rows_csv(Group::Energy, 2028, 2030);
+        let has = |csv: &str, row: &str| csv.lines().any(|l| l.starts_with(row));
+        // Easter 2028-04-16, 2029-04-01, 2030-04-21: Good Friday closed.
+        assert!(has(&eq, "2028-04-14,closed,,"));
+        assert!(has(&eq, "2029-03-30,closed,,"));
+        assert!(has(&eq, "2030-04-19,closed,,"));
+        // 2028-12-25 is a Monday: Christmas Eve is a Sunday, no row; Christmas closed.
+        assert!(!has(&eq, "2028-12-24"));
+        assert!(has(&eq, "2028-12-25,closed,,18:00"));
+        // 2028-01-01 is a Saturday: no New Year row. 2028-07-04 Tuesday: equity July 3 13:15.
+        assert!(!has(&eq, "2027-12-31") && !has(&eq, "2028-01-01"));
+        assert!(has(&eq, "2028-07-03,early_halt,13:15,18:00"));
+        assert!(!has(&en, "2028-07-03"));
+        // 2027-style Friday observance: 2030-07-04 Thursday (no shift); Juneteenth 2027 Sat -> Fri.
+        assert!(has(&en, "2030-07-04,early_halt,14:30,18:00"));
+        // Friday holiday in energy halts 13:00 with no reopen; 2029-01-01 Monday closed.
+        assert!(has(&en, "2028-06-19,early_halt,14:30,18:00"));
+        assert!(has(&en, "2029-01-01,closed,,18:00"));
+        // Thanksgiving 2030-11-28, day after 14:45 (Friday, no reopen).
+        assert!(has(&en, "2030-11-29,early_halt,14:45,,"));
+        assert!(is_trade_date(ymd(2030, 12, 31)).unwrap());
+        assert!(!is_trade_date(ymd(2030, 12, 25)).unwrap());
+    }
+
     #[test]
     fn test_embedded_table_row_count() {
-        assert_eq!(table_row_count(), 252);
+        // 252 sourced rows (2006-2027) + 37 BP-1b rule rows (2028: 11, 2029: 13, 2030: 13).
+        assert_eq!(table_row_count(), 289);
         assert_eq!(first_date(), ymd(2006, 1, 1));
-        assert_eq!(last_date(), ymd(2027, 12, 31));
+        assert_eq!(last_date(), ymd(2030, 12, 31));
     }
 
     #[test]
@@ -1031,16 +1238,16 @@ mod tests {
     #[test]
     fn test_out_of_range_refusals() {
         let before = ymd(2005, 12, 31);
-        let after = ymd(2028, 1, 1);
+        let after = ymd(2031, 1, 1);
         assert!(matches!(is_trade_date(before), Err(GlobexError::OutOfRange(_))));
         assert!(matches!(is_trade_date(after), Err(GlobexError::OutOfRange(_))));
         assert!(matches!(session_open(before), Err(GlobexError::OutOfRange(_))));
         assert!(matches!(session_close(after), Err(GlobexError::OutOfRange(_))));
-        assert!(matches!(next_session(ymd(2027, 12, 31)), Err(GlobexError::OutOfRange(_))));
+        assert!(matches!(next_session(ymd(2030, 12, 31)), Err(GlobexError::OutOfRange(_))));
         assert!(matches!(previous_session(ymd(2006, 1, 1)), Err(GlobexError::OutOfRange(_))));
 
         let t_before = Utc.with_ymd_and_hms(2005, 12, 31, 23, 59, 59).unwrap();
-        let t_after = Utc.with_ymd_and_hms(2028, 1, 1, 6, 0, 0).unwrap();
+        let t_after = Utc.with_ymd_and_hms(2031, 1, 1, 6, 0, 0).unwrap();
         assert!(matches!(session_at(t_before), Err(GlobexError::OutOfRangeInstant(_))));
         assert!(matches!(session_at(t_after), Err(GlobexError::OutOfRangeInstant(_))));
 
