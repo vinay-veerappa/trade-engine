@@ -195,8 +195,8 @@ repo, **G2** = an integration test against a spawned peer (ntx fake, riskguard-s
   of the Tradovate truth (D3 applied across repos).
 - **ntx observer:** `observer.rs` already pushes to riskguard (`RG_SERVICE_URL`).
   Membership moves to the engine path. The observer keeps its current fill and P&L
-  push until phase 4b retires it, after a G3 week with both paths compared and no
-  mismatch.
+  push; phase 4b retires its membership role once the 4b tests are green (no soak
+  window: owner ruling 2026-11-12, cut over on green tests and fix forward).
 - **Instruments:** riskguard tick and value math switches to the phase 1 table. Its
   own copy is retired (kept as reference, with a gate test that nothing live imports
   it).

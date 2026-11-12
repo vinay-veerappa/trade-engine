@@ -59,4 +59,4 @@ Two sub-slices, two commits, in this order.
 
 - Deploy. Turning the sink on, restarting rg_service, or anything live needs the owner,
   flat, then `isArmed` and the three switches checked.
-- 4b (retiring the ntx observer's membership push) waits for a one-week G3 comparison.
+- 4b (retiring the ntx observer's membership role) is its own brief, `BP-4B-RETIRE-OBSERVER-MEMBERSHIP.md`.
