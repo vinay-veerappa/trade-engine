@@ -716,6 +716,37 @@ pub fn instruments_json() -> String {
     serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Schema tag of the exported instrument file (BP-4c). Bump it when the shape changes.
+pub const INSTRUMENT_EXPORT_SCHEMA: &str = "te-futures-instruments/1";
+
+/// The BP-1 instrument table as the committed export file (BP-4c, design 6.1 / D3):
+/// `{"schema", "instruments": [{"root","exchange","currency","tick_size","point_value",
+/// "tick_value"}, ...]}`, pretty-printed, every number a string (D6), table order, LF line
+/// endings, one trailing newline. Generated from [`FUTURE_SPECS`] only, so there is no hand
+/// copy: `tests/instrument_table_export.rs` fails when the committed file differs, and
+/// riskguard keeps a byte-identical copy that its own gate compares. `session` is left out
+/// on purpose: it comes from the calendar, not from the table, and a consumer that only needs
+/// tick math must not go stale when a calendar changes.
+pub fn instrument_export_json() -> String {
+    let rows: Vec<serde_json::Value> = FUTURE_SPECS
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "root": s.root,
+                "exchange": s.exchange,
+                "currency": s.currency,
+                "tick_size": s.tick_size_str,
+                "point_value": s.point_value_str,
+                "tick_value": s.tick_value_str,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({ "schema": INSTRUMENT_EXPORT_SCHEMA, "instruments": rows });
+    let mut text = serde_json::to_string_pretty(&doc).unwrap_or_default();
+    text.push('\n');
+    text
+}
+
 /// One row of the table for one root, or a refusal.
 pub fn spec_json(root: &str) -> R<String> {
     let spec: FutureSpec = spec_for_root(root)?;

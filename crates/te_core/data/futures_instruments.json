@@ -1,0 +1,101 @@
+{
+  "instruments": [
+    {
+      "currency": "USD",
+      "exchange": "CME",
+      "point_value": "20",
+      "root": "NQ",
+      "tick_size": "0.25",
+      "tick_value": "5.00"
+    },
+    {
+      "currency": "USD",
+      "exchange": "CME",
+      "point_value": "2",
+      "root": "MNQ",
+      "tick_size": "0.25",
+      "tick_value": "0.50"
+    },
+    {
+      "currency": "USD",
+      "exchange": "CME",
+      "point_value": "50",
+      "root": "ES",
+      "tick_size": "0.25",
+      "tick_value": "12.50"
+    },
+    {
+      "currency": "USD",
+      "exchange": "CME",
+      "point_value": "5",
+      "root": "MES",
+      "tick_size": "0.25",
+      "tick_value": "1.25"
+    },
+    {
+      "currency": "USD",
+      "exchange": "CBOT",
+      "point_value": "5",
+      "root": "YM",
+      "tick_size": "1.0",
+      "tick_value": "5.00"
+    },
+    {
+      "currency": "USD",
+      "exchange": "CBOT",
+      "point_value": "0.5",
+      "root": "MYM",
+      "tick_size": "1.0",
+      "tick_value": "0.50"
+    },
+    {
+      "currency": "USD",
+      "exchange": "CME",
+      "point_value": "50",
+      "root": "RTY",
+      "tick_size": "0.1",
+      "tick_value": "5.00"
+    },
+    {
+      "currency": "USD",
+      "exchange": "CME",
+      "point_value": "5",
+      "root": "M2K",
+      "tick_size": "0.1",
+      "tick_value": "0.50"
+    },
+    {
+      "currency": "USD",
+      "exchange": "NYMEX",
+      "point_value": "1000",
+      "root": "CL",
+      "tick_size": "0.01",
+      "tick_value": "10.00"
+    },
+    {
+      "currency": "USD",
+      "exchange": "NYMEX",
+      "point_value": "100",
+      "root": "MCL",
+      "tick_size": "0.01",
+      "tick_value": "1.00"
+    },
+    {
+      "currency": "USD",
+      "exchange": "COMEX",
+      "point_value": "100",
+      "root": "GC",
+      "tick_size": "0.1",
+      "tick_value": "10.00"
+    },
+    {
+      "currency": "USD",
+      "exchange": "COMEX",
+      "point_value": "10",
+      "root": "MGC",
+      "tick_size": "0.1",
+      "tick_value": "1.00"
+    }
+  ],
+  "schema": "te-futures-instruments/1"
+}
