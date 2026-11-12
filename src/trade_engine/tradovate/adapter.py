@@ -142,8 +142,10 @@ class TradovateAdapter:
         clock,
         ledger=None,
         trading_day: Callable[[datetime], date] | None = None,
+        on_poll=None,
     ) -> None:
         self._client = client
+        self._on_poll = on_poll
         self._clock = clock
         self._ledger = ledger
         self._trading_day = trading_day
@@ -216,7 +218,11 @@ class TradovateAdapter:
     def poller(self) -> PollAndDiff:
         if self._poller is None:
             self._poller = PollAndDiff(
-                self, clock=self._clock, ledger=self._ledger, stale_after=self.stale_after
+                self,
+                clock=self._clock,
+                ledger=self._ledger,
+                stale_after=self.stale_after,
+                on_poll=self._on_poll,
             )
         return self._poller
 
