@@ -124,11 +124,11 @@ mod energy {
     fn range_edges() {
         let cl = cal("CL");
         assert_eq!(cl.first_date(), d(2009, 1, 1));
-        assert_eq!(cl.last_date(), d(2027, 12, 31));
+        assert_eq!(cl.last_date(), d(2030, 12, 31));
         assert!(cl.is_closed(d(2009, 1, 1)).unwrap());
         assert!(cl.is_session(d(2009, 1, 2)).unwrap());
         assert!(matches!(cl.is_session(d(2008, 12, 31)), Err(GlobexError::RootOutOfRange { root: "CL", .. })));
-        assert!(matches!(cl.is_session(d(2028, 1, 1)), Err(GlobexError::RootOutOfRange { root: "CL", .. })));
+        assert!(matches!(cl.is_session(d(2031, 1, 1)), Err(GlobexError::RootOutOfRange { root: "CL", .. })));
         assert!(matches!(
             cl.session_at(et(2008, 12, 31, 12, 0)),
             Err(GlobexError::RootOutOfRangeInstant { root: "CL", .. })
@@ -196,9 +196,9 @@ mod metals {
     fn range_edges() {
         let gc = cal("GC");
         assert_eq!(gc.first_date(), d(2009, 1, 1));
-        assert_eq!(gc.last_date(), d(2027, 12, 31));
+        assert_eq!(gc.last_date(), d(2030, 12, 31));
         assert!(matches!(gc.is_session(d(2008, 12, 31)), Err(GlobexError::RootOutOfRange { root: "GC", .. })));
-        assert!(matches!(gc.is_session(d(2028, 1, 1)), Err(GlobexError::RootOutOfRange { root: "GC", .. })));
+        assert!(matches!(gc.is_session(d(2031, 1, 1)), Err(GlobexError::RootOutOfRange { root: "GC", .. })));
         // MGC takes GC's range, not its own 2010-10-04 first trade date (mini data is served under the micro symbol)
         let mgc = cal("MGC");
         assert_eq!(mgc.first_date(), gc.first_date());
@@ -258,7 +258,7 @@ mod equity {
         for root in ["ES", "NQ"] {
             let c = cal(root);
             assert_eq!(c.first_date(), d(2006, 1, 1), "{root}");
-            assert_eq!(c.last_date(), d(2027, 12, 31), "{root}");
+            assert_eq!(c.last_date(), d(2030, 12, 31), "{root}");
         }
         // a micro takes its mini's range, not its 2019-05-06 listing (mini data is served under the micro symbol)
         for (micro, mini) in [("MNQ", "NQ"), ("MES", "ES"), ("MYM", "YM"), ("M2K", "RTY")] {
@@ -303,7 +303,7 @@ fn unknown_roots_refuse_and_all_supported_roots_resolve() {
 /// halt inside weekday sessions to 2021-06-25, the default rule after. Energy and metals have none.
 mod eras {
     use super::*;
-    use te_core::calendar::globex::{parse_holiday_table, table_for, EQUITY_ERAS};
+    use te_core::calendar::globex::{csv_with_rules, parse_holiday_table, table_for, EQUITY_ERAS};
 
     #[test]
     fn friday_closes_1615_until_2012_11_16_then_1700() {
@@ -354,7 +354,7 @@ mod eras {
     #[test]
     fn the_default_rule_is_byte_identical_after_the_last_era() {
         assert_eq!(EQUITY_ERAS.last().unwrap().to, d(2021, 6, 25));
-        let plain = parse_holiday_table(include_str!("../data/cme_equity_holidays.csv")).unwrap();
+        let plain = parse_holiday_table(&csv_with_rules(include_str!("../data/cme_equity_holidays.csv"), Group::Equity)).unwrap();
         let eras = table_for(Group::Equity);
         let (mut n, mut differs_before) = (0, 0);
         for (a, b) in plain.sessions.iter().zip(eras.sessions.iter()) {

@@ -31,14 +31,15 @@
 //!
 //! Dated rows for 2024-2030, computed from the cited rules and bounded by
 //! [`TABLE_FIRST_YEAR`]/[`TABLE_LAST_YEAR`]. A contract month outside the table is
-//! refused, never extrapolated. Holiday shifts are not modeled (the Globex calendar's
-//! holiday table ends 2027-12-31, so using it here would refuse 2028-2030); every
-//! business-day rule below therefore counts weekdays only.
+//! refused, never extrapolated. A business day is a trade date of the root's Globex
+//! calendar (2028-2030 from the BP-1b rule rows) that is not a US exchange holiday
+//! ([`is_us_exchange_holiday`]): Globex trades a shortened session on MLK Day or Thanksgiving,
+//! but CME does not settle, so those days do not count toward an expiry rule.
 //!
 //! | Cycle | Expiry rule | Roll |
 //! |---|---|---|
-//! | Index (NQ, MNQ, ES, MES, YM, MYM, RTY, M2K), H/M/U/Z only | Third Friday of the contract month (CME equity-index last trade day, 9:30 a.m. ET) | 8 calendar days before expiry |
-//! | Energy (CL, MCL), all 12 months | Three business days before the 25th of the month preceding delivery (NYMEX Rule 200.C) | 5 calendar days before expiry |
+//! | Index (NQ, MNQ, ES, MES, YM, MYM, RTY, M2K), H/M/U/Z only | Third Friday of the contract month (CME equity-index last trade day, 9:30 a.m. ET); the preceding business day if that Friday is not one (Juneteenth 2026 and 2027) | 8 calendar days before expiry |
+//! | Energy (CL, MCL), all 12 months | Three business days before the 25th of the month preceding delivery, four if the 25th is not a business day (NYMEX Rule 200.C) | 5 calendar days before expiry |
 //! | Metals (GC, MGC), all 12 months | Third-to-last business day of the contract month (COMEX gold last trade day) | 5 calendar days before expiry |
 //!
 //! # Wire shape
@@ -47,6 +48,8 @@
 //! array, one row per root, every number as a string (D6).
 
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
+
+use crate::calendar::globex::{is_us_exchange_holiday, GlobexCalendar};
 
 use crate::ledger::model::{err, ContractMonth, FutureContract, LErr, R};
 use crate::sim::tick::{month_from_code, spec_for_root, FutureSpec, FUTURE_SPECS};
@@ -496,8 +499,23 @@ fn cycle_for_root(root: &'static str) -> Cycle {
     }
 }
 
-fn is_business_day(d: NaiveDate) -> bool {
-    !matches!(d.weekday(), Weekday::Sat | Weekday::Sun)
+/// A CME business day for `root`'s expiry rules: a Globex trade date that is not a US
+/// exchange holiday.
+fn is_business_day(cal: &GlobexCalendar, d: NaiveDate) -> R<bool> {
+    let trade = cal
+        .is_trade_date(d)
+        .map_err(|e| lerr("unsupported", format!("{}: {e}", cal.root())))?;
+    Ok(trade && !is_us_exchange_holiday(d))
+}
+
+fn previous_business_day_on_or_before(cal: &GlobexCalendar, date: NaiveDate) -> R<NaiveDate> {
+    let mut d = date;
+    while !is_business_day(cal, d)? {
+        d = d
+            .pred_opt()
+            .ok_or_else(|| lerr("value", "date out of range"))?;
+    }
+    Ok(d)
 }
 
 fn days(n: i64) -> Duration {
@@ -526,25 +544,25 @@ fn last_day_of_month(year: i32, month: u32) -> R<NaiveDate> {
         .ok_or_else(|| lerr("value", "date out of range"))
 }
 
-fn nth_business_day_before(date: NaiveDate, n: u32) -> R<NaiveDate> {
+fn nth_business_day_before(cal: &GlobexCalendar, date: NaiveDate, n: u32) -> R<NaiveDate> {
     let mut d = date;
     let mut seen = 0;
     while seen < n {
         d = d
             .pred_opt()
             .ok_or_else(|| lerr("value", "date out of range"))?;
-        if is_business_day(d) {
+        if is_business_day(cal, d)? {
             seen += 1;
         }
     }
     Ok(d)
 }
 
-fn nth_last_business_day(year: i32, month: u32, n: u32) -> R<NaiveDate> {
+fn nth_last_business_day(cal: &GlobexCalendar, year: i32, month: u32, n: u32) -> R<NaiveDate> {
     let mut d = last_day_of_month(year, month)?;
     let mut seen = 0;
     loop {
-        if is_business_day(d) {
+        if is_business_day(cal, d)? {
             seen += 1;
             if seen == n {
                 return Ok(d);
@@ -589,15 +607,20 @@ pub fn contract_schedule(root: &str, month: ContractMonth) -> R<ContractSchedule
             ),
         );
     }
+    let cal = GlobexCalendar::for_root(spec.root)
+        .map_err(|e| lerr("unsupported", format!("{}: {e}", spec.root)))?;
     let (expiry, roll_date) = match cycle {
-        // Equity index: last trade day is the third Friday of the contract month; the
-        // volume roll happens 8 calendar days earlier.
+        // Equity index: last trade day is the third Friday of the contract month, or the
+        // business day before it when that Friday is a holiday; the volume roll happens 8
+        // calendar days earlier.
         Cycle::Index => {
-            let expiry = nth_weekday(month.year, month.month, Weekday::Fri, 3)?;
+            let third_friday = nth_weekday(month.year, month.month, Weekday::Fri, 3)?;
+            let expiry = previous_business_day_on_or_before(&cal, third_friday)?;
             (expiry, expiry - days(8))
         }
         // NYMEX Rule 200.C (CL, and MCL on the same rule): last trade day is three
-        // business days before the 25th of the month preceding the delivery month.
+        // business days before the 25th of the month preceding the delivery month, four
+        // when the 25th is not a business day.
         Cycle::Energy => {
             let (py, pm) = if month.month == 1 {
                 (month.year - 1, 12)
@@ -606,13 +629,14 @@ pub fn contract_schedule(root: &str, month: ContractMonth) -> R<ContractSchedule
             };
             let the_25th = NaiveDate::from_ymd_opt(py, pm, 25)
                 .ok_or_else(|| lerr("value", "date out of range"))?;
-            let expiry = nth_business_day_before(the_25th, 3)?;
+            let n = if is_business_day(&cal, the_25th)? { 3 } else { 4 };
+            let expiry = nth_business_day_before(&cal, the_25th, n)?;
             (expiry, expiry - days(5))
         }
         // COMEX gold: last trade day is the third-to-last business day of the contract
         // month.
         Cycle::Metals => {
-            let expiry = nth_last_business_day(month.year, month.month, 3)?;
+            let expiry = nth_last_business_day(&cal, month.year, month.month, 3)?;
             (expiry, expiry - days(5))
         }
     };
@@ -979,9 +1003,29 @@ mod tests {
         let cl = contract_schedule("CL", ContractMonth::new(2026, 3).unwrap()).unwrap();
         assert_eq!(cl.expiry, day(2026, 2, 20));
         assert_eq!(cl.roll_date, day(2026, 2, 15));
-        // January rolls into the prior December.
+        // January rolls into the prior December. 2025-12-25 is Christmas, so the 25th is not a
+        // business day and the rule counts four: 24, 23, 22, 19 -> 2025-12-19 (CLF26).
         let cljan = contract_schedule("CL", ContractMonth::new(2026, 1).unwrap()).unwrap();
-        assert_eq!(cljan.expiry, day(2025, 12, 22));
+        assert_eq!(cljan.expiry, day(2025, 12, 19));
+        // CLZ27: the 25th is Thanksgiving 2027 (Globex trades, CME does not settle): four
+        // business days before it are 24, 23, 22, 19.
+        let clz27 = contract_schedule("CL", ContractMonth::new(2027, 12).unwrap()).unwrap();
+        assert_eq!(clz27.expiry, day(2027, 11, 19));
+        // CLZ29 (rule years): the 25th is a Sunday and Thanksgiving is the 22nd, so the four
+        // business days are 23, 21, 20, 19.
+        let clz29 = contract_schedule("CL", ContractMonth::new(2029, 12).unwrap()).unwrap();
+        assert_eq!(clz29.expiry, day(2029, 11, 19));
+        // Index: Juneteenth falls on the third Friday in 2026 and (observed) 2027, so the
+        // last trade day is the Thursday before.
+        let nqm26 = contract_schedule("NQ", ContractMonth::new(2026, 6).unwrap()).unwrap();
+        assert_eq!(nqm26.expiry, day(2026, 6, 18));
+        assert_eq!(nqm26.roll_date, day(2026, 6, 10));
+        let esm27 = contract_schedule("ES", ContractMonth::new(2027, 6).unwrap()).unwrap();
+        assert_eq!(esm27.expiry, day(2027, 6, 17));
+        // Metals in a rule year: Christmas 2030 is a Wednesday, so GCZ30's third-to-last
+        // business day skips it: 31, 30, 27.
+        let gcz30 = contract_schedule("GC", ContractMonth::new(2030, 12).unwrap()).unwrap();
+        assert_eq!(gcz30.expiry, day(2030, 12, 27));
         // Metals: third-to-last business day of the contract month.
         let gc = contract_schedule("GC", ContractMonth::new(2026, 2).unwrap()).unwrap();
         assert_eq!(gc.expiry, day(2026, 2, 25));
