@@ -42,6 +42,17 @@ def interval(seconds: int) -> int:
     return _call(rs.accounts_interval, seconds)
 
 
+def nt8_route(name: str) -> dict[str, Any]:
+    """One NT8 account name to its key, local flag and `{platform: nt8}` route (BP-6a)."""
+    return json.loads(_call(rs.nt8_route, name))
+
+
+def nt8_routes_from_text(text: str) -> list[dict[str, Any]]:
+    """The bridge's account-list JSON text to mapped keys and routes (BP-6a)."""
+    return json.loads(_call(rs.nt8_routes_from_text, text))
+
+
+
 def check_snapshot(snapshot: dict[str, Any]) -> None:
     """Validate a snapshot's wire form with the one Rust rule set."""
     _call(rs.accounts_snapshot_check, _text(snapshot))
@@ -84,6 +95,8 @@ __all__ = [
     "is_stale",
     "key",
     "mask",
+    "nt8_route",
+    "nt8_routes_from_text",
     "replay",
     "rs",
     "check_snapshot",
