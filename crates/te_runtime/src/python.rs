@@ -12,6 +12,32 @@ extern "system" {
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
     fn GetModuleFileNameW(module: *mut c_void, buffer: *mut u16, size: u32) -> u32;
+    fn LoadLibraryExW(path: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+}
+
+const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x0000_1000;
+
+/// Stable-ABI extension modules (curl_cffi's `_wrapper.pyd`) link against
+/// `python3.dll`, which CPython ships in its home but not beside te.exe. Load
+/// it first so the import resolves the already-loaded forwarder instead of a
+/// dependency the loader cannot find. A missing copy must not fail startup.
+unsafe fn preload_stable_abi(config: &Config) {
+    let path = config.python_home.join("python3.dll");
+    if !path.is_file() {
+        eprintln!("warning: stable-ABI forwarder missing: {}", path.display());
+        return;
+    }
+    let module = LoadLibraryExW(
+        wide(&path).as_ptr(),
+        std::ptr::null_mut(),
+        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+    );
+    if module.is_null() {
+        eprintln!(
+            "warning: could not preload stable-ABI forwarder: {}",
+            path.display()
+        );
+    }
 }
 
 fn wide(path: &Path) -> Vec<u16> {
@@ -62,6 +88,7 @@ unsafe fn initialize(config: &Config) -> Result<(), Value> {
     if ffi::Py_IsInitialized() != 0 {
         return Err(error("interpreter already initialized"));
     }
+    preload_stable_abi(config);
     trade_engine_rs::register_embedded_module().map_err(error)?;
     let mut raw = std::mem::MaybeUninit::<ffi::PyConfig>::uninit();
     ffi::PyConfig_InitIsolatedConfig(raw.as_mut_ptr());
