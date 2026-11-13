@@ -42,6 +42,11 @@ def interval(seconds: int) -> int:
     return _call(rs.accounts_interval, seconds)
 
 
+def max_records() -> int:
+    """The design's hard cap on one broker's account list (2,000), from Rust."""
+    return rs.accounts_max_records()
+
+
 def check_snapshot(snapshot: dict[str, Any]) -> None:
     """Validate a snapshot's wire form with the one Rust rule set."""
     _call(rs.accounts_snapshot_check, _text(snapshot))
@@ -84,6 +89,7 @@ __all__ = [
     "is_stale",
     "key",
     "mask",
+    "max_records",
     "replay",
     "rs",
     "check_snapshot",

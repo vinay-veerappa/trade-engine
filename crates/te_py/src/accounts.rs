@@ -33,6 +33,12 @@ fn accounts_interval(seconds: i64) -> PyResult<i64> {
     ac::interval_seconds(seconds as i128).map(|v| v as i64).map_err(refuse)
 }
 
+/// The design's hard cap on one broker's account list (§6.8a): read, never restated.
+#[pyfunction]
+fn accounts_max_records() -> usize {
+    ac::MAX_RECORDS
+}
+
 #[pyfunction]
 fn accounts_snapshot_check(snapshot: &str) -> PyResult<()> {
     ac::snapshot_from_json(snapshot).map(|_| ()).map_err(refuse)
@@ -207,6 +213,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(accounts_key, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_display, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_interval, m)?)?;
+    m.add_function(wrap_pyfunction!(accounts_max_records, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_snapshot_check, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_diff, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_is_stale, m)?)?;

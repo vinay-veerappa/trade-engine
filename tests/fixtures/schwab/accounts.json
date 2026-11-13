@@ -1,0 +1,29 @@
+[
+  {
+    "securitiesAccount": {
+      "type": "MARGIN",
+      "accountNumber": "ACCT-TEST-194",
+      "isDayTrader": false,
+      "isClosingOnlyRestricted": false,
+      "roundTrips": 0
+    }
+  },
+  {
+    "securitiesAccount": {
+      "type": "IRA",
+      "accountNumber": "ACCT-TEST-195",
+      "isDayTrader": false,
+      "isClosingOnlyRestricted": false,
+      "roundTrips": 0
+    }
+  },
+  {
+    "securitiesAccount": {
+      "type": "CASH",
+      "accountNumber": "ACCT-TEST-196",
+      "isDayTrader": false,
+      "isClosingOnlyRestricted": false,
+      "roundTrips": 0
+    }
+  }
+]
