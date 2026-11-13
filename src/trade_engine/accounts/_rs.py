@@ -42,6 +42,21 @@ def interval(seconds: int) -> int:
     return _call(rs.accounts_interval, seconds)
 
 
+def nt8_route(name: str) -> dict[str, Any]:
+    """One NT8 account name to its key, local flag and `{platform: nt8}` route (BP-6a)."""
+    return json.loads(_call(rs.nt8_route, name))
+
+
+def nt8_routes_from_text(text: str) -> list[dict[str, Any]]:
+    """The bridge's account-list JSON text to mapped keys and routes (BP-6a)."""
+    return json.loads(_call(rs.nt8_routes_from_text, text))
+
+
+def ibkr_snapshot(text: str, now: datetime) -> dict[str, Any]:
+    """One TWS/IB Gateway or Client Portal text read to a snapshot's contract form (BP-6b)."""
+    return json.loads(_call(rs.ibkr_snapshot, text, now.isoformat()))
+
+
 def check_snapshot(snapshot: dict[str, Any]) -> None:
     """Validate a snapshot's wire form with the one Rust rule set."""
     _call(rs.accounts_snapshot_check, _text(snapshot))
@@ -80,10 +95,13 @@ def _text(value: dict[str, Any]) -> str:
 __all__ = [
     "diff",
     "event_ring",
+    "ibkr_snapshot",
     "interval",
     "is_stale",
     "key",
     "mask",
+    "nt8_route",
+    "nt8_routes_from_text",
     "replay",
     "rs",
     "check_snapshot",

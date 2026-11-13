@@ -28,6 +28,32 @@ fn accounts_display(account_id: &str) -> String {
     ac::display(account_id)
 }
 
+/// BP-6a: one NT8 account name to its key and `{platform: nt8, local_name}` route.
+#[pyfunction]
+fn nt8_route(name: &str) -> PyResult<String> {
+    te_core::nt8_routes::map_account(name)
+        .map(|m| te_core::nt8_routes::mapping_text(&m))
+        .map_err(refuse)
+}
+
+/// BP-6a: the bridge's account-list JSON text to mapped keys and routes.
+#[pyfunction]
+fn nt8_routes_from_text(text: &str) -> PyResult<String> {
+    te_core::nt8_routes::map_accounts(text)
+        .map(|m| te_core::nt8_routes::mappings_json(&m))
+        .map_err(refuse)
+}
+
+/// BP-6b: one TWS/IB Gateway or Client Portal text read to a snapshot's contract JSON.
+#[pyfunction]
+fn ibkr_snapshot(text: &str, now: &str) -> PyResult<String> {
+    let at = when(now, "now")?;
+    te_core::ibkr::snapshot_from_text(text, &at)
+        .map(|s| ac::snapshot_to_json(&s))
+        .map_err(refuse)
+}
+
+
 #[pyfunction]
 fn accounts_interval(seconds: i64) -> PyResult<i64> {
     ac::interval_seconds(seconds as i128).map(|v| v as i64).map_err(refuse)
@@ -206,6 +232,9 @@ fn field_val(node: &Json) -> Val {
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(accounts_key, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_display, m)?)?;
+    m.add_function(wrap_pyfunction!(nt8_route, m)?)?;
+    m.add_function(wrap_pyfunction!(nt8_routes_from_text, m)?)?;
+    m.add_function(wrap_pyfunction!(ibkr_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_interval, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_snapshot_check, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_diff, m)?)?;
