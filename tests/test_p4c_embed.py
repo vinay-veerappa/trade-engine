@@ -1,6 +1,7 @@
 """Release packaging proof only: synthetic plugins, no jobs or writable ledger."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -67,6 +68,37 @@ except BaseException as exc:
     print(json.dumps({"error": {"type": type(exc).__name__, "message": str(exc)}}, ensure_ascii=True))
     sys.exit(2)
 """
+
+
+STABLE_ABI = """
+import ctypes
+from ctypes import wintypes
+
+
+def probe(config):
+    import curl_cffi
+    modules = (wintypes.HMODULE * 1024)()
+    needed = wintypes.DWORD()
+    ctypes.windll.kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    ctypes.windll.psapi.EnumProcessModules.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.HMODULE),
+                                                      wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    ctypes.windll.psapi.GetModuleFileNameExW.argtypes = [wintypes.HANDLE, wintypes.HMODULE,
+                                                       wintypes.LPWSTR, wintypes.DWORD]
+    process = ctypes.windll.kernel32.GetCurrentProcess()
+    assert ctypes.windll.psapi.EnumProcessModules(process, modules, ctypes.sizeof(modules), ctypes.byref(needed))
+    loaded = []
+    for handle in modules[:needed.value // ctypes.sizeof(wintypes.HMODULE)]:
+        buffer = ctypes.create_unicode_buffer(32768)
+        assert ctypes.windll.psapi.GetModuleFileNameExW(process, handle, buffer, len(buffer))
+        loaded.append(buffer.value)
+    return {"version": curl_cffi.__version__,
+            "wrapper": any(p.lower().endswith("_wrapper.pyd") for p in loaded),
+            "forwarder": any(p.lower().endswith("python3.dll") for p in loaded)}
+"""
+
+
+def curl_cffi_installed():
+    return importlib.util.find_spec("curl_cffi") is not None
 
 
 @pytest.fixture
@@ -416,3 +448,24 @@ def test_builtin_lock_on_synthetic_sidecar_without_ledger(package):
     assert code == old_code == 0
     assert report["result"]["lock"] == old["result"]["lock"] == [True, True, False, False, True]
     assert not list(plugins.glob("*.db"))
+
+
+def test_release_bundle_carries_the_stable_abi_forwarder(package):
+    dll = BINARY.parent / "python3.dll"
+    assert dll.is_file(), f"release bundle must colocate {dll}"
+    assert dll.read_bytes() == (Path(sys.base_prefix) / "python3.dll").read_bytes()
+
+
+@pytest.mark.skipif(not curl_cffi_installed(),
+                    reason="curl_cffi is not installed in the configured site-packages")
+def test_stable_abi_extension_imports_in_the_embedded_host(package):
+    cfg, _, _, plugins = package
+    (plugins / "fake_plugin.py").write_text(STABLE_ABI, encoding="utf-8")
+    code, report = run(package)
+    assert code == 0, report
+    result = report["result"]
+    assert result["version"]
+    assert result["wrapper"] and result["forwarder"], result
+    code, standalone = run(package, standalone=True)
+    assert code == 0, standalone
+    assert standalone["result"]["version"] == result["version"]

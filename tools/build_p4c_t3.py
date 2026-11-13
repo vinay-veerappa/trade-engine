@@ -20,7 +20,11 @@ def build(*, native_only=False):
     subprocess.run(["cargo", "build", "--manifest-path", str(ROOT / "crates" / "Cargo.toml"),
                     "-p", "te_runtime", "--release"], cwd=ROOT, env=env, check=True)
     release = ROOT / "crates" / "target" / "release"
-    shutil.copy2(Path(sys.base_prefix) / "python313.dll", release / "python313.dll")
+    home = Path(sys.base_prefix)
+    shutil.copy2(home / "python313.dll", release / "python313.dll")
+    # Stable-ABI extension modules (_wrapper.pyd) import this forwarder, which
+    # CPython keeps in its home rather than beside the executable.
+    shutil.copy2(home / "python3.dll", release / "python3.dll")
     if not (release / "te.exe").is_file():
         raise RuntimeError("missing mandatory release executable")
     if native_only:
