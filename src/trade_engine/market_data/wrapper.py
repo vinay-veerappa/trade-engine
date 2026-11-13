@@ -1,3 +1,4 @@
+# RETIRED (P6): reference only; live path is trade_engine_rs::market_data_verify. Do not import.
 """Market data wrapper verifying as_of freshness and preventing lookahead (Architecture §4.8, I5, I7)."""
 
 from __future__ import annotations
