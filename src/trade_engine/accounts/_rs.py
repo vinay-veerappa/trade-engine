@@ -52,6 +52,10 @@ def nt8_routes_from_text(text: str) -> list[dict[str, Any]]:
     return json.loads(_call(rs.nt8_routes_from_text, text))
 
 
+def ibkr_snapshot(text: str, now: datetime) -> dict[str, Any]:
+    """One TWS/IB Gateway or Client Portal text read to a snapshot's contract form (BP-6b)."""
+    return json.loads(_call(rs.ibkr_snapshot, text, now.isoformat()))
+
 
 def check_snapshot(snapshot: dict[str, Any]) -> None:
     """Validate a snapshot's wire form with the one Rust rule set."""
@@ -91,6 +95,7 @@ def _text(value: dict[str, Any]) -> str:
 __all__ = [
     "diff",
     "event_ring",
+    "ibkr_snapshot",
     "interval",
     "is_stale",
     "key",

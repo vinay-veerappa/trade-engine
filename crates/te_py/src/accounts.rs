@@ -44,6 +44,15 @@ fn nt8_routes_from_text(text: &str) -> PyResult<String> {
         .map_err(refuse)
 }
 
+/// BP-6b: one TWS/IB Gateway or Client Portal text read to a snapshot's contract JSON.
+#[pyfunction]
+fn ibkr_snapshot(text: &str, now: &str) -> PyResult<String> {
+    let at = when(now, "now")?;
+    te_core::ibkr::snapshot_from_text(text, &at)
+        .map(|s| ac::snapshot_to_json(&s))
+        .map_err(refuse)
+}
+
 
 #[pyfunction]
 fn accounts_interval(seconds: i64) -> PyResult<i64> {
@@ -225,6 +234,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(accounts_display, m)?)?;
     m.add_function(wrap_pyfunction!(nt8_route, m)?)?;
     m.add_function(wrap_pyfunction!(nt8_routes_from_text, m)?)?;
+    m.add_function(wrap_pyfunction!(ibkr_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_interval, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_snapshot_check, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_diff, m)?)?;
