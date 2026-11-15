@@ -223,8 +223,29 @@ class TradovateAdapter:
                 ledger=self._ledger,
                 stale_after=self.stale_after,
                 on_poll=self._on_poll,
+                pnl_source=self.pnl_rows if self._trading_day is not None else None,
             )
         return self._poller
+
+    def pnl_rows(self, snapshot: AccountSnapshot) -> list[tuple[str, tuple[str, str] | None]]:
+        """PS-4a: `(key, (realized_usd, as_of))` per account in `snapshot`, `None` for no figure.
+
+        The figure is `realized_pnl` for the trading day of the snapshot's `confirmed_at`, as a
+        plain decimal string (D6). An account whose figure cannot be read is absent, not guessed.
+        """
+        day = self._trading_day(snapshot.confirmed_at)  # type: ignore[misc]
+        rows: list[tuple[str, tuple[str, str] | None]] = []
+        for record in snapshot.records:
+            figure: tuple[str, str] | None = None
+            try:
+                value = self.realized_pnl(record.key, day)
+                if value is not None:
+                    as_of = _aware(self._kept[record.key].raw.get("as_of_utc"), "account.as_of_utc")
+                    figure = (format(value, "f"), as_of.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            except AccountRuleError as exc:
+                log.warning("ntx realized pnl unreadable for %s (%s)", _accounts_rs.mask(record.display), exc.kind)
+            rows.append((record.key, figure))
+        return rows
 
     def is_stale(self, now: datetime) -> bool:
         """The whole list is stale from `stale_after` seconds after the last good read."""

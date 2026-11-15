@@ -44,6 +44,25 @@ impl RegistryOutbox {
         self.inner.on_response(status, body, now).map(str::to_string).map_err(refuse)
     }
 
+    /// PS-4a: switch the optional `pnl` list on or off (default off; off forgets held values).
+    fn set_pnl_enabled(&mut self, on: bool) {
+        self.inner.set_pnl_enabled(on);
+    }
+
+    /// PS-4a: keep the latest realized P&L for one account. `realized_usd` is a decimal string.
+    fn set_pnl(&mut self, key: &str, realized_usd: &str, as_of: &str) -> PyResult<()> {
+        self.inner.set_pnl(key, realized_usd, as_of).map_err(refuse)
+    }
+
+    /// PS-4a: forget one account's figure (it has none this poll).
+    fn clear_pnl(&mut self, key: &str) {
+        self.inner.clear_pnl(key);
+    }
+
+    fn pnl_len(&self) -> usize {
+        self.inner.pnl_len()
+    }
+
     fn to_json(&self) -> String {
         self.inner.to_json()
     }
