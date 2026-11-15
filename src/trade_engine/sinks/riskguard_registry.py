@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from trade_engine.accounts import _rs
 from trade_engine.accounts.errors import AccountRuleError
@@ -41,6 +41,7 @@ ENV_SWITCH = "TE_RISKGUARD_REGISTRY_SINK"
 ENV_URL = "TE_RISKGUARD_URL"
 ENV_TOKEN_FILE = "TE_RISKGUARD_TOKEN_FILE"
 ENV_OUTBOX = "TE_RISKGUARD_OUTBOX_PATH"
+ENV_PNL = "TE_RISKGUARD_REGISTRY_PNL"  # PS-4a: only `on` sends the broker realized P&L list
 
 DEFAULT_CAP_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_TAIL_EVENTS = 100_000
@@ -65,12 +66,15 @@ class RegistrySinkConfig:
     stale_after_s: int = 120
     cap_bytes: int = DEFAULT_CAP_BYTES
     max_tail_events: int = DEFAULT_MAX_TAIL_EVENTS
+    pnl_enabled: bool = False  # PS-4a; ignored when `enabled` is False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str], **overrides: Any) -> "RegistrySinkConfig":
         enabled = environ.get(ENV_SWITCH, "off").strip().lower() == "on"
+        pnl_enabled = environ.get(ENV_PNL, "off").strip().lower() == "on"
         return cls(
             enabled=enabled,
+            pnl_enabled=pnl_enabled,
             base_url=environ.get(ENV_URL, ""),
             token_file=environ.get(ENV_TOKEN_FILE, ""),
             outbox_path=environ.get(ENV_OUTBOX, ""),
@@ -79,8 +83,8 @@ class RegistrySinkConfig:
 
     def __repr__(self) -> str:  # the token file's path is not a secret, its contents are
         return (
-            f"RegistrySinkConfig(enabled={self.enabled}, broker={self.broker!r}, "
-            f"cap_bytes={self.cap_bytes})"
+            f"RegistrySinkConfig(enabled={self.enabled}, pnl_enabled={self.pnl_enabled}, "
+            f"broker={self.broker!r}, cap_bytes={self.cap_bytes})"
         )
 
 
@@ -167,6 +171,7 @@ class RiskguardRegistrySink:
             "persist_failures": 0,
             "state_discarded": 0,
             "oversize_refused": 0,
+            "pnl_refused": 0,
         }
         self.last_error_kind: str | None = None
         if not config.enabled:
@@ -174,6 +179,8 @@ class RiskguardRegistrySink:
         if not (config.base_url and config.token_file and config.outbox_path):
             raise ValueError("an enabled registry sink needs base_url, token_file and outbox_path")
         self._outbox = self._load()
+        if config.pnl_enabled:
+            self._outbox.set_pnl_enabled(True)
 
     def __repr__(self) -> str:
         return f"RiskguardRegistrySink(enabled={self.enabled}, halted={self.halted!r})"
@@ -250,8 +257,19 @@ class RiskguardRegistrySink:
 
     # -- observing ------------------------------------------------------------------------
 
-    def observe(self, snapshot: AccountSnapshot, events: list[dict[str, Any]], seq: int) -> None:
-        """Record one good poll. Memory only; the worker (or `pump`) delivers it."""
+    def observe(
+        self,
+        snapshot: AccountSnapshot,
+        events: list[dict[str, Any]],
+        seq: int,
+        pnl: Sequence[tuple[str, tuple[str, str] | None]] | None = None,
+    ) -> None:
+        """Record one good poll. Memory only; the worker (or `pump`) delivers it.
+
+        `pnl` (PS-4a) is one `(key, (realized_usd, as_of))` row per account in the snapshot, the
+        figure `None` when the account has none this poll. It is forwarded as is; every rule
+        (cap, drop, ordering, the switch) lives in the Rust outbox.
+        """
         if self._outbox is None:
             return
         snap_text = json.dumps(snapshot.as_contract(), separators=(",", ":"))
@@ -275,7 +293,22 @@ class RiskguardRegistrySink:
                     return
             self.counters["observed"] += 1
             self._dirty = True
+            if pnl is not None and self._config.pnl_enabled:
+                self._forward_pnl(pnl)
         self._wake.set()
+
+    def _forward_pnl(self, rows: Sequence[tuple[str, tuple[str, str] | None]]) -> None:
+        for key, figure in rows:
+            try:
+                if figure is None:
+                    self._outbox.clear_pnl(key)
+                else:
+                    _rs._call(self._outbox.set_pnl, key, figure[0], figure[1])
+            except AccountRuleError as exc:
+                self.counters["pnl_refused"] += 1
+                self.last_error_kind = exc.kind
+                # Kind only: the key is an account id and stays out of the log (masked elsewhere).
+                log.warning("registry sink refused a pnl figure (%s)", exc.kind)
 
     def _observe_locked(self, snap_text: str, ev_text: str, seq: int, confirmed: str) -> None:
         _rs._call(self._outbox.observe, snap_text, ev_text, seq, confirmed)
@@ -408,6 +441,7 @@ class RiskguardRegistrySink:
 
 
 __all__ = [
+    "ENV_PNL",
     "ENV_SWITCH",
     "RegistrySinkConfig",
     "RiskguardRegistrySink",

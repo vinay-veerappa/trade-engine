@@ -127,6 +127,7 @@ class PollAndDiff:
         interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
         stale_after: int = 120,
         on_poll=None,
+        pnl_source=None,
     ) -> None:
         # The minimum (30 s) is Rust's rule; a smaller interval refuses here (I5).
         self.interval_seconds = _rs.interval(interval_seconds)
@@ -141,6 +142,9 @@ class PollAndDiff:
         self._ring = _rs.event_ring()
         # BP-4a: told after each good read, never allowed to fail it (see `_notify`).
         self._on_poll = on_poll
+        # PS-4a: `pnl_source(snapshot)` returns the broker realized-P&L rows to pass along. It
+        # only reads and formats; the sink and Rust decide what to keep. None: no pnl argument.
+        self._pnl_source = pnl_source
 
     @property
     def seq(self) -> int:
@@ -202,7 +206,11 @@ class PollAndDiff:
         if self._on_poll is None:
             return
         try:
-            self._on_poll(snapshot, [_internal_event(e) for e in events], self._seq)
+            internal = [_internal_event(e) for e in events]
+            if self._pnl_source is None:
+                self._on_poll(snapshot, internal, self._seq)
+            else:
+                self._on_poll(snapshot, internal, self._seq, pnl=self._pnl_source(snapshot))
         except Exception as exc:  # noqa: BLE001 - the sink is best-effort here; it counts its own
             log.warning("registry sink observe failed (%s)", type(exc).__name__)
 

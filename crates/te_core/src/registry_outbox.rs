@@ -23,11 +23,18 @@
 //! - **Halts.** 400, 401, 413 and any other non-retryable answer halt the outbox with the
 //!   refusal's kind (never the body): the caller alerts and does not retry.
 //!
+//! - **Broker realized P&L (PS-4a).** Optional and off by default (`set_pnl_enabled`). The latest
+//!   figure per account rides on envelopes as a top-level `"pnl"` list. It never takes a seq.
+//!   See `set_pnl` for the staleness rule.
+//!
 //! Time arrives as an argument (I7); nothing here reads a clock. The wire never carries
 //! `api_ref` (D-13): records are re-serialized through `accounts::record_json`, which has no
 //! such field, and a `class`/`firm` that is not null is `overlay_from_engine`.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::str::FromStr;
+
+use rust_decimal::Decimal;
 
 use super::accounts::{self, parse_at, parse_record, record_json, Record};
 use super::ledger::json::{self, Json};
@@ -73,12 +80,18 @@ pub struct Counters {
     pub retries: u64,
     pub envelopes: u64,
     pub acked: u64,
+    /// `set_pnl` calls refused (new key past the account cap, bad value, wrong broker, switch off).
+    pub pnl_refused: u64,
+    /// pnl entries dropped because their account left the snapshot set.
+    pub pnl_dropped: u64,
 }
 
 #[derive(Debug, Clone)]
 struct Inflight {
     top_seq: u64,
     snapshot: bool,
+    /// `Outbox::pnl_version` when the envelope was built (what it carried).
+    pnl_version: u64,
 }
 
 #[derive(Debug)]
@@ -102,6 +115,14 @@ pub struct Outbox {
     last_sent_s: Option<i64>,
     halted: Option<String>,
     counters: Counters,
+    pnl_enabled: bool,
+    /// key -> (realized, `as_of`). Bounded by `accounts::MAX_RECORDS` (B7): one Decimal plus one
+    /// timestamp string per account. Memory only; never persisted (the next poll refills it).
+    pnl: BTreeMap<String, (Decimal, String)>,
+    /// Bumped on every change to `pnl` (value, new key, removal). A change is "sent" once an
+    /// envelope that carried it was acknowledged: `pnl_version > pnl_sent_version` is due.
+    pnl_version: u64,
+    pnl_sent_version: u64,
 }
 
 fn str_json(s: &str) -> String {
@@ -152,7 +173,95 @@ impl Outbox {
             last_sent_s: None,
             halted: None,
             counters: Counters::default(),
+            pnl_enabled: false,
+            pnl: BTreeMap::new(),
+            pnl_version: 0,
+            pnl_sent_version: 0,
         })
+    }
+
+    /// Turn the `pnl` list on or off (default off). Turning it off forgets the held values, so
+    /// the envelopes are exactly the pre-PS-4a bytes.
+    pub fn set_pnl_enabled(&mut self, on: bool) {
+        self.pnl_enabled = on;
+        if !on {
+            self.pnl.clear();
+            self.pnl_version = 0;
+            self.pnl_sent_version = 0;
+        }
+    }
+
+    pub fn pnl_len(&self) -> usize {
+        self.pnl.len()
+    }
+
+    /// Keep the latest realized P&L for one account (overwrites). `realized` must be a plain
+    /// decimal string (D6: no exponent, never a float); `as_of` the daemon's `as_of_utc`.
+    ///
+    /// A new key past `accounts::MAX_RECORDS` is refused (`cap_exceeded`) and counted. A pnl
+    /// change takes no seq. Staleness: riskguard treats the figure as stale after 10 s, but
+    /// heartbeats are due only every `stale_after_s / 3` (40 s at the default 120), so a changed
+    /// value makes the next `next_envelope` due at once (a heartbeat-shaped envelope with no
+    /// events) instead of waiting for the cadence. An unchanged value waits for the cadence.
+    pub fn set_pnl(&mut self, key: &str, realized: &str, as_of: &str) -> R<()> {
+        let value = match self.check_pnl(key, realized, as_of) {
+            Ok(v) => v,
+            Err(e) => {
+                self.counters.pnl_refused += 1;
+                return Err(e);
+            }
+        };
+        if !self.pnl.contains_key(key) && self.pnl.len() >= accounts::MAX_RECORDS {
+            self.counters.pnl_refused += 1;
+            return err("cap_exceeded", format!("more than {} accounts carry a pnl figure", accounts::MAX_RECORDS));
+        }
+        let changed = self.pnl.get(key).map_or(true, |(old, _)| *old != value);
+        self.pnl.insert(key.to_string(), (value, as_of.to_string()));
+        if changed {
+            self.pnl_version += 1;
+        }
+        Ok(())
+    }
+
+    /// Forget one account's figure (it has none now: another day, unknown). Absent is a no-op.
+    pub fn clear_pnl(&mut self, key: &str) {
+        if self.pnl.remove(key).is_some() {
+            self.pnl_version += 1;
+        }
+    }
+
+    fn check_pnl(&self, key: &str, realized: &str, as_of: &str) -> R<Decimal> {
+        if !self.pnl_enabled {
+            return err("pnl_disabled", "the pnl list is switched off");
+        }
+        self.check_broker(key)?;
+        parse_at(as_of, "pnl.as_of")?;
+        let plain = !realized.is_empty()
+            && realized.bytes().enumerate().all(|(i, b)| b.is_ascii_digit() || b == b'.' || (i == 0 && b == b'-'));
+        match Decimal::from_str(realized) {
+            Ok(v) if plain => Ok(v),
+            _ => err("bad_money", "realized_usd must be a plain decimal string"),
+        }
+    }
+
+    /// The `,"pnl":[...]` fragment, or empty when the switch is off or nothing is held.
+    fn pnl_fragment(&self) -> String {
+        if !self.pnl_enabled || self.pnl.is_empty() {
+            return String::new();
+        }
+        let rows: Vec<String> = self
+            .pnl
+            .iter()
+            .map(|(key, (value, as_of))| {
+                format!(
+                    "{{\"key\":{},\"realized_usd\":{},\"as_of\":{}}}",
+                    str_json(key),
+                    str_json(&value.to_string()),
+                    str_json(as_of)
+                )
+            })
+            .collect();
+        format!(",\"pnl\":[{}]", rows.join(","))
     }
 
     pub fn counters(&self) -> &Counters {
@@ -279,6 +388,13 @@ impl Outbox {
 
         // Commit.
         self.counters.duplicates_ignored += duplicates;
+        // A figure for an account the snapshot no longer lists is dropped with it.
+        let before = self.pnl.len();
+        self.pnl.retain(|k, _| members.contains_key(k));
+        if self.pnl.len() != before {
+            self.counters.pnl_dropped += (before - self.pnl.len()) as u64;
+            self.pnl_version += 1;
+        }
         self.members = members;
         self.members_bytes = members_bytes;
         self.confirmed_at = Some(confirmed_at.to_string());
@@ -404,12 +520,14 @@ impl Outbox {
             return Ok(None);
         };
         let head = format!(
-            "{{\"contract\":{},\"broker\":{},\"confirmed_at\":{},\"stale_after_s\":{}",
+            "{{\"contract\":{},\"broker\":{},\"confirmed_at\":{},\"stale_after_s\":{}{}",
             str_json(CONTRACT),
             str_json(&self.broker),
             str_json(&confirmed_at),
-            self.stale_after_s
+            self.stale_after_s,
+            self.pnl_fragment()
         );
+        let pnl_version = self.pnl_version;
         if self.needs_snapshot {
             let accounts: Vec<&str> = self.members.values().map(String::as_str).collect();
             let body = format!(
@@ -420,7 +538,7 @@ impl Outbox {
             if body.len() > MAX_BODY_BYTES {
                 return self.halt("too_large");
             }
-            self.inflight = Some(Inflight { top_seq: self.head_seq, snapshot: true });
+            self.inflight = Some(Inflight { top_seq: self.head_seq, snapshot: true, pnl_version });
             self.counters.envelopes += 1;
             return Ok(Some(body));
         }
@@ -445,16 +563,18 @@ impl Outbox {
                 top = *seq;
             }
             let body = format!("{head},\"events\":[{}]}}", chunk.join(","));
-            self.inflight = Some(Inflight { top_seq: top, snapshot: false });
+            self.inflight = Some(Inflight { top_seq: top, snapshot: false, pnl_version });
             self.counters.envelopes += 1;
             return Ok(Some(body));
         }
-        let due = match self.last_sent_s {
-            None => true,
-            Some(last) => now_s - last >= self.stale_after_s / 3,
-        };
+        let pnl_due = self.pnl_enabled && self.pnl_version > self.pnl_sent_version;
+        let due = pnl_due
+            || match self.last_sent_s {
+                None => true,
+                Some(last) => now_s - last >= self.stale_after_s / 3,
+            };
         if due {
-            self.inflight = Some(Inflight { top_seq: self.acked_seq, snapshot: false });
+            self.inflight = Some(Inflight { top_seq: self.acked_seq, snapshot: false, pnl_version });
             self.counters.envelopes += 1;
             return Ok(Some(format!("{head},\"events\":[]}}")));
         }
@@ -518,6 +638,9 @@ impl Outbox {
                     // was in flight were not tailed (a snapshot was pending), so if the head
                     // moved on, riskguard is behind and needs a newer snapshot.
                     self.needs_snapshot = self.head_seq > f.top_seq;
+                }
+                if let Some(f) = &inflight {
+                    self.pnl_sent_version = self.pnl_sent_version.max(f.pnl_version);
                 }
                 self.inflight = None;
                 self.last_sent_s = Some(now_s);
@@ -679,6 +802,9 @@ impl Outbox {
             ("retries".into(), n(c.retries)),
             ("envelopes".into(), n(c.envelopes)),
             ("acked".into(), n(c.acked)),
+            ("pnl_held".into(), n(self.pnl.len() as u64)),
+            ("pnl_refused".into(), n(c.pnl_refused)),
+            ("pnl_dropped".into(), n(c.pnl_dropped)),
         ]))
     }
 }
@@ -1030,5 +1156,190 @@ mod tests {
         let rows: Vec<String> = (0..accounts::MAX_RECORDS + 1).map(|i| rec_json(&format!("ACCT-TEST-{i:05}"), "active")).collect();
         let text = format!("{{\"records\":[{}]}}", rows.join(","));
         assert_eq!(ob.observe(&text, "[]", 0, T0).unwrap_err().kind, "cap_exceeded");
+    }
+
+    // --- PS-4a: broker realized P&L ------------------------------------------------------------
+
+    const AS_OF: &str = "2026-11-15T14:03:11Z";
+
+    fn pnl_seeded() -> Outbox {
+        let mut ob = outbox();
+        ob.set_pnl_enabled(true);
+        ob.observe(
+            &snap(&[("A194", "active"), ("B207", "active")]),
+            &evs(&[added("A194", 1), added("B207", 2)]),
+            2,
+            T0,
+        )
+        .unwrap();
+        ob.next_envelope(T0).unwrap().unwrap();
+        assert_eq!(ob.on_response(200, "{\"applied_seq\":2}", T0).unwrap(), "acked");
+        ob
+    }
+
+    fn key(id: &str) -> String {
+        format!("{BROKER}:{id}")
+    }
+
+    #[test]
+    fn pnl_off_envelopes_are_the_pre_ps4a_bytes() {
+        // Same inputs, switch never touched vs. switch on but nothing set vs. set while off.
+        let run = |mutate: fn(&mut Outbox)| {
+            let mut ob = outbox();
+            mutate(&mut ob);
+            ob.observe(&snap(&[("A194", "active")]), &evs(&[added("A194", 1)]), 1, T0).unwrap();
+            let snapshot = ob.next_envelope(T0).unwrap().unwrap();
+            ob.on_response(200, "{\"applied_seq\":1}", T0).unwrap();
+            let beat = ob.next_envelope(&secs(40)).unwrap().unwrap();
+            (snapshot, beat)
+        };
+        let (snapshot, beat) = run(|_| {});
+        assert_eq!(
+            snapshot,
+            format!(
+                "{{\"contract\":\"broker-account/1\",\"broker\":\"tradovate\",\"confirmed_at\":\"{T0}\",\"stale_after_s\":120,\"snapshot\":{{\"seq\":1,\"accounts\":[{}]}},\"events\":[]}}",
+                wire_record_for_test("A194")
+            )
+        );
+        assert_eq!(
+            beat,
+            format!("{{\"contract\":\"broker-account/1\",\"broker\":\"tradovate\",\"confirmed_at\":\"{T0}\",\"stale_after_s\":120,\"events\":[]}}")
+        );
+        assert_eq!(run(|ob| ob.set_pnl_enabled(false)), (snapshot.clone(), beat.clone()));
+        // Enabled but empty map: still the same bytes.
+        assert_eq!(run(|ob| ob.set_pnl_enabled(true)), (snapshot, beat));
+        // A set while off is refused, counted, and leaves no trace.
+        let mut ob = outbox();
+        assert_eq!(ob.set_pnl(&key("A194"), "-62.50", AS_OF).unwrap_err().kind, "pnl_disabled");
+        assert_eq!(ob.pnl_len(), 0);
+        assert_eq!(ob.counters().pnl_refused, 1);
+    }
+
+    fn wire_record_for_test(id: &str) -> String {
+        let mut ob = outbox();
+        ob.observe(&snap(&[(id, "active")]), "[]", 0, T0).unwrap();
+        let env = ob.next_envelope(T0).unwrap().unwrap();
+        let start = env.find("\"accounts\":[").unwrap() + "\"accounts\":[".len();
+        let end = env.rfind("]},\"events\"").unwrap();
+        env[start..end].to_string()
+    }
+
+    #[test]
+    fn pnl_on_is_a_sorted_list_of_decimal_strings_on_any_envelope() {
+        let mut ob = pnl_seeded();
+        // Set out of order: the wire is sorted by key.
+        ob.set_pnl(&key("B207"), "125", AS_OF).unwrap();
+        ob.set_pnl(&key("A194"), "-62.50", AS_OF).unwrap();
+        let env = ob.next_envelope(&secs(1)).unwrap().unwrap();
+        let want = format!(
+            "\"pnl\":[{{\"key\":\"{}\",\"realized_usd\":\"-62.50\",\"as_of\":\"{AS_OF}\"}},{{\"key\":\"{}\",\"realized_usd\":\"125\",\"as_of\":\"{AS_OF}\"}}]",
+            key("A194"),
+            key("B207")
+        );
+        assert!(env.contains(&want), "{env}");
+        assert!(env.contains("\"events\":[]") && !env.contains("\"snapshot\""), "a heartbeat shape");
+        // It rides on a snapshot and on an events envelope too.
+        ob.observe(&snap(&[("A194", "closed"), ("B207", "active")]), &evs(&[changed("A194", 3, "closed")]), 3, T0).unwrap();
+        ob.on_response(200, "{\"applied_seq\":2}", &secs(1)).unwrap();
+        let env = ob.next_envelope(&secs(2)).unwrap().unwrap();
+        assert!(env.contains(&want) && env.contains("\"seq\":3"), "{env}");
+    }
+
+    #[test]
+    fn a_value_change_is_sent_at_once_without_a_seq_and_an_unchanged_value_waits() {
+        let mut ob = pnl_seeded();
+        ob.set_pnl(&key("A194"), "-62.50", AS_OF).unwrap();
+        // The change is due now, long before the 40 s heartbeat.
+        let env = ob.next_envelope(&secs(1)).unwrap().unwrap();
+        assert!(env.contains("\"-62.50\""));
+        let head_before = ob.head_seq();
+        assert_eq!(ob.on_response(200, "{\"applied_seq\":2}", &secs(1)).unwrap(), "acked");
+        assert_eq!(ob.head_seq(), head_before, "a pnl change takes no seq");
+        // Re-setting the same value (even with a new as_of) is not a change: nothing due.
+        ob.set_pnl(&key("A194"), "-62.50", "2026-11-15T14:03:41Z").unwrap();
+        assert!(ob.next_envelope(&secs(2)).unwrap().is_none());
+        // A different value is due on the very next call.
+        ob.set_pnl(&key("A194"), "-80.25", "2026-11-15T14:04:11Z").unwrap();
+        let env = ob.next_envelope(&secs(3)).unwrap().unwrap();
+        assert!(env.contains("\"-80.25\"") && env.contains("2026-11-15T14:04:11Z"));
+        // An unacknowledged send stays due (retry-safe).
+        assert_eq!(ob.on_response(503, "", &secs(3)).unwrap(), "retry");
+        assert!(ob.next_envelope(&secs(4)).unwrap().is_some());
+        ob.on_response(200, "{\"applied_seq\":2}", &secs(4)).unwrap();
+        assert!(ob.next_envelope(&secs(5)).unwrap().is_none());
+        // The unchanged figure keeps riding on the 40 s cadence.
+        let env = ob.next_envelope(&secs(44)).unwrap().unwrap();
+        assert!(env.contains("\"-80.25\""));
+    }
+
+    #[test]
+    fn clear_pnl_removes_one_entry_and_a_cleared_list_is_omitted() {
+        let mut ob = pnl_seeded();
+        ob.set_pnl(&key("A194"), "1", AS_OF).unwrap();
+        ob.clear_pnl(&key("A194"));
+        ob.clear_pnl(&key("nobody")); // absent: no-op
+        let env = ob.next_envelope(&secs(1)).unwrap().unwrap();
+        assert!(!env.contains("\"pnl\""), "{env}");
+    }
+
+    #[test]
+    fn bad_pnl_values_are_refused_with_a_kind() {
+        let mut ob = pnl_seeded();
+        for bad in ["", "1e3", "NaN", "0x10", "+5", "1,5", " 5", "--1", "1.2.3", "-"] {
+            assert_eq!(ob.set_pnl(&key("A194"), bad, AS_OF).unwrap_err().kind, "bad_money", "{bad:?}");
+        }
+        assert_eq!(ob.set_pnl("nt8:A194", "1", AS_OF).unwrap_err().kind, "bad_key");
+        assert_eq!(ob.set_pnl(&key("A194"), "1", "yesterday").unwrap_err().kind, "value");
+        assert_eq!(ob.pnl_len(), 0);
+        assert_eq!(ob.counters().pnl_refused, 12);
+    }
+
+    #[test]
+    fn the_pnl_map_holds_at_the_account_cap_and_counts_refusals() {
+        let mut ob = outbox();
+        ob.set_pnl_enabled(true);
+        for i in 0..accounts::MAX_RECORDS + 25 {
+            let r = ob.set_pnl(&key(&format!("ACCT-TEST-{i:05}")), "1.5", AS_OF);
+            if i < accounts::MAX_RECORDS {
+                r.unwrap();
+            } else {
+                assert_eq!(r.unwrap_err().kind, "cap_exceeded");
+            }
+        }
+        assert_eq!(ob.pnl_len(), accounts::MAX_RECORDS, "size holds at the cap");
+        assert_eq!(ob.counters().pnl_refused, 25);
+        // An existing key still overwrites at the cap, and does not count as a refusal.
+        ob.set_pnl(&key("ACCT-TEST-00000"), "2.5", AS_OF).unwrap();
+        assert_eq!(ob.pnl_len(), accounts::MAX_RECORDS);
+        assert_eq!(ob.counters().pnl_refused, 25);
+        // Removing one frees a slot.
+        ob.clear_pnl(&key("ACCT-TEST-00001"));
+        ob.set_pnl(&key("ACCT-TEST-99999"), "3", AS_OF).unwrap();
+        assert_eq!(ob.pnl_len(), accounts::MAX_RECORDS);
+    }
+
+    #[test]
+    fn an_account_gone_from_the_snapshot_drops_its_pnl_entry() {
+        let mut ob = pnl_seeded();
+        ob.set_pnl(&key("A194"), "10", AS_OF).unwrap();
+        ob.set_pnl(&key("B207"), "20", AS_OF).unwrap();
+        ob.next_envelope(&secs(1)).unwrap().unwrap();
+        ob.on_response(200, "{\"applied_seq\":2}", &secs(1)).unwrap();
+        let removed = "{\"kind\":\"removed\",\"key\":\"tradovate:B207\",\"display\":\"*207\",\"at\":\"2026-11-11T14:00:00Z\",\"seq\":3,\"record\":null,\"changes\":[]}";
+        ob.observe(&snap(&[("A194", "active")]), &evs(&[removed.to_string()]), 3, T0).unwrap();
+        assert_eq!(ob.pnl_len(), 1);
+        assert_eq!(ob.counters().pnl_dropped, 1);
+        // The drop is itself a change that goes out; the dropped entry is absent.
+        let env = ob.next_envelope(&secs(2)).unwrap().unwrap();
+        assert!(env.contains(&key("A194")) && !env.contains("\"realized_usd\":\"20\""), "{env}");
+    }
+
+    #[test]
+    fn pnl_is_never_persisted_so_outbox_files_keep_their_shape() {
+        let mut ob = pnl_seeded();
+        let before = ob.to_json();
+        ob.set_pnl(&key("A194"), "10", AS_OF).unwrap();
+        assert_eq!(ob.to_json(), before);
+        assert!(ob.stats_json().contains("\"pnl_held\":1"));
     }
 }

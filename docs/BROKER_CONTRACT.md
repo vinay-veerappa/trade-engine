@@ -91,6 +91,19 @@ The connector token goes in the `Authorization: Bearer` header. The content type
 - `events` may be empty. An envelope with no snapshot and no events is a **heartbeat**: it refreshes `confirmed_at` only. The engine sends one at least every `stale_after_s / 3`.
 - `confirmed_at` and `stale_after_s` set that broker's freshness. riskguard computes no freshness of its own.
 
+### pnl (PS-4a)
+
+An envelope may carry an optional top-level `pnl` list (any envelope, heartbeats included). It is sent only when `TE_RISKGUARD_REGISTRY_PNL=on` on the engine and at least one account has a figure; otherwise the field is absent and the bytes are unchanged. riskguard must accept the field first (PS-4b), because `IngestRequest` refuses unknown fields.
+
+```json
+"pnl": [{"key": "tradovate:ACCT-TEST-194", "realized_usd": "-62.50", "as_of": "2026-11-15T14:03:11Z"}]
+```
+
+- `key` is the registry key used in the snapshot. One entry per account, sorted by key.
+- `realized_usd` is the broker's own running realized figure for the current trading day, a **decimal string** (never a float). `as_of` is the broker daemon's `as_of_utc`. An account with no figure (another day, unknown) is left out.
+- A pnl change takes **no seq**. The engine sends a changed value on the next envelope without waiting for the `stale_after_s / 3` heartbeat, so the figure stays within the engine's poll interval of the broker rather than 40 s.
+- An account missing from a snapshot loses its entry. The engine holds at most one entry per account (the account cap); a new key past the cap is refused and counted, never sent.
+
 ### Apply rules
 
 1. riskguard sorts the events in the envelope by `seq` and applies them in that order.
