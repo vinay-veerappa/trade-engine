@@ -61,6 +61,13 @@ def main(argv: list[str] | None = None) -> int:
         help="SimBroker slippage in basis points (default 0)",
     )
 
+    feed_parser = subparsers.add_parser(
+        "registry-feed", help="Run the Tradovate registry feed to riskguard (BP-4d)"
+    )
+    feed_parser.add_argument(
+        "--once", action="store_true", help="One snapshot, one pump, print counts, exit"
+    )
+
     args = parser.parse_args(argv)
 
     if args.version:
@@ -72,6 +79,21 @@ def main(argv: list[str] | None = None) -> int:
         from trade_engine.eod.cli import run_eod
 
         return run_eod(args)
+
+    if args.command == "registry-feed":
+        import json
+        import os
+
+        from trade_engine.tradovate import registry_feed
+
+        if args.once:
+            code, summary = registry_feed.run_once(os.environ)
+            if summary is None:
+                print(registry_feed.SINK_OFF_LINE)
+            else:
+                print(json.dumps(summary, sort_keys=True))
+            return code
+        return registry_feed.main_loop(os.environ)
 
     parser.print_help()
     return 0

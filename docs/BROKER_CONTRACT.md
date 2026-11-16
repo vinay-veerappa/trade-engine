@@ -138,3 +138,36 @@ An envelope may carry an optional top-level `pnl` list (any envelope, heartbeats
   Here "events" are the wire events and the engine ledger. riskguard's own `account.*` journal is display-only (riskguard decision 10).
 - `api_ref` never leaves trade-engine (D-13). Inside the engine it is excluded from `repr`, logs and serialization.
 - The token is never logged by either side.
+
+## 7. Running the registry feed (BP-4d)
+
+`python -m trade_engine registry-feed` is the host process. It wires `NtxClient -> TradovateAdapter(on_poll=sink.observe) -> AccountWatcher` and the `RiskguardRegistrySink` pump. It has one poll loop: the watcher's.
+
+| Env var | Meaning |
+|---|---|
+| `TE_RISKGUARD_REGISTRY_SINK` | `on` runs the feed; anything else exits at once with code 2 and `registry sink off (TE_RISKGUARD_REGISTRY_SINK!=on)` |
+| `TE_RISKGUARD_REGISTRY_PNL` | `on` adds the `pnl` list (PS-4a, CME day rolls 17:00 New York); off keeps the BP-4a envelope byte for byte |
+| `TE_RISKGUARD_URL` | riskguard service base URL, for example `http://127.0.0.1:8791` |
+| `TE_RISKGUARD_TOKEN_FILE` | path of the file holding the riskguard ingest token (never logged) |
+| `TE_RISKGUARD_OUTBOX_PATH` | durable outbox file; capped at 50 MB by default |
+| `NTX_STORE` / `LOCALAPPDATA` | where the ntx daemon token is read from (`secrets\daemon-token.txt`) |
+
+- `--once`: one snapshot, one pump; prints `{"accounts": n, "pnl_rows": n, "sent": n, "halted": null|reason}`. Use it before starting the service.
+- Without `--once` it runs until SIGINT or SIGTERM and exits 0. It logs one heartbeat line a minute with counts only (snapshots, connects, accounts, sink stats): no money, ids or token.
+
+quantd service entry (add by hand, the feed does not edit quantd):
+
+```
+name: registry_feed
+cmd: <trade-engine venv>\Scripts\python.exe -m trade_engine registry-feed
+cwd: <trade-engine checkout>
+env:
+  TE_RISKGUARD_REGISTRY_SINK: "on"
+  TE_RISKGUARD_REGISTRY_PNL: "on"
+  TE_RISKGUARD_URL: "http://127.0.0.1:8791"
+  TE_RISKGUARD_TOKEN_FILE: "<path to the ingest token file>"
+  TE_RISKGUARD_OUTBOX_PATH: "<state dir>\registry_outbox.json"
+restart: on-failure
+```
+
+Check: `GET /v1/fleet` on riskguard. Each Tradovate account shows a broker P&L slot with a fresh `at`; BP-4b coverage counts it as covered. The registry `GET /v1/accounts` lists the broker accounts by `display` only.

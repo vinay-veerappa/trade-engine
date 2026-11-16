@@ -676,7 +676,7 @@ def verb_findings(source: str) -> list[str]:
 
 
 def test_order_verb_gate_adapter_and_client_carry_no_order_verb():
-    assert [p.name for p in GATED] == ["__init__.py", "adapter.py", "ntx_client.py"]
+    assert [p.name for p in GATED] == ["__init__.py", "adapter.py", "ntx_client.py", "registry_feed.py"]
     for path in GATED:
         assert verb_findings(path.read_text(encoding="utf-8")) == [], path.name
 
