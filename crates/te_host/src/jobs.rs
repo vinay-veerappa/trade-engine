@@ -134,6 +134,31 @@ fn save(connection: &Connection, record: &Record) -> Result<(), Error> {
     Ok(())
 }
 
+/// Deletes up to `needed` terminal job records, oldest `committed_seq` first
+/// (ties by key), and returns how many were deleted.
+fn prune_terminal(connection: &Connection, needed: u64) -> Result<u64, Error> {
+    let records = {
+        let mut statement = connection
+            .prepare("SELECT key,value FROM meta WHERE key GLOB 'te.runtime.jobs.v1:*'")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut terminal = Vec::new();
+    for (key, text) in records {
+        let record = decode(&text, &key)?;
+        if matches!(record.state, State::Completed | State::Refused | State::Failed) {
+            terminal.push((record.committed_seq, key));
+        }
+    }
+    terminal.sort();
+    let mut deleted = 0;
+    for (_, key) in terminal.into_iter().take(needed as usize) {
+        deleted += connection.execute("DELETE FROM meta WHERE key=?", [&key])? as u64;
+    }
+    Ok(deleted)
+}
+
 pub struct Journal {
     connection: SharedConnection,
     role: String,
@@ -242,7 +267,15 @@ impl Journal {
                 [],
                 |row| row.get(0),
             )?;
-            if count as u64 >= self.limit as u64 {
+            // P4C-CAP-1: at capacity, retire the oldest terminal records (completed,
+            // refused, failed) so a long-lived owner keeps admitting. Queued, running
+            // and uncertain records are never pruned. A pruned request ID loses its
+            // duplicate-admission memory; only IDs older than the retained window are
+            // affected, and job IDs are per-session so they are not resubmitted.
+            if count as u64 >= self.limit as u64
+                && prune_terminal(connection, count as u64 + 1 - self.limit as u64)?
+                    < count as u64 + 1 - self.limit as u64
+            {
                 return refuse(
                     "RuntimeCapacityError",
                     "job record capacity reached; existing records are retained",
@@ -463,6 +496,58 @@ mod tests {
         );
         assert_eq!(journal.get("one").unwrap(), Some(record));
         reader.close();
+    }
+
+    #[test]
+    fn capacity_prunes_oldest_terminal_records_and_keeps_in_flight_and_uncertain() {
+        let world = World::new();
+        let journal = world.journal("first", 3);
+        let failure = || Failure {
+            r#type: "EodRunnerError".into(),
+            message: "refused".into(),
+        };
+        journal.admit(request("a")).unwrap();
+        journal.start("a").unwrap();
+        journal
+            .finish("a", State::Completed, Some(json!({"ok":true})), None)
+            .unwrap();
+        journal.admit(request("b")).unwrap();
+        journal.start("b").unwrap();
+        journal
+            .finish("b", State::Refused, None, Some(failure()))
+            .unwrap();
+        journal.admit(request("c")).unwrap();
+        let count = |j: &Journal| {
+            ["a", "b", "c", "d", "e", "f"]
+                .iter()
+                .filter(|id| j.get(id).unwrap().is_some())
+                .count()
+        };
+        // At the limit: "a" (oldest terminal) is retired, "d" admitted.
+        assert!(journal.admit(request("d")).unwrap().1);
+        assert_eq!(journal.get("a").unwrap(), None);
+        assert!(journal.get("b").unwrap().is_some());
+        assert_eq!(count(&journal), 3);
+        // Next: "b" retired.
+        assert!(journal.admit(request("e")).unwrap().1);
+        assert_eq!(journal.get("b").unwrap(), None);
+        assert_eq!(count(&journal), 3);
+        // Only queued records left: refuse, nothing deleted.
+        assert_eq!(
+            journal.admit(request("f")).unwrap_err().kind,
+            "RuntimeCapacityError"
+        );
+        assert_eq!(count(&journal), 3);
+        // After restart the in-flight records become uncertain; still never pruned.
+        let restarted = world.journal("second", 3);
+        assert_eq!(restarted.recover().unwrap().len(), 3);
+        assert_eq!(
+            restarted.admit(request("f")).unwrap_err().kind,
+            "RuntimeCapacityError"
+        );
+        for id in ["c", "d", "e"] {
+            assert_eq!(restarted.get(id).unwrap().unwrap().state, State::Uncertain);
+        }
     }
 
     #[test]
