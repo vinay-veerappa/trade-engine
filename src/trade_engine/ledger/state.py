@@ -143,6 +143,7 @@ HANDLERS: Mapping[EventKind, Callable[[AccountState, Event], AccountState]] = Ma
             EventKind.VENUE_RECONCILE,
             EventKind.VENUE_HALT_CLEARED,
             EventKind.EOD_RUN,
+            EventKind.EOD_VOID,
             EventKind.EXPIRY,
             EventKind.EXERCISE,
             EventKind.ASSIGNMENT,

@@ -60,6 +60,15 @@ def main(argv: list[str] | None = None) -> int:
         type=_slippage_bps,
         help="SimBroker slippage in basis points (default 0)",
     )
+    eod_parser.add_argument(
+        "--void",
+        action="store_true",
+        help="Void --session for --accounts instead of running it: the owner's signed "
+        "record that a session which can never complete is complete (EOD-VOID-1). "
+        "Needs --accounts, --reason and --owner",
+    )
+    eod_parser.add_argument("--reason", default="", help="Why the session is voided (--void)")
+    eod_parser.add_argument("--owner", default="", help="Who signs the void (--void)")
 
     feed_parser = subparsers.add_parser(
         "registry-feed", help="Run the Tradovate registry feed to riskguard (BP-4d)"
@@ -76,9 +85,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "eod":
-        from trade_engine.eod.cli import run_eod
+        from trade_engine.eod.cli import run_eod, run_void
 
-        return run_eod(args)
+        return run_void(args) if args.void else run_eod(args)
 
     if args.command == "registry-feed":
         import json

@@ -14,8 +14,9 @@ import sys
 import uuid
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.clock.replay import ReplayClock
+from trade_engine.clock.wall import WallClock
 from trade_engine.eod import EodRunner, EodRunnerConfig, PluginDiscoveryError, discover_plugins
-from trade_engine.eod.runner import EodRunnerError
+from trade_engine.eod.runner import EodRunnerError, _void_command, void_session
 from trade_engine.ledger import Ledger
 from trade_engine.ledger._rs import call as rs_call
 from trade_engine.sim import SimBroker
@@ -47,6 +48,39 @@ def _resolve_market_data(name: str | None) -> object:
             f"No market-data plugin named '{name}' among {[type(p).__name__ for p in found]}"
         )
     return matching[0]
+
+
+def run_void(args: argparse.Namespace) -> int:
+    """`eod --void`: write the owner-signed void of one session for the named accounts.
+
+    No market data and no runner: a void is a ledger record, not a replay. Every
+    refusal (no reason or owner, no accounts, an unknown account, a session that
+    already ran) writes nothing and exits 2; a repeat void prints the same lines and
+    writes nothing new (I3).
+    """
+    ledger_path = args.ledger
+    if not ledger_path:
+        print("eod: --ledger is required", file=sys.stderr)
+        return 2
+    accounts = [item.strip() for item in args.accounts.split(",") if item.strip()]
+    if not accounts:
+        print("eod: --void needs --accounts; a void never defaults to every account", file=sys.stderr)
+        return 2
+    session = args.session
+    with Ledger(ledger_path) as ledger:
+        before = {a for a in accounts if ledger.event_by_command(_void_command("eod", a, session))}
+        try:
+            done = void_session(
+                ledger, WallClock(), ExchangeCalendar(), "eod", session, accounts,
+                reason=args.reason, owner=args.owner,
+            )
+        except EodRunnerError as err:
+            print(f"eod: refused: {err}", file=sys.stderr)
+            return 2
+    for account_id in done:
+        state = "already voided" if account_id in before else "voided"
+        print(f"{account_id}: {state} {session.isoformat()} (reason: {args.reason.strip()}; owner: {args.owner.strip()})")
+    return 0
 
 
 def run_eod(args: argparse.Namespace) -> int:

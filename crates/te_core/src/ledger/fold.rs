@@ -865,6 +865,8 @@ pub fn apply_event(st: &mut AccountState, event: &Event) -> R<()> {
             st.venue_halted = !st.halted_venues.is_empty();
         }
         Obj::EodRun(_) => {}
+        // Owner-signed void: provenance for the I3 gate, never trading history (EOD-VOID-1).
+        Obj::EodVoid(_) => {}
         Obj::Lifecycle(n) => on_lifecycle(st, n, kind)?,
         Obj::MQueued(q) => mirror_step(st, kind, |m| mirror::on_queued(m, q))?,
         Obj::MRefused(r) => mirror_step(st, kind, |m| mirror::on_refused(m, r))?,

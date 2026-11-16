@@ -63,6 +63,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -84,7 +85,7 @@ from trade_engine.interfaces.broker import (
 from trade_engine.interfaces.clock import Clock
 from trade_engine.eod.options_routing import OptionRouter
 from trade_engine.interfaces.market_data import MarketData, StaleDataError
-from trade_engine.ledger import CashFlow, EodRun, Event, EventKind, Ledger, Mark
+from trade_engine.ledger import CashFlow, EodRun, EodVoid, Event, EventKind, Ledger, Mark
 from trade_engine.ledger.state import AccountState, fold_account
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
@@ -110,6 +111,11 @@ def pass_of(job: str) -> str | None:
     return names[0] if names else None
 
 
+def _void_command(job: str, account_id: str, session: date) -> str:
+    """The command id of an account's session void: ``eod-void:<job>:<account>:<session>``."""
+    return decide("eod:command", ("eod-void", job, account_id, session.isoformat()))[0][0]
+
+
 class EodRunnerError(RuntimeError):
     """Base class for refused EOD runs (I5)."""
 
@@ -123,6 +129,63 @@ class ReplayDataError(EodRunnerError):
 
 
 register("runtime_eod", EodRunnerError)
+
+
+def void_session(
+    ledger: Ledger,
+    clock: Clock,
+    calendar: ExchangeCalendar,
+    job: str,
+    session: date,
+    accounts: Iterable[str],
+    *,
+    reason: str,
+    owner: str,
+) -> tuple[str, ...]:
+    """Record the owner's void of ``session`` for each of ``accounts`` (EOD-VOID-1).
+
+    A session that can never complete (an options session whose expiry cannot be
+    settled) would otherwise block every later session through the I3
+    previous-session gate. A void is the owner's signed statement that the session is
+    complete for that account; the gate then lets the next session through. It is NOT
+    trading history: nothing folds from it and it does not count as a run.
+
+    Everything is validated before anything is written: a non-empty reason and owner,
+    a real trading session, a known account, and no EodRun already recorded for that
+    account and session (a session that ran is not voided). A second void of the same
+    account and session is an idempotent no-op (I3, the command id). Returns the
+    accounts handled, in the order given with repeats dropped.
+    """
+    if not isinstance(session, date) or isinstance(session, datetime):
+        raise EodRunnerError(f"void session must be a date, got {session!r}")
+    if not isinstance(reason, str) or not reason.strip():
+        raise EodRunnerError("a void needs a non-empty reason (I5)")
+    if not isinstance(owner, str) or not owner.strip():
+        raise EodRunnerError("a void needs a non-empty owner (I5)")
+    if not calendar.is_session(session):
+        raise EodRunnerError(f"{session} is not a trading session; nothing to void (I5)")
+    chosen = tuple(dict.fromkeys(accounts))
+    if not chosen or any(not isinstance(a, str) or not a.strip() for a in chosen):
+        raise EodRunnerError("a void needs at least one non-empty account (I5)")
+    known = set(ledger.accounts())
+    unknown = [a for a in chosen if a not in known]
+    if unknown:
+        raise EodRunnerError(f"unknown account(s) {unknown}: not in the ledger (I5)")
+    for account_id in chosen:
+        run = decide("eod:command", ("eod", job, account_id, session.isoformat()))[0][0]
+        if ledger.event_by_command(run) is not None:
+            raise EodRunnerError(
+                f"{account_id} already ran {session}: a session that ran cannot be voided (I3)"
+            )
+    for account_id in chosen:
+        ledger.append(Event(
+            account=account_id,
+            kind=EventKind.EOD_VOID,
+            payload=EodVoid(session, account_id, reason.strip(), owner.strip(), job),
+            ts_utc=clock.now_utc(),
+            command_id=_void_command(job, account_id, session),
+        ))
+    return chosen
 register("runtime_incomplete", SessionIncompleteError)
 register("runtime_replay", ReplayDataError)
 
@@ -267,6 +330,17 @@ class EodRunner:
         """
         return rs.eod_pass(self, session, through, name)
 
+    def void_session(self, session: date, accounts: Iterable[str], *, reason: str, owner: str) -> tuple[str, ...]:
+        """Void ``session`` for ``accounts``: the owner's signed record that it is complete (I3).
+
+        See ``void_session`` (module level), which this runs against the runner's own
+        ledger, clock, calendar and job name.
+        """
+        return void_session(
+            self._ledger, self._clock, self._calendar, self._config.job_name, session, accounts,
+            reason=reason, owner=owner,
+        )
+
     def _pass_job(self, name: str) -> str:
         return decide("eod:pass_job", (self._config.job_name, name))[0][0]
 
@@ -296,8 +370,12 @@ class EodRunner:
                 # This session already completed; the re-run proves idempotency itself.
                 continue
             if self._account_has_history(account_id, session):
+                # The third flag is the owner's void of that session (EOD-VOID-1): it counts as complete.
                 decide("eod:previous", (session.isoformat(), account_id, previous.isoformat(), self._config.job_name),
-                    flags=(True, self._ledger.event_by_command(self._run_command(account_id, previous)) is not None))
+                    flags=(True,
+                           self._ledger.event_by_command(self._run_command(account_id, previous)) is not None,
+                           self._ledger.event_by_command(_void_command(self._config.job_name, account_id, previous))
+                           is not None))
 
     def _account_has_history(self, account_id: str, session: date) -> bool:
         """Whether this job has marked a session BEFORE ``session`` for the account.

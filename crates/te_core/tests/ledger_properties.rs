@@ -262,6 +262,13 @@ fn make_sample_event_for_kind(kind: EventKind, seed: u32) -> Event {
             bars_processed: 390,
             at_close: ts.clone(),
         }),
+        EventKind::EodVoid => Obj::EodVoid(EodVoid {
+            session: NaiveDate::from_ymd_opt(2026, 10, 16).unwrap(),
+            account_id: account.clone(),
+            reason: "options expiry session cannot complete".into(),
+            owner: "owner".into(),
+            job: "eod_main".into(),
+        }),
         EventKind::MirrorQueued => Obj::MQueued(MirrorQueued {
             venue: "paper".into(),
             ticket_key: format!("ticket-{seed}"),
@@ -345,7 +352,7 @@ fn make_sample_event_for_kind(kind: EventKind, seed: u32) -> Event {
     }
 }
 
-const ALL_EVENT_KINDS: [EventKind; 30] = [
+const ALL_EVENT_KINDS: [EventKind; 31] = [
     EventKind::SignalSeen,
     EventKind::RiskVerdict,
     EventKind::OrdersCreated,
@@ -369,6 +376,7 @@ const ALL_EVENT_KINDS: [EventKind; 30] = [
     EventKind::VenueReconcile,
     EventKind::VenueHaltCleared,
     EventKind::EodRun,
+    EventKind::EodVoid,
     EventKind::MirrorQueued,
     EventKind::MirrorRefused,
     EventKind::MirrorAck,
