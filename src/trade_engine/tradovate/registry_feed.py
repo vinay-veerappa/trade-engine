@@ -48,7 +48,8 @@ from zoneinfo import ZoneInfo
 from trade_engine.clock.wall import WallClock
 from trade_engine.schwab.adapter import SchwabAccountsAdapter, SchwabAccountsConfig
 from trade_engine.schwab.hub_client import KINDS as HUB_FAILURE_KINDS
-from trade_engine.schwab.hub_client import HubAccountsClient, HubReadError
+from trade_engine.schwab.hub_client import HubAccountsClient, HubReadError, hub_base_url
+from trade_engine.schwab.hub_ws import WS_KINDS, HubHintListener
 from trade_engine.sinks.riskguard_registry import (
     ENV_SWITCH,
     RegistrySinkConfig,
@@ -71,7 +72,14 @@ SCHWAB_TICK_SECONDS = 1.0
 SCHWAB_BACKOFF_START_SECONDS = 30.0
 SCHWAB_BACKOFF_CAP_SECONDS = 300.0
 SCHWAB_BACKOFF_JITTER = 0.1  # +-10%, from the injected `rand`
+# BP-5e: the hub /ws hint. On by default with TE_SCHWAB_ACCOUNTS; `0` or `off` turns it off.
+ENV_HINT = "TE_SCHWAB_ACCOUNTS_HINT"
 _ET = ZoneInfo("America/New_York")
+
+
+def schwab_hint_on(environ: Mapping[str, str]) -> bool:
+    """`TE_SCHWAB_ACCOUNTS_HINT`: unset or anything but `0`/`off` is on (BP-5e)."""
+    return (environ.get(ENV_HINT) or "on").strip().lower() not in ("0", "off")
 
 
 def cme_trading_day(at: datetime) -> date:
@@ -144,6 +152,10 @@ class SchwabPoller:
         self.backoff_seconds = 0.0
         self._consecutive_failures = 0
         self._next_attempt_at: datetime | None = None
+        # BP-5e: one flag, set by the hub listener's thread and read by this thread (no queue).
+        self._cond = threading.Condition()
+        self._asked = False
+        self.asks = 0
 
     def __repr__(self) -> str:
         return (
@@ -162,11 +174,24 @@ class SchwabPoller:
 
     # -- the timer ------------------------------------------------------------------------
 
+    def ask(self) -> None:
+        """BP-5e: an early read is wanted (an ACCOUNTS_CHANGED hint). Sets a flag; never blocks.
+
+        The flag waits out a failure backoff: the read still happens no earlier than
+        `_next_attempt_at`. The 60 s floor is not needed while the flag is set.
+        """
+        with self._cond:
+            self._asked = True
+            self.asks += 1
+            self._cond.notify()
+
     def due(self, now: datetime) -> bool:
-        """True when a read may run now: past the backoff and past the adapter's 60 s floor."""
+        """True when a read may run now: past the backoff, and either asked or past the 60 s floor."""
         if self._next_attempt_at is not None and now < self._next_attempt_at:
             return False
-        return self._adapter.next_poll_due(now)
+        with self._cond:
+            asked = self._asked
+        return asked or self._adapter.next_poll_due(now)
 
     def tick(self, now: datetime) -> None:
         if self.due(now):
@@ -181,6 +206,8 @@ class SchwabPoller:
 
     def attempt(self, now: datetime) -> bool:
         """One hub read pair, then feed + poll. True on a good read; never raises `HubReadError`."""
+        with self._cond:
+            self._asked = False  # a hint that lands during this read asks again for the next tick
         try:
             numbers, accounts = self._client.read()
         except HubReadError as exc:
@@ -201,11 +228,32 @@ class SchwabPoller:
         self.reads_ok += 1
         return True
 
+    def _wait_for_tick(self, stop_event: threading.Event) -> None:
+        """Block up to one tick, waking early when a hint is ready (asked and past the backoff).
+
+        A hint inside a backoff does not wake the wait, or the loop would spin until the
+        backoff ends; it is read on the first tick after `_next_attempt_at`.
+        """
+        with self._cond:
+            if stop_event.is_set():
+                return
+            if self._asked and (
+                self._next_attempt_at is None or self._clock.now_utc() >= self._next_attempt_at
+            ):
+                return
+            self._cond.wait(self.tick_seconds)
+
     def run(self, stop_event: threading.Event, wait: Callable[[float], None] | None = None) -> None:
-        """Tick every `tick_seconds` until `stop_event`: a blocking wait, never a busy loop."""
-        wait = stop_event.wait if wait is None else wait
+        """Tick every `tick_seconds` until `stop_event`, or sooner on a ready hint. Never busy.
+
+        `wait`, when given, replaces the blocking wait (tests); the hint wake applies only when
+        it is None.
+        """
         while not stop_event.is_set():
-            wait(self.tick_seconds)
+            if wait is None:
+                self._wait_for_tick(stop_event)
+            else:
+                wait(self.tick_seconds)
             if stop_event.is_set():
                 return
             self.tick(self._clock.now_utc())
@@ -222,12 +270,36 @@ class SchwabFeed:
     Tradovate feed is exactly the BP-4d/4e one (I1).
     """
 
-    def __init__(self, config: SchwabAccountsConfig, adapter, sink, client, *, clock, rand=None) -> None:
+    def __init__(
+        self,
+        config: SchwabAccountsConfig,
+        adapter,
+        sink,
+        client,
+        *,
+        clock,
+        rand=None,
+        listener: HubHintListener | None = None,
+    ) -> None:
         self.config = config
         self.adapter = adapter
         self.sink = sink
         self.client = client
+        self.clock = clock
         self.poller = SchwabPoller(adapter, client, clock=clock, rand=rand)
+        # BP-5e: None unless TE_SCHWAB_ACCOUNTS_HINT is on. Its thread only calls on_accounts_hint.
+        self.listener = listener
+
+    def on_accounts_hint(self) -> bool:
+        """BP-5e: one ACCOUNTS_CHANGED frame. Runs on the listener thread; never raises.
+
+        `on_activity` owns the 10 s debounce and touches only the hint counters; `ask` sets the
+        poll thread's flag. The message is None, so no frame content reaches the adapter (B5).
+        """
+        acted = self.adapter.on_activity(self.clock.now_utc(), None)
+        if acted:
+            self.poller.ask()
+        return acted
 
     @classmethod
     def build(
@@ -239,6 +311,7 @@ class SchwabFeed:
         http_post=None,
         hub_client=None,
         rand: Callable[[], float] | None = None,
+        ws_connect=None,
     ) -> SchwabFeed | None:
         config = SchwabAccountsConfig.from_env(dict(environ))
         if not config.enabled:
@@ -256,10 +329,16 @@ class SchwabFeed:
         sink = RiskguardRegistrySink(sink_config, clock=clock, **kwargs)
         client = hub_client if hub_client is not None else HubAccountsClient.from_env(environ)
         adapter = SchwabAccountsAdapter(config, clock=clock, on_poll=sink.observe)
-        # TODO(BP-5e): an ACCOUNTS_CHANGED frame on the hub's /ws should call
-        # `adapter.on_activity(now, None)` for an early re-poll; the 60 s poll is this slice's
-        # contract, so the frame is not wired yet.
-        return cls(config, adapter, sink, client, clock=clock, rand=rand)
+        feed = cls(config, adapter, sink, client, clock=clock, rand=rand)
+        if schwab_hint_on(environ):
+            # BP-5e: the hub /ws listener. Loopback only (hub_base_url refuses anything else).
+            feed.listener = HubHintListener(
+                hub_base_url(environ),
+                on_hint=feed.on_accounts_hint,
+                connect=ws_connect,
+                rand=rand,
+            )
+        return feed
 
     def once(self) -> int:
         """`--once`: one hub read pair, one poll, one pump. Returns envelopes acked."""
@@ -272,9 +351,20 @@ class SchwabFeed:
         out: dict[str, Any] = {
             "schwab_accounts": self.poller.accounts(),
             "schwab_reads_ok": self.poller.reads_ok,
+            "schwab_hints_acted": self.adapter.stats.hints,
+            "schwab_hints_suppressed": self.adapter.stats.hints_suppressed,
         }
         for kind, count in self.poller.failures.items():
             out[f"schwab_read_fail_{kind}"] = count
+        listener = self.listener
+        if listener is not None:
+            out["schwab_hints_received"] = listener.hints_received
+            out["schwab_hint_errors"] = listener.hint_errors
+            out["schwab_ws_connects"] = listener.connects
+            out["schwab_ws_frames_oversized"] = listener.frames_oversized
+            out["schwab_ws_frames_malformed"] = listener.frames_malformed
+            for kind in WS_KINDS:
+                out[f"schwab_ws_fail_{kind}"] = listener.failures[kind]
         for key, value in _counts(self.sink.stats()).items():
             out[f"schwab_sink.{key}"] = value
         return out
@@ -377,6 +467,7 @@ class Feed:
         http_post=None,
         hub_client=None,
         rand: Callable[[], float] | None = None,
+        ws_connect=None,
     ) -> Feed | None:
         config = RegistrySinkConfig.from_env(dict(environ))
         if not config.enabled:
@@ -400,6 +491,7 @@ class Feed:
             http_post=http_post,
             hub_client=hub_client,
             rand=rand,
+            ws_connect=ws_connect,
         )
         return cls(config, sink, client, adapter, schwab=schwab)
 
@@ -461,6 +553,7 @@ def run(
     hub_client=None,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
     pump_tick_seconds: float = 5.0,
+    ws_connect=None,
 ) -> int:
     """Run the feed until `stop_event` is set. Exit 2 at once when the sink is off."""
     clock = clock or WallClock()
@@ -471,6 +564,7 @@ def run(
         http_post=http_post,
         hub_client=hub_client,
         rand=rand,
+        ws_connect=ws_connect,
     )
     if feed is None:
         log.warning(SINK_OFF_LINE)
@@ -511,14 +605,14 @@ def run(
     thread.start()
     # BP-5c: one Schwab thread, same stop event, only when the switch built the half.
     schwab_thread = None
+    hint_thread = None
     if feed.schwab is not None:
         feed.schwab.sink.start(tick_seconds=pump_tick_seconds)
 
         def poll_schwab() -> None:
             try:
-                feed.schwab.poller.run(
-                    stop_event, wait=sleep if sleep is not None else stop_event.wait
-                )
+                # No injected wait: the poller wakes at once on a BP-5e hint (ask-aware wait).
+                feed.schwab.poller.run(stop_event)
             except Exception as exc:  # noqa: BLE001 - a crashed Schwab thread ends the process
                 log.error("registry feed schwab poll stopped (%s)", type(exc).__name__)
                 stop_event.set()
@@ -527,6 +621,21 @@ def run(
             target=poll_schwab, name="registry-feed-schwab", daemon=True
         )
         schwab_thread.start()
+        if feed.schwab.listener is not None:
+            # BP-5e: the hint listener. It never sets the stop event: a dead listener only
+            # means the 60 s poll runs alone (the poll is the contract).
+            listener = feed.schwab.listener
+
+            def listen_hub() -> None:
+                try:
+                    listener.run(stop_event)
+                except Exception as exc:  # noqa: BLE001 - counted in the log, poll unaffected
+                    log.error("registry feed hub ws listener stopped (%s)", type(exc).__name__)
+
+            hint_thread = threading.Thread(
+                target=listen_hub, name="registry-feed-hub-ws", daemon=True
+            )
+            hint_thread.start()
     try:
         while not stop_event.wait(heartbeat_seconds):
             oldest = pump.oldest_as_of
@@ -553,6 +662,8 @@ def run(
         pump_thread.join(timeout=1.0)
         if schwab_thread is not None:
             schwab_thread.join(timeout=1.0)
+        if hint_thread is not None:
+            hint_thread.join(timeout=1.0)
         log.info("registry feed stopped")
     return 0
 
@@ -589,5 +700,6 @@ __all__ = [
     "cme_trading_day",
     "run",
     "run_once",
+    "schwab_hint_on",
     "schwab_outbox_path",
 ]

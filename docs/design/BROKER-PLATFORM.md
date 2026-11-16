@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Partly built: merged to main through BP-6, BP-5c and BP-4f; BP-5e not started (see section 12) |
+| Status | Partly built: merged to main through BP-6, BP-5c and BP-4f; BP-5e built on branch `bp-5e-accounts-changed`, unmerged (see section 12) |
 | Owner | owner (approver) |
 | Author | Opus design thread |
 | Last updated | 2026-11-16 |
@@ -462,7 +462,7 @@ Built (merged to trade-engine main unless noted):
 
 Remaining:
 
-- BP-5e, ACCOUNTS_CHANGED hint: not started (no commits in either repo).
+- BP-5e, ACCOUNTS_CHANGED hint: built on branch `bp-5e-accounts-changed` (worktree `C:/Users/vinay/te-worktrees/bp-5e`), not merged to main and not deployed. Stdlib loopback websocket client chosen under D-9 (no new runtime dependency). Tests: `tests/test_bp5e_accounts_changed.py`.
 - P4c flip, and the BP-4a sink on (it stays off while the registry is empty), per nt8-riskguard `docs/product/11_REMAINING_WORK.md` section 4.
 - Deploy and live checks of BP-5c and BP-6a/b: not verified in this pass.
 - The section 9 P4 gate live G3 read while flat, after the owner re-login: not verified in this pass.
