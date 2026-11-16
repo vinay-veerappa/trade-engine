@@ -93,6 +93,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(json.dumps(summary, sort_keys=True))
             return code
+        import logging
+
+        # The heartbeat and start/stop lines are INFO; without a handler they are dropped and
+        # the quantd log stays empty. Counts only are logged (BP-4d), never money or ids.
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
         return registry_feed.main_loop(os.environ)
 
     parser.print_help()
