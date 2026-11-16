@@ -59,6 +59,7 @@ class EventKind(StrEnum):
     VENUE_RECONCILE = "VenueReconcile"
     VENUE_HALT_CLEARED = "VenueHaltCleared"
     EOD_RUN = "EodRun"
+    EOD_VOID = "EodVoid"
     MIRROR_QUEUED = "MirrorQueued"
     MIRROR_REFUSED = "MirrorRefused"
     MIRROR_ACK = "MirrorAck"
@@ -338,6 +339,35 @@ class EodRun:
         if self.bars_processed < 0:
             raise EventPayloadError("EodRun.bars_processed must be non-negative")
         _require_utc(self.at_close, "EodRun.at_close")
+
+
+@dataclass(frozen=True)
+class EodVoid:
+    """An owner-signed void of one account's EOD session (EOD-VOID-1, I3, I11).
+
+    A session that can never complete (an options expiry day with no chain snapshots)
+    would block every later session through the previous-session gate. The void is the
+    owner's recorded decision that this account's session is complete without a run.
+    It is provenance, never trading history: it is not an ``EodRun``, folds to nothing,
+    and does not make the account "have history". Its command id is
+    ``eod-void:<job>:<account>:<session>``.
+    """
+
+    session: date
+    account_id: str
+    reason: str
+    owner: str
+    job: str
+
+    def __post_init__(self) -> None:
+        if not self.account_id:
+            raise EventPayloadError("EodVoid.account_id must be non-empty")
+        if not self.reason:
+            raise EventPayloadError("EodVoid.reason must be non-empty (I11)")
+        if not self.owner:
+            raise EventPayloadError("EodVoid.owner must be non-empty (I11)")
+        if not self.job:
+            raise EventPayloadError("EodVoid.job must be non-empty")
 
 
 # -- the venue mirror (T2, §4.7) -----------------------------------------------------
@@ -719,6 +749,7 @@ PAYLOAD_TYPES: dict[EventKind, type] = {
     EventKind.VENUE_RECONCILE: VenueReconcile,
     EventKind.VENUE_HALT_CLEARED: VenueHaltCleared,
     EventKind.EOD_RUN: EodRun,
+    EventKind.EOD_VOID: EodVoid,
     EventKind.MIRROR_QUEUED: MirrorQueued,
     EventKind.MIRROR_REFUSED: MirrorRefused,
     EventKind.MIRROR_ACK: MirrorAck,

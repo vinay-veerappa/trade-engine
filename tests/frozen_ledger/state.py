@@ -842,6 +842,7 @@ HANDLERS: dict[EventKind, Callable[[AccountState, Event], AccountState]] = {
     EventKind.VENUE_RECONCILE: _on_venue_reconcile,
     EventKind.VENUE_HALT_CLEARED: _on_venue_halt_cleared,
     EventKind.EOD_RUN: _on_eod_run,
+    EventKind.EOD_VOID: _on_eod_run,
     EventKind.EXPIRY: _lifecycle_handler(EventKind.EXPIRY),
     EventKind.EXERCISE: _lifecycle_handler(EventKind.EXERCISE),
     EventKind.ASSIGNMENT: _lifecycle_handler(EventKind.ASSIGNMENT),

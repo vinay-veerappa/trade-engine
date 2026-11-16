@@ -76,7 +76,8 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
         }
         // s: marker job, this job, marker session, run session (ISO dates order as text): only an earlier session is history.
         "history" => p.flags.push(b[0] && s[2] < s[3] && (s[0] == s[1] || ["morning","midday","late"].iter().any(|v| s[0] == format!("{}-{v}",s[1])))),
-        "previous" => if b[0] && !b[1] {
+        // b: has history, previous session ran, previous session voided by the owner (EOD-VOID-1: a void counts as complete).
+        "previous" => if b[0] && !b[1] && !b.get(2).copied().unwrap_or(false) {
             return err("runtime_incomplete",format!("Cannot run {} for '{}': the previous session {} has no {} marker; complete it first (I3)",s[0],s[1],s[2],s[3]));
         },
         "replay_clock" => if n[0] > n[1] {
@@ -168,6 +169,21 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    #[test]
+    fn previous_rule_treats_a_void_as_complete() {
+        let s: Vec<String> = ["eod", "ACC", "2026-10-16", "eod"].iter().map(|v| v.to_string()).collect();
+        // history, previous never ran, not voided: refused (I3).
+        assert!(decide("previous", &s, &[], &[true, false, false], &[]).is_err());
+        // the legacy two-flag shape still refuses.
+        assert!(decide("previous", &s, &[], &[true, false], &[]).is_err());
+        // history, previous never ran, but the owner voided it: complete.
+        assert!(decide("previous", &s, &[], &[true, false, true], &[]).is_ok());
+        // previous ran: complete, voided or not.
+        assert!(decide("previous", &s, &[], &[true, true, false], &[]).is_ok());
+        assert!(decide("previous", &s, &[], &[true, true, true], &[]).is_ok());
+        // no history: nothing to demand.
+        assert!(decide("previous", &s, &[], &[false, false, false], &[]).is_ok());
+    }
     #[test]
     fn boundary_and_refusal() {
         assert!(decide("cutoff",&[],&[5,5],&[],&[]).unwrap().flags[0]);

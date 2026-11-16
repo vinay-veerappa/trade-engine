@@ -52,6 +52,7 @@ from trade_engine.ledger.events import (  # noqa: E402
     AccountMembership,
     CashFlow,
     EodRun,
+    EodVoid,
     EmulatedOrderState,
     Event,
     EventKind,
@@ -332,6 +333,7 @@ def event_zoo() -> list[Event]:
         _ev(K.VENUE_RECONCILE, VenueReconcile("tos", T0, False, drift=("AAPL", "MSFT"), note="n")),
         _ev(K.VENUE_HALT_CLEARED, VenueHaltCleared("tos", T0, "checked", 4)),
         _ev(K.EOD_RUN, EodRun(date(2026, 9, 24), "eod", "ACC", 390, T0)),
+        _ev(K.EOD_VOID, EodVoid(date(2026, 10, 16), "ACC", "options expiry session cannot complete", "owner", "eod")),
         # mirror
         _ev(K.MIRROR_QUEUED, queued, account=VA),
         _ev(K.MIRROR_QUEUED, MirrorQueued(V, "tos:b", SPREAD, Side.SELL, Decimal("1"), OrderType.MARKET, None, TimeInForce.GTC,
@@ -568,6 +570,8 @@ def random_stream(seed: int) -> tuple[list[Event], str]:
                 evs.append(ev(K.VENUE_RECONCILE, VenueReconcile(venue, tick(), True)))
         else:
             evs.append(ev(K.EOD_RUN, EodRun(date(2026, 9, 24), "eod", acct, 390, tick())))
+            if rnd.random() < 0.3:
+                evs.append(ev(K.EOD_VOID, EodVoid(date(2026, 9, 23), acct, "cannot complete", "owner", "eod")))
 
     def mirror_episode():
         V = "D-00000001"

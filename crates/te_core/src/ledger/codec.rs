@@ -188,7 +188,7 @@ pub fn decode(node: &Json) -> R<Val> {
     codec(format!("Unrecognised encoded object with keys [{}]", shown.join(", ")))
 }
 
-const TAGS: [&str; 30] = [
+const TAGS: [&str; 31] = [
     "Equity",
     "OptionContract",
     "Combo",
@@ -209,6 +209,7 @@ const TAGS: [&str; 30] = [
     "VenueReconcile",
     "VenueHaltCleared",
     "EodRun",
+    "EodVoid",
     "OptionLifecycle",
     "CorporateAction",
     "MirrorAllocation",
@@ -247,6 +248,7 @@ fn build(tag: &str, f: Vec<(String, Val)>) -> R<Val> {
         "VenueReconcile" => obj(Obj::Reconcile(build_reconcile(f)?)),
         "VenueHaltCleared" => obj(Obj::HaltCleared(build_halt_cleared(f)?)),
         "EodRun" => obj(Obj::EodRun(build_eod_run(f)?)),
+        "EodVoid" => obj(Obj::EodVoid(build_eod_void(f)?)),
         "OptionLifecycle" => obj(Obj::Lifecycle(build_lifecycle(f)?)),
         "CorporateAction" => obj(Obj::Corp(build_corporate_action(f)?)),
         "MirrorAllocation" => obj(Obj::MAlloc(build_mirror_alloc(f)?)),
@@ -578,6 +580,16 @@ pub fn enc_obj(o: &Obj) -> R<Json> {
                 ("account_id", jstr(&r.account_id)),
                 ("bars_processed", Json::Int(r.bars_processed)),
                 ("at_close", jdt(&r.at_close)),
+            ],
+        ),
+        Obj::EodVoid(v) => dc(
+            "EodVoid",
+            vec![
+                ("session", jdate(&v.session)),
+                ("account_id", jstr(&v.account_id)),
+                ("reason", jstr(&v.reason)),
+                ("owner", jstr(&v.owner)),
+                ("job", jstr(&v.job)),
             ],
         ),
         Obj::Lifecycle(l) => dc(

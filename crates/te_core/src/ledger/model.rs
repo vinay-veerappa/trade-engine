@@ -122,6 +122,7 @@ str_enum!(
         (VenueReconcile, "VenueReconcile"),
         (VenueHaltCleared, "VenueHaltCleared"),
         (EodRun, "EodRun"),
+        (EodVoid, "EodVoid"),
         (MirrorQueued, "MirrorQueued"),
         (MirrorRefused, "MirrorRefused"),
         (MirrorAck, "MirrorAck"),
@@ -837,6 +838,17 @@ pub struct EodRun {
     pub at_close: DateTime,
 }
 
+/// An owner-signed void of one account's EOD session (EOD-VOID-1): provenance, never
+/// trading history. A voided session counts as complete for the I3 previous-session gate.
+#[derive(Debug, Clone)]
+pub struct EodVoid {
+    pub session: NaiveDate,
+    pub account_id: String,
+    pub reason: String,
+    pub owner: String,
+    pub job: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct MirrorAllocation {
     pub strategy_order_id: String,
@@ -960,6 +972,7 @@ pub enum Obj {
     Reconcile(VenueReconcile),
     HaltCleared(VenueHaltCleared),
     EodRun(EodRun),
+    EodVoid(EodVoid),
     Lifecycle(OptionLifecycle),
     Corp(CorporateAction),
     MAlloc(MirrorAllocation),
@@ -994,6 +1007,7 @@ impl Obj {
             Obj::Reconcile(_) => "VenueReconcile",
             Obj::HaltCleared(_) => "VenueHaltCleared",
             Obj::EodRun(_) => "EodRun",
+            Obj::EodVoid(_) => "EodVoid",
             Obj::Lifecycle(_) => "OptionLifecycle",
             Obj::Corp(_) => "CorporateAction",
             Obj::MAlloc(_) => "MirrorAllocation",
@@ -1956,6 +1970,24 @@ pub fn build_eod_run(f: Vec<(String, Val)>) -> R<EodRun> {
     Ok(EodRun { session, job, account_id, bars_processed, at_close })
 }
 
+pub fn build_eod_void(f: Vec<(String, Val)>) -> R<EodVoid> {
+    let mut k = Kw::bind(
+        "EodVoid",
+        f,
+        &[("session", true), ("account_id", true), ("reason", true), ("owner", true), ("job", true)],
+    )?;
+    let session = x_date(k.req("session"), "session")?;
+    let account_id = x_str(k.req("account_id"), "account_id")?;
+    let reason = x_str(k.req("reason"), "reason")?;
+    let owner = x_str(k.req("owner"), "owner")?;
+    let job = x_str(k.req("job"), "job")?;
+    pnonempty(&account_id, "EodVoid.account_id must be non-empty")?;
+    pnonempty(&reason, "EodVoid.reason must be non-empty (I11)")?;
+    pnonempty(&owner, "EodVoid.owner must be non-empty (I11)")?;
+    pnonempty(&job, "EodVoid.job must be non-empty")?;
+    Ok(EodVoid { session, account_id, reason, owner, job })
+}
+
 /// `_require_whole`.
 fn require_whole(v: Money, name: &str, positive: bool) -> R<Money> {
     let value = v;
@@ -2394,6 +2426,7 @@ pub fn expected_payload(kind: EventKind) -> &'static str {
         VenueReconcile => "VenueReconcile",
         VenueHaltCleared => "VenueHaltCleared",
         EodRun => "EodRun",
+        EodVoid => "EodVoid",
         MirrorQueued => "MirrorQueued",
         MirrorRefused => "MirrorRefused",
         MirrorAck => "MirrorAck",
@@ -2449,6 +2482,7 @@ pub fn check_event(e: &Event) -> R<()> {
         Obj::Fill(f) => Some(&f.account_id),
         Obj::Lifecycle(l) => Some(&l.account_id),
         Obj::EodRun(r) => Some(&r.account_id),
+        Obj::EodVoid(v) => Some(&v.account_id),
         Obj::OrderUpdated(u) => Some(&u.order.account_id),
         _ => None,
     };
