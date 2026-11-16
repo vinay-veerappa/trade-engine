@@ -51,6 +51,10 @@ from trade_engine.ledger.events import EventKind
 
 STRICT = {"strict", "unsupported"}
 SEEDS = 1500
+# TEST-HANG-1: the recorded suites take ~5 min; a wedged nested run must fail, not hang the suite.
+RECORD_TIMEOUT = 900
+# TEST-HANG-1: the real recording is ~9 MB; anything near this bound is a recorder bug.
+MAX_RECORDING_BYTES = 64 * 1024 * 1024
 
 # the suites whose folds are replayed (every test file that folds a ledger)
 RECORDED_SUITES = [
@@ -213,25 +217,54 @@ def test_random_streams_fold_identically():
 
 @pytest.fixture(scope="module")
 def recorded(tmp_path_factory):
-    """Run the suites that fold ledgers, unchanged, with the recording plugin."""
+    """Run the suites that fold ledgers, unchanged, with the recording plugin.
+
+    Both halves of this test are bounded (TEST-HANG-1). The nested run is a second pytest
+    process launched from inside the suite: with no timeout a child that wedges (or a
+    grandchild that keeps the captured pipe open) stops the *whole* run at this point with
+    no output, which is exactly how the suite used to hang at 23%. The recording is capped
+    too, and the test reads it back one line at a time instead of holding the whole file in
+    memory, so a recording that explodes fails here instead of growing the process.
+    """
     out = tmp_path_factory.mktemp("rec") / "streams.jsonl"
     out.write_text("")
     env = dict(os.environ, LEDGER_RECORD=str(out), PYTHONPATH=str(HERE), PYTHONDONTWRITEBYTECODE="1")
     env.pop("PYTEST_CURRENT_TEST", None)
     files = [str(HERE / name) for name in RECORDED_SUITES]
-    run = subprocess.run(
-        [sys.executable, "-B", "-m", "pytest", "-q", "-p", "ledger_record_plugin", "-p", "no:cacheprovider", *files],
-        env=env, capture_output=True, text=True, cwd=str(HERE.parent),
-    )
+    try:
+        run = subprocess.run(
+            [sys.executable, "-B", "-m", "pytest", "-q", "-p", "ledger_record_plugin", "-p", "no:cacheprovider", *files],
+            env=env, capture_output=True, text=True, cwd=str(HERE.parent), timeout=RECORD_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as err:
+        raise AssertionError(
+            f"the recorder did not finish in {RECORD_TIMEOUT}s: the recorded suites wedged. "
+            f"Without this bound the whole suite would hang here instead of failing.\n"
+            f"stdout tail: {(err.stdout or '')[-2000:]}\nstderr tail: {(err.stderr or '')[-2000:]}"
+        ) from None
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
-    return [json.loads(line) for line in out.read_text(encoding="utf8").splitlines() if line]
+    size = out.stat().st_size
+    assert size <= MAX_RECORDING_BYTES, (
+        f"the recorder wrote {size} bytes (bound {MAX_RECORDING_BYTES}); a recording this large is a "
+        "recorder bug, not coverage: it would be loaded and folded stream by stream below"
+    )
+    return out
+
+
+def read_recording(path):
+    """The recording, one stream at a time: never the whole file in memory."""
+    with path.open(encoding="utf8") as fh:
+        for line in fh:
+            if line.strip():
+                yield json.loads(line)
 
 
 def test_the_suites_streams_fold_identically(recorded):
-    assert len(recorded) > 200, "the recorder captured too few streams to mean anything"
     tally = Tally()
     kinds_folded = set()
-    for i, rec in enumerate(recorded):
+    streams = 0
+    for i, rec in enumerate(read_recording(recorded)):
+        streams += 1
         blobs = [s.encode() for s in rec["events"]]
         events = [codec.decode_event(json.loads(s)) for s in rec["events"]]
         what = f"recorded[{i}] {rec['kind']}"
@@ -248,6 +281,7 @@ def test_the_suites_streams_fold_identically(recorded):
             if py[0] == "ok":
                 kinds_folded |= {e.kind for e in events}
     assert tally.strict == 0
+    assert streams > 200, "the recorder captured too few streams to mean anything"
     assert tally.ok > 150
     # the real suites exercise fills, lifecycle, the mirror and venue events
     assert {EventKind.FILL, EventKind.EXPIRY, EventKind.MIRROR_FILL, EventKind.MIRROR_ACK,
