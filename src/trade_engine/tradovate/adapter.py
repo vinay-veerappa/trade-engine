@@ -33,7 +33,7 @@ import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -64,6 +64,8 @@ log = logging.getLogger(__name__)
 BROKER = "tradovate"
 SOURCE = "ntx"
 ACCOUNT_CAP = 2_000  # the design's hard cap on broker accounts (6.8a)
+# BP-4e: riskguard calls a broker figure stale after this many seconds (pnl_source.rs).
+FIGURE_FRESH_SECONDS = 10
 _ENVS = ("sim", "paper", "live")
 _READ_ONLY = "this adapter is read-only: it carries no orders"
 
@@ -154,6 +156,8 @@ class TradovateAdapter:
         self._identities: dict[str, VenueIdentity] = {}
         self._reference: date | None = None
         self._poller: PollAndDiff | None = None
+        # BP-4e: the oldest stamped figure of the last pnl pass (None: no figures).
+        self.last_figure_as_of: datetime | None = None
         self.stats = AdapterStats()
         # The broker protocol's capabilities: no order types, nothing to send.
         self.capabilities = Capabilities(
@@ -233,19 +237,60 @@ class TradovateAdapter:
         The figure is `realized_pnl` for the trading day of the snapshot's `confirmed_at`, as a
         plain decimal string (D6). An account whose figure cannot be read is absent, not guessed.
         """
-        day = self._trading_day(snapshot.confirmed_at)  # type: ignore[misc]
         rows: list[tuple[str, tuple[str, str] | None]] = []
+        oldest: datetime | None = None
+        for key, figure in self._figures(snapshot):
+            if figure is None:
+                rows.append((key, None))
+                continue
+            value, as_of = figure
+            rows.append((key, (format(value, "f"), as_of.strftime("%Y-%m-%dT%H:%M:%SZ"))))
+            oldest = as_of if oldest is None or as_of < oldest else oldest
+        self.last_figure_as_of = oldest
+        return rows
+
+    def _figures(self, snapshot: AccountSnapshot) -> list[tuple[str, tuple[Decimal, datetime] | None]]:
+        """Per account: `(value, as_of)` or None. BP-4e: `as_of` is the read time while the
+        daemon reports `ws_connected` (or its last event is within `FIGURE_FRESH_SECONDS`);
+        otherwise the daemon's time, so a figure whose stream is down goes stale honestly."""
+        if self._trading_day is None:
+            return [(record.key, None) for record in snapshot.records]
+        day = self._trading_day(snapshot.confirmed_at)  # type: ignore[misc]
+        out: list[tuple[str, tuple[Decimal, datetime] | None]] = []
         for record in snapshot.records:
-            figure: tuple[str, str] | None = None
+            figure: tuple[Decimal, datetime] | None = None
             try:
                 value = self.realized_pnl(record.key, day)
                 if value is not None:
-                    as_of = _aware(self._kept[record.key].raw.get("as_of_utc"), "account.as_of_utc")
-                    figure = (format(value, "f"), as_of.strftime("%Y-%m-%dT%H:%M:%SZ"))
+                    raw = self._kept[record.key].raw
+                    daemon_as_of = _aware(raw.get("as_of_utc"), "account.as_of_utc")
+                    connected = raw.get("ws_connected") is True
+                    figure = (value, self._figure_as_of(daemon_as_of, snapshot.confirmed_at, connected))
             except AccountRuleError as exc:
                 log.warning("ntx realized pnl unreadable for %s (%s)", _accounts_rs.mask(record.display), exc.kind)
-            rows.append((record.key, figure))
-        return rows
+            out.append((record.key, figure))
+        return out
+
+    @staticmethod
+    def _figure_as_of(daemon_as_of: datetime, read_at: datetime, connected: bool) -> datetime:
+        # ntx's `as_of_utc` is its store's `last_event_utc`: it moves only on a broker event, so a
+        # quiet account with a live websocket is current at read time. A disconnected one is
+        # freshened only while its last event is itself within the fresh window.
+        if connected or read_at - daemon_as_of <= timedelta(seconds=FIGURE_FRESH_SECONDS):
+            return read_at
+        return daemon_as_of
+
+    def has_open_position(self) -> bool:
+        """True when any kept account holds a non-zero net position, or a row cannot be read
+        (then it is treated as open, the fresher cadence)."""
+        for account in self._kept.values():
+            try:
+                for row in account.raw.get("positions") or []:
+                    if _decimal(row.get("net_pos"), "position.net_pos") != 0:
+                        return True
+            except (AccountRuleError, AttributeError):
+                return True
+        return False
 
     def is_stale(self, now: datetime) -> bool:
         """The whole list is stale from `stale_after` seconds after the last good read."""
@@ -468,11 +513,14 @@ class AccountWatcher:
         rand: Callable[[], float],
         limiter: RefreshLimiter | None = None,
         backoff: ReconnectBackoff | None = None,
+        read: Callable[[], None] | None = None,
     ) -> None:
         self._adapter = adapter
         self._client = client
         self._clock = clock
         self._sleep = sleep
+        # BP-4e: where a read goes. None polls the adapter's poller on this thread (BP-3).
+        self._read_fn = read
         self.limiter = limiter if limiter is not None else RefreshLimiter()
         self.backoff = backoff if backoff is not None else ReconnectBackoff(rand)
         self.snapshots = 0
@@ -487,7 +535,10 @@ class AccountWatcher:
 
     def _read(self) -> None:
         self.snapshots += 1
-        self._adapter.poller.poll()
+        if self._read_fn is None:
+            self._adapter.poller.poll()
+        else:
+            self._read_fn()
 
     def run_once(self) -> str:
         """One connection: open, read a fresh snapshot, consume hints until it ends.
