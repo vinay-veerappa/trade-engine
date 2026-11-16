@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| Status | In review |
+| Status | Partly built: merged to main through BP-6, BP-5c and BP-4f; BP-5e not started (see section 12) |
 | Owner | owner (approver) |
 | Author | Opus design thread |
-| Last updated | 2026-11-11 |
+| Last updated | 2026-11-16 |
 | Repos touched | trade-engine (core), nt8-riskguard (consumer), nt_tradovate_mcp / ntx (source), Vela (consumer) |
 | Plan | [../BROKER_PLATFORM_PLAN.md](../BROKER_PLATFORM_PLAN.md) |
 | Briefs | [../briefs/BP-COMMON.md](../briefs/BP-COMMON.md), [BP-1-FUTURES](../briefs/BP-1-FUTURES.md), [BP-2-ACCOUNTS](../briefs/BP-2-ACCOUNTS.md); riskguard `docs/product/slice_briefs/ACCT-REGISTRY-1.md` |
@@ -447,3 +447,23 @@ The phases are in [the plan](../BROKER_PLATFORM_PLAN.md):
 | Date | Reviewer | Comment | Resolution |
 |---|---|---|---|
 | 2026-11-11 | owner | LUCID is Tradovate; hub change needs no weekend; asked what changes in the hub; perf and memory at every step. | D-10, D-11, D-12; added 6.8a, 6.10 and B7. |
+
+## 12. Status 2026-11-16
+
+Built (merged to trade-engine main unless noted):
+
+- BP-1 futures instrument (e65fcb3), BP-1b CME holidays (660cdc6, merge 2e83164), BP-4c instrument export for riskguard (07847e2, merge ac7141b).
+- BP-2 account port (31fee1e, merge 3e08c5f). BP-3 Tradovate adapter over ntx, read-only (96f8a92, merge 79db165).
+- BP-4a engine sink and outbox (1808ccc, merge 8e80b10). BP-4d registry-feed host (2c83f9f, merge a736aab). BP-4e broker P&L freshness (046810e, merge 8a8115d). BP-4f outbox as_of (08694dd, merge 5ef7f2a).
+- BP-5b half 1, engine adapter (38c3d7f, merge b1db8e9). BP-5b half 2, hub passthrough (6786a8866; tvDownloadOHLC merge 1bd792cbc). BP-5c Schwab accounts host in registry-feed (03802b2, merge 836ae80).
+- BP-6a NT8 route (25f4009) and BP-6b IBKR accounts adapter (3b5c1b9), merge 1fe4f55.
+- BP-7 Vela: four commits on tvDownloadOHLC main (per nt8-riskguard `docs/product/11_REMAINING_WORK.md`).
+- PS-4a sender (trade-engine, default off). PS-4b broker P&L on registry ingest is in nt8-riskguard (ce191e4b).
+
+Remaining:
+
+- BP-5e, ACCOUNTS_CHANGED hint: not started (no commits in either repo).
+- P4c flip, and the BP-4a sink on (it stays off while the registry is empty), per nt8-riskguard `docs/product/11_REMAINING_WORK.md` section 4.
+- Deploy and live checks of BP-5c and BP-6a/b: not verified in this pass.
+- The section 9 P4 gate live G3 read while flat, after the owner re-login: not verified in this pass.
+- Order placement needs owner approval per broker (section 9 owner gates).

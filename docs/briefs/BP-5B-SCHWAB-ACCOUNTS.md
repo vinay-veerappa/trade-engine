@@ -2,6 +2,8 @@ Parent design: trade-engine/docs/design/BROKER-PLATFORM.md
 
 # BP-5b: Schwab Trader API accounts adapter (plan phase 5b)
 
+**Status 2026-11-16: merged.** Half 1 (engine) is on trade-engine main (38c3d7f, merge b1db8e9). Half 2 (hub) is on tvDownloadOHLC main (6786a8866, merge 1bd792cbc), live since the hub restart 2026-11-15 ~20:18 local (per nt8-riskguard `docs/product/11_REMAINING_WORK.md`).
+
 Read BP-COMMON.md first, then plan phase 5, `te_core::accounts` (the port, the key,
 mask and diff rules) and BP-3 (the Tradovate adapter is the model to copy).
 
@@ -22,7 +24,7 @@ Two halves, two repos, two commits. **Neither is deployed by this brief.**
 4. The adapter feeds the 4a outbox with broker `schwab`. It is behind a switch that
    is off by default.
 
-## Half 2: hub passthrough (tvDownloadOHLC, branch only, never merged here)
+## Half 2: hub passthrough (tvDownloadOHLC, merged to main)
 
 1. `scripts/streaming/schwab_hub.py`: add **only** the two accounts endpoints above to
    the REST allowlist, through the existing budgeted REST lane (the shared 120/min).
@@ -33,7 +35,7 @@ Two halves, two repos, two commits. **Neither is deployed by this brief.**
    subscription without a reconnect, stop and report; don't work around it.
 3. Tests with the hub's existing fakes: allowlist accepts exactly the two new paths and
    still refuses everything else; the 120/min budget is shared, not doubled.
-4. Leave the branch unmerged and report it. The owner deploys hub changes outside
+4. Merged to main (status 2026-11-16). The owner deploys hub changes outside
    market hours and checks the feed afterwards (owner gate).
 
 ## Tests
