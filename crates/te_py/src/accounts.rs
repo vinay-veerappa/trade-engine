@@ -95,7 +95,7 @@ fn accounts_replay(events: &str) -> PyResult<String> {
 }
 
 /// The bounded account-event ring (10,000 events or 24 h, oldest dropped and counted).
-#[pyclass(unsendable)]
+#[pyclass]
 struct AccountEventRing {
     inner: ac::EventRing,
 }

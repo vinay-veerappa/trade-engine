@@ -27,8 +27,10 @@ B7: memory stays bounded by the adapter's `ACCOUNT_CAP` and the outbox `cap_byte
 keeps no list of its own. CPU: the watcher blocks on the `/events` stream and its backoff sleep;
 the pump blocks on its condition for at most one interval; the Schwab thread blocks on the stop
 event for at most one tick (1 s); the main thread blocks on
-`stop_event.wait(HEARTBEAT_SECONDS)`. The poller's event ring is `unsendable` (pyo3), so the
-pump is the only thread that calls `poll()`: one per broker, never shared.
+`stop_event.wait(HEARTBEAT_SECONDS)`. The pump is the only thread that calls `poll()`
+(one per broker, never shared) because `PollAndDiff` keeps unlocked Python state (the last
+snapshot and the seq counter). The Rust event ring is no longer `unsendable` (TE-RING-1), so
+building or dropping a poller on another thread is safe; concurrent `poll()` calls are not.
 """
 
 from __future__ import annotations
@@ -152,8 +154,8 @@ class SchwabPoller:
     def accounts(self) -> int:
         """How many accounts the last good Schwab snapshot holds.
 
-        Reads the adapter's own `last_good`, never `adapter.poller`: the poller's event ring is
-        `unsendable` (pyo3), so only the thread that polls may touch it.
+        Reads the adapter's own `last_good`, never `adapter.poller`: the poller's state is
+        unlocked, so only the thread that polls may touch it.
         """
         snapshot = self._adapter.last_good
         return 0 if snapshot is None else len(snapshot.records)

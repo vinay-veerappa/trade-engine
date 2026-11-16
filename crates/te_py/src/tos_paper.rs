@@ -130,7 +130,7 @@ fn list(text: &str) -> PyResult<Vec<Json>> {
 }
 
 /// The `TosPaperBroker`'s decision state (docs/RUST_PORT.md P5-T9).
-#[pyclass(module = "trade_engine_rs", unsendable)]
+#[pyclass(module = "trade_engine_rs")]
 pub struct TosBroker {
     core: Broker,
 }
