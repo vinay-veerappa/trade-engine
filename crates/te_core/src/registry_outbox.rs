@@ -92,6 +92,8 @@ struct Inflight {
     snapshot: bool,
     /// `Outbox::pnl_version` when the envelope was built (what it carried).
     pnl_version: u64,
+    /// `Outbox::pnl_fresh_version` when the envelope was built (BP-4f).
+    pnl_fresh_version: u64,
 }
 
 #[derive(Debug)]
@@ -123,7 +125,17 @@ pub struct Outbox {
     /// envelope that carried it was acknowledged: `pnl_version > pnl_sent_version` is due.
     pnl_version: u64,
     pnl_sent_version: u64,
+    /// BP-4f: bumped when only an `as_of` moves forward (same value). Sent no sooner than
+    /// `PNL_FRESH_MIN_INTERVAL_S` after the last acknowledged envelope, so riskguard's 10 s
+    /// staleness check sees a live figure without a post per re-read.
+    pnl_fresh_version: u64,
+    pnl_fresh_sent_version: u64,
 }
+
+/// BP-4f: the shortest gap between two envelopes sent only to carry a newer `as_of`.
+/// B7: at most 30 such posts a minute; the feed re-reads every 2 s while a position is open
+/// and every 30 s when flat, so the flat cost is one post per 30 s.
+pub const PNL_FRESH_MIN_INTERVAL_S: i64 = 2;
 
 fn str_json(s: &str) -> String {
     json::dumps(&Json::Str(s.to_string()))
@@ -177,6 +189,8 @@ impl Outbox {
             pnl: BTreeMap::new(),
             pnl_version: 0,
             pnl_sent_version: 0,
+            pnl_fresh_version: 0,
+            pnl_fresh_sent_version: 0,
         })
     }
 
@@ -188,6 +202,8 @@ impl Outbox {
             self.pnl.clear();
             self.pnl_version = 0;
             self.pnl_sent_version = 0;
+            self.pnl_fresh_version = 0;
+            self.pnl_fresh_sent_version = 0;
         }
     }
 
@@ -202,7 +218,9 @@ impl Outbox {
     /// change takes no seq. Staleness: riskguard treats the figure as stale after 10 s, but
     /// heartbeats are due only every `stale_after_s / 3` (40 s at the default 120), so a changed
     /// value makes the next `next_envelope` due at once (a heartbeat-shaped envelope with no
-    /// events) instead of waiting for the cadence. An unchanged value waits for the cadence.
+    /// events) instead of waiting for the cadence. An unchanged value with a newer `as_of`
+    /// (BP-4f) is due once `PNL_FRESH_MIN_INTERVAL_S` has passed since the last send; an older
+    /// or equal `as_of` is kept out (the stored one stays) and is never due.
     pub fn set_pnl(&mut self, key: &str, realized: &str, as_of: &str) -> R<()> {
         let value = match self.check_pnl(key, realized, as_of) {
             Ok(v) => v,
@@ -215,10 +233,19 @@ impl Outbox {
             self.counters.pnl_refused += 1;
             return err("cap_exceeded", format!("more than {} accounts carry a pnl figure", accounts::MAX_RECORDS));
         }
-        let changed = self.pnl.get(key).map_or(true, |(old, _)| *old != value);
-        self.pnl.insert(key.to_string(), (value, as_of.to_string()));
-        if changed {
-            self.pnl_version += 1;
+        match self.pnl.get(key) {
+            Some((old, old_as_of)) if *old == value => {
+                // Same figure: only a strictly newer as_of refreshes it (BP-4f).
+                let newer = parse_at(as_of, "pnl.as_of")?.instant() > parse_at(old_as_of, "pnl.as_of")?.instant();
+                if newer {
+                    self.pnl.insert(key.to_string(), (value, as_of.to_string()));
+                    self.pnl_fresh_version += 1;
+                }
+            }
+            _ => {
+                self.pnl.insert(key.to_string(), (value, as_of.to_string()));
+                self.pnl_version += 1;
+            }
         }
         Ok(())
     }
@@ -528,6 +555,7 @@ impl Outbox {
             self.pnl_fragment()
         );
         let pnl_version = self.pnl_version;
+        let pnl_fresh_version = self.pnl_fresh_version;
         if self.needs_snapshot {
             let accounts: Vec<&str> = self.members.values().map(String::as_str).collect();
             let body = format!(
@@ -538,7 +566,7 @@ impl Outbox {
             if body.len() > MAX_BODY_BYTES {
                 return self.halt("too_large");
             }
-            self.inflight = Some(Inflight { top_seq: self.head_seq, snapshot: true, pnl_version });
+            self.inflight = Some(Inflight { top_seq: self.head_seq, snapshot: true, pnl_version, pnl_fresh_version });
             self.counters.envelopes += 1;
             return Ok(Some(body));
         }
@@ -563,18 +591,22 @@ impl Outbox {
                 top = *seq;
             }
             let body = format!("{head},\"events\":[{}]}}", chunk.join(","));
-            self.inflight = Some(Inflight { top_seq: top, snapshot: false, pnl_version });
+            self.inflight = Some(Inflight { top_seq: top, snapshot: false, pnl_version, pnl_fresh_version });
             self.counters.envelopes += 1;
             return Ok(Some(body));
         }
         let pnl_due = self.pnl_enabled && self.pnl_version > self.pnl_sent_version;
+        let fresh_due = self.pnl_enabled
+            && self.pnl_fresh_version > self.pnl_fresh_sent_version
+            && self.last_sent_s.map_or(true, |last| now_s - last >= PNL_FRESH_MIN_INTERVAL_S);
         let due = pnl_due
+            || fresh_due
             || match self.last_sent_s {
                 None => true,
                 Some(last) => now_s - last >= self.stale_after_s / 3,
             };
         if due {
-            self.inflight = Some(Inflight { top_seq: self.acked_seq, snapshot: false, pnl_version });
+            self.inflight = Some(Inflight { top_seq: self.acked_seq, snapshot: false, pnl_version, pnl_fresh_version });
             self.counters.envelopes += 1;
             return Ok(Some(format!("{head},\"events\":[]}}")));
         }
@@ -641,6 +673,7 @@ impl Outbox {
                 }
                 if let Some(f) = &inflight {
                     self.pnl_sent_version = self.pnl_sent_version.max(f.pnl_version);
+                    self.pnl_fresh_sent_version = self.pnl_fresh_sent_version.max(f.pnl_fresh_version);
                 }
                 self.inflight = None;
                 self.last_sent_s = Some(now_s);
@@ -1179,6 +1212,32 @@ mod tests {
 
     fn key(id: &str) -> String {
         format!("{BROKER}:{id}")
+    }
+
+    #[test]
+    fn a_newer_as_of_alone_is_sent_after_the_min_interval_bp4f() {
+        let mut ob = pnl_seeded();
+        ob.set_pnl(&key("A194"), "-62.50", "2026-11-11T14:00:00Z").unwrap();
+        ob.next_envelope(T0).unwrap().unwrap();
+        ob.on_response(200, "{\"applied_seq\":2}", T0).unwrap();
+        // Same value, newer as_of: not due inside the min interval, due at it, carrying the new time.
+        ob.set_pnl(&key("A194"), "-62.50", &secs(1)).unwrap();
+        assert!(ob.next_envelope(&secs(1)).unwrap().is_none());
+        let env = ob.next_envelope(&secs(PNL_FRESH_MIN_INTERVAL_S)).unwrap().unwrap();
+        assert!(env.contains(&format!("\"as_of\":\"{}\"", secs(1))), "{env}");
+        ob.on_response(200, "{\"applied_seq\":2}", &secs(2)).unwrap();
+        // Nothing new: not due until the heartbeat cadence.
+        assert!(ob.next_envelope(&secs(10)).unwrap().is_none());
+        // An equal or older as_of keeps the stored one and is never due.
+        ob.set_pnl(&key("A194"), "-62.50", &secs(1)).unwrap();
+        ob.set_pnl(&key("A194"), "-62.50", T0).unwrap();
+        assert!(ob.next_envelope(&secs(10)).unwrap().is_none());
+        // A changed value is still due at once, regardless of the interval.
+        ob.set_pnl(&key("A194"), "-70.00", &secs(3)).unwrap();
+        ob.next_envelope(&secs(10)).unwrap();
+        ob.on_response(200, "{\"applied_seq\":2}", &secs(10)).unwrap();
+        ob.set_pnl(&key("A194"), "-75.00", &secs(11)).unwrap();
+        assert!(ob.next_envelope(&secs(10)).unwrap().is_some());
     }
 
     #[test]
