@@ -145,6 +145,8 @@ def env_for(tmp_path: Path, *, schwab: bool, sub: str = "a", pnl: bool = False) 
         env["TE_RISKGUARD_REGISTRY_PNL"] = "on"
     if schwab:
         env["TE_SCHWAB_ACCOUNTS"] = "on"
+        # BP-5e: the hub /ws hint would dial the real hub port from these tests; they run without it.
+        env["TE_SCHWAB_ACCOUNTS_HINT"] = "0"
     return env
 
 
