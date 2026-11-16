@@ -171,3 +171,20 @@ restart: on-failure
 ```
 
 Check: `GET /v1/fleet` on riskguard. Each Tradovate account shows a broker P&L slot with a fresh `at`; BP-4b coverage counts it as covered. The registry `GET /v1/accounts` lists the broker accounts by `display` only.
+
+## 7a. Hosting the Schwab accounts adapter (BP-5c)
+
+The same process hosts the Schwab accounts adapter, off by default. With `TE_SCHWAB_ACCOUNTS=on` the feed builds the BP-5b adapter, a hub client and a **second** `RiskguardRegistrySink` with `broker="schwab"` and its own outbox; with it off nothing Schwab is constructed, no thread starts and the Tradovate sink, outbox and bytes are unchanged (I1).
+
+| Env var | Meaning |
+|---|---|
+| `TE_SCHWAB_ACCOUNTS` | `on` hosts the adapter; anything else (the default) builds nothing Schwab and starts no Schwab thread |
+| `TE_SCHWAB_HUB_URL` | the hub's base URL, default `http://127.0.0.1:8081`. **Loopback only** (`127.0.0.1`, `localhost`, `::1`): any other host is a `ValueError` at startup |
+| `TE_SCHWAB_OUTBOX_PATH` | the Schwab outbox file; default the Tradovate outbox's name with `_schwab` (`registry_outbox.json` -> `registry_outbox_schwab.json`, same directory). Same cap and `stale_after_s` as the Tradovate outbox |
+
+- Each poll is two reads of the hub's `POST /request` - `{"method": "get_account_numbers"}` then `{"method": "get_accounts"}`, nothing else in the body - and the response text goes to `adapter.feed(...)`; membership and the diff are the 60 s poll, so the steady cost is 2 calls/min of the hub's shared 120/min.
+- A failed read (`status` other than `success`, a `code` of `timeout` or `403`, HTTP 4xx/5xx, connection refused, a body that is not `{"status": "success", "data": ...}`) is counted by kind (`schwab_read_fail_refused`, `_timeout`, `_unreachable`, `_bad_shape`) and never feeds or emits an account event; the next read backs off 30 s, 60 s, 120 s, 240 s and then stays at 300 s (jitter +-10%).
+- An `ACCOUNTS_CHANGED` frame on the hub's `/ws` is not wired in this slice: the 60 s poll is the contract (BP-5e adds the hint through `adapter.on_activity`).
+- `--once`: with the switch on it also does one hub read, one poll and one pump, and prints `"schwab_accounts": n, "schwab_sent": n` next to the Tradovate counts. The heartbeat adds `schwab_accounts`, `schwab_reads_ok`, the four `schwab_read_fail_*` counters and the Schwab sink's counts as `schwab_sink.*`; counts only, never an account number, a `hashValue` or money.
+- Check it landed: riskguard's registry ingest accepts broker `schwab` (any non-empty broker name is accepted once every key carries that prefix), so `GET /v1/accounts?scope=all` (or `?platform=tos`) lists the rows by `display` (`*194`), each with route `{platform: tos, local_name: <accountNumber>}`. `GET /v1/fleet` lists registry **members that a connector observes** (BP-4b), so a `schwab:` account gets a fleet row labeled with its TOS/NT8 account name once that account is observed there; the registry read is the check that the ingest itself arrived.
+
