@@ -203,8 +203,9 @@ def test_the_poller_passes_the_ntx_figures_for_the_trading_day_only(tmp_path, da
     sink.pump()
     sent = rg.envelopes[-1]["pnl"]
     # 277's figure is from another day: absent. Python decided nothing but the day mapping.
+    # 194's stream is connected, so its figure is stamped at the read (BP-4e).
     assert [(r["key"], r["realized_usd"], r["as_of"]) for r in sent] == [
-        ("tradovate:ACCT-TEST-194", "-62.5", "2026-11-11T17:59:30Z")
+        ("tradovate:ACCT-TEST-194", "-62.5", "2026-11-11T18:00:00Z")
     ]
 
 

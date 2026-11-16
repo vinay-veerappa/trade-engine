@@ -10,7 +10,7 @@ Parent design: trade-engine/docs/design/BROKER-PLATFORM.md (phase 4) and nt8-ris
 
 ## Do
 1. In `registry_feed.run`, add a bounded periodic re-snapshot. Interval: 2 s while any account has a non-zero position, 30 s when all are flat. Use the existing `NtxClient` snapshot call and the existing `observe` path. No second poll loop: drive it from the watcher's wait timeout, or a single timer thread that the stop event ends.
-2. Stamp the row's `as_of` from the snapshot read time only when the daemon's `as_of_utc` is not older than the read. If the daemon's own data is older than 10 s (its stream is down), keep the daemon's time. The figure must go stale honestly and never be freshened by our clock alone.
+2. Stamp the row's `as_of` with the snapshot read time while the account's `ws_connected` is true. ntx's `as_of_utc` is the time of the last broker event (`daemon.rs` `last_event_utc`), so a quiet, connected account is live even when it is old. When the stream is down (`ws_connected` false), use read time only if `as_of_utc` is within 10 s of the read; otherwise keep the daemon's time. The figure must go stale honestly and never be freshened by our clock alone.
 3. Heartbeat line gains `resnapshots` and `max_as_of_age_s`. Counts and ages only.
 4. **B7:**
    - CPU: a flat fleet costs at most one snapshot per 30 s, and an open one at most one per 2 s. Test both with a fake clock.
