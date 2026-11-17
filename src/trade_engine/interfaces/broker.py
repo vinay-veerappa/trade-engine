@@ -66,6 +66,19 @@ class VenueOrderAllocation:
 
 
 @dataclass(frozen=True)
+class RiskguardVerdict:
+    """A riskguard `/v1/check` verdict carried to the venue adapter (OA-3).
+
+    Only enforce mode attaches one. `checked_at` is riskguard's own clock text; the
+    venue (ntx) refuses a verdict older than its freshness window.
+    """
+
+    allowed: bool
+    verdict_revision: int | None = None
+    checked_at: str | None = None
+
+
+@dataclass(frozen=True)
 class VenueOrder:
     """Order submitted to a specific venue (supports 1:1 or netted strategy orders, Architecture §4.4)."""
 
@@ -82,6 +95,9 @@ class VenueOrder:
     allocations: tuple[VenueOrderAllocation, ...] = ()
     parent_order_id: str | None = None
     oco_group: str | None = None
+    protective_stop_price: Decimal | None = field(default=None, repr=False)
+    protective_target_price: Decimal | None = field(default=None, repr=False)
+    riskguard_verdict: RiskguardVerdict | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.venue_order_id:
@@ -124,6 +140,7 @@ class OrderChanges:
     new_quantity: Decimal | None = None
     new_limit_price: Decimal | None = None
     new_stop_price: Decimal | None = None
+    riskguard_verdict: RiskguardVerdict | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

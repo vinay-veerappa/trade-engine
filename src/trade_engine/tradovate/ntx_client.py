@@ -1,12 +1,14 @@
-"""The ntx-daemon client: a loopback I/O shell (BROKER_PLATFORM phase 3, read-only).
+"""The ntx-daemon client: a loopback I/O shell (BROKER_PLATFORM phase 3, OA-3 orders).
 
 It reads three things from the ntx daemon at ``127.0.0.1:9234``: ``GET /health``,
 ``GET /snapshot`` and the ``GET /events`` server-sent stream. It carries data and does I/O
 only (D2, D3): which account was added or removed is `te_core::accounts`' decision, never
 made here.
 
-The client links no order call: the daemon's order verbs are not reachable from this
-module (the order-verb gate test scans it).
+OA-3 adds the three order verbs, ``place``, ``modify`` and ``cancel`` (one POST each, no
+retry, no thread). The order gate test allows exactly these three POST paths. A POST that
+may have been written but got no answer raises ``NtxError("pending")``: the caller must
+never resend it (the clOrdId is idempotent at the daemon, but the outcome is unknown).
 
 Rules it carries:
 - the bearer token is held in :class:`NtxToken`, which never shows its text in `repr`,
@@ -42,6 +44,9 @@ TOKEN_FILE = Path("secrets") / "daemon-token.txt"
 # Budgets (BROKER_PLATFORM design 6.8a; BP-3 brief).
 MAX_LINE_BYTES = 1_048_576  # SSE line buffer cap: 1 MB
 MAX_BODY_BYTES = 16 * 1_048_576  # one /snapshot or /health body
+ORDER_TIMEOUT_SECONDS = 2.5  # ntx gives itself 2 s
+MAX_ORDER_BODY_BYTES = 16 * 1024  # one order request
+MAX_ORDER_RESPONSE_BYTES = 64 * 1024  # one order answer
 READ_TIMEOUT_SECONDS = 45.0  # the daemon's keepalive is 15 s
 BACKOFF_FIRST = 1.0
 BACKOFF_CAP = 30.0
@@ -305,8 +310,43 @@ class RefreshLimiter:
         return self._pending
 
 
+_ORDER_OUTCOMES = frozenset({"SENT", "PENDING", "REFUSED"})
+_ORDER_RESPONSE_KEYS = frozenset(
+    {"account", "clOrdId", "op", "outcome", "code", "reason", "orderIds", "commandId"}
+)
+_ORDER_RESPONSE_REQUIRED = frozenset({"account", "clOrdId", "op", "outcome"})
+_ORDER_ID_KEYS = frozenset({"entryId", "stopId", "targetId"})
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _valid_order_response(body: object, op: str, cl_ord_id: object) -> bool:
+    """The strict OrderResponse check (submit.rs): exact keys and types, op and clOrdId echoed."""
+    if not isinstance(body, dict) or not _ORDER_RESPONSE_REQUIRED <= body.keys() <= _ORDER_RESPONSE_KEYS:
+        return False
+    if not all(isinstance(body[k], str) for k in ("account", "clOrdId", "op", "outcome")):
+        return False
+    if body["outcome"] not in _ORDER_OUTCOMES or body["op"] != op or body["clOrdId"] != cl_ord_id:
+        return False
+    for key in ("code", "reason"):
+        if key in body and not isinstance(body[key], str):
+            return False
+    if "commandId" in body and not _is_int(body["commandId"]):
+        return False
+    ids = body.get("orderIds")
+    if "orderIds" in body:
+        if not isinstance(ids, dict) or not {"entryId", "stopId"} <= ids.keys() <= _ORDER_ID_KEYS:
+            return False
+        if not all(_is_int(v) for v in ids.values()):
+            return False
+    return True
+
+
 class NtxClient:
-    """HTTP client for the ntx daemon: `health()`, `snapshot()` and `open_events()`.
+    """HTTP client for the ntx daemon: `health()`, `snapshot()`, `open_events()` and the
+    three order verbs `place()`, `modify()`, `cancel()`.
 
     One connection per call; `open_events()` returns the only long-lived socket, which the
     caller closes. The daemon is on loopback; any other host refuses.
@@ -362,6 +402,61 @@ class NtxClient:
         if not isinstance(payload, dict):
             raise NtxError("protocol", "the daemon's answer is not an object")
         return status, payload
+
+    def _post_order(self, path: str, op: str, body: dict[str, Any]) -> dict[str, Any]:
+        """One order POST. Returns the validated OrderResponse dict.
+
+        Raises NtxError: `network` (nothing was written), `pending` (written, no answer),
+        `unauthorized` (401), `invalid_body` (HTTP 400; message is the daemon's code) or
+        `invalid` (an answer that is not a valid OrderResponse; the order's fate is unknown).
+        """
+        raw = json.dumps(body, separators=(",", ":")).encode()
+        if len(raw) > MAX_ORDER_BODY_BYTES:
+            raise NtxError("oversize_body", "the order body is over the body cap")
+        headers = dict(self._token.header())
+        headers["Content-Type"] = "application/json"
+        conn = self._connect(ORDER_TIMEOUT_SECONDS)
+        try:
+            try:
+                conn.connect()
+            except (OSError, HTTPException) as exc:
+                raise NtxError("network", f"the daemon was not reached ({type(exc).__name__})") from None
+            try:
+                conn.request("POST", path, body=raw, headers=headers)
+                resp = conn.getresponse()
+                answer = resp.read(MAX_ORDER_RESPONSE_BYTES + 1)
+                status = resp.status
+            except (OSError, HTTPException) as exc:
+                raise NtxError("pending", f"no answer after the write ({type(exc).__name__})") from None
+        finally:
+            conn.close()
+        if status == 401:
+            raise NtxError("unauthorized", "the daemon refused the token (401)")
+        if len(answer) > MAX_ORDER_RESPONSE_BYTES:
+            raise NtxError("invalid", "the daemon's answer is over the body cap")
+        try:
+            payload = json.loads(answer)
+        except ValueError:
+            payload = None
+        if not _valid_order_response(payload, op, body.get("clOrdId")):
+            if status == 400:
+                raise NtxError("invalid_body", "invalid_body")
+            raise NtxError("invalid", f"the daemon's answer ({status}) is not an order response")
+        if status == 400:
+            raise NtxError("invalid_body", payload.get("code") or "invalid_body")
+        return payload
+
+    def place(self, body: dict[str, Any]) -> dict[str, Any]:
+        """`POST /v1/orders`: a bracketed entry. Never resend after `NtxError("pending")`."""
+        return self._post_order("/v1/orders", "place", body)
+
+    def modify(self, body: dict[str, Any]) -> dict[str, Any]:
+        """`POST /v1/orders/modify`."""
+        return self._post_order("/v1/orders/modify", "modify", body)
+
+    def cancel(self, body: dict[str, Any]) -> dict[str, Any]:
+        """`POST /v1/orders/cancel`."""
+        return self._post_order("/v1/orders/cancel", "cancel", body)
 
     def health(self) -> tuple[int, dict[str, Any]]:
         """`(status, body)` from `GET /health`: 200, or 207 when an identity is degraded."""
@@ -421,11 +516,14 @@ __all__ = [
     "BACKOFF_CAP",
     "BACKOFF_FIRST",
     "MAX_LINE_BYTES",
+    "MAX_ORDER_BODY_BYTES",
+    "MAX_ORDER_RESPONSE_BYTES",
     "NtxClient",
     "NtxError",
     "NtxStream",
     "NtxToken",
     "ReconnectBackoff",
+    "ORDER_TIMEOUT_SECONDS",
     "RefreshLimiter",
     "SseReader",
     "SseStats",

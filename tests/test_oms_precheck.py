@@ -17,7 +17,7 @@ import pytest
 
 from trade_engine.domain.instruments import Equity, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType
-from trade_engine.interfaces.broker import OrderChanges, VenueAck, VenueOrder, VenueOrderAllocation
+from trade_engine.interfaces.broker import OrderChanges, RiskguardVerdict, VenueAck, VenueOrder, VenueOrderAllocation
 from trade_engine.ledger import Ledger
 from trade_engine.oms import OrderManagementError, OrderManager
 from trade_engine.oms.precheck import (
@@ -531,7 +531,7 @@ def test_a_netted_opening_order_is_sent_once_when_every_account_allows(ledger, g
 
     gate.submit(venue_order, accepting(sent))
 
-    assert sent == [venue_order]
+    assert sent == [replace(venue_order, riskguard_verdict=RiskguardVerdict(True, None, None))]
     assert [r["path"] for r in guard.requests] == ["/v1/check?account=core-1", "/v1/check?account=core-2"]
 
 

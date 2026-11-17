@@ -26,7 +26,13 @@ from urllib.parse import quote, urlsplit
 
 from trade_engine.domain.instruments import Instrument, Side
 from trade_engine.domain.orders import Order
-from trade_engine.interfaces.broker import OrderChanges, VenueAck, VenueOrder, VenueOrderAllocation
+from trade_engine.interfaces.broker import (
+    OrderChanges,
+    RiskguardVerdict,
+    VenueAck,
+    VenueOrder,
+    VenueOrderAllocation,
+)
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import Ledger
 
@@ -48,7 +54,7 @@ REASON_CODES = frozenset(
         "COPY_OPENING_REFUSED",
     }
 )
-RESPONSE_KEYS = frozenset({"allowed", "isReducing", "reasonCode", "detail", "ruleId", "verdictRevision"})
+RESPONSE_KEYS = frozenset({"allowed", "isReducing", "reasonCode", "detail", "ruleId", "verdictRevision", "checkedAt"})
 REQUIRED_RESPONSE_KEYS = frozenset({"allowed", "isReducing", "reasonCode"})
 ACCOUNT_KEY_FIELDS = frozenset({"venue", "env", "brokerAccountId"})
 
@@ -127,6 +133,12 @@ class CheckResult:
 
     allowed: bool
     kind: str
+    verdict_revision: int | None = None
+    checked_at: str | None = None
+
+    def verdict(self) -> RiskguardVerdict:
+        """The verdict an adapter that needs one puts on the wire (OA-3)."""
+        return RiskguardVerdict(self.allowed, self.verdict_revision, self.checked_at)
 
 
 def split_quantity(quantity: Decimal, side: Side, position: Decimal) -> tuple[Decimal, Decimal]:
@@ -147,6 +159,8 @@ def _valid_response(body) -> bool:
     if "detail" in body and not isinstance(body["detail"], str):
         return False
     if "ruleId" in body and not isinstance(body["ruleId"], str):
+        return False
+    if "checkedAt" in body and not isinstance(body["checkedAt"], str):
         return False
     revision = body.get("verdictRevision", 0)
     return isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0
@@ -176,7 +190,7 @@ class RiskGuardClient:
         if not _valid_response(parsed):
             return CheckResult(False, "invalid")
         if parsed["allowed"] is True:
-            return CheckResult(True, "allowed")
+            return CheckResult(True, "allowed", parsed.get("verdictRevision"), parsed.get("checkedAt"))
         return CheckResult(False, parsed["reasonCode"])
 
     def _post(self, path: str, payload: bytes, headers: dict) -> tuple[str | None, int, bytes]:
@@ -231,10 +245,10 @@ class Precheck:
         if opening == 0:
             return send(order)
         if reducing == 0:
-            result = self._first_refusal(order, openings)
+            result, verdict = self._first_refusal(order, openings)
             if result is not None:
                 return self._refuse(order.venue_order_id, result)
-            return send(order)
+            return send(replace(order, riskguard_verdict=verdict))
         return self._submit_split(order, reducing_allocs, opening_allocs, openings, send)
 
     def _submit_split(self, order, reducing_allocs, opening_allocs, openings, send) -> VenueAck:
@@ -244,24 +258,30 @@ class Precheck:
         reduce_ack = send(replace(order, quantity=reducing, allocations=reducing_allocs))
         if reduce_ack.status == "REJECTED":
             return reduce_ack
-        result = self._first_refusal(order, openings)
+        result, verdict = self._first_refusal(order, openings)
         if result is not None:
             _LOG.warning("riskguard precheck refused opening part: venue_order=%s kind=%s qty=%s",
                          order.venue_order_id, result.kind, opening)
             return replace(reduce_ack, message=f"opening {opening} refused: {result.kind}")
         open_ack = send(replace(order, venue_order_id=order.venue_order_id + OPEN_SUFFIX,
-                                quantity=opening, allocations=opening_allocs))
+                                quantity=opening, allocations=opening_allocs,
+                                riskguard_verdict=verdict))
         if open_ack.status == "REJECTED":
             return replace(reduce_ack, message=f"opening {opening} rejected by the venue")
         return reduce_ack
 
-    def _first_refusal(self, order: VenueOrder, openings: Mapping[str, Decimal]) -> CheckResult | None:
+    def _first_refusal(
+        self, order: VenueOrder, openings: Mapping[str, Decimal]
+    ) -> tuple[CheckResult | None, RiskguardVerdict | None]:
         # Each account with an opening part is checked once, in order; the first refusal stops the rest.
+        # The second item is the last allowed verdict (the only one for a single-account order).
+        verdict: RiskguardVerdict | None = None
         for account, quantity in openings.items():
             result = self._check(account, order.instrument, order.side, quantity)
             if not result.allowed:
-                return result
-        return None
+                return result, None
+            verdict = result.verdict()
+        return None, verdict
 
     def replace(self, venue_order_id: str, changes: OrderChanges,
                 send: Callable[[str, OrderChanges], VenueAck]) -> VenueAck:
@@ -293,6 +313,8 @@ class Precheck:
         if not result.allowed:
             _LOG.warning("riskguard precheck would refuse replace (warn): venue_order=%s kind=%s qty=%s",
                          venue_order_id, result.kind, opening)
+        elif self.enforcing:
+            changes = replace(changes, riskguard_verdict=result.verdict())
         return send(venue_order_id, changes)
 
     def _refuse(self, venue_order_id: str, result: CheckResult) -> VenueAck:

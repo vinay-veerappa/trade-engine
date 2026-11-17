@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections.abc import Mapping
-from dataclasses import fields, is_dataclass
+from dataclasses import MISSING, fields, is_dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -106,6 +106,10 @@ def _registry() -> tuple[dict[str, type], dict[str, type[Exception]]]:
 CARRIERS, ERRORS = _registry()
 
 
+# OA-3 fields that are absent from the frozen goldens; omitted from the encoding while None.
+_ADDITIVE_NONE = frozenset({"protective_stop_price", "protective_target_price", "riskguard_verdict"})
+
+
 def encode(value: Any) -> dict[str, Any]:
     if type(value) in codec._TYPE_TO_TAG:
         return {"tag": "ledger-payload", "value": codec.encode_payload(value)}
@@ -143,7 +147,8 @@ def encode(value: Any) -> dict[str, Any]:
         key = f"{type(value).__module__}.{type(value).__qualname__}"
         if key in CARRIERS:
             return {"tag": "dataclass", "type": key,
-                    "value": {field.name: encode(getattr(value, field.name)) for field in fields(value)}}
+                    "value": {field.name: encode(getattr(value, field.name)) for field in fields(value)
+                              if not (field.name in _ADDITIVE_NONE and getattr(value, field.name) is None)}}
     raise CorpusError(f"Unsupported observation value {type(value).__module__}.{type(value).__qualname__}")
 
 
@@ -212,7 +217,13 @@ def decode(tree: Any) -> Any:
             if tag == "enum" and issubclass(cls, Enum) and isinstance(value, str):
                 return cls[value]
             if tag == "dataclass" and is_dataclass(cls) and isinstance(value, dict):
-                if set(value) != {field.name for field in fields(cls)}:
+                # A field added later with a default may be absent from an older golden.
+                known = {field.name for field in fields(cls)}
+                required = {
+                    field.name for field in fields(cls)
+                    if field.default is MISSING and field.default_factory is MISSING
+                }
+                if not required <= set(value) <= known:
                     raise CorpusError(f"Malformed dataclass fields for {key}")
                 return cls(**{key: decode(item) for key, item in value.items()})
     except (ValueError, TypeError, KeyError, ArithmeticError) as error:

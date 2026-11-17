@@ -28,7 +28,7 @@ from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import EmulatedOrderState, Event, EventKind, Ledger, codec
 from trade_engine.ledger.codec import DecimalRangeError, canon_decimal, encode_payload
 from trade_engine.oms.models import Bracket
-from trade_engine.oms.precheck import Precheck, PrecheckConfig
+from trade_engine.oms.precheck import Precheck, PrecheckConfig, PrecheckConfigError
 from trade_engine.sim import _rs
 
 
@@ -248,6 +248,11 @@ class OrderManager:
     def __init__(
         self, broker: BrokerAdapter, clock: Clock, ledger: Ledger, precheck: PrecheckConfig | None = None
     ) -> None:
+        from trade_engine.tradovate.adapter import TradovateAdapter  # lazy: the adapter imports the OMS carriers
+
+        if isinstance(broker, TradovateAdapter) and (precheck is None or precheck.mode != "enforce"):
+            # Warn or off would send unchecked orders to a live venue (OA-3).
+            raise PrecheckConfigError("TradovateAdapter needs riskguard.precheck.mode = enforce")
         self._broker = broker
         self._clock = clock
         self._ledger = ledger
