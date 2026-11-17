@@ -255,9 +255,11 @@ def test_client_refuses_an_oversize_body_without_writing(ntx):
 # ---- the adapter: place -------------------------------------------------------------------
 
 
-def test_capabilities_are_market_limit_day_with_native_stops(ntx):
+def test_capabilities_are_market_limit_stop_day_with_native_stops(ntx):
     caps = adapter_for(ntx).capabilities
-    assert caps.supported_order_types == frozenset({OrderType.MARKET, OrderType.LIMIT})
+    assert caps.supported_order_types == frozenset(
+        {OrderType.MARKET, OrderType.LIMIT, OrderType.STOP}
+    )
     assert caps.supported_tifs == frozenset({TimeInForce.DAY})
     assert caps.supports_native_stops is True
 

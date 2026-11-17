@@ -148,6 +148,9 @@ class TradovateAdapter:
     name = "tradovate"
     env = "paper"
     stale_after = 120
+    # OA-3b: entry, stop and first target go out as one order; the OMS host fills them on the entry.
+    # A plain attribute, not a Capabilities field: that dataclass is serialized into the frozen p4c tape.
+    atomic_bracket = True
 
     def __init__(
         self,
@@ -177,7 +180,7 @@ class TradovateAdapter:
         self.stats = AdapterStats()
         # Market and limit entries with a native protective stop, day orders.
         self.capabilities = Capabilities(
-            supported_order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}),
+            supported_order_types=frozenset({OrderType.MARKET, OrderType.LIMIT, OrderType.STOP}),
             supported_tifs=frozenset({TimeInForce.DAY}),
             supports_multi_leg=False,
             supports_native_stops=True,
@@ -499,7 +502,9 @@ class TradovateAdapter:
         return []
 
     def submit(self, order: VenueOrder) -> VenueAck:
-        if order.order_type not in self.capabilities.supported_order_types:
+        if order.parent_order_id is not None and order.order_type in (OrderType.STOP, OrderType.LIMIT):
+            return self._adopt_child(order)
+        if order.order_type not in (OrderType.MARKET, OrderType.LIMIT):  # STOP only as an adopted child
             raise UnsupportedCapability(f"order type {order.order_type} not supported on tradovate")
         if order.tif not in self.capabilities.supported_tifs:
             raise UnsupportedCapability(f"time in force {order.tif} not supported on tradovate")
@@ -541,8 +546,80 @@ class TradovateAdapter:
         ack, response = self._send("place", cl, ntx_account, self._client.place, body)
         if response is not None and response["outcome"] == "SENT" and response.get("orderIds"):
             ids = dict(response["orderIds"])
-            ids.update(account=ntx_account, qty=int(order.quantity), entry=body["entry"], seq=0)
+            ids.update(account=ntx_account, qty=int(order.quantity), entry=body["entry"], seq=0,
+                       stopQty=int(order.quantity), targetQty=int(order.quantity),
+                       stopPrice=body["stop"], targetPrice=body.get("target"), targetChild=None)
             self._remember(cl, ids)
+        return ack
+
+    def _adopt_child(self, order: VenueOrder) -> VenueAck:
+        """OA-3b: a protective child of an entry this adapter placed adopts the ntx stop or target.
+
+        The bracket's stop and first target went out with the entry, so a child submit makes no
+        place call. It maps the child to the stored ntx order id and sends at most one modify, when
+        the child's quantity or price differs from what ntx holds. A looser stop is refused.
+        """
+        cl = order.venue_order_id
+        accounts = {item.account_id for item in order.allocations}
+        if len(accounts) != 1:
+            raise UnsupportedCapability("netted orders not supported on tradovate")
+        ntx_account = self._ntx_account(next(iter(accounts)))
+        parent = self._orders.get(order.parent_order_id)
+        if parent is None:
+            return self._refused(cl, "adopt", ntx_account, "unknown_parent")
+        if parent["account"] != ntx_account:
+            return self._refused(cl, "adopt", ntx_account, "account_mismatch")
+        is_stop = order.order_type is OrderType.STOP
+        if is_stop:
+            ntx_id, held_qty, held_price = parent.get("stopId"), parent["stopQty"], parent["stopPrice"]
+            price = order.stop_price
+        else:
+            ntx_id, held_qty, held_price = parent.get("targetId"), parent["targetQty"], parent["targetPrice"]
+            price = order.limit_price
+            if ntx_id is None or held_price is None:
+                return self._refused(cl, "adopt", ntx_account, "no_target")
+            claimed = parent.get("targetChild")
+            if claimed is not None and claimed != cl:
+                return self._refused(cl, "adopt", ntx_account, "extra_target")
+        if ntx_id is None or price is None:
+            return self._refused(cl, "adopt", ntx_account, "no_stop")
+        qty = order.quantity
+        if qty != qty.to_integral_value() or not 1 <= qty <= _MAX_QTY:
+            return self._refused(cl, "adopt", ntx_account, "qty_invalid")
+        new_price = _price(price)
+        price_changed = Decimal(new_price) != Decimal(held_price)
+        if is_stop and price_changed:
+            new, held = Decimal(new_price), Decimal(held_price)
+            if (new > held) if order.side is Side.BUY else (new < held):
+                return self._refused(cl, "adopt", ntx_account, "stop_loosen")
+        seq = 0
+        if price_changed or int(qty) != held_qty:
+            wire_cl = _wire_cl_ord_id(f"{cl}.m0")
+            if wire_cl is None:
+                return self._refused(cl, "modify", ntx_account, "cl_ord_id_invalid")
+            body = {
+                "account": ntx_account,
+                "clOrdId": wire_cl,
+                "orderId": ntx_id,
+                "qty": int(qty),
+                "to": {"type": "stop" if is_stop else "limit", "price": new_price},
+            }
+            ack, response = self._send("modify", cl, ntx_account, self._client.modify, body)
+            if response is None or response["outcome"] != "SENT":
+                return ack
+            seq = 1
+        else:
+            ack = VenueAck(cl, "ACCEPTED", self._clock.now_utc(), None)
+            log.info("ntx order adopt: venue_order=%s account=%s status=ACCEPTED", cl, _mask(ntx_account))
+        parent["stopQty" if is_stop else "targetQty"] = int(qty)
+        parent["stopPrice" if is_stop else "targetPrice"] = new_price
+        if not is_stop:
+            parent["targetChild"] = cl
+        self._remember(cl, {
+            "account": ntx_account, "entryId": ntx_id, "stopId": ntx_id if is_stop else None,
+            "qty": int(qty), "seq": seq, "child": "stop" if is_stop else "target", "side": order.side,
+            "entry": {"type": "stop" if is_stop else "limit", "price": new_price},
+        })
         return ack
 
     def cancel(self, venue_order_id: str) -> VenueAck:
@@ -570,6 +647,10 @@ class TradovateAdapter:
         qty = Decimal(known["qty"]) if changes.new_quantity is None else changes.new_quantity
         if qty != qty.to_integral_value() or not 1 <= qty <= _MAX_QTY:
             return self._refused(venue_order_id, "modify", account, "qty_invalid")
+        if changes.new_stop_price is not None and known.get("child") == "stop":
+            held, new = Decimal(known["entry"]["price"]), changes.new_stop_price
+            if (new > held) if known["side"] is Side.BUY else (new < held):
+                return self._refused(venue_order_id, "modify", account, "stop_loosen")
         if changes.new_stop_price is not None:
             order_id, to = known["stopId"], {"type": "stop", "price": _price(changes.new_stop_price)}
         elif changes.new_limit_price is not None:
@@ -598,7 +679,7 @@ class TradovateAdapter:
             known["seq"] += 1
             if response["outcome"] == "SENT":
                 known["qty"] = int(qty)
-                if to["type"] != "stop":
+                if to["type"] != "stop" or known.get("child") == "stop":
                     known["entry"] = to
         return ack
 
