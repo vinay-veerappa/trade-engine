@@ -59,7 +59,8 @@ fn quantity(equity: bool, q: &Money) -> R<()> {
     }
     Ok(())
 }
-fn equity(i: &Instrument) -> bool { matches!(i, Instrument::Equity(_)) }
+/// Whole-unit instruments: shares and futures contracts.
+fn equity(i: &Instrument) -> bool { matches!(i, Instrument::Equity(_) | Instrument::Future(_)) }
 fn positive(q: &Money, message: String) -> R<()> {
     if !q.is_finite() || le(q,&zero())? { return err("value",message); }
     Ok(())
@@ -131,25 +132,16 @@ fn allocate(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
 
 /// `_validate_quantity`: an equity quantity is whole shares.
 pub fn validate_quantity(instrument: &Instrument, q: &Money) -> R<()> {
-    if matches!(instrument, Instrument::Future(_)) {
-        return err("unsupported", "futures not supported in OMS");
-    }
     quantity(equity(instrument), q)
 }
 
 /// `_allocate_quantity`.
 pub fn allocate_quantity(q: &Money, w: &[Money], instrument: &Instrument) -> R<Vec<Money>> {
-    if matches!(instrument, Instrument::Future(_)) {
-        return err("unsupported", "futures not supported in OMS");
-    }
     allocate(q, w, equity(instrument))
 }
 
 /// `_split_quantity`: `count` equal weights, each portion positive.
 pub fn split_quantity(q: &Money, count: usize, instrument: &Instrument) -> R<Vec<Money>> {
-    if matches!(instrument, Instrument::Future(_)) {
-        return err("unsupported", "futures not supported in OMS");
-    }
     split(q, &vec![Money::int(1); count], equity(instrument))
 }
 
@@ -167,9 +159,6 @@ fn split(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
 
 /// `_fraction_quantities`: each target's fraction, the remainder a runner.
 pub fn fraction_quantities(q: &Money, w: &[Money], instrument: &Instrument) -> R<Vec<Money>> {
-    if matches!(instrument, Instrument::Future(_)) {
-        return err("unsupported", "futures not supported in OMS");
-    }
     fractions(q, w, equity(instrument))
 }
 

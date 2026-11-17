@@ -384,7 +384,7 @@ pub fn apply_fill(account_id: &str, position: Option<&Position>, fill: &Fill, mu
         &fill.price,
         &fill.filled_at,
         fill.fill_id.clone(),
-        multiplier,
+        &Money::from_i128(multiplier).map_err(derr)?,
     )
 }
 

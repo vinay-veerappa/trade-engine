@@ -171,7 +171,7 @@ fn lot_with(lot: &Lot, quantity: Money) -> R<Lot> {
     make_lot(lot.lot_id.clone(), quantity, lot.cost_basis.clone(), lot.acquired_at.clone(), lot.side)
 }
 
-fn consume_lots(lots: &[Lot], quantity: &Money, exit_price: &Money, multiplier: i128) -> R<(Vec<Lot>, Money)> {
+fn consume_lots(lots: &[Lot], quantity: &Money, exit_price: &Money, multiplier: &Money) -> R<(Vec<Lot>, Money)> {
     let mut remaining = quantity.clone();
     let mut realized = zero();
     let mut kept: Vec<Lot> = Vec::new();
@@ -190,7 +190,7 @@ fn consume_lots(lots: &[Lot], quantity: &Money, exit_price: &Money, multiplier: 
             remaining = zero();
         }
         let per = if lot.side == Side::Buy { sub(exit_price, &lot.cost_basis)? } else { sub(&lot.cost_basis, exit_price)? };
-        realized = add(&realized, &mul_i(&mul(&per, &closed)?, multiplier)?)?;
+        realized = add(&realized, &mul(&mul(&per, &closed)?, multiplier)?)?;
     }
     if ne(&remaining, &zero())? {
         return fe(format!("Open lots ran short by {}; ledger is inconsistent (I2)", s(&remaining)));
@@ -236,7 +236,7 @@ fn apply_trade(
     price: &Money,
     at: &DateTime,
     lot_id: String,
-    multiplier: i128,
+    multiplier: &Money,
 ) -> R<Position> {
     let signed_delta = if side == Side::Buy { quantity.clone() } else { neg(quantity)? };
 
@@ -300,28 +300,29 @@ pub fn apply_trade_pub(
     price: &Money,
     at: &DateTime,
     lot_id: String,
-    multiplier: i128,
+    multiplier: &Money,
 ) -> R<Position> {
     apply_trade(account_id, position, instrument, side, quantity, price, at, lot_id, multiplier)
 }
 
 // --- helpers -----------------------------------------------------------------------------------
 
-pub(crate) fn multiplier(i: &Instrument) -> R<i128> {
+/// The value factor of one unit: 1 for equity, the option multiplier, a future's point value.
+pub(crate) fn multiplier(i: &Instrument) -> R<Money> {
     match i {
-        Instrument::Equity(_) => Ok(1),
-        Instrument::Option(c) => Ok(c.multiplier),
+        Instrument::Equity(_) => Ok(Money::from_i128(1).map_err(derr)?),
+        Instrument::Option(c) => Money::from_i128(c.multiplier).map_err(derr),
         Instrument::Combo(legs) => {
-            let mut mults: Vec<i128> = Vec::new();
+            let mut mults: Vec<Money> = Vec::new();
             for l in legs {
                 let m = multiplier(&l.contract)?;
-                if !mults.contains(&m) {
+                if !contains_money(&mults, &m) {
                     mults.push(m);
                 }
             }
-            mults.sort();
+            mults.sort_by(|a, b| a.cmp_ord(b).unwrap_or(std::cmp::Ordering::Equal));
             if mults.len() != 1 {
-                let listed: Vec<String> = mults.iter().map(|m| m.to_string()).collect();
+                let listed: Vec<String> = mults.iter().map(s).collect();
                 return fe(format!(
                     "Cannot value a mixed-multiplier combo as one instrument; value it per leg: Combo has mixed leg multipliers [{}]; value it per leg (I6)",
                     listed.join(", ")
@@ -329,8 +330,12 @@ pub(crate) fn multiplier(i: &Instrument) -> R<i128> {
             }
             multiplier(&legs[0].contract)
         }
-        Instrument::Future(_) => fe("futures not supported in ledger fold (I6)"),
+        Instrument::Future(c) => Ok(c.point_value.clone()),
     }
+}
+
+fn contains_money(list: &[Money], m: &Money) -> bool {
+    list.iter().any(|x| dec_eq(x, m))
 }
 
 fn require_order(st: &AccountState, order_id: &str, kind: EventKind) -> R<Order> {
@@ -458,7 +463,7 @@ fn on_fill(st: &mut AccountState, fill: &Fill) -> R<()> {
     check_finite(&fill.fee, &format!("Fill {} fee", fill.fill_id))?;
 
     let mult = multiplier(&fill.instrument)?;
-    let gross = mul_i(&mul(&fill.quantity, &fill.price)?, mult)?;
+    let gross = mul(&mul(&fill.quantity, &fill.price)?, &mult)?;
     let signed_gross = if fill.side == Side::Sell { gross } else { neg(&gross)? };
     let cash_delta = sub(&signed_gross, &fill.fee)?;
 
@@ -474,7 +479,7 @@ fn on_fill(st: &mut AccountState, fill: &Fill) -> R<()> {
         &fill.price,
         &fill.filled_at,
         fill.fill_id.clone(),
-        mult,
+        &mult,
     )?;
     updated.realized_pnl = sub(&updated.realized_pnl, &fill.fee)?;
     let updated_realized = updated.realized_pnl.clone();
@@ -753,16 +758,16 @@ fn on_lifecycle(st: &mut AccountState, notice: &OptionLifecycle, kind: EventKind
         }
     }
 
-    let mult = contract.multiplier;
+    let mult = Money::from_i128(contract.multiplier).map_err(derr)?;
     let mut cash = st.cash.clone();
     let mut realized = zero();
     if kind == EventKind::Expiry || cash_settled {
         let exit_price = if kind == EventKind::Expiry { zero() } else { value.clone() };
-        let (kept, closed_pnl) = consume_lots(&position.open_lots, &notice.quantity, &exit_price, mult)?;
+        let (kept, closed_pnl) = consume_lots(&position.open_lots, &notice.quantity, &exit_price, &mult)?;
         realized = add(&realized, &closed_pnl)?;
         let rem = remaining_position(&position, kept, add(&position.realized_pnl, &closed_pnl)?)?;
         st.positions.insert(hk, Instrument::Option(contract.clone()), rem);
-        let amount = mul_i(&mul(&exit_price, &notice.quantity)?, mult)?;
+        let amount = mul(&mul(&exit_price, &notice.quantity)?, &mult)?;
         cash = if held == Side::Buy { add(&cash, &amount)? } else { sub(&cash, &amount)? };
     } else {
         let (kept, taken) = take_lots(&position.open_lots, &notice.quantity)?;
@@ -784,7 +789,7 @@ fn on_lifecycle(st: &mut AccountState, notice: &OptionLifecycle, kind: EventKind
                 lc::delivery(&wire, held == Side::Buy, &s(&lot.cost_basis)).map_err(|e| only_value(oerr(e)))?;
             let side = if buys { Side::Buy } else { Side::Sell };
             let price = Money::parse(&price_text).ok_or_else(|| LErr { kind: "value", msg: price_text.clone() })?;
-            let shares = mul_i(&lot.quantity, mult)?;
+            let shares = mul(&lot.quantity, &mult)?;
             let shares_position = st.positions.get(&shares_hk).cloned();
             let prior = shares_position.as_ref().map_or_else(zero, |p| p.realized_pnl.clone());
             let updated = apply_trade(
@@ -796,7 +801,7 @@ fn on_lifecycle(st: &mut AccountState, notice: &OptionLifecycle, kind: EventKind
                 &price,
                 &notice.as_of,
                 format!("{}:{}:{}", kind.value(), notice.as_of.iso(), lot.lot_id),
-                multiplier(&shares_instrument)?,
+                &multiplier(&shares_instrument)?,
             )?;
             realized = add(&realized, &sub(&updated.realized_pnl, &prior)?)?;
             st.positions.insert(shares_hk.clone(), shares_instrument.clone(), updated);

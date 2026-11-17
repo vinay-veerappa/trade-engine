@@ -105,7 +105,7 @@ pub fn underlying_of(instrument: &Instrument) -> R<String> {
             }
             Ok(found.pop().unwrap_or_default())
         }
-        Instrument::Future(_) => err("unsupported", "futures not supported in snapshot venue"),
+        Instrument::Future(_) => instrument.symbol(),
     }
 }
 
@@ -493,7 +493,20 @@ impl Venue {
                 Ok(if pos_cmp(&price)?.is_gt() { Some(price) } else { None })
             }
             Instrument::Combo(_) => Ok(None),
-            Instrument::Future(_) => err("unsupported", "futures not supported in snapshot venue"),
+            Instrument::Future(c) => {
+                if instrument.symbol()? != s.underlying {
+                    return Ok(None);
+                }
+                // Slip against the taker, then snap to the tick grid in the same direction.
+                let price = &s.underlying_price;
+                let moved = d(d(price.mul(&self.slippage))?.div(&d(Money::from_i128(BPS))?))?;
+                let (raw, mode) = if side == Side::Buy {
+                    (d(price.add(&moved))?, crate::sim::tick::RoundMode::Ceil)
+                } else {
+                    (d(price.sub(&moved))?, crate::sim::tick::RoundMode::Floor)
+                };
+                Ok(Some(crate::sim::tick::round_to_tick(&raw, &c.tick_size, mode)?))
+            }
         }
     }
 

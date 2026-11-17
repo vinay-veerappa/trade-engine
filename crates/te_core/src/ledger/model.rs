@@ -1267,6 +1267,20 @@ pub fn build_option(f: Vec<(String, Val)>) -> R<Instrument> {
     make_option(&underlying, expiry, strike, multiplier, right).map(Instrument::Option)
 }
 
+/// D2: a future is `{root, year, month}`; the spec comes from the one table, so an unknown
+/// root is refused here.
+pub fn build_future(f: Vec<(String, Val)>) -> R<Instrument> {
+    let mut k = Kw::bind("Future", f, &[("root", true), ("year", true), ("month", true)])?;
+    let root = x_str(k.req("root"), "root")?;
+    let year = x_int(k.req("year"), "year")?;
+    let month = x_int(k.req("month"), "month")?;
+    let (Ok(year), Ok(month)) = (i32::try_from(year), u32::try_from(month)) else {
+        return err("value", format!("Future month {year}-{month} out of range"));
+    };
+    let cm = ContractMonth::new(year, month)?;
+    crate::futures_symbols::contract_for(&root, cm).map(Instrument::Future)
+}
+
 pub fn build_equity(f: Vec<(String, Val)>) -> R<Instrument> {
     let mut k = Kw::bind("Equity", f, &[("symbol", true)])?;
     let s = k.req("symbol");
@@ -1311,6 +1325,19 @@ pub fn build_combo_leg(f: Vec<(String, Val)>) -> R<ComboLeg> {
 }
 
 /// `validate_order_prices`.
+/// D5: a price on a future must sit on the tick grid. Refused, never rounded.
+pub fn validate_future_ticks(i: &Instrument, limit: &Option<Money>, stop: &Option<Money>) -> R<()> {
+    let Instrument::Future(c) = i else { return Ok(()) };
+    for (name, p) in [("limit_price", limit), ("stop_price", stop)] {
+        let Some(p) = p else { continue };
+        let snapped = crate::sim::tick::round_to_tick(p, &c.tick_size, crate::sim::tick::RoundMode::Nearest)?;
+        if !dec_eq(&snapped, p) {
+            return err("off_tick", format!("{} {} is not a multiple of tick size {} for {}", name, p.canon(), c.tick_size.canon(), c.root));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_order_prices(
     ot: OrderType,
     limit: &Option<Money>,
@@ -1445,6 +1472,7 @@ pub fn build_order(f: Vec<(String, Val)>) -> R<Order> {
         return err("value", format!("Order quantity must be positive, got {} (I5)", quantity.canon()));
     }
     validate_order_prices(order_type, &limit_price, &stop_price, &trail_amount)?;
+    validate_future_ticks(&instrument, &limit_price, &stop_price)?;
     Ok(Order {
         order_id,
         account_id,

@@ -47,6 +47,14 @@ fn text_of(v: &Option<crate::money::Money>) -> String {
     v.as_ref().map_or_else(|| "None".to_string(), |d| d.canon())
 }
 
+/// An integral factor is a JSON int (as before); a fractional point value (MYM 0.5) is its decimal text.
+fn multiplier_json(m: &crate::money::Money) -> Json {
+    match m.to_i128_exact() {
+        Some(n) => Json::Int(n),
+        None => Json::Float(m.canon()),
+    }
+}
+
 /// The journal execution one fill becomes, as an ordered JSON object: the asset class,
 /// the multiplier and the bracket's stop and target. `has_seq`: the fill's ledger event was
 /// found with a seq; the check sits where Python's did, after the bracket lookups.
@@ -76,9 +84,13 @@ pub fn journal_payload(st: &AccountState, fill: &Fill, journal_account: &str, ha
         ("account_id".into(), s(journal_account)),
         (
             "asset_class".into(),
-            s(if matches!(fill.instrument, Instrument::Option(_)) { "option" } else { "equity" }),
+            s(match fill.instrument {
+                Instrument::Option(_) => "option",
+                Instrument::Future(_) => "future",
+                _ => "equity",
+            }),
         ),
-        ("multiplier".into(), Json::Int(crate::oms::structures::multiplier(&fill.instrument)?)),
+        ("multiplier".into(), multiplier_json(&crate::oms::structures::multiplier(&fill.instrument)?)),
         ("stop_loss".into(), stop.map_or(Json::Null, |c| Json::Str(text_of(&c.stop_price)))),
         (
             "profit_target".into(),
