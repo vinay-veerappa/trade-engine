@@ -528,6 +528,9 @@ pub fn create_bracket<H: Host>(h: &H, intent: &Intent, quantity: &Money) -> R<Br
         parent_order_id: Some(entry.order_id.clone()),
         oco_group: Some(format!("{prefix}:exits")),
     }).collect();
+    crate::ledger::model::validate_future_ticks(&intent.instrument, &entry.limit_price, &entry.stop_price)?;
+    crate::ledger::model::validate_future_ticks(&intent.instrument, &None, &stop.stop_price)?;
+    for t in &targets { crate::ledger::model::validate_future_ticks(&intent.instrument, &t.limit_price, &None)?; }
     let mut orders = vec![entry, stop];
     orders.extend(targets);
     let batch = OrdersCreated {
@@ -925,6 +928,7 @@ pub fn replace<H: Host>(h: &H, order_id: &str, changes: &OrderChanges, command: 
         changes.new_stop_price.as_ref(),
     );
     validate_order_prices(updated.order_type, &updated.limit_price, &updated.stop_price, &updated.trail_amount)?;
+    crate::ledger::model::validate_future_ticks(&updated.instrument, &updated.limit_price, &updated.stop_price)?;
     if noop {
         let payload = Obj::OrderUpdated(OrderUpdated {
             order: order.clone(),
@@ -1007,6 +1011,7 @@ pub fn replace_emulated_stop<H: Host>(h: &H, order: &Order, changes: &OrderChang
         changes.new_stop_price.as_ref(),
     );
     validate_order_prices(updated.order_type, &updated.limit_price, &updated.stop_price, &updated.trail_amount)?;
+    crate::ledger::model::validate_future_ticks(&updated.instrument, &updated.limit_price, &updated.stop_price)?;
     append(
         h,
         &order.account_id,

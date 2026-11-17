@@ -277,7 +277,7 @@ fn book(intent: &Intent, price: &Option<Money>, ctx: &Context<'_>) -> R<Book> {
                 return Ok(Book { equity: None, after: None, error: Some(error), before: None });
             }
             Some(mark) => {
-                value = add(&value, &mul_i(&mul(&position.quantity, &mark)?, multiplier(instrument)?)?)?;
+                value = add(&value, &mul(&mul(&position.quantity, &mark)?, &multiplier(instrument)?)?)?;
             }
         }
     }
@@ -303,7 +303,7 @@ fn book(intent: &Intent, price: &Option<Money>, ctx: &Context<'_>) -> R<Book> {
         if !marks.contains(&hk) {
             marks.insert(hk, leg.contract.clone(), Some(lp.clone()));
         }
-        cash = sub(&cash, &mul_i(&mul(&signed, &lp)?, multiplier(&leg.contract)?)?)?;
+        cash = sub(&cash, &mul(&mul(&signed, &lp)?, &multiplier(&leg.contract)?)?)?;
         if is_option(&leg.contract) {
             let key = make_equity(&underlying_of(&leg.contract)?)?;
             let up = underlying_price(&leg.contract, st, ctx.snapshot)?;
@@ -516,10 +516,10 @@ fn max_loss(intent: &Intent, price: &Money) -> R<Option<Money>> {
     if legs.len() == 1 {
         let leg = &legs[0];
         if leg.side == Side::Buy {
-            return Ok(Some(mul(&mul_i(price, m)?, units)?));
+            return Ok(Some(mul(&mul(price, &m)?, units)?));
         }
         if right_of(&leg.contract)? == Right::Put {
-            return Ok(Some(mul(&mul_i(&sub(&strike_of(&leg.contract)?, price)?, m)?, units)?));
+            return Ok(Some(mul(&mul(&sub(&strike_of(&leg.contract)?, price)?, &m)?, units)?));
         }
         return Ok(None);
     }
@@ -532,9 +532,9 @@ fn max_loss(intent: &Intent, price: &Money) -> R<Option<Money>> {
         if same && a.side != b.side {
             let width = abs(&sub(&strike_of(&a.contract)?, &strike_of(&b.contract)?)?)?;
             if intent.side == Side::Sell {
-                return Ok(Some(mul(&mul_i(&sub(&width, price)?, m)?, units)?));
+                return Ok(Some(mul(&mul(&sub(&width, price)?, &m)?, units)?));
             }
-            return Ok(Some(mul(&mul_i(price, m)?, units)?));
+            return Ok(Some(mul(&mul(price, &m)?, units)?));
         }
     }
     Ok(None)
@@ -760,7 +760,7 @@ pub fn evaluate(
     let debit = match &price {
         Some(p) if intent.side == Side::Buy && is_structure(&intent.instrument) => {
             let first = legs_of(&intent.instrument, intent.side);
-            Some(mul_i(&mul(p, &intent.quantity)?, multiplier(&first[0].contract)?)?)
+            Some(mul(&mul(p, &intent.quantity)?, &multiplier(&first[0].contract)?)?)
         }
         Some(_) => Some(zero()),
         None => None,
@@ -791,7 +791,7 @@ pub fn evaluate(
                     continue; // a credit structure
                 }
                 let first = legs_of(&entry.instrument, entry.side);
-                held = add(&held, &mul_i(&mul(&s.entry_price, &s.units)?, multiplier(&first[0].contract)?)?)?;
+                held = add(&held, &mul(&mul(&s.entry_price, &s.units)?, &multiplier(&first[0].contract)?)?)?;
             }
             let total = match &debit {
                 Some(d) => Some(add(&held, d)?),

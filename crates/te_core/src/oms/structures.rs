@@ -7,7 +7,7 @@
 //! and the latest-expiry-first sort is stable.
 
 use crate::ledger::fold::AccountState;
-use crate::ledger::model::{err, ComboLeg, Instrument, LErr, Order, OrderState, Side, R};
+use crate::ledger::model::{dec_eq, derr, err, ComboLeg, Instrument, LErr, Order, OrderState, Side, R};
 use crate::ledger::ops::{add, div, eq, mul, mul_i, neg, sub, zero};
 use crate::sim::{dmax, dmin};
 use crate::money::Money;
@@ -56,21 +56,21 @@ pub fn legs_of(i: &Instrument, side: Side) -> Vec<ComboLeg> {
 }
 
 /// `Instrument.multiplier` (a mixed combo refuses, as the property did).
-pub fn multiplier(i: &Instrument) -> R<i128> {
+pub fn multiplier(i: &Instrument) -> R<Money> {
     match i {
-        Instrument::Equity(_) => Ok(1),
-        Instrument::Option(c) => Ok(c.multiplier),
+        Instrument::Equity(_) => Money::from_i128(1).map_err(derr),
+        Instrument::Option(c) => Money::from_i128(c.multiplier).map_err(derr),
         Instrument::Combo(legs) => {
-            let mut found: Vec<i128> = Vec::new();
+            let mut found: Vec<Money> = Vec::new();
             for l in legs {
                 let m = multiplier(&l.contract)?;
-                if !found.contains(&m) {
+                if !found.iter().any(|x| dec_eq(x, &m)) {
                     found.push(m);
                 }
             }
             if found.len() != 1 {
-                found.sort();
-                let shown: Vec<String> = found.iter().map(|m| m.to_string()).collect();
+                found.sort_by(|a, b| a.cmp_ord(b).unwrap_or(std::cmp::Ordering::Equal));
+                let shown: Vec<String> = found.iter().map(crate::ledger::ops::s).collect();
                 return err(
                     "value",
                     format!("Combo has mixed leg multipliers [{}]; value it per leg (I6)", shown.join(", ")),
@@ -78,7 +78,7 @@ pub fn multiplier(i: &Instrument) -> R<i128> {
             }
             multiplier(&legs[0].contract)
         }
-        Instrument::Future(_) => err("unsupported", "futures not supported in OMS multiplier"),
+        Instrument::Future(c) => Ok(c.point_value.clone()),
     }
 }
 
@@ -94,17 +94,16 @@ fn target_id(entry: &str) -> String {
 fn entry_price(st: &AccountState, entry: &Order, units: &Money) -> R<Money> {
     let first = legs_of(&entry.instrument, entry.side);
     let scale = match first.first().map(|l| &l.contract) {
-        Some(Instrument::Option(c)) => c.multiplier,
         Some(other) => multiplier(other)?,
         None => return err("value", "a structure with no legs"),
     };
     let mut collected = zero();
     for fill in st.fills.iter().filter(|f| f.order_id == entry.order_id) {
         let signed = if fill.side == Side::Sell { fill.price.clone() } else { neg(&fill.price)? };
-        let term = mul_i(&mul(&signed, &fill.quantity)?, multiplier(&fill.instrument)?)?;
+        let term = mul(&mul(&signed, &fill.quantity)?, &multiplier(&fill.instrument)?)?;
         collected = add(&collected, &term)?;
     }
-    let collected = div(&collected, &mul_i(units, scale)?)?;
+    let collected = div(&collected, &mul(units, &scale)?)?;
     if entry.side == Side::Sell {
         Ok(collected)
     } else {

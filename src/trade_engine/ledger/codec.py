@@ -33,6 +33,7 @@ from trade_engine.domain.instruments import (
     Combo,
     ComboLeg,
     Equity,
+    Future,
     Instrument,
     OptionContract,
     OptionRight,
@@ -73,6 +74,7 @@ from trade_engine.ledger.events import (
 # Payload types by tag: the walker's dataclass allowlist and the builder's constructors.
 _TAG_TO_TYPE: dict[str, type] = {
     "Equity": Equity,
+    "Future": Future,
     "OptionContract": OptionContract,
     "Combo": Combo,
     "ComboLeg": ComboLeg,
@@ -220,6 +222,8 @@ def _encode_instrument(instrument: Instrument) -> Any:
                 "multiplier": instrument.multiplier,
             },
         }
+    if isinstance(instrument, Future):
+        return {"dc": "Future", "f": {"root": instrument.root, "year": instrument.year, "month": instrument.month}}
     if isinstance(instrument, Combo):
         return {"dc": "Combo", "f": {"legs": _encode(instrument.legs)}}
     return {"?i": type(instrument).__name__}

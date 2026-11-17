@@ -188,8 +188,9 @@ pub fn decode(node: &Json) -> R<Val> {
     codec(format!("Unrecognised encoded object with keys [{}]", shown.join(", ")))
 }
 
-const TAGS: [&str; 31] = [
+const TAGS: [&str; 32] = [
     "Equity",
+    "Future",
     "OptionContract",
     "Combo",
     "ComboLeg",
@@ -230,6 +231,7 @@ fn build(tag: &str, f: Vec<(String, Val)>) -> R<Val> {
     Ok(match tag {
         "Equity" => obj(Obj::Instr(build_equity(f)?)),
         "OptionContract" => obj(Obj::Instr(build_option(f)?)),
+        "Future" => obj(Obj::Instr(build_future(f)?)),
         "Combo" => obj(Obj::Instr(build_combo(f)?)),
         "ComboLeg" => obj(Obj::ComboLeg(build_combo_leg(f)?)),
         "Fill" => obj(Obj::Fill(build_fill(f)?)),
@@ -351,7 +353,15 @@ pub fn enc_instrument(i: &Instrument) -> R<Json> {
             }
             dc("Combo", vec![("legs", jtuple(items))])
         }
-        Instrument::Future(_) => return err("unsupported", "futures not supported in ledger codec"),
+        Instrument::Future(c) => {
+            let Some(m) = c.contract_month else {
+                return err("unsupported", "continuous future cannot be booked");
+            };
+            dc(
+                "Future",
+                vec![("root", jstr(&c.root)), ("year", Json::Int(m.year as i128)), ("month", Json::Int(m.month as i128))],
+            )
+        }
     })
 }
 

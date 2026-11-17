@@ -739,66 +739,30 @@ mod tests {
         assert_eq!(slip_ticks(&unaligned, Side::Sell, 1, &tick).unwrap().canon(), "19999.75");
     }
 
+    /// D6: the I6 refusals that remain after LEDGER-FUT-1 (MirrorQueued, margin, the equity-only
+    /// SimBroker `Book`); every other site now books a future.
     #[test]
-    fn test_refusals_at_each_site() {
+    fn test_remaining_refusals_after_ledger_fut_1() {
         let future_contract = parse_future_symbol("NQZ26").unwrap();
         let future_instr = Instrument::Future(future_contract.clone());
 
-        // 1. Ledger codec bridge: enc_instrument refuses Future
-        let codec_err = crate::ledger::codec::enc_instrument(&future_instr).unwrap_err();
-        assert_eq!(codec_err.kind, "unsupported");
-        assert!(codec_err.msg.contains("futures not supported in ledger codec"));
-
-        // 2. Canon: canon_contracts refuses Future via enc_instrument
-        let mut pos_map = crate::ledger::ops::OMap::new();
-        pos_map.insert(future_instr.hk(), future_instr.clone(), p("1"));
-        let canon_err = crate::ledger::canon::canon_contracts(&pos_map).unwrap_err();
-        assert_eq!(canon_err.kind, "unsupported");
-        assert!(canon_err.msg.contains("futures not supported in ledger codec"));
-
-        // 3. Ledger fold: multiplier refuses Future
-        let fold_mult_err = crate::ledger::fold::multiplier(&future_instr).unwrap_err();
-        assert_eq!(fold_mult_err.kind, "fold");
-        assert_eq!(fold_mult_err.msg, "futures not supported in ledger fold (I6)");
-
-        // 4. Mirror: check_mirror_instrument refuses Future
+        // Mirror: check_mirror_instrument still refuses Future (D3)
         let mirror_err = crate::ledger::model::check_mirror_instrument(&future_instr).unwrap_err();
         assert_eq!(mirror_err.kind, "payload");
         assert_eq!(mirror_err.msg, "MirrorQueued.instrument: futures not supported in mirror");
 
-        // 5. Margin: risk_options margin preparation refuses Future
+        // Margin: still refused (D3)
         let mut st_margin = crate::ledger::fold::AccountState::new("A1");
-        let pos = crate::ledger::fold::make_position(
-            "A1",
-            future_instr.clone(),
-            p("1"),
-            p("20000"),
-            p("0"),
-            Vec::new(),
-        ).unwrap();
+        let pos = crate::ledger::fold::make_position("A1", future_instr.clone(), p("1"), p("20000"), p("0"), Vec::new()).unwrap();
         st_margin.positions.insert(future_instr.hk(), future_instr.clone(), pos);
         let margin_err = crate::risk_options::margin_of(&st_margin).unwrap_err();
         assert_eq!(margin_err.kind, "unsupported");
         assert_eq!(margin_err.msg, "futures not supported in margin calculation");
 
-        // 6. OMS: multiplier and validate_quantity refuse Future
-        let oms_mult_err = crate::oms::structures::multiplier(&future_instr).unwrap_err();
-        assert_eq!(oms_mult_err.kind, "unsupported");
-        assert_eq!(oms_mult_err.msg, "futures not supported in OMS multiplier");
-
-        let oms_val_err = crate::oms::manager::validate_quantity(&future_instr, &p("1")).unwrap_err();
-        assert_eq!(oms_val_err.kind, "unsupported");
-        assert_eq!(oms_val_err.msg, "futures not supported in OMS");
-
-        let oms_alloc_err = crate::oms::manager::allocate_quantity(&p("10"), &[p("0.5"), p("0.5")], &future_instr).unwrap_err();
-        assert_eq!(oms_alloc_err.kind, "unsupported");
-        assert_eq!(oms_alloc_err.msg, "futures not supported in OMS");
-
-        // 7. sim::broker::Book: Book::validate and Book::process_bar refuse non-equity with existing message
+        // sim::broker::Book stays equity-only
         let mut book = Book::new("A1", true, p("0")).unwrap();
         let mut clock = || Ok("2026-03-02T14:00:00+00:00".to_string());
         book.connect(&mut clock).unwrap();
-
         let vorder = VOrder {
             id: "o1".into(),
             instr: future_instr.clone(),
@@ -817,7 +781,6 @@ mod tests {
         let book_order_err = book.submit(vorder, &mut clock).unwrap_err();
         assert_eq!(book_order_err.kind, "value");
         assert_eq!(book_order_err.msg, "SimBroker accepts equity orders only");
-
         let bar = Bar {
             instr: future_instr.clone(),
             ts: ts("2026-03-02T14:30:00+00:00"),
@@ -831,28 +794,109 @@ mod tests {
         let book_bar_err = book.process_bar(Some(bar)).unwrap_err();
         assert_eq!(book_bar_err.kind, "value");
         assert_eq!(book_bar_err.msg, "SimBroker supports equities only");
+    }
 
-        // 8. sim::snapshot: underlying_of and model_price refuse Future
-        let snap_und_err = crate::sim::snapshot::underlying_of(&future_instr).unwrap_err();
-        assert_eq!(snap_und_err.kind, "unsupported");
-        assert_eq!(snap_und_err.msg, "futures not supported in snapshot venue");
+    #[test]
+    fn test_future_sites_now_book() {
+        let nq = Instrument::Future(parse_future_symbol("NQZ26").unwrap());
+        // fold, OMS multipliers and quantity checks accept a future; the factor is its point value
+        assert!(dec_eq(&crate::ledger::fold::multiplier(&nq).unwrap(), &p("20")));
+        assert!(dec_eq(&crate::oms::structures::multiplier(&nq).unwrap(), &p("20")));
+        crate::oms::manager::validate_quantity(&nq, &p("1")).unwrap();
+        assert!(crate::oms::manager::validate_quantity(&nq, &p("1.5")).is_err());
+        let parts = crate::oms::manager::allocate_quantity(&p("10"), &[p("1"), p("1")], &nq).unwrap();
+        assert_eq!(parts.len(), 2);
+        // the codec carries it as {root, year, month}; canon_contracts no longer refuses it
+        let wire = crate::ledger::codec::enc_instrument(&nq).unwrap();
+        let text = format!("{wire:?}");
+        assert!(text.contains("Future") && text.contains("NQ") && text.contains("2026"), "{text}");
+        let mut pos_map = crate::ledger::ops::OMap::new();
+        pos_map.insert(nq.hk(), nq.clone(), p("1"));
+        crate::ledger::canon::canon_contracts(&pos_map).unwrap();
+        // a continuous future cannot be booked
+        let cont = Instrument::Future(spec_future_continuous("NQ"));
+        let e = crate::ledger::codec::enc_instrument(&cont).unwrap_err();
+        assert_eq!(e.msg, "continuous future cannot be booked");
+    }
 
-        let snap_venue = crate::sim::snapshot::Venue::new(
-            "A1",
-            Some(p("0")),
-            Some(p("0")),
-            Some(p("0")),
-            Some(60.0),
-        ).unwrap();
-        let mut get_quote = |_occ: &str| Ok(None);
-        let mut snap = crate::sim::snapshot::Snap {
-            as_of: ts("2026-03-02T14:30:00+00:00"),
-            underlying: "NQ".into(),
-            underlying_price: p("20000"),
-            quote: &mut get_quote,
+    fn spec_future_continuous(root: &str) -> FutureContract {
+        let s = spec_for_root(root).unwrap();
+        FutureContract { root: s.root.to_string(), contract_month: None, tick_size: s.tick_size, point_value: s.point_value }
+    }
+
+    fn realized(sym: &str, qty: &str, open: &str, close: &str) -> Money {
+        use crate::ledger::fold::{apply_trade_pub, multiplier};
+        let instr = Instrument::Future(parse_future_symbol(sym).unwrap());
+        let at = crate::ledger::model::parse_datetime("2026-03-02T14:00:00+00:00").unwrap().0;
+        let m = multiplier(&instr).unwrap();
+        let pos = apply_trade_pub("A1", None, &instr, Side::Buy, &p(qty), &p(open), &at, "f1".into(), &m).unwrap();
+        let pos = apply_trade_pub("A1", Some(&pos), &instr, Side::Sell, &p(qty), &p(close), &at, "f2".into(), &m).unwrap();
+        assert!(pos.quantity.is_zero());
+        pos.realized_pnl
+    }
+
+    #[test]
+    fn test_future_realized_pnl_uses_point_value() {
+        // MYM 0.5 per point: 2 x 10 points x 0.5 = 10.00
+        assert!(dec_eq(&realized("MYMZ26", "2", "40000", "40010"), &p("10")));
+        // NQ 20 per point: 0.75 points x 20 = 15.00
+        assert!(dec_eq(&realized("NQZ26", "1", "20000.25", "20001.00"), &p("15")));
+    }
+
+    #[test]
+    fn test_off_tick_price_on_a_future_is_refused() {
+        let nq = Instrument::Future(parse_future_symbol("NQZ26").unwrap());
+        crate::ledger::model::validate_future_ticks(&nq, &Some(p("20000.25")), &Some(p("19990.5"))).unwrap();
+        let e = crate::ledger::model::validate_future_ticks(&nq, &Some(p("20000.10")), &None).unwrap_err();
+        assert_eq!(e.kind, "off_tick");
+        let e = crate::ledger::model::validate_future_ticks(&nq, &None, &Some(p("19990.3"))).unwrap_err();
+        assert_eq!(e.kind, "off_tick");
+        // equities are not on a tick grid here
+        crate::ledger::model::validate_future_ticks(&Instrument::Equity("AAPL".into()), &Some(p("10.123")), &None).unwrap();
+    }
+
+    #[test]
+    fn test_mes_bracket_through_snapshot_venue_folds_to_flat() {
+        use crate::ledger::fold::{apply_trade_pub, multiplier};
+        use crate::sim::snapshot::{Snap, Venue};
+        let mes = Instrument::Future(parse_future_symbol("MESZ26").unwrap());
+        let sym = mes.symbol().unwrap();
+        let mut venue = Venue::new("A1", Some(p("0")), Some(p("0")), Some(p("0")), Some(60.0)).unwrap();
+        let mut clock = || Ok("2026-03-02T14:30:00+00:00".to_string());
+        venue.connect(&mut clock).unwrap();
+        let vo = |id: &str, otype, side, limit: Option<&str>| VOrder {
+            id: id.into(),
+            instr: mes.clone(),
+            otype,
+            side,
+            quantity: p("1"),
+            submitted_at: ts("2026-03-02T14:00:00+00:00"),
+            tif: Tif::Day,
+            limit: limit.map(p),
+            stop: None,
+            trail: None,
+            allocs: vec![Alloc { soid: format!("{id}-s"), account: "A1".into(), qty: p("1") }],
+            parent: None,
+            oco: None,
         };
-        let snap_model_err = snap_venue.model_price(&future_instr, Side::Buy, &mut snap).unwrap_err();
-        assert_eq!(snap_model_err.kind, "unsupported");
-        assert_eq!(snap_model_err.msg, "futures not supported in snapshot venue");
+        // entry (market buy) and a profit target (limit sell 5002.50) of the bracket
+        venue.submit(vo("b:entry", OrderType::Market, Side::Buy, None), &mut clock).unwrap();
+        venue.submit(vo("b:target:1", OrderType::Limit, Side::Sell, Some("5002.50")), &mut clock).unwrap();
+        let mut quote = |_occ: &str| Ok(None);
+        let mut at = |px: &str, venue: &mut Venue| {
+            let mut snap = Snap { as_of: ts("2026-03-02T14:30:00+00:00"), underlying: sym.clone(), underlying_price: p(px), quote: &mut quote };
+            venue.process_snapshot(&mut snap, &mut clock).unwrap()
+        };
+        assert_eq!(at("5000.00", &mut venue).len(), 1, "entry fills; the target waits");
+        assert_eq!(at("5002.50", &mut venue).len(), 1, "the target fills at its limit");
+        let m = multiplier(&mes).unwrap();
+        let when = crate::ledger::model::parse_datetime("2026-03-02T14:30:00+00:00").unwrap().0;
+        let mut pos = None;
+        for f in &venue.fills {
+            pos = Some(apply_trade_pub("A1", pos.as_ref(), &mes, f.side, &f.quantity, &f.price, &when, f.fill_id.clone(), &m).unwrap());
+        }
+        let pos = pos.unwrap();
+        assert!(pos.quantity.is_zero(), "flat");
+        assert!(dec_eq(&pos.realized_pnl, &p("12.5")), "2.5 points x 5 = 12.50, got {}", pos.realized_pnl.canon());
     }
 }
