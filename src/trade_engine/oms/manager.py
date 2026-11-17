@@ -15,7 +15,7 @@ from decimal import Decimal
 from enum import Enum
 
 from trade_engine.domain.instruments import Equity, Instrument, Side
-from trade_engine.domain.orders import Order, OrderType, TimeInForce
+from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.signals import OrderIntent
 from trade_engine.interfaces.broker import (
@@ -179,8 +179,27 @@ class _Host:
     def env(self):
         return self._broker.env
 
+    def _bracket_prices(self, data):
+        """OA-3b: the stop and first target of a bracket entry, from the folded state.
+
+        The Rust flow links a child to its entry by ``Order.parent_order_id`` (flow.rs create_bracket);
+        ``manager.rs bracket`` picks the STOP child and the LIMIT children sorted by order id.
+        """
+        orders = self._ledger.state(data["allocations"][0]["account_id"]).orders
+        children = [item for item in orders.values()
+                    if item.parent_order_id == data["venue_order_id"] and item.state is OrderState.NEW]
+        stops = [item for item in children if item.order_type is OrderType.STOP]
+        targets = sorted((item for item in children if item.order_type is OrderType.LIMIT),
+                         key=lambda item: item.order_id)
+        return (stops[0].stop_price if stops else None, targets[0].limit_price if targets else None)
+
     def venue_order(self, text):
         data = json.loads(text)
+        stop_price = target_price = None
+        # tests/flow_p3b2b.py calls this unbound with self=None to compare plain conversion
+        if (self is not None and data["parent_order_id"] is None and data["allocations"]
+                and getattr(self._broker, "atomic_bracket", False)):
+            stop_price, target_price = self._bracket_prices(data)
         return VenueOrder(
             venue_order_id=data["venue_order_id"],
             instrument=codec.build(data["instrument"]),
@@ -198,6 +217,8 @@ class _Host:
             ),
             parent_order_id=data["parent_order_id"],
             oco_group=data["oco_group"],
+            protective_stop_price=stop_price,
+            protective_target_price=target_price,
         )
 
     @staticmethod
