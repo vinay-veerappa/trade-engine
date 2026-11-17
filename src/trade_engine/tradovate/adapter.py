@@ -1,8 +1,12 @@
 """The Tradovate adapter over ntx: accounts, positions, fills (BROKER_PLATFORM phase 3).
 
-READ-ONLY. This module links no order call and has no code path that sends one: the
-three order methods of the broker protocol refuse with `UnsupportedCapability`. The
-order-verb gate test scans this module and the client for the verbs as calls or URLs.
+Orders (OA-3): `submit`, `cancel` and `replace` go to the ntx daemon through `NtxClient`:
+one HTTP call per action, no thread, one INFO log line per action (account masked to its
+last 3). A submit needs a protective stop and a riskguard verdict, or it is refused locally
+with no call (`no_stop`, `verdict_required`). The clOrdId is the venue order id; an
+unanswered call is `PENDING` and is never resent (the next snapshot or event reconciles it).
+Exits go through ntx flatten, which is out of scope here. The order-verb gate test allows
+the three order paths only and still refuses liquidate and flatten.
 
 It is an I/O shell (D2, D3). Membership is decided by `te_core::accounts` through
 `PollAndDiff`; the key, the mask, the staleness and the diff are Rust's. This module maps
@@ -31,7 +35,9 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable
+import re
+from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -46,12 +52,16 @@ from trade_engine.interfaces.broker import (
     AccountRecord,
     AccountSnapshot,
     Capabilities,
+    OrderChanges,
     Route,
     UnsupportedCapability,
+    VenueAck,
     VenueFill,
     VenueIdentity,
+    VenueOrder,
     VenuePosition,
 )
+from trade_engine.domain.orders import OrderType, TimeInForce
 from trade_engine.tradovate.ntx_client import (
     NtxClient,
     NtxError,
@@ -67,7 +77,9 @@ ACCOUNT_CAP = 2_000  # the design's hard cap on broker accounts (6.8a)
 # BP-4e: riskguard calls a broker figure stale after this many seconds (pnl_source.rs).
 FIGURE_FRESH_SECONDS = 10
 _ENVS = ("sim", "paper", "live")
-_READ_ONLY = "this adapter is read-only: it carries no orders"
+ORDER_ID_CAP = 512  # venue order ids kept for replace/cancel; the oldest is dropped
+_CL_ORD_ID_OK = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_MAX_QTY = 1000
 
 
 def _decimal(value: Any, what: str) -> Decimal:
@@ -131,7 +143,7 @@ class _Account:
 
 
 class TradovateAdapter:
-    """`BrokerAdapter` for the Tradovate accounts ntx reads. Read-only."""
+    """`BrokerAdapter` for the Tradovate accounts ntx reads and orders (OA-3)."""
 
     name = "tradovate"
     env = "paper"
@@ -145,8 +157,12 @@ class TradovateAdapter:
         ledger=None,
         trading_day: Callable[[datetime], date] | None = None,
         on_poll=None,
+        account_bindings: Mapping[str, Any] | None = None,
     ) -> None:
         self._client = client
+        # engine account id -> binding whose account_key["brokerAccountId"] is the ntx account
+        self._bindings = dict(account_bindings or {})
+        self._orders: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._on_poll = on_poll
         self._clock = clock
         self._ledger = ledger
@@ -159,12 +175,12 @@ class TradovateAdapter:
         # BP-4e: the oldest stamped figure of the last pnl pass (None: no figures).
         self.last_figure_as_of: datetime | None = None
         self.stats = AdapterStats()
-        # The broker protocol's capabilities: no order types, nothing to send.
+        # Market and limit entries with a native protective stop, day orders.
         self.capabilities = Capabilities(
-            supported_order_types=frozenset(),
-            supported_tifs=frozenset(),
+            supported_order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}),
+            supported_tifs=frozenset({TimeInForce.DAY}),
             supports_multi_leg=False,
-            supports_native_stops=False,
+            supports_native_stops=True,
             supports_streaming=False,
         )
 
@@ -482,14 +498,189 @@ class TradovateAdapter:
     def cash_events(self, since: datetime) -> list:
         return []
 
-    def submit(self, order):
-        raise UnsupportedCapability(_READ_ONLY)
+    def submit(self, order: VenueOrder) -> VenueAck:
+        if order.order_type not in self.capabilities.supported_order_types:
+            raise UnsupportedCapability(f"order type {order.order_type} not supported on tradovate")
+        if order.tif not in self.capabilities.supported_tifs:
+            raise UnsupportedCapability(f"time in force {order.tif} not supported on tradovate")
+        accounts = {item.account_id for item in order.allocations}
+        if len(accounts) != 1:
+            raise UnsupportedCapability("netted orders not supported on tradovate")
+        engine_account = next(iter(accounts))
+        cl = order.venue_order_id
+        # Local refusals: nothing reaches ntx unstopped, unchecked or unmapped.
+        if order.protective_stop_price is None:
+            return self._refused(cl, "place", engine_account, "no_stop")
+        verdict = order.riskguard_verdict
+        if verdict is None or not verdict.checked_at or verdict.verdict_revision is None:
+            return self._refused(cl, "place", engine_account, "verdict_required")
+        ntx_account = self._ntx_account(engine_account)
+        if ntx_account is None:
+            return self._refused(cl, "place", engine_account, "unmapped_account")
+        wire_cl = _wire_cl_ord_id(cl)
+        if wire_cl is None:
+            return self._refused(cl, "place", ntx_account, "cl_ord_id_invalid")
+        if order.quantity != order.quantity.to_integral_value() or not 1 <= order.quantity <= _MAX_QTY:
+            return self._refused(cl, "place", ntx_account, "qty_invalid")
+        try:
+            symbol = order.instrument.to_platform(Platform.TRADOVATE)
+        except Exception:  # noqa: BLE001 - any unresolvable instrument is a local refusal
+            return self._refused(cl, "place", ntx_account, "symbol_invalid")
+        body: dict[str, Any] = {
+            "account": ntx_account,
+            "clOrdId": wire_cl,
+            "symbol": symbol,
+            "side": "Buy" if order.side is Side.BUY else "Sell",
+            "qty": int(order.quantity),
+            "entry": _entry(order),
+            "stop": _price(order.protective_stop_price),
+        }
+        if order.protective_target_price is not None:
+            body["target"] = _price(order.protective_target_price)
+        body["verdict"] = _verdict(verdict)
+        ack, response = self._send("place", cl, ntx_account, self._client.place, body)
+        if response is not None and response["outcome"] == "SENT" and response.get("orderIds"):
+            ids = dict(response["orderIds"])
+            ids.update(account=ntx_account, qty=int(order.quantity), entry=body["entry"], seq=0)
+            self._remember(cl, ids)
+        return ack
 
-    def cancel(self, venue_order_id):
-        raise UnsupportedCapability(_READ_ONLY)
+    def cancel(self, venue_order_id: str) -> VenueAck:
+        known = self._orders.get(venue_order_id)
+        if known is None:
+            return self._refused(venue_order_id, "cancel", None, "unknown_order")
+        wire_cl = _wire_cl_ord_id(f"{venue_order_id}.c{known['seq']}")
+        if wire_cl is None:
+            return self._refused(venue_order_id, "cancel", known["account"], "cl_ord_id_invalid")
+        body = {"account": known["account"], "clOrdId": wire_cl, "orderId": known["entryId"]}
+        ack, response = self._send("cancel", venue_order_id, known["account"], self._client.cancel, body)
+        if response is not None:
+            known["seq"] += 1
+            if response["outcome"] == "SENT":
+                self._orders.pop(venue_order_id, None)
+        return ack
 
-    def replace(self, venue_order_id, changes):
-        raise UnsupportedCapability(_READ_ONLY)
+    def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
+        known = self._orders.get(venue_order_id)
+        if known is None:
+            return self._refused(venue_order_id, "modify", None, "unknown_order")
+        account = known["account"]
+        if changes.new_limit_price is not None and changes.new_stop_price is not None:
+            return self._refused(venue_order_id, "modify", account, "one_change_only")
+        qty = Decimal(known["qty"]) if changes.new_quantity is None else changes.new_quantity
+        if qty != qty.to_integral_value() or not 1 <= qty <= _MAX_QTY:
+            return self._refused(venue_order_id, "modify", account, "qty_invalid")
+        if changes.new_stop_price is not None:
+            order_id, to = known["stopId"], {"type": "stop", "price": _price(changes.new_stop_price)}
+        elif changes.new_limit_price is not None:
+            order_id, to = known["entryId"], {"type": "limit", "price": _price(changes.new_limit_price)}
+        elif changes.new_quantity is not None:
+            order_id, to = known["entryId"], known["entry"]
+        else:
+            return self._refused(venue_order_id, "modify", account, "no_change")
+        wire_cl = _wire_cl_ord_id(f"{venue_order_id}.m{known['seq']}")
+        if wire_cl is None:
+            return self._refused(venue_order_id, "modify", account, "cl_ord_id_invalid")
+        body: dict[str, Any] = {
+            "account": account,
+            "clOrdId": wire_cl,
+            "orderId": order_id,
+            "qty": int(qty),
+            "to": to,
+        }
+        verdict = changes.riskguard_verdict
+        if verdict is not None:
+            if not verdict.checked_at or verdict.verdict_revision is None:
+                return self._refused(venue_order_id, "modify", account, "verdict_required")
+            body["verdict"] = _verdict(verdict)
+        ack, response = self._send("modify", venue_order_id, account, self._client.modify, body)
+        if response is not None:
+            known["seq"] += 1
+            if response["outcome"] == "SENT":
+                known["qty"] = int(qty)
+                if to["type"] != "stop":
+                    known["entry"] = to
+        return ack
+
+    # -- order helpers -------------------------------------------------------------
+
+    def _ntx_account(self, engine_account: str) -> str | None:
+        binding = self._bindings.get(engine_account)
+        if binding is None:
+            return None
+        name = binding.account_key.get("brokerAccountId")
+        return name if isinstance(name, str) and name else None
+
+    def _remember(self, venue_order_id: str, record: dict[str, Any]) -> None:
+        self._orders[venue_order_id] = record
+        self._orders.move_to_end(venue_order_id)
+        while len(self._orders) > ORDER_ID_CAP:
+            self._orders.popitem(last=False)
+
+    def _refused(self, venue_order_id: str, op: str, account: str | None, code: str) -> VenueAck:
+        log.info("ntx order %s refused locally: venue_order=%s account=%s code=%s",
+                 op, venue_order_id, _mask(account), code)
+        return VenueAck(venue_order_id, "REJECTED", self._clock.now_utc(), code)
+
+    def _send(
+        self,
+        op: str,
+        venue_order_id: str,
+        account: str,
+        call: Callable[[dict[str, Any]], dict[str, Any]],
+        body: dict[str, Any],
+    ) -> tuple[VenueAck, dict[str, Any] | None]:
+        """One ntx call, never retried. Returns the ack and the daemon's answer (None: no answer)."""
+        response: dict[str, Any] | None = None
+        try:
+            response = call(body)
+        except NtxError as exc:
+            if exc.kind in ("pending", "invalid"):
+                # Written, no usable answer: the outcome is unknown. Never resend.
+                status, message = "PENDING", "outcome_unknown"
+            elif exc.kind == "invalid_body":
+                status, message = "REJECTED", exc.message
+            else:
+                status, message = "REJECTED", exc.kind
+        else:
+            outcome = response["outcome"]
+            if outcome == "SENT":
+                status, message = "ACCEPTED", None
+            elif outcome == "PENDING":
+                status, message = "PENDING", response.get("code") or "outcome_unknown"
+            else:
+                status, message = "REJECTED", response.get("code") or response.get("reason") or "refused"
+        log.info("ntx order %s: venue_order=%s account=%s status=%s code=%s",
+                 op, venue_order_id, _mask(account), status, message)
+        return VenueAck(venue_order_id, status, self._clock.now_utc(), message), response
+
+
+def _mask(account: str | None) -> str:
+    return "***" + account[-3:] if account else "***"
+
+
+def _wire_cl_ord_id(text: str) -> str | None:
+    """The ntx clOrdId spelling: the id itself, with the split-suffix colon written as a dot."""
+    text = text.replace(":", ".")
+    return text if _CL_ORD_ID_OK.match(text) else None
+
+
+def _price(value: Decimal) -> str:
+    return format(value, "f")
+
+
+def _entry(order: VenueOrder) -> dict[str, str]:
+    if order.order_type is OrderType.LIMIT:
+        return {"type": "limit", "price": _price(order.limit_price)}
+    return {"type": "market"}
+
+
+def _verdict(verdict: Any) -> dict[str, Any]:
+    return {
+        "allowed": verdict.allowed,
+        "verdictRevision": verdict.verdict_revision,
+        "checkedAt": verdict.checked_at,
+    }
 
 
 class AccountWatcher:

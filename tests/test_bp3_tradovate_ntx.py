@@ -1,4 +1,4 @@
-"""BP-3: the Tradovate adapter over ntx, read-only (BROKER_PLATFORM phase 3).
+"""BP-3: the Tradovate adapter over ntx (BROKER_PLATFORM phase 3); orders are OA-3 (test_oa3_ntx_orders.py).
 
 Fixtures and a local fake ntx daemon only: nothing here reads the live ntx install, the
 live riskguard, NT8 or a broker. Account ids are fakes (`ACCT-TEST-194`, numeric `900194`).
@@ -7,7 +7,7 @@ Enforcing tests, by rule:
 - G1/G2 against the fake HTTP+SSE daemon: snapshot -> added; SSE account event -> early
   re-read -> added/removed; daemon down -> stale after 120 s, known accounts unchanged;
   reconnect -> one fresh snapshot -> diff; one identity 401 -> no `removed`, its accounts stale.
-- read-only: `test_order_verb_gate_*` (scans the adapter and the client for the verbs).
+- order-verb gate: `test_order_verb_gate_*` (only the three OA-3 order paths; no liquidate or flatten).
 - the token never leaks: `test_token_never_appears_*`.
 - mapping: `test_route_*`, `test_env_*`, `test_unknown_instrument_*`, `test_nan_*`, money.
 - budgets: `test_budget_oversize_frame_*`, `test_budget_reconnect_storm_*`,
@@ -627,21 +627,21 @@ def test_no_float_money_reaches_the_carriers(daemon, clock):
     assert all(isinstance(v, Decimal) for v in values)
 
 
-def test_order_methods_refuse_and_send_nothing(daemon, clock):
+def test_adapter_without_orders_reads_nothing_extra(daemon, clock):
     adapter = make_adapter(daemon, clock)
     before = (daemon.snapshot_calls, daemon.events_opened)
-    for call in (lambda: adapter.submit(object()), lambda: adapter.cancel("X"), lambda: adapter.replace("X", {})):
-        with pytest.raises(UnsupportedCapability):
-            call()
-    assert (daemon.snapshot_calls, daemon.events_opened) == before
     assert adapter.orders(NOW) == [] and adapter.cash_events(NOW) == []
-    assert not adapter.capabilities.supported_order_types
+    assert (daemon.snapshot_calls, daemon.events_opened) == before
+    assert adapter.capabilities.supported_order_types  # OA-3: market and limit
 
 
 # =====================================================================================
-# the order-verb gate (BP-3 is read-only)
+# the order-verb gate (OA-3: place, modify and cancel paths only)
 # =====================================================================================
 
+# OA-3 allows exactly these names and strings; everything else with a verb still fails.
+ALLOWED_NAMES = {"place", "cancel", "modify"}
+ALLOWED_STRINGS = ALLOWED_NAMES | {"/v1/orders", "/v1/orders/modify", "/v1/orders/cancel"}
 VERB = re.compile(r"(place|cancel|modify|liquidate|flatten)", re.IGNORECASE)
 VERB_WORD = re.compile(r"\b(place|cancel|modify|liquidate|flatten)", re.IGNORECASE)
 GATED = sorted((Path(adapter_mod.__file__).parent).glob("*.py"))
@@ -661,21 +661,23 @@ def verb_findings(source: str) -> list[str]:
         if isinstance(node, ast.Call):
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if VERB.match(name):
+            if VERB.match(name) and name not in ALLOWED_NAMES:
                 found.append(f"call {name}")
-        elif isinstance(node, ast.Attribute) and VERB.match(node.attr):
+        elif isinstance(node, ast.Attribute) and VERB.match(node.attr) and node.attr not in ALLOWED_NAMES:
             found.append(f"attribute {node.attr}")
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 if VERB.match(alias.name.split(".")[-1]):
                     found.append(f"import {alias.name}")
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            if node.value in ALLOWED_STRINGS:
+                continue
             if VERB_WORD.search(node.value) or re.search(r"/(place|cancel|modify|liquidate|flatten)", node.value, re.I):
                 found.append(f"string {node.value[:40]!r}")
     return found
 
 
-def test_order_verb_gate_adapter_and_client_carry_no_order_verb():
+def test_order_verb_gate_adapter_and_client_carry_only_the_oa3_verbs():
     assert [p.name for p in GATED] == ["__init__.py", "adapter.py", "ntx_client.py", "registry_feed.py"]
     for path in GATED:
         assert verb_findings(path.read_text(encoding="utf-8")) == [], path.name
@@ -704,11 +706,13 @@ def test_order_verb_gate_ignores_prose_and_def_names():
     assert verb_findings(ok) == []
 
 
-def test_only_get_requests_are_made():
+def test_only_get_and_the_three_order_posts_are_made():
     source = Path(client_mod.__file__).read_text(encoding="utf-8")
     methods = re.findall(r"\.request\(\s*\"([A-Z]+)\"", source)
-    assert methods and set(methods) == {"GET"}
+    assert methods and set(methods) == {"GET", "POST"}
     assert not re.search(r"\.(post|put|patch|delete)\(", source, re.IGNORECASE)
+    paths = set(re.findall(r"_post_order\(\"([^\"]+)\"", source))
+    assert paths == {"/v1/orders", "/v1/orders/modify", "/v1/orders/cancel"}
 
 
 # =====================================================================================
