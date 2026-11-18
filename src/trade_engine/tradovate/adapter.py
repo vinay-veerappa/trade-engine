@@ -8,6 +8,16 @@ unanswered call is `PENDING` and is never resent (the next snapshot or event rec
 Exits go through ntx flatten, which is out of scope here. The order-verb gate test allows
 the three order paths only and still refuses liquidate and flatten.
 
+Reconcile (OA-5): on connect and on every stream reconnect, one `/snapshot` read rebuilds the
+entry -> {stopId, targetId} map for the entries still open in the ledger's folded state. A
+bracket is matched by the clOrdId ntx keeps for it (D-5; the snapshot row's `brackets` list),
+never by price or quantity. An entry with no match stays unmapped (logged once) and its
+children still refuse `unknown_parent`. A PENDING entry is resolved from the same read:
+listed means ACCEPTED with its ntx ids, absent means REJECTED `not_at_venue`; it is never
+resent. A row without a `brackets` list carries no venue truth, so nothing is mapped or
+rejected from it (fail closed). Rebuilt ids get a per-session modify/cancel sequence base
+(the clock in ms) so a post-restart clOrdId never replays an earlier one from the ntx store.
+
 It is an I/O shell (D2, D3). Membership is decided by `te_core::accounts` through
 `PollAndDiff`; the key, the mask, the staleness and the diff are Rust's. This module maps
 what the ntx `/snapshot` carries onto the account carriers and decides nothing about them.
@@ -38,7 +48,7 @@ import math
 import re
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -59,9 +69,10 @@ from trade_engine.interfaces.broker import (
     VenueFill,
     VenueIdentity,
     VenueOrder,
+    VenueOrderState,
     VenuePosition,
 )
-from trade_engine.domain.orders import OrderType, TimeInForce
+from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
 from trade_engine.tradovate.ntx_client import (
     NtxClient,
     NtxError,
@@ -166,6 +177,10 @@ class TradovateAdapter:
         # engine account id -> binding whose account_key["brokerAccountId"] is the ntx account
         self._bindings = dict(account_bindings or {})
         self._orders: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        # OA-5: reconcile verdicts for PENDING entries, read back by the OMS through `orders()`.
+        self._resolved: OrderedDict[str, VenueOrderState] = OrderedDict()
+        self._logged_unmatched: set[str] = set()
+        self._last_payload: dict[str, Any] | None = None  # the last good /snapshot, for reconcile
         self._on_poll = on_poll
         self._clock = clock
         self._ledger = ledger
@@ -190,14 +205,26 @@ class TradovateAdapter:
     # -- identity ------------------------------------------------------------------
 
     def connect(self) -> VenueIdentity:
-        """Read once and return the first identity; `identities()` has them all."""
+        """Read once and return the first identity; `identities()` has them all.
+
+        With a ledger, the same read also reconciles the open brackets (OA-5).
+        """
+        self.take_payload()
         self.accounts()
         identities = self.identities()
         if not identities:
             raise AccountRuleError("no_identity", "ntx reports no identity")
         first = identities[0]
         self.env = first.env
+        payload = self.take_payload()
+        if self._ledger is not None and payload is not None:
+            self.reconcile(payload=payload)
         return first
+
+    def take_payload(self) -> dict[str, Any] | None:
+        """The raw payload of the last good read since the previous take (None: none)."""
+        payload, self._last_payload = self._last_payload, None
+        return payload
 
     def identities(self) -> list[VenueIdentity]:
         """One `VenueIdentity` per ntx identity, in the order the daemon listed them."""
@@ -223,6 +250,7 @@ class TradovateAdapter:
             log.warning("ntx snapshot refused (%s)", exc.kind)
             return self._fallback(exc)
         self._last_accounts = snapshot
+        self._last_payload = payload
         self._kept = kept
         self._identities = identities
         self._reference = reference
@@ -495,8 +523,132 @@ class TradovateAdapter:
 
     # -- the protocol's remaining reads and the refused writes ---------------------
 
-    def orders(self, since: datetime) -> list:
-        return []
+    def orders(self, since: datetime) -> list[VenueOrderState]:
+        """The venue states reconcile resolved for PENDING entries (OA-5), at or after `since`."""
+        return [item for item in self._resolved.values() if item.updated_at >= since]
+
+    # -- reconcile (OA-5) ------------------------------------------------------------
+
+    def reconcile(self, ledger=None, *, payload: dict[str, Any] | None = None) -> ReconcileReport:
+        """Rebuild the bracket map and resolve PENDING entries from one `/snapshot` read.
+
+        `payload` reuses a read just made (connect, reconnect); otherwise one read is made here.
+        A failed read changes nothing. Never sends an order. The caller runs the OMS
+        `reconcile_order` for `report.accepted + report.rejected`.
+        """
+        report = ReconcileReport()
+        ledger = ledger if ledger is not None else self._ledger
+        if ledger is None:
+            return report
+        if payload is None:
+            try:
+                payload = self._client.snapshot()
+            except NtxError as exc:
+                log.warning("ntx reconcile read failed (%s)", exc.kind)
+                report.read_failed = True
+                return report
+        rows = payload.get("accounts") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            log.warning("ntx reconcile refused (bad_shape)")
+            report.read_failed = True
+            return report
+        by_name = {row["name"]: row for row in rows
+                   if isinstance(row, dict) and isinstance(row.get("name"), str)}
+        now = self._clock.now_utc()
+        base = int(now.timestamp() * 1000)  # per-session clOrdId sequence base (see module doc)
+        known_accounts = set(ledger.accounts())
+        for engine_account in self._bindings:
+            ntx_account = self._ntx_account(engine_account)
+            if ntx_account is None or engine_account not in known_accounts:
+                continue
+            index = _bracket_index(by_name.get(ntx_account))
+            state = ledger.state(engine_account)
+            for order in list(state.orders.values()):
+                if order.parent_order_id is not None:
+                    continue
+                venue = state.venue_order_ids.get(order.order_id) or order.order_id
+                kids = [item for item in state.orders.values()
+                        if item.parent_order_id in (order.order_id, venue) and item.state in _LIVE]
+                pending = order.state is OrderState.PENDING_UNKNOWN
+                if not (order.state in _LIVE or (order.state is OrderState.FILLED and kids)):
+                    continue
+                if venue in self._orders and not pending:
+                    continue  # mapped this session already; its record is current
+                wire = _wire_cl_ord_id(venue)
+                found = index.get(wire) if index is not None and wire is not None else None
+                if found is None:
+                    if pending and index is not None:
+                        self._resolve(venue, OrderState.REJECTED, order.quantity, now)
+                        report.rejected.append(order.order_id)
+                        log.info("ntx reconcile: venue_order=%s account=%s status=REJECTED code=not_at_venue",
+                                 venue, _mask(ntx_account))
+                        continue
+                    report.unmatched.append(order.order_id)
+                    if venue not in self._logged_unmatched:
+                        self._logged_unmatched.add(venue)
+                        log.warning("ntx reconcile: venue_order=%s account=%s unmatched; left unmapped",
+                                    venue, _mask(ntx_account))
+                    continue
+                self._map_bracket(venue, order, kids, found, ntx_account, base, state.venue_order_ids)
+                report.mapped.append(order.order_id)
+                if pending:
+                    self._resolve(venue, OrderState.ACCEPTED, order.quantity, now)
+                    report.accepted.append(order.order_id)
+                    log.info("ntx reconcile: venue_order=%s account=%s status=ACCEPTED",
+                             venue, _mask(ntx_account))
+        log.info("ntx reconcile: mapped=%d unmatched=%d accepted=%d rejected=%d",
+                 len(report.mapped), len(report.unmatched), len(report.accepted), len(report.rejected))
+        return report
+
+    def _map_bracket(self, venue: str, order, kids, found: dict[str, Any], ntx_account: str, base: int,
+                     venue_ids: Mapping[str, str]) -> None:
+        """Rebuild the entry record and its stop and first-target child records from the ledger."""
+        stops = [item for item in kids if item.order_type is OrderType.STOP]
+        targets = sorted((item for item in kids if item.order_type is OrderType.LIMIT),
+                         key=lambda item: item.order_id)
+        stop = stops[0] if stops else None
+        target = targets[0] if targets else None
+        stop_id, target_id = found["stopId"], found.get("targetId")
+        qty = int(order.quantity)
+        entry_spec = ({"type": "limit", "price": _price(order.limit_price)}
+                      if order.order_type is OrderType.LIMIT and order.limit_price is not None
+                      else {"type": "market"})
+        adopted = (OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED,
+                   OrderState.PENDING_UNKNOWN)
+        def wire_key(child) -> str:  # records are keyed by the venue id, as submit/_adopt_child key them
+            return venue_ids.get(child.order_id) or child.order_id
+
+        target_child = wire_key(target) if target is not None and target.state in adopted else None
+        self._remember(venue, {
+            "entryId": found["entryId"], "stopId": stop_id, "targetId": target_id,
+            "account": ntx_account, "qty": qty, "entry": entry_spec, "seq": base,
+            "stopQty": int(stop.quantity) if stop is not None else qty,
+            "stopPrice": _price(stop.stop_price) if stop is not None and stop.stop_price is not None else None,
+            "targetQty": int(target.quantity) if target is not None else qty,
+            "targetPrice": (_price(target.limit_price)
+                            if target is not None and target.limit_price is not None else None),
+            "targetChild": target_child,
+        })
+        # A child adopted before the restart (past NEW) is replaced and cancelled by its own id.
+        if stop is not None and stop.state in adopted and stop.stop_price is not None:
+            self._remember(wire_key(stop), {
+                "account": ntx_account, "entryId": stop_id, "stopId": stop_id, "qty": int(stop.quantity),
+                "seq": base, "child": "stop", "side": stop.side,
+                "entry": {"type": "stop", "price": _price(stop.stop_price)},
+            })
+        if (target_child is not None and target_id is not None and target is not None
+                and target.limit_price is not None):
+            self._remember(target_child, {
+                "account": ntx_account, "entryId": target_id, "stopId": None, "qty": int(target.quantity),
+                "seq": base, "child": "target", "side": target.side,
+                "entry": {"type": "limit", "price": _price(target.limit_price)},
+            })
+
+    def _resolve(self, venue: str, state: OrderState, qty: Decimal, now: datetime) -> None:
+        self._resolved[venue] = VenueOrderState(venue, state, Decimal(0), qty, now)
+        self._resolved.move_to_end(venue)
+        while len(self._resolved) > ORDER_ID_CAP:
+            self._resolved.popitem(last=False)
 
     def cash_events(self, since: datetime) -> list:
         return []
@@ -736,6 +888,38 @@ class TradovateAdapter:
         return VenueAck(venue_order_id, status, self._clock.now_utc(), message), response
 
 
+_LIVE = frozenset({
+    OrderState.NEW, OrderState.SUBMITTED, OrderState.ACCEPTED,
+    OrderState.PARTIALLY_FILLED, OrderState.PENDING_UNKNOWN,
+})
+
+
+@dataclass
+class ReconcileReport:
+    """What one reconcile did, by engine order id."""
+
+    mapped: list[str] = field(default_factory=list)
+    unmatched: list[str] = field(default_factory=list)
+    accepted: list[str] = field(default_factory=list)  # PENDING -> ACCEPTED
+    rejected: list[str] = field(default_factory=list)  # PENDING -> REJECTED not_at_venue
+    read_failed: bool = False
+
+
+def _bracket_index(row: dict[str, Any] | None) -> dict[str, dict[str, Any]] | None:
+    """clOrdId -> ntx ids from a snapshot row's `brackets`; None when the row carries none."""
+    if row is None:
+        return None
+    brackets = row.get("brackets")
+    if not isinstance(brackets, list):
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    for item in brackets:
+        if (isinstance(item, dict) and isinstance(item.get("clOrdId"), str)
+                and item.get("entryId") is not None and item.get("stopId") is not None):
+            out[item["clOrdId"]] = item
+    return out
+
+
 def _mask(account: str | None) -> str:
     return "***" + account[-3:] if account else "***"
 
@@ -812,6 +996,18 @@ class AccountWatcher:
         else:
             self._read_fn()
 
+    def _reconcile(self) -> None:
+        """OA-5: on each (re)connect, reconcile brackets from the read just made (one read)."""
+        if getattr(self._adapter, "_ledger", None) is None:
+            return
+        if self._read_fn is None:
+            payload = self._adapter.take_payload()
+            if payload is None:
+                return  # the read failed; the next reconnect tries again
+            self._adapter.reconcile(payload=payload)
+        else:
+            self._adapter.reconcile()  # BP-4e: the read went elsewhere; one read of our own
+
     def run_once(self) -> str:
         """One connection: open, read a fresh snapshot, consume hints until it ends.
 
@@ -825,7 +1021,10 @@ class AccountWatcher:
         self.connects += 1
         try:
             self.backoff.connected(self._clock.now_utc())
+            if getattr(self._adapter, "_ledger", None) is not None:
+                self._adapter.take_payload()  # drop a stale payload; reconcile uses this read's
             self._read()
+            self._reconcile()
             self.limiter.note_read(self._clock.now_utc())
             try:
                 for payload in stream.events():
@@ -852,4 +1051,4 @@ class AccountWatcher:
             self._client.stats.reconnects += 1
 
 
-__all__ = ["ACCOUNT_CAP", "AccountWatcher", "AdapterStats", "TradovateAdapter"]
+__all__ = ["ACCOUNT_CAP", "AccountWatcher", "AdapterStats", "ReconcileReport", "TradovateAdapter"]
