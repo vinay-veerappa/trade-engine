@@ -468,6 +468,7 @@ class Feed:
         hub_client=None,
         rand: Callable[[], float] | None = None,
         ws_connect=None,
+        ledger=None,
     ) -> Feed | None:
         config = RegistrySinkConfig.from_env(dict(environ))
         if not config.enabled:
@@ -483,6 +484,7 @@ class Feed:
             clock=clock,
             on_poll=sink.observe,
             trading_day=cme_trading_day if config.pnl_enabled else None,
+            ledger=ledger,
         )
         schwab = SchwabFeed.build(
             environ,
@@ -554,8 +556,13 @@ def run(
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
     pump_tick_seconds: float = 5.0,
     ws_connect=None,
+    ledger=None,
 ) -> int:
-    """Run the feed until `stop_event` is set. Exit 2 at once when the sink is off."""
+    """Run the feed until `stop_event` is set. Exit 2 at once when the sink is off.
+
+    `ledger` is the owner's open ledger (OA-5b): the adapter then reconciles the open brackets and
+    PENDING entries from one snapshot on start and on every reconnect. None skips reconcile.
+    """
     clock = clock or WallClock()
     feed = Feed.build(
         environ,
@@ -565,6 +572,7 @@ def run(
         hub_client=hub_client,
         rand=rand,
         ws_connect=ws_connect,
+        ledger=ledger,
     )
     if feed is None:
         log.warning(SINK_OFF_LINE)
@@ -668,7 +676,7 @@ def run(
     return 0
 
 
-def main_loop(environ: Mapping[str, str]) -> int:
+def main_loop(environ: Mapping[str, str], *, ledger=None) -> int:
     """The CLI entry: SIGINT/SIGTERM set the stop event; exit 0 on a clean stop."""
     import signal
 
@@ -680,7 +688,8 @@ def main_loop(environ: Mapping[str, str]) -> int:
     signal.signal(signal.SIGINT, on_signal)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, on_signal)
-    return run(environ, clock=WallClock(), sleep=stop_event.wait, rand=random.random, stop_event=stop_event)
+    return run(environ, clock=WallClock(), sleep=stop_event.wait, rand=random.random, stop_event=stop_event,
+               ledger=ledger)
 
 
 __all__ = [

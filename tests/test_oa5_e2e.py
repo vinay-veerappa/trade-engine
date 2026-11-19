@@ -41,7 +41,9 @@ class FakeNtx:
         self.working: dict[int, dict] = {}  # ntx order id -> {type, price, qty}
         self.next_id = 100
         self.timeout: str | None = None  # "present" / "absent": place answers nothing
-        self.list_brackets = True
+        self.list_brackets = True  # False: the row carries no bracket truth at all
+        self.row_brackets = True  # OA-5b ntx: order rows carry clOrdId + brackets {parentId, stopId, targetId}
+        self.authoritative: bool | None = None  # bracketsAuthoritative, omitted when None
         self.snapshots = 0
 
     def _id(self) -> int:
@@ -92,7 +94,24 @@ class FakeNtx:
         row = acct(NTX_ACCOUNT, "900194")
         if self.list_brackets:
             row["brackets"] = list(self.brackets.values())
+            if self.authoritative is not None:
+                row["bracketsAuthoritative"] = self.authoritative
+            if self.row_brackets:
+                row["orders"] = self._order_rows()
         return snap([row])
+
+    def _order_rows(self) -> list[dict]:
+        """Working order rows as the OA-5b ntx emits them: only ntx-placed brackets carry links."""
+        rows = []
+        for cl, ids in self.brackets.items():
+            links = {"parentId": ids["entryId"], "stopId": ids["stopId"]}
+            if "targetId" in ids:
+                links["targetId"] = ids["targetId"]
+            for key in ("entryId", "stopId", "targetId"):
+                if key in ids and ids[key] in self.working:
+                    rows.append({"id": ids[key], "clOrdId": cl, "brackets": links, **self.working[ids[key]]})
+        rows.append({"id": 9999, "type": "limit", "qty": 1})  # a venue order ntx did not place: no links
+        return rows
 
     def _answer(self, op: str, cl: str, ids: dict) -> dict:
         answer = {"account": "***194", "clOrdId": cl, "op": op, "outcome": "SENT", "orderIds": ids}
@@ -223,6 +242,98 @@ def test_unmatched_entry_fails_closed_after_restart(fake, ledger, guard, monkeyp
     assert manager.get_order(bracket.stop.order_id).state is OrderState.REJECTED
     assert len(fake.calls) == calls  # refused locally: no ntx call
     assert "code=unknown_parent" in caplog.text
+
+
+def test_restart_maps_children_from_the_order_rows_alone(fake, ledger, guard, monkeypatch):
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    bracket = new_bracket(manager)
+    entry = manager.submit(bracket.entry)
+    manager.record_fill(fill(adapter, entry))
+    (ids,) = fake.brackets.values()
+    snapshot = fake.snapshot()
+    (row,) = snapshot["accounts"]
+    assert {o["clOrdId"] for o in row["orders"] if "clOrdId" in o} == set(fake.brackets)
+    assert {o["brackets"]["stopId"] for o in row["orders"] if "brackets" in o} == {ids["stopId"]}
+    row.pop("brackets")  # no account-level list: the order rows are the only source
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    report = adapter.reconcile(payload=snapshot)
+    assert report.mapped == [entry.order_id] and report.unmatched == []
+    record = adapter._orders[entry.order_id]
+    assert (record["entryId"], record["stopId"], record["targetId"]) == (
+        ids["entryId"], ids["stopId"], ids["targetId"])
+
+
+def test_a_row_without_order_links_still_maps_by_cl_ord_id(fake, ledger, guard, monkeypatch):
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    bracket = new_bracket(manager)
+    entry = manager.submit(bracket.entry)
+    manager.record_fill(fill(adapter, entry))
+    (ids,) = fake.brackets.values()
+    fake.row_brackets = False  # an ntx before OA-5b: only the account-level clOrdId list
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    report = adapter.reconcile()
+    assert report.mapped == [entry.order_id]
+    assert adapter._orders[entry.order_id]["stopId"] == ids["stopId"]
+    moved = manager.move_stop(entry.order_id, Decimal("21995"), command_id="cmd-move-1")
+    assert moved.state is not OrderState.REJECTED
+    assert fake.ops("modify")[0]["orderId"] == ids["stopId"]
+
+
+def test_unmatched_entry_is_still_rejected_unknown_parent_with_order_rows(fake, ledger, guard, monkeypatch, caplog):
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    bracket = new_bracket(manager)
+    entry = manager.submit(bracket.entry)
+    fake.brackets.clear()  # order rows carry links for other brackets only; this clOrdId is not listed
+    fake.brackets["someone-else"] = {"clOrdId": "someone-else", "entryId": 7, "stopId": 8}
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    report = adapter.reconcile()
+    assert report.unmatched == [entry.order_id] and report.mapped == []
+    with caplog.at_level(logging.INFO, logger="trade_engine.tradovate.adapter"):
+        with pytest.raises(OrderManagementError, match="requires venue reconciliation"):
+            manager.record_fill(fill(adapter, entry))
+    assert manager.get_order(bracket.stop.order_id).state is OrderState.REJECTED
+    assert "code=unknown_parent" in caplog.text
+
+
+def test_absent_pending_entry_is_not_rejected_when_ntx_is_not_authoritative(fake, ledger, guard, monkeypatch):
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    fake.timeout = "absent"
+    entry = manager.submit(new_bracket(manager).entry)
+    assert entry.state is OrderState.PENDING_UNKNOWN
+    fake.timeout = None
+    fake.authoritative = False  # ntx has another unresolved placement: absence proves nothing
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    report = adapter.reconcile()
+    assert report.rejected == [] and report.accepted == [] and report.unmatched == [entry.order_id]
+    fake.authoritative = True
+    assert adapter.reconcile().rejected == [entry.order_id]
+
+
+def test_adapter_without_a_ledger_skips_reconcile_with_one_log_line(fake, monkeypatch, caplog):
+    adapter = TradovateAdapter(fake, clock=Clock(), account_bindings={ENGINE: Binding(NTX_ACCOUNT)})
+    reads = fake.snapshots
+    with caplog.at_level(logging.INFO, logger="trade_engine.tradovate.adapter"):
+        for _ in range(3):
+            report = adapter.reconcile()
+    assert report.mapped == [] and report.unmatched == [] and report.rejected == []
+    assert fake.snapshots == reads  # no read either
+    assert sum("reconcile skipped (no ledger)" in r.getMessage() for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize("row, expected", [
+    (None, (None, False)),
+    ({"orders": []}, (None, False)),
+    ({"brackets": []}, ({}, True)),
+    ({"brackets": [], "bracketsAuthoritative": False}, ({}, False)),
+    ({"orders": [{"clOrdId": "a", "brackets": {"parentId": 1, "stopId": 2}}]},
+     ({"a": {"clOrdId": "a", "entryId": 1, "stopId": 2, "targetId": None}}, True)),
+    ({"orders": [{"clOrdId": "a", "brackets": {"parentId": 1}}]}, (None, False)),  # no stop: not a bracket
+    ({"orders": [{"brackets": {"parentId": 1, "stopId": 2}}]}, (None, False)),  # no clOrdId: never by price/qty
+])
+def test_bracket_index_reads_rows_and_the_account_list(row, expected):
+    from trade_engine.tradovate.adapter import _bracket_index
+
+    assert _bracket_index(row) == expected
 
 
 def test_a_row_without_brackets_maps_and_rejects_nothing(fake, ledger, guard, monkeypatch):

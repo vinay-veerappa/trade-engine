@@ -228,6 +228,17 @@ def test_bound_accounts_capped_by_adapter(tmp_path, daemon, clock):
     assert summary["accounts"] <= ACCOUNT_CAP
 
 
+def test_feed_build_forwards_the_owner_ledger_to_the_adapter(tmp_path, daemon, clock):
+    env = env_for(tmp_path, pnl=True)
+    rg = RecordingRg(SENTINEL)
+    plain = Feed.build(env, clock=clock, make_client=lambda: make_client(daemon), http_post=rg.post)
+    assert plain.adapter._ledger is None  # default: reconcile skips (OA-5b)
+    owner_ledger = object()
+    owned = Feed.build(env, clock=clock, make_client=lambda: make_client(daemon), http_post=rg.post,
+                       ledger=owner_ledger)
+    assert owned.adapter._ledger is owner_ledger
+
+
 def test_bound_outbox_cap_holds_over_repeated_polls(tmp_path, daemon, clock):
     env = env_for(tmp_path, pnl=True)
     rg = RecordingRg(SENTINEL)

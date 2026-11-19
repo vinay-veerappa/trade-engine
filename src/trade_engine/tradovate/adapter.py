@@ -184,6 +184,7 @@ class TradovateAdapter:
         self._on_poll = on_poll
         self._clock = clock
         self._ledger = ledger
+        self._logged_no_ledger = False
         self._trading_day = trading_day
         self._last_accounts: AccountSnapshot | None = None
         self._kept: dict[str, _Account] = {}  # key -> account; replaced per read, <= ACCOUNT_CAP
@@ -539,6 +540,9 @@ class TradovateAdapter:
         report = ReconcileReport()
         ledger = ledger if ledger is not None else self._ledger
         if ledger is None:
+            if not self._logged_no_ledger:
+                self._logged_no_ledger = True
+                log.info("ntx reconcile skipped (no ledger)")
             return report
         if payload is None:
             try:
@@ -561,7 +565,7 @@ class TradovateAdapter:
             ntx_account = self._ntx_account(engine_account)
             if ntx_account is None or engine_account not in known_accounts:
                 continue
-            index = _bracket_index(by_name.get(ntx_account))
+            index, authoritative = _bracket_index(by_name.get(ntx_account))
             state = ledger.state(engine_account)
             for order in list(state.orders.values()):
                 if order.parent_order_id is not None:
@@ -577,7 +581,7 @@ class TradovateAdapter:
                 wire = _wire_cl_ord_id(venue)
                 found = index.get(wire) if index is not None and wire is not None else None
                 if found is None:
-                    if pending and index is not None:
+                    if pending and index is not None and authoritative:
                         self._resolve(venue, OrderState.REJECTED, order.quantity, now)
                         report.rejected.append(order.order_id)
                         log.info("ntx reconcile: venue_order=%s account=%s status=REJECTED code=not_at_venue",
@@ -905,19 +909,38 @@ class ReconcileReport:
     read_failed: bool = False
 
 
-def _bracket_index(row: dict[str, Any] | None) -> dict[str, dict[str, Any]] | None:
-    """clOrdId -> ntx ids from a snapshot row's `brackets`; None when the row carries none."""
+def _bracket_index(row: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]] | None, bool]:
+    """`(clOrdId -> ntx ids, authoritative)` from one snapshot account row.
+
+    The index is None when the row carries no bracket truth at all (an ntx without `brackets`).
+    Order rows are read first (`clOrdId` plus `brackets {parentId, stopId, targetId?}`, OA-5b),
+    then the account-level `brackets` list fills any id the rows did not give. `authoritative` is
+    False when ntx says it has a placement of unknown outcome (`bracketsAuthoritative: false`):
+    an entry missing from the index is then not proof it is absent from the venue.
+    """
     if row is None:
-        return None
-    brackets = row.get("brackets")
-    if not isinstance(brackets, list):
-        return None
+        return None, False
     out: dict[str, dict[str, Any]] = {}
-    for item in brackets:
-        if (isinstance(item, dict) and isinstance(item.get("clOrdId"), str)
-                and item.get("entryId") is not None and item.get("stopId") is not None):
-            out[item["clOrdId"]] = item
-    return out
+    seen = False
+    orders = row.get("orders")
+    for item in orders if isinstance(orders, list) else ():
+        links = item.get("brackets") if isinstance(item, dict) else None
+        cl = item.get("clOrdId") if isinstance(item, dict) else None
+        if (isinstance(cl, str) and isinstance(links, dict)
+                and links.get("parentId") is not None and links.get("stopId") is not None):
+            seen = True
+            out.setdefault(cl, {"clOrdId": cl, "entryId": links["parentId"], "stopId": links["stopId"],
+                                "targetId": links.get("targetId")})
+    brackets = row.get("brackets")
+    if isinstance(brackets, list):
+        seen = True
+        for item in brackets:
+            if (isinstance(item, dict) and isinstance(item.get("clOrdId"), str)
+                    and item.get("entryId") is not None and item.get("stopId") is not None):
+                out.setdefault(item["clOrdId"], item)
+    if not seen:
+        return None, False
+    return out, row.get("bracketsAuthoritative") is not False
 
 
 def _mask(account: str | None) -> str:
