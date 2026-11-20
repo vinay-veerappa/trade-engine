@@ -99,6 +99,8 @@ class FakeRg:
             code = int(self.mode.split(":")[1])
             return code, json.dumps({"kind": "bad_shape", "echo": self.token})
         snapshot = env.get("snapshot")
+        if snapshot and snapshot["seq"] <= self.applied:  # riskguard must not rewind
+            return 200, json.dumps({"applied_seq": self.applied})
         base = self.applied
         if snapshot:
             base = snapshot["seq"]
@@ -277,6 +279,9 @@ def test_an_ack_ahead_of_the_head_halts(tmp_path):
     seed(sink)
     rg.mode = "ahead"
     sink.pump()
+    assert sink.halted is None and sink.counters["rebases"] == 1  # BP-4a-SEQ: first one rebases
+    sink.observe(fleet(3), [], 4)
+    sink.pump()  # a second ack_ahead inside 60 s halts
     assert sink.halted == "ack_ahead"
     posts = sink.counters["posts"]
     rg.mode = "ack"
@@ -284,6 +289,81 @@ def test_an_ack_ahead_of_the_head_halts(tmp_path):
     assert sink.counters["posts"] == posts  # halted: nothing more is sent
     sink.resume()
     assert sink.pump() >= 1 and sink.halted is None
+
+
+def _restart_sink_at_head(tmp_path, clk, head: int):
+    """Persist an outbox whose head is `head`, as a previous registry_feed run left it."""
+    first = make_sink(tmp_path, FakeRg(), clk)
+    seed(first, head)
+    first.pump()
+    first._dirty = True
+    first._persist()
+    return make_sink(tmp_path, None, clk)  # the restarted sink; the poller seq restarts at 1
+
+
+def test_restart_with_riskguard_ahead_rebases_instead_of_halting(tmp_path):
+    clk, rg = FakeClock(T0), FakeRg()
+    rg.applied = 46
+    sink = _restart_sink_at_head(tmp_path, clk, 10)
+    sink._post = rg.post
+    seed(sink, 3)  # poller seq restarts at 1: gap -> base = old head
+    assert sink.stats()["seq_base"] == 10
+    sink.pump()  # riskguard is at 46 > 13: rebase, not a halt
+    assert sink.halted is None and sink.counters["rebases"] == 1
+    assert sink.stats()["seq_base"] == 46 - 13 + 1 + 10
+    clk.advance(1)
+    flt_snapshot = fleet(3, at=clk.now_utc())
+    sink.observe(flt_snapshot, [], 4)
+    assert sink.pump() >= 1
+    assert sink.halted is None and sink.counters["acks"] > 0
+    assert rg.snapshots and rg.snapshots[-1] > 46 and rg.applied > 46
+    assert json.loads(Path(str(tmp_path / "outbox.json") + ".base").read_text())["seq_base"] == sink.stats()["seq_base"]
+    assert make_sink(tmp_path, None, clk).stats()["seq_base"] == sink.stats()["seq_base"]
+
+
+def test_restart_with_riskguard_behind_sets_the_base_to_the_old_head(tmp_path):
+    clk, rg = FakeClock(T0), FakeRg()
+    rg.applied = 2
+    sink = _restart_sink_at_head(tmp_path, clk, 10)
+    sink._post = rg.post
+    seed(sink, 3)
+    assert sink.stats()["seq_base"] == 10
+    assert sink.pump() >= 1
+    assert sink.halted is None and sink.counters["rebases"] == 0
+    assert rg.snapshots == [13] and rg.applied == 13
+
+
+def test_a_second_ack_ahead_within_60s_halts_once(tmp_path):
+    clk, rg = FakeClock(T0), FakeRg()
+    sink = make_sink(tmp_path, rg, clk)
+    seed(sink)
+    rg.mode = "ahead"
+    sink.pump()
+    assert sink.counters["rebases"] == 1 and sink.halted is None
+    clk.advance(30)
+    sink.observe(fleet(3, at=clk.now_utc()), [], 4)
+    sink.pump()
+    assert sink.halted == "ack_ahead" and sink.counters["halts"] == 1
+    sink.pump()
+    assert sink.counters["halts"] == 1 and sink.counters["rebases"] == 1
+    clk.advance(120)  # after resume, a later ack_ahead may rebase again
+    sink.resume()
+    rg.mode = "ack"
+    assert sink.pump() >= 1
+
+
+def test_a_missing_or_corrupt_base_file_is_zero_with_a_warning(tmp_path, caplog):
+    clk = FakeClock(T0)
+    assert make_sink(tmp_path, None, clk).stats()["seq_base"] == 0  # missing: silent zero
+    base = Path(str(tmp_path / "outbox.json") + ".base")
+    for bad in ("{not json", '{"seq_base":-3}', '{"seq_base":"x"}', "[]"):
+        base.write_text(bad)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert make_sink(tmp_path, None, clk).stats()["seq_base"] == 0
+        assert any("seq base" in r.getMessage() for r in caplog.records)
+    base.write_text('{"seq_base":7}')
+    assert make_sink(tmp_path, None, clk).stats()["seq_base"] == 7
 
 
 def test_delivery_is_in_order_after_an_outage(tmp_path):
@@ -343,9 +423,9 @@ def test_a_seq_gap_is_refused_and_the_sink_reseeds_from_a_snapshot(tmp_path):
     assert sink.counters["reseeds"] == 1
     assert stats(sink)["gaps_refused"] >= 1 and before["head_seq"] == 3
     sink.pump()
-    assert rg.snapshots == [3, 7]  # re-seeded by a snapshot at the new head
+    assert rg.snapshots == [3, 10]  # re-seeded at the new head (7 + seq_base 3, BP-4a-SEQ)
     assert rg.applied_seqs == []  # event 7 never reached riskguard without its predecessors
-    assert rg.applied == 7
+    assert rg.applied == 10
 
 
 def test_the_outbox_core_refuses_a_gap_and_changes_nothing():

@@ -49,6 +49,7 @@ MAX_ENVELOPES_PER_PUMP = 64
 MAX_RESPONSE_BYTES = 65_536
 TOKEN_FILE_MAX_BYTES = 1_048_576
 REQUEST_TIMEOUT_S = 5.0
+REBASE_MIN_INTERVAL_S = 60.0  # a second ack_ahead inside this window halts (BP-4a-SEQ)
 
 # (status, body text); status 0 is "no answer".
 HttpPost = Callable[[str, bytes, Mapping[str, str], float], tuple[int, str]]
@@ -157,10 +158,13 @@ class RiskguardRegistrySink:
         self._thread: threading.Thread | None = None
         self._dirty = False
         self._outbox = None
+        self._seq_base = 0  # BP-4a-SEQ: added to every poller seq; persisted in `<outbox>.base`
+        self._last_rebase = None
         self.counters: dict[str, int] = {
             "observed": 0,
             "observe_refused": 0,
             "reseeds": 0,
+            "rebases": 0,
             "posts": 0,
             "post_failures": 0,
             "token_failures": 0,
@@ -178,6 +182,7 @@ class RiskguardRegistrySink:
             return
         if not (config.base_url and config.token_file and config.outbox_path):
             raise ValueError("an enabled registry sink needs base_url, token_file and outbox_path")
+        self._seq_base = self._load_base()
         self._outbox = self._load()
         if config.pnl_enabled:
             self._outbox.set_pnl_enabled(True)
@@ -201,6 +206,7 @@ class RiskguardRegistrySink:
     def stats(self) -> dict[str, Any]:
         out: dict[str, Any] = dict(self.counters)
         out["enabled"] = self.enabled
+        out["seq_base"] = self._seq_base
         if self._outbox is not None:
             with self._lock:
                 out["outbox"] = json.loads(self._outbox.stats())
@@ -229,6 +235,46 @@ class RiskguardRegistrySink:
             log.warning("registry outbox state discarded (%s); starting from the next snapshot", kind)
             self.counters["state_discarded"] += 1
             return self._new_outbox()
+
+    def _base_path(self) -> Path:
+        return Path(self._config.outbox_path + ".base")
+
+    def _load_base(self) -> int:
+        """The persisted sequence base; a missing or bad file is 0."""
+        path = self._base_path()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return 0
+        except (OSError, UnicodeDecodeError) as exc:
+            log.warning("registry seq base unreadable (%s); using 0", type(exc).__name__)
+            return 0
+        try:
+            value = json.loads(text).get("seq_base")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        except (ValueError, AttributeError):
+            pass
+        log.warning("registry seq base file is corrupt; using 0")
+        return 0
+
+    def _persist_base(self) -> None:
+        """Write `{"seq_base":N}` with tmp + os.replace (rare, one tiny file)."""
+        path = self._base_path()
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps({"seq_base": self._seq_base}), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            self.counters["persist_failures"] += 1
+            log.warning("registry seq base persist failed (%s)", type(exc).__name__)
+
+    def _rebased_events(self, events: list[dict[str, Any]]) -> str:
+        base = self._seq_base
+        if base:
+            events = [{**e, "seq": e["seq"] + base} if isinstance(e.get("seq"), int) else e for e in events]
+        return json.dumps(events, separators=(",", ":"))
 
     def _persist(self) -> None:
         """Write the outbox to disk. Serialising is memory-only and runs under the lock; the
@@ -273,11 +319,10 @@ class RiskguardRegistrySink:
         if self._outbox is None:
             return
         snap_text = json.dumps(snapshot.as_contract(), separators=(",", ":"))
-        ev_text = json.dumps(events, separators=(",", ":"))
         confirmed = _iso_z(snapshot.confirmed_at)
         with self._lock:
             try:
-                self._observe_locked(snap_text, ev_text, seq, confirmed)
+                self._observe_locked(snap_text, self._rebased_events(events), seq + self._seq_base, confirmed)
             except AccountRuleError as exc:
                 if exc.kind != "seq_gap":
                     self._refused(exc.kind)
@@ -285,9 +330,15 @@ class RiskguardRegistrySink:
                 # The poller and the outbox disagree about the head (a restart, a ledger
                 # replay): drop the outbox's view and re-seed riskguard from this snapshot.
                 self.counters["reseeds"] += 1
+                old_head = json.loads(self._outbox.stats()).get("head_seq", 0)
+                if old_head > self._seq_base:
+                    self._seq_base = old_head
+                    self._persist_base()  # rare and tiny; only on a reseed
                 self._outbox.reset()
                 try:
-                    self._observe_locked(snap_text, ev_text, seq, confirmed)
+                    self._observe_locked(
+                        snap_text, self._rebased_events(events), seq + self._seq_base, confirmed
+                    )
                 except AccountRuleError as again:
                     self._refused(again.kind)
                     return
@@ -377,6 +428,8 @@ class RiskguardRegistrySink:
             try:
                 result = _rs._call(self._outbox.on_response, status, text, now)
             except AccountRuleError as exc:
+                if exc.kind == "ack_ahead" and self._rebase_on_ack_ahead(status, text):
+                    return "need_snapshot"
                 if exc.kind in ("ack_missing", "ack_short", "bad_response"):
                     self.counters["ack_refused"] += 1
                     self.last_error_kind = exc.kind
@@ -394,6 +447,39 @@ class RiskguardRegistrySink:
             return "need_snapshot"
         self.counters["acks"] += 1
         return "acked"
+
+    def _rebase_on_ack_ahead(self, status: int, text: str) -> bool:
+        """Riskguard is ahead of this outbox (BP-4a-SEQ). Move the base above its seq and
+        re-seed instead of halting, once per `REBASE_MIN_INTERVAL_S`. Caller holds the lock."""
+        try:
+            applied = json.loads(text).get("applied_seq") if status == 200 else None
+        except (ValueError, AttributeError):
+            applied = None
+        if not isinstance(applied, int) or isinstance(applied, bool) or applied < 0:
+            return False
+        now = self._clock.now_utc()
+        last = self._last_rebase
+        if last is not None and (now - last).total_seconds() < REBASE_MIN_INTERVAL_S:
+            return False
+        head = json.loads(self._outbox.stats()).get("head_seq", 0)
+        old_base = self._seq_base
+        self._seq_base += max(0, applied - head + 1)
+        self._outbox.reset()
+        self._outbox.resume()  # `ack_ahead` set the halt; the next observe re-seeds
+        self._last_rebase = now
+        self._dirty = True
+        self.counters["rebases"] += 1
+        self.counters["snapshots_requested"] += 1
+        self.last_error_kind = "ack_ahead"
+        self._persist_base()
+        log.warning(
+            "registry sink rebased: riskguard applied_seq=%d is ahead of outbox head=%d; seq_base %d -> %d",
+            applied,
+            head,
+            old_base,
+            self._seq_base,
+        )
+        return True
 
     def _halted(self, kind: str) -> None:
         self.counters["halts"] += 1
