@@ -10,7 +10,7 @@ restarts a process or edits config. Every step that writes to the venue is marke
 ## 0. Hard rules
 
 - **Demo only.** Step 1 must confirm the account's environment is demo. If it is not demo, stop.
-- **One contract (1 MES).** Every cycle starts flat and ends flat.
+- **One contract (1 MNQ).** ntx `instrument_allowed` permits only MNQ and NQ roots, so MES is refused. Every cycle starts flat and ends flat.
 - **Enter with a stop, every time.** A bracket without `stop` is refused as `no_stop`.
 - **Never resend.** Each request gets a new `clOrdId`. A timeout or `PENDING` is reconciled
   from `GET /snapshot`; do not send it again.
@@ -24,9 +24,10 @@ restarts a process or edits config. Every step that writes to the venue is marke
 1. ntx daemon is up on `127.0.0.1:9234`. `GET /health` answers. The startup line in the ntx
    log lists `POST /v1/orders[/modify|/cancel]` and `POST /v1/flatten`. If the order routes are
    missing, the running daemon predates ORDER-API-1 OA-2; stop and report.
-2. **Allowlist.** `POST /v1/orders*` refuses every account unless `orders.json` in the ntx store
-   (`%LOCALAPPDATA%\ntx_tradovate\orders.json`) lists the account. As of 2026-11-18 that file
-   does not exist, so every order is refused with `account_not_allowlisted`. The owner adds the
+2. **Allowlist.** `POST /v1/orders*` refuses every account unless `orders.json` in the ntx secrets dir
+   (`%LOCALAPPDATA%\ntx_tradovate\secrets\orders.json`; `session_store_dir()` appends `\secrets`)
+   lists the account. As of 2026-11-20 the file lists ***194 only (owner decision 3); before
+   that it did not exist, so every order was refused with `account_not_allowlisted`. The owner adds the
    demo account. The parent must not write the file on the owner's behalf.
 3. **Environment.** `GET /snapshot` (with the bearer header) shows the account's identity as
    demo. If the environment field is anything other than demo, abort.
@@ -72,7 +73,7 @@ for the account's contract, quoted from `/snapshot` or the quote route.
 
 1. **[ORDER] place.** `POST /v1/orders` with body:
    ```json
-   {"account": "<demo account>", "clOrdId": "<id>", "symbol": "<front MES symbol from ntx>",
+   {"account": "<demo account>", "clOrdId": "<id>", "symbol": "<front MNQ symbol from ntx, e.g. MNQZ6>",
     "side": "Buy", "qty": 1, "entry": {"type": "market"},
     "stop": "<bid - 10 ticks>", "target": "<ask + 40 ticks>",
     "verdict": {"allowed": true, "verdictRevision": <rev>, "checkedAt": "<RFC3339>"}}
