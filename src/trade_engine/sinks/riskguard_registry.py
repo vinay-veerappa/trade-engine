@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ MAX_RESPONSE_BYTES = 65_536
 TOKEN_FILE_MAX_BYTES = 1_048_576
 REQUEST_TIMEOUT_S = 5.0
 REBASE_MIN_INTERVAL_S = 60.0  # a second ack_ahead inside this window halts (BP-4a-SEQ)
+REPLACE_RETRY_SECONDS = 0.05  # REGFEED-STOP-1: one retry after PermissionError (AV or indexer lock)
 
 # (status, body text); status 0 is "no answer".
 HttpPost = Callable[[str, bytes, Mapping[str, str], float], tuple[int, str]]
@@ -87,6 +89,27 @@ class RegistrySinkConfig:
             f"RegistrySinkConfig(enabled={self.enabled}, pnl_enabled={self.pnl_enabled}, "
             f"broker={self.broker!r}, cap_bytes={self.cap_bytes})"
         )
+
+
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    """`os.replace`, retried once after 50 ms on PermissionError (Windows AV or indexer sharing)."""
+    try:
+        os.replace(tmp, path)
+    except PermissionError:
+        time.sleep(REPLACE_RETRY_SECONDS)
+        os.replace(tmp, path)
+
+
+def _log_write_failure(what: str, exc: OSError, path: Path) -> None:
+    """The exception type, errno, winerror and the path. Never the file's contents."""
+    log.warning(
+        "%s (%s, errno=%s, winerror=%s, path=%s)",
+        what,
+        type(exc).__name__,
+        exc.errno,
+        getattr(exc, "winerror", None),
+        path,
+    )
 
 
 class TokenUnavailable(RuntimeError):
@@ -265,10 +288,10 @@ class RiskguardRegistrySink:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps({"seq_base": self._seq_base}), encoding="utf-8")
-            os.replace(tmp, path)
+            _replace_with_retry(tmp, path)
         except OSError as exc:
             self.counters["persist_failures"] += 1
-            log.warning("registry seq base persist failed (%s)", type(exc).__name__)
+            _log_write_failure("registry seq base persist failed", exc, path)
 
     def _rebased_events(self, events: list[dict[str, Any]]) -> str:
         base = self._seq_base
@@ -295,11 +318,11 @@ class RiskguardRegistrySink:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, path)
+            _replace_with_retry(tmp, path)
         except OSError as exc:
             self._dirty = True
             self.counters["persist_failures"] += 1
-            log.warning("registry outbox persist failed (%s)", type(exc).__name__)
+            _log_write_failure("registry outbox persist failed", exc, path)
 
     # -- observing ------------------------------------------------------------------------
 
@@ -383,6 +406,8 @@ class RiskguardRegistrySink:
         with self._pump_lock:
             try:
                 for _ in range(MAX_ENVELOPES_PER_PUMP):
+                    if self._stop.is_set():
+                        break  # stop: no new post; the last persisted file stays whole
                     outcome = self._send_one()
                     if outcome == "idle":
                         break
@@ -518,12 +543,23 @@ class RiskguardRegistrySink:
         self._thread = threading.Thread(target=run, name="registry-sink", daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 1.0) -> None:
+        """Stop the worker, wait at most `timeout`, then flush one last persist if dirty.
+
+        The worker checks the stop flag before each post, so the join normally returns within
+        one post. A post still in flight after the join is not waited for: the thread is a
+        daemon, the last persisted file is whole (tmp + replace), and unacked envelopes are sent
+        again after a restart. The flush is skipped while the worker is alive (no two writers).
+        """
         self._stop.set()
         self._wake.set()
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout)
+            if thread.is_alive():
+                log.warning("registry sink still delivering at stop; final flush skipped")
+                return
+        self._persist()
 
 
 __all__ = [

@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -1004,6 +1005,22 @@ class AccountWatcher:
         self.backoff = backoff if backoff is not None else ReconnectBackoff(rand)
         self.snapshots = 0
         self.connects = 0
+        # REGFEED-STOP-1: the open stream, so `wake()` (another thread, on stop) can reach it.
+        self._lock = threading.Lock()
+        self._stream = None
+        self._stopping = False
+
+    def wake(self) -> None:
+        """Stop path (REGFEED-STOP-1): end a read blocked on the open `/events` socket now.
+
+        The caller sets its stop flag first; this only marks the watcher stopping and shuts the
+        socket, so `run_once` returns at once and `run` exits. Never blocks.
+        """
+        with self._lock:
+            self._stopping = True
+            stream = self._stream
+        if stream is not None:
+            stream.wake()
 
     @staticmethod
     def _is_hint(payload: dict[str, Any]) -> bool:
@@ -1041,6 +1058,11 @@ class AccountWatcher:
         except NtxError as exc:
             self.backoff.dropped(self._clock.now_utc())
             return exc.kind
+        with self._lock:
+            if self._stopping:  # a stop raced the connect: do not read at all
+                stream.close()
+                return "stopped"
+            self._stream = stream
         self.connects += 1
         try:
             self.backoff.connected(self._clock.now_utc())
@@ -1061,6 +1083,8 @@ class AccountWatcher:
                 return exc.kind
             return "stream_ended"
         finally:
+            with self._lock:
+                self._stream = None
             stream.close()
             self.backoff.dropped(self._clock.now_utc())
 

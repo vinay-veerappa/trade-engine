@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -501,6 +502,16 @@ class NtxStream:
             yield from self._reader.events()
         except (OSError, HTTPException) as exc:
             raise NtxError("unavailable", f"the stream broke ({type(exc).__name__})") from None
+
+    def wake(self) -> None:
+        """REGFEED-STOP-1: shut the socket down so a `readline` blocked in another thread returns
+        at once (end of stream). Only the reader closes the connection, in its own thread."""
+        sock = self._conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # already closed or reset: the reader is not blocked any more
 
     def close(self) -> None:
         self._conn.close()

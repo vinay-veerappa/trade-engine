@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import date, datetime, timedelta
@@ -61,6 +62,7 @@ from trade_engine.tradovate.ntx_client import NtxClient, default_token_path, rea
 log = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 60.0
+STOP_BUDGET_SECONDS = 1.0  # REGFEED-STOP-1: all the stop waits together, one shared deadline
 RESNAP_OPEN_SECONDS = 2.0  # BP-4e: re-read while any account holds a position
 RESNAP_FLAT_SECONDS = 30.0  # BP-4e: re-read while every account is flat
 SINK_OFF_EXIT = 2
@@ -660,36 +662,52 @@ def run(
                 payload.update(feed.schwab.counts())
             log.info("registry feed heartbeat %s", payload)
     finally:
+        # REGFEED-STOP-1: every stop wait shares one deadline (STOP_BUDGET_SECONDS). A thread
+        # still busy at the deadline is a daemon and is left to finish; exit does not wait on it.
+        deadline = time.monotonic() + STOP_BUDGET_SECONDS
+
+        def left() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        watcher.wake()  # a read blocked on /events returns now (the stop flag is already set)
         pump.stop()
-        feed.sink.stop()
+        feed.sink.stop(timeout=left())
         if feed.schwab is not None:
-            feed.schwab.sink.stop()
-        # The watcher may be blocked on the stream; it is a daemon thread and checks the
-        # stop flag after each connection, so a short join is enough.
-        thread.join(timeout=1.0)
-        pump_thread.join(timeout=1.0)
-        if schwab_thread is not None:
-            schwab_thread.join(timeout=1.0)
-        if hint_thread is not None:
-            hint_thread.join(timeout=1.0)
+            feed.schwab.sink.stop(timeout=left())
+        for worker in (thread, pump_thread, schwab_thread, hint_thread):
+            if worker is not None:
+                worker.join(timeout=left())
         log.info("registry feed stopped")
     return 0
 
 
 def main_loop(environ: Mapping[str, str], *, ledger=None) -> int:
-    """The CLI entry: SIGINT/SIGTERM set the stop event; exit 0 on a clean stop."""
+    """The CLI entry: SIGINT/SIGTERM (and SIGBREAK on Windows) set the stop event; exit 0 on a clean stop."""
     import signal
 
     stop_event = threading.Event()
+    signalled: list[int] = []
 
     def on_signal(signum, frame) -> None:
+        signalled.append(signum)
         stop_event.set()
 
     signal.signal(signal.SIGINT, on_signal)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, on_signal)
-    return run(environ, clock=WallClock(), sleep=stop_event.wait, rand=random.random, stop_event=stop_event,
-               ledger=ledger)
+    if hasattr(signal, "SIGBREAK"):  # Windows: quantd's fallback when the Ctrl+C event is refused
+        signal.signal(signal.SIGBREAK, on_signal)
+    code = run(
+        environ,
+        clock=WallClock(),
+        sleep=stop_event.wait,
+        rand=random.random,
+        stop_event=stop_event,
+        ledger=ledger,
+    )
+    if signalled:
+        log.info("registry_feed: stopped (signal)")
+    return code
 
 
 __all__ = [
