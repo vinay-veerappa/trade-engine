@@ -272,3 +272,47 @@ def test_bound_no_busy_loop(tmp_path, daemon, clock):
         pump_tick_seconds=0.1,
     )
     assert daemon.events_opened < 50
+
+
+def test_main_thread_waits_in_short_slices(tmp_path, daemon, clock):
+    """REGFEED-STOP-1b: a Windows lock wait ignores Ctrl+C, so the signal handler runs only when
+    the main wait returns. With a 60 s heartbeat the main thread must still wake every slice."""
+
+    class RecordingEvent(threading.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.timeouts: list[tuple[str, float | None]] = []
+
+        def wait(self, timeout=None):
+            self.timeouts.append((threading.current_thread().name, timeout))
+            return super().wait(timeout)
+
+    rg = RecordingRg(SENTINEL)
+    stop = RecordingEvent()
+    t = threading.Thread(
+        target=lambda: run(
+            env_for(tmp_path, pnl=True),
+            clock=clock,
+            rand=lambda: 0.0,
+            stop_event=stop,
+            make_client=lambda: make_client(daemon),
+            http_post=rg.post,
+            heartbeat_seconds=60.0,
+            pump_tick_seconds=0.05,
+        ),
+        name="feed-main",
+        daemon=True,
+    )
+    t.start()
+    deadline = time.monotonic() + 5
+    while daemon.snapshot_calls < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    started = time.monotonic()
+    stop.set()
+    t.join(timeout=3.0)
+    assert not t.is_alive()
+    assert time.monotonic() - started < 1.5
+    main_waits = [w for name, w in stop.timeouts if name == "feed-main"]
+    assert main_waits, "the main loop waits on the stop event"
+    assert max(main_waits) <= registry_feed.MAIN_WAKE_SECONDS

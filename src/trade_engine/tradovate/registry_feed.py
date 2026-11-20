@@ -63,6 +63,9 @@ log = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 60.0
 STOP_BUDGET_SECONDS = 1.0  # REGFEED-STOP-1: all the stop waits together, one shared deadline
+# REGFEED-STOP-1b: on Windows a lock wait is not interrupted by Ctrl+C, so the Python signal
+# handler runs only when the main thread's wait returns. The main thread waits in short slices.
+MAIN_WAKE_SECONDS = 0.5
 RESNAP_OPEN_SECONDS = 2.0  # BP-4e: re-read while any account holds a position
 RESNAP_FLAT_SECONDS = 30.0  # BP-4e: re-read while every account is flat
 SINK_OFF_EXIT = 2
@@ -647,7 +650,11 @@ def run(
             )
             hint_thread.start()
     try:
-        while not stop_event.wait(heartbeat_seconds):
+        next_beat = time.monotonic() + heartbeat_seconds
+        while not stop_event.wait(min(MAIN_WAKE_SECONDS, heartbeat_seconds)):
+            if time.monotonic() < next_beat:
+                continue
+            next_beat = time.monotonic() + heartbeat_seconds
             oldest = pump.oldest_as_of
             now = clock.now_utc()
             payload: dict[str, Any] = {
