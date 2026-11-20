@@ -316,3 +316,32 @@ def test_main_thread_waits_in_short_slices(tmp_path, daemon, clock):
     main_waits = [w for name, w in stop.timeouts if name == "feed-main"]
     assert main_waits, "the main loop waits on the stop event"
     assert max(main_waits) <= registry_feed.MAIN_WAKE_SECONDS
+
+
+# REGFEED-STOP-1c: main_loop clears the inherited "ignore Ctrl+C" flag on Windows.
+class _FakeKernel32:
+    def __init__(self, ret=1, raise_exc=False):
+        self.calls = []
+        self.ret = ret
+        self.raise_exc = raise_exc
+
+    def SetConsoleCtrlHandler(self, handler, add):
+        self.calls.append((handler, add))
+        if self.raise_exc:
+            raise OSError("no console")
+        return self.ret
+
+
+def test_accept_console_ctrl_c_clears_ignore_flag():
+    from trade_engine.tradovate.registry_feed import _accept_console_ctrl_c
+
+    k = _FakeKernel32()
+    assert _accept_console_ctrl_c(k) is True
+    assert k.calls == [(None, False)]
+
+
+def test_accept_console_ctrl_c_never_raises():
+    from trade_engine.tradovate.registry_feed import _accept_console_ctrl_c
+
+    assert _accept_console_ctrl_c(_FakeKernel32(raise_exc=True)) is False
+    assert _accept_console_ctrl_c(_FakeKernel32(ret=0)) is False

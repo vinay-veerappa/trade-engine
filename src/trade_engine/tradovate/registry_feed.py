@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import random
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -688,6 +689,27 @@ def run(
     return 0
 
 
+def _accept_console_ctrl_c(kernel32=None) -> bool:
+    """Clear an inherited "ignore Ctrl+C" flag so quantd's console event 0 reaches SIGINT.
+
+    REGFEED-STOP-1c: under quantd every Ctrl+C stop was forced at 10 s while event 1 (SIGBREAK)
+    stopped clean, so the process had inherited the ignore flag. Windows only; never raises.
+    """
+    if kernel32 is None:
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+        except Exception:  # noqa: BLE001  # pragma: no cover - ctypes always present on CPython/Windows
+            return False
+    try:
+        return bool(kernel32.SetConsoleCtrlHandler(None, False))
+    except Exception:  # noqa: BLE001 - a console API failure must never stop the feed
+        return False
+
+
 def main_loop(environ: Mapping[str, str], *, ledger=None) -> int:
     """The CLI entry: SIGINT/SIGTERM (and SIGBREAK on Windows) set the stop event; exit 0 on a clean stop."""
     import signal
@@ -699,6 +721,7 @@ def main_loop(environ: Mapping[str, str], *, ledger=None) -> int:
         signalled.append(signum)
         stop_event.set()
 
+    _accept_console_ctrl_c()
     signal.signal(signal.SIGINT, on_signal)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, on_signal)
