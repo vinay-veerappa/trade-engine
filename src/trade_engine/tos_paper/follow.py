@@ -137,6 +137,7 @@ def follow_cycle(
     clock: Clock,
     max_age: timedelta = MAX_AGE,
     express: Express | None = None,
+    settle=None,
 ) -> MirrorRunReport:
     """One follow pass at the venue (see the module doc). Idempotent within a minute (I3)."""
     now = clock.now_utc()
@@ -161,6 +162,7 @@ def follow_cycle(
         clock=clock,
         express=express,
         may_wait=True,
+        settle=settle,
     )
     # The entries refused here are the report's too: a refusal the caller never sees is
     # one the operator's log never shows (measured 2026-09-29, the first live cycle).

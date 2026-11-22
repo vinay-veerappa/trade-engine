@@ -115,6 +115,10 @@ class MirrorRunReport:
     # Orders the cover rule held back this run (``may_wait``): (order id, why). Nothing about them was
     # recorded or sent; the caller presents them again next run, and the venue never saw one (I3).
     waiting: tuple[tuple[str, str], ...] = ()
+    # Expired contracts settled out of the mirror book before collecting (``tos_paper.expiry``), and
+    # the expiries that could not settle yet ("<expiry>: <why>"); those drift until they can.
+    expired: tuple = ()
+    unsettled: tuple[str, ...] = ()
 
 
 def mirror_of(ledger: Ledger, venue: str) -> MirrorState:
@@ -268,8 +272,13 @@ def _reconcile(ledger: Ledger, broker: TosPaperBroker, clock: Clock, event: Venu
     return written
 
 
-def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock) -> MirrorRunReport:
+def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock, settle=None) -> MirrorRunReport:
     venue = broker.venue
+    if settle is not None:  # (calendar, settlements): expired contracts leave the book before the reconcile
+        from trade_engine.tos_paper.expiry import settle_expired
+        outcome = settle_expired(ledger, venue, clock, *settle)
+        report = _collect(ledger, broker, clock)
+        return replace(report, expired=outcome.events, unsettled=outcome.unsettled)
     try:
         collection = broker.collect_fills(mirror_of(ledger, venue))
     except TransportUnavailable as exc:  # could not ask: record and halt nothing, ask again next run
@@ -385,9 +394,9 @@ def cancel_ticket(ledger: Ledger, broker: TosPaperBroker, ticket_key: str, *, cl
     return ack
 
 
-def collect_only(ledger: Ledger, broker: TosPaperBroker, *, clock: Clock) -> MirrorRunReport:
+def collect_only(ledger: Ledger, broker: TosPaperBroker, *, clock: Clock, settle=None) -> MirrorRunReport:
     """Fills and the reconcile, no sends: the after-close pass (and a safe probe)."""
-    return _collect(ledger, broker, clock)
+    return _collect(ledger, broker, clock, settle)
 
 
 def run_mirror(
@@ -397,6 +406,7 @@ def run_mirror(
     *,
     clock: Clock,
     may_wait: bool = False,
+    settle=None,
 ) -> MirrorRunReport:
     """One mirror session for ``orders`` (usually :func:`pending_orders`). Idempotent (I3).
 
@@ -409,7 +419,7 @@ def run_mirror(
     a caller that never learned about waiting can never send a naked call. See ``tos_paper.cover``.
     """
     venue = broker.venue
-    collected = _collect(ledger, broker, clock)
+    collected = _collect(ledger, broker, clock, settle)
     if collected.deferred is not None:  # the venue could not be asked: send nothing over an unread venue
         return collected
     mirror = mirror_of(ledger, venue)

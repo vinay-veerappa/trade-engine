@@ -720,43 +720,7 @@ fn on_lifecycle(st: &mut AccountState, notice: &OptionLifecycle, kind: EventKind
         ));
     }
     let wire = contract.wire();
-    let price_text = s(&notice.underlying_price);
-    let value_text = lc::intrinsic(&wire, &price_text).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
-    let value = Money::parse(&value_text).ok_or_else(|| LErr { kind: "value", msg: value_text.clone() })?;
-    let cash_settled = lc::is_cash_settled(&wire).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
-    let american = lc::can_exercise_early(&wire).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
-
-    if kind == EventKind::Expiry {
-        if notice.early {
-            return fe(format!("{label}: a contract expires only at its expiry (I9)"));
-        }
-        if ge(&value, &exercise_threshold())? {
-            return fe(format!(
-                "{label}: {} in the money at {}; it is exercised or assigned, not expired worthless (I9)",
-                s(&value),
-                s(&notice.underlying_price)
-            ));
-        }
-    } else {
-        let wanted = if kind == EventKind::Exercise { Side::Buy } else { Side::Sell };
-        if held != wanted {
-            return fe(format!(
-                "{label}: {} applies to {} contracts; these are held {} (I5)",
-                kind.value(),
-                if wanted == Side::Buy { "long" } else { "short" },
-                held.value()
-            ));
-        }
-        if lt(&value, &exercise_threshold())? {
-            return fe(format!(
-                "{label}: not in the money at {}; nobody exercises it (I9)",
-                s(&notice.underlying_price)
-            ));
-        }
-        if notice.early && !american {
-            return fe(format!("{label}: a European contract cannot be assigned early (I5)"));
-        }
-    }
+    let (value, cash_settled) = lifecycle_checks(&label, notice, kind, held)?;
 
     let mult = Money::from_i128(contract.multiplier).map_err(derr)?;
     let mut cash = st.cash.clone();
@@ -811,6 +775,101 @@ fn on_lifecycle(st: &mut AccountState, notice: &OptionLifecycle, kind: EventKind
     }
     st.cash = cash;
     st.realized_pnl = add(&st.realized_pnl, &realized)?;
+    Ok(())
+}
+
+/// The settlement rules every lifecycle event obeys, for a strategy book or a venue mirror:
+/// an expiry is worthless and at expiry; an exercise is of long, an assignment of short,
+/// in-the-money contracts (I9). Returns the intrinsic value and whether it settles in cash.
+fn lifecycle_checks(label: &str, notice: &OptionLifecycle, kind: EventKind, held: Side) -> R<(Money, bool)> {
+    let wire = notice.contract.wire();
+    let price_text = s(&notice.underlying_price);
+    let value_text = lc::intrinsic(&wire, &price_text).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
+    let value = Money::parse(&value_text).ok_or_else(|| LErr { kind: "value", msg: value_text.clone() })?;
+    let cash_settled = lc::is_cash_settled(&wire).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
+    let american = lc::can_exercise_early(&wire).map_err(|e| lifecycle_wrap(&label, pair(e)))?;
+
+    if kind == EventKind::Expiry {
+        if notice.early {
+            return fe(format!("{label}: a contract expires only at its expiry (I9)"));
+        }
+        if ge(&value, &exercise_threshold())? {
+            return fe(format!(
+                "{label}: {} in the money at {}; it is exercised or assigned, not expired worthless (I9)",
+                s(&value),
+                s(&notice.underlying_price)
+            ));
+        }
+    } else {
+        let wanted = if kind == EventKind::Exercise { Side::Buy } else { Side::Sell };
+        if held != wanted {
+            return fe(format!(
+                "{label}: {} applies to {} contracts; these are held {} (I5)",
+                kind.value(),
+                if wanted == Side::Buy { "long" } else { "short" },
+                held.value()
+            ));
+        }
+        if lt(&value, &exercise_threshold())? {
+            return fe(format!(
+                "{label}: not in the money at {}; nobody exercises it (I9)",
+                s(&notice.underlying_price)
+            ));
+        }
+        if notice.early && !american {
+            return fe(format!("{label}: a European contract cannot be assigned early (I5)"));
+        }
+    }
+    Ok((value, cash_settled))
+}
+
+/// A lifecycle event on a venue mirror (`__venue__:<venue>`): the venue settled what the
+/// mirror books, so the contract leaves every strategy account's book entry. The mirror
+/// carries no cash or lots, so only the holding moves; it must be settled whole and only
+/// in cash (a delivered exercise would put shares in the book, which is refused) (I5, I9).
+fn on_mirror_lifecycle(st: &mut AccountState, notice: &OptionLifecycle, kind: EventKind) -> R<()> {
+    let contract = &notice.contract;
+    let label = format!(
+        "{} of {} in '{}'",
+        kind.value(),
+        crate::options::pyrules::strip(&contract.occ()?),
+        st.account_id
+    );
+    let wanted = Instrument::Option(contract.clone()).hk();
+    let mut keys = Vec::new();
+    let mut net = zero();
+    for (k, v) in st.mirror.book.iter() {
+        if k.1.hk() == wanted {
+            keys.push(k.clone());
+            net = add(&net, v)?;
+        }
+    }
+    if eq(&net, &zero())? {
+        return fe(format!("{label}: the mirror books no open position to settle (I5)"));
+    }
+    let held = if gt(&net, &zero())? { Side::Buy } else { Side::Sell };
+    if held != notice.held {
+        return fe(format!(
+            "{label}: the event says the contracts are held {} but the mirror books them {} (I5)",
+            notice.held.value(),
+            held.value()
+        ));
+    }
+    let held_abs = abs(&net)?;
+    if !eq(&notice.quantity, &held_abs)? {
+        return fe(format!(
+            "{label}: {} contracts settled but the mirror books {}; a venue settles the whole holding (I5)",
+            s(&notice.quantity),
+            s(&held_abs)
+        ));
+    }
+    let (_, cash_settled) = lifecycle_checks(&label, notice, kind, held)?;
+    if kind != EventKind::Expiry && !cash_settled {
+        return fe(format!("{label}: the mirror books no delivered shares; settle a delivered exercise by hand (I5)"));
+    }
+    for (account, c) in keys {
+        st.mirror.book.remove(&mirror::book_hk(&account, &c));
+    }
     Ok(())
 }
 
@@ -872,6 +931,7 @@ pub fn apply_event(st: &mut AccountState, event: &Event) -> R<()> {
         Obj::EodRun(_) => {}
         // Owner-signed void: provenance for the I3 gate, never trading history (EOD-VOID-1).
         Obj::EodVoid(_) => {}
+        Obj::Lifecycle(n) if st.account_id.starts_with(MIRROR_ACCOUNT_PREFIX) => on_mirror_lifecycle(st, n, kind)?,
         Obj::Lifecycle(n) => on_lifecycle(st, n, kind)?,
         Obj::MQueued(q) => mirror_step(st, kind, |m| mirror::on_queued(m, q))?,
         Obj::MRefused(r) => mirror_step(st, kind, |m| mirror::on_refused(m, r))?,

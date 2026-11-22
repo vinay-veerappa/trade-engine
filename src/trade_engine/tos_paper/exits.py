@@ -151,6 +151,7 @@ def run_pass_mirror(
     clock: Clock,
     express: Express | None = None,
     may_wait: bool = False,
+    settle=None,
 ) -> MirrorRunReport:
     """One pass at the venue: collect, cancel what the exits replace, then send the
     pass's ``entries`` and exits in one batch (``run_mirror``). Idempotent (I3).
@@ -158,7 +159,7 @@ def run_pass_mirror(
     ``express``, when given, turns each order into the one the venue can take; an order it
     cannot is refused with its reason, and a resting ticket that only it replaced is kept."""
     venue = broker.venue
-    collected = collect_only(ledger, broker, clock=clock)
+    collected = collect_only(ledger, broker, clock=clock, settle=settle)
     if collected.deferred is not None:
         # The venue could not be asked: no cancel, no refusal, no send goes out over an unread venue.
         # Nothing was recorded, so the whole pass is the next run's to do (I3 keeps it once).

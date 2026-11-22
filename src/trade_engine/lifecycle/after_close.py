@@ -32,6 +32,7 @@ from trade_engine.domain.option_lifecycle import can_exercise_early
 from trade_engine.domain.option_roots import SettleTime, option_style, settlement_instant
 from trade_engine.interfaces.market_data import StaleDataError
 from trade_engine.ledger import Event, EventKind, Ledger, OptionLifecycle
+from trade_engine.ledger.events import MIRROR_ACCOUNT_PREFIX
 from trade_engine.lifecycle.sources import Dividends, OptionQuotes, SettlementPrice, Settlements
 from trade_engine._lifecycle_runtime import decide, flag, journal, register
 
@@ -52,6 +53,28 @@ class LifecycleResult:
 
 def _compact(contract: OptionContract) -> str:
     return decide("compact", [contract.occ])[0][0]
+
+
+@dataclass(frozen=True)
+class _Net:
+    quantity: Decimal
+
+
+def _mirror_net(state) -> dict:
+    """A venue mirror's holdings per contract: its book summed over the strategy accounts.
+
+    The mirror holds no positions of its own (``__venue__:<venue>``); what it holds at the
+    venue is its book, and an expired contract leaves the book only by an ``OptionLifecycle``
+    (the fold's ``on_mirror_lifecycle``), or every later reconcile drifts on it."""
+    net: dict = {}
+    keys: dict = {}
+    for (_account, instrument), quantity in state.mirror.book.items():
+        if not isinstance(instrument, OptionContract):
+            continue
+        key = instrument.occ
+        keys.setdefault(key, instrument)
+        net[key] = net.get(key, Decimal(0)) + Decimal(quantity)
+    return {keys[k]: _Net(q) for k, q in net.items() if q != 0}
 
 
 class LifecyclePass:
@@ -91,7 +114,8 @@ class LifecyclePass:
 
     def _account(self, account: str, session: date, now: datetime) -> list[Event]:
         state = self._ledger.state(account)
-        rows = list(state.positions.items())
+        mirror = account.startswith(MIRROR_ACCOUNT_PREFIX)
+        rows = list(_mirror_net(state).items() if mirror else state.positions.items())
         indices = decide("held",
             [v for instrument, position in rows for v in
              (instrument.occ if isinstance(instrument, OptionContract) else "", str(position.quantity))],
@@ -108,6 +132,8 @@ class LifecyclePass:
                 decide("overdue", [contract.occ.strip(), account, contract.expiry.isoformat()],
                        [(contract.expiry - session).days])
                 events.append(self._expiry(account, contract, side, quantity, session, now))
+                continue
+            if mirror:  # a venue's mirror books what the venue reports; it never decides an early assignment
                 continue
             early = self._early_assignment(account, contract, side, quantity, session, now)
             if early is not None:
