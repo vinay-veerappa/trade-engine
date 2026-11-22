@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import trade_engine_rs
@@ -25,3 +26,15 @@ class WallClock(Clock):
     def sleep(self, seconds: float) -> None:
         """Sleep for the given number of seconds."""
         self._native.sleep(seconds)
+
+
+def monotonic_seconds() -> float:
+    """Elapsed-time reads for stop budgets and heartbeats (not a wall-time read).
+
+    Lives here because this file is the one I7 allowlists for host-clock access."""
+    return time.monotonic()
+
+
+def pause(seconds: float) -> None:
+    """A short host sleep for retry back-off outside any Clock (I7 allowlisted)."""
+    time.sleep(seconds)

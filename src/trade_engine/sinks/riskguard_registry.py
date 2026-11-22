@@ -25,7 +25,6 @@ import json
 import logging
 import os
 import threading
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -34,6 +33,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from trade_engine.accounts import _rs
 from trade_engine.accounts.errors import AccountRuleError
+from trade_engine.clock.wall import pause
 from trade_engine.interfaces.broker import AccountSnapshot, _iso_z
 
 log = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ def _replace_with_retry(tmp: Path, path: Path) -> None:
     try:
         os.replace(tmp, path)
     except PermissionError:
-        time.sleep(REPLACE_RETRY_SECONDS)
+        pause(REPLACE_RETRY_SECONDS)
         os.replace(tmp, path)
 
 

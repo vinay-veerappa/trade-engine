@@ -39,7 +39,6 @@ import logging
 import random
 import sys
 import threading
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import date, datetime, timedelta
@@ -47,7 +46,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from trade_engine.clock.wall import WallClock
+from trade_engine.clock.wall import WallClock, monotonic_seconds
 from trade_engine.schwab.adapter import SchwabAccountsAdapter, SchwabAccountsConfig
 from trade_engine.schwab.hub_client import KINDS as HUB_FAILURE_KINDS
 from trade_engine.schwab.hub_client import HubAccountsClient, HubReadError, hub_base_url
@@ -651,11 +650,11 @@ def run(
             )
             hint_thread.start()
     try:
-        next_beat = time.monotonic() + heartbeat_seconds
+        next_beat = monotonic_seconds() + heartbeat_seconds
         while not stop_event.wait(min(MAIN_WAKE_SECONDS, heartbeat_seconds)):
-            if time.monotonic() < next_beat:
+            if monotonic_seconds() < next_beat:
                 continue
-            next_beat = time.monotonic() + heartbeat_seconds
+            next_beat = monotonic_seconds() + heartbeat_seconds
             oldest = pump.oldest_as_of
             now = clock.now_utc()
             payload: dict[str, Any] = {
@@ -672,10 +671,10 @@ def run(
     finally:
         # REGFEED-STOP-1: every stop wait shares one deadline (STOP_BUDGET_SECONDS). A thread
         # still busy at the deadline is a daemon and is left to finish; exit does not wait on it.
-        deadline = time.monotonic() + STOP_BUDGET_SECONDS
+        deadline = monotonic_seconds() + STOP_BUDGET_SECONDS
 
         def left() -> float:
-            return max(0.0, deadline - time.monotonic())
+            return max(0.0, deadline - monotonic_seconds())
 
         watcher.wake()  # a read blocked on /events returns now (the stop flag is already set)
         pump.stop()
