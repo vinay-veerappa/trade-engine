@@ -85,7 +85,7 @@ from trade_engine.interfaces.broker import (
 from trade_engine.interfaces.clock import Clock
 from trade_engine.eod.options_routing import OptionRouter
 from trade_engine.interfaces.market_data import MarketData, StaleDataError
-from trade_engine.ledger import CashFlow, EodRun, EodVoid, Event, EventKind, Ledger, Mark
+from trade_engine.ledger import CashFlow, EodRun, EodVoid, Event, EventKind, Ledger, Mark, OrderStateChange
 from trade_engine.ledger.state import AccountState, fold_account
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
@@ -186,6 +186,80 @@ def void_session(
             command_id=_void_command(job, account_id, session),
         ))
     return chosen
+
+
+_WORKING_STATES = frozenset({OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PENDING_UNKNOWN})
+_TERMINAL_STATES = frozenset({OrderState.FILLED, OrderState.CANCELLED, OrderState.EXPIRED, OrderState.REJECTED})
+
+
+def write_off_order(
+    ledger: Ledger,
+    clock: Clock,
+    account_id: str,
+    order_id: str,
+    *,
+    reason: str,
+    owner: str,
+) -> tuple[str, ...]:
+    """Record the owner's write-off of one stuck working order (SCAN-WRITEOFF-1).
+
+    A working entry that never fills makes ``_replay_instruments`` demand bars for its
+    name every session; with none to be had, the I3 gate refuses every later run. The
+    write-off is the owner's signed cancel: the entry and each non-terminal bracket child
+    become CANCELLED through the fold's ordinary ORDER_CANCELLED step. No Fill, CashFlow,
+    Mark or EodRun is written, so cash and realized P&L do not move.
+
+    Everything is validated before anything is written: a non-empty reason and owner, a
+    known account, an order that exists, is still working and has no fills (a filled or
+    partly filled order is a position, not a write-off). A repeat (the entry's command id
+    already in the ledger) is checked first and writes nothing. Returns the ids cancelled.
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise EodRunnerError("a write-off needs a non-empty reason (I5)")
+    if not isinstance(owner, str) or not owner.strip():
+        raise EodRunnerError("a write-off needs a non-empty owner (I5)")
+    if account_id not in set(ledger.accounts()):
+        raise EodRunnerError(f"unknown account {account_id!r}: not in the ledger (I5)")
+    command = f"eod-writeoff:{account_id}:{order_id}"
+    if ledger.event_by_command(command) is not None:
+        return ()
+    state = ledger.state(account_id)
+    order = state.orders.get(order_id)
+    if order is None:
+        raise EodRunnerError(f"{account_id} has no order {order_id!r} (I5)")
+    if state.filled_quantity.get(order_id, Decimal("0")) != 0:
+        raise EodRunnerError(
+            f"order {order_id!r} has fills: a filled or partly filled order is a position, "
+            "not a write-off (I5)"
+        )
+    if order.state not in _WORKING_STATES:
+        raise EodRunnerError(
+            f"order {order_id!r} is {order.state.value}, not working; nothing to write off (I5)"
+        )
+    text = f"Owner write-off: {reason.strip()} (owner: {owner.strip()})"
+    ts = clock.now_utc()
+    cancelled = [order_id]
+    ledger.append(Event(
+        account=account_id,
+        kind=EventKind.ORDER_CANCELLED,
+        payload=OrderStateChange(order_id, reason=text, venue_order_id=state.venue_order_ids.get(order_id)),
+        ts_utc=ts,
+        command_id=command,
+    ))
+    for child_id, child in state.orders.items():
+        if child.parent_order_id != order_id or child.state in _TERMINAL_STATES:
+            continue
+        ledger.append(Event(
+            account=account_id,
+            kind=EventKind.ORDER_CANCELLED,
+            payload=OrderStateChange(
+                child_id, reason=f"{text} (bracket child of {order_id})", venue_order_id=None
+            ),
+            ts_utc=ts,
+            command_id=f"{command}:child:{child_id}",
+        ))
+        cancelled.append(child_id)
+    return tuple(cancelled)
 register("runtime_incomplete", SessionIncompleteError)
 register("runtime_replay", ReplayDataError)
 

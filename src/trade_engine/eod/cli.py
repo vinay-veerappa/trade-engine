@@ -16,7 +16,7 @@ from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.clock.replay import ReplayClock
 from trade_engine.clock.wall import WallClock
 from trade_engine.eod import EodRunner, EodRunnerConfig, PluginDiscoveryError, discover_plugins
-from trade_engine.eod.runner import EodRunnerError, _void_command, void_session
+from trade_engine.eod.runner import EodRunnerError, _void_command, void_session, write_off_order
 from trade_engine.ledger import Ledger
 from trade_engine.ledger._rs import call as rs_call
 from trade_engine.sim import SimBroker
@@ -80,6 +80,40 @@ def run_void(args: argparse.Namespace) -> int:
     for account_id in done:
         state = "already voided" if account_id in before else "voided"
         print(f"{account_id}: {state} {session.isoformat()} (reason: {args.reason.strip()}; owner: {args.owner.strip()})")
+    return 0
+
+
+def run_write_off(args: argparse.Namespace) -> int:
+    """`eod --write-off`: the owner-signed cancel of one stuck working order.
+
+    No market data and no runner: a ledger record. Needs exactly one account. Every
+    refusal writes nothing and exits 2; a repeat prints ``already written off``.
+    """
+    ledger_path = args.ledger
+    if not ledger_path:
+        print("eod: --ledger is required", file=sys.stderr)
+        return 2
+    accounts = [item.strip() for item in args.accounts.split(",") if item.strip()]
+    if len(accounts) != 1:
+        print("eod: --write-off needs exactly one --accounts", file=sys.stderr)
+        return 2
+    if not args.order.strip():
+        print("eod: --write-off needs --order", file=sys.stderr)
+        return 2
+    with Ledger(ledger_path) as ledger:
+        try:
+            done = write_off_order(
+                ledger, WallClock(), accounts[0], args.order.strip(),
+                reason=args.reason, owner=args.owner,
+            )
+        except EodRunnerError as err:
+            print(f"eod: refused: {err}", file=sys.stderr)
+            return 2
+    if not done:
+        print(f"{accounts[0]}: already written off {args.order.strip()}")
+        return 0
+    for order_id in done:
+        print(f"{accounts[0]}: written off {order_id} (reason: {args.reason.strip()}; owner: {args.owner.strip()})")
     return 0
 
 
