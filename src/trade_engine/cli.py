@@ -67,8 +67,16 @@ def main(argv: list[str] | None = None) -> int:
         "record that a session which can never complete is complete (EOD-VOID-1). "
         "Needs --accounts, --reason and --owner",
     )
-    eod_parser.add_argument("--reason", default="", help="Why the session is voided (--void)")
-    eod_parser.add_argument("--owner", default="", help="Who signs the void (--void)")
+    eod_parser.add_argument(
+        "--write-off",
+        action="store_true",
+        help="Write off one stuck working order instead of running --session: the owner's "
+        "signed cancel, zero P&L (SCAN-WRITEOFF-1). Needs exactly one --accounts, --order, "
+        "--reason and --owner",
+    )
+    eod_parser.add_argument("--order", default="", help="Order id to write off (--write-off)")
+    eod_parser.add_argument("--reason", default="", help="Why the session is voided or the order written off")
+    eod_parser.add_argument("--owner", default="", help="Who signs the void or write-off")
 
     feed_parser = subparsers.add_parser(
         "registry-feed", help="Run the Tradovate registry feed to riskguard (BP-4d)"
@@ -85,8 +93,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "eod":
-        from trade_engine.eod.cli import run_eod, run_void
+        from trade_engine.eod.cli import run_eod, run_void, run_write_off
 
+        if args.write_off:
+            return run_write_off(args)
         return run_void(args) if args.void else run_eod(args)
 
     if args.command == "registry-feed":
