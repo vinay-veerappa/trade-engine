@@ -1,0 +1,37 @@
+{
+  "orderType": "LIMIT",
+  "session": "NORMAL",
+  "duration": "DAY",
+  "orderStrategyType": "TRIGGER",
+  "price": "187.25",
+  "orderLegCollection": [
+    {"instruction": "BUY", "quantity": 100, "instrument": {"symbol": "AAPL", "assetType": "EQUITY"}}
+  ],
+  "childOrderStrategies": [
+    {
+      "orderStrategyType": "OCO",
+      "childOrderStrategies": [
+        {
+          "orderType": "STOP",
+          "session": "NORMAL",
+          "duration": "DAY",
+          "orderStrategyType": "SINGLE",
+          "stopPrice": "185.00",
+          "orderLegCollection": [
+            {"instruction": "SELL", "quantity": 100, "instrument": {"symbol": "AAPL", "assetType": "EQUITY"}}
+          ]
+        },
+        {
+          "orderType": "LIMIT",
+          "session": "NORMAL",
+          "duration": "DAY",
+          "orderStrategyType": "SINGLE",
+          "price": "192.50",
+          "orderLegCollection": [
+            {"instruction": "SELL", "quantity": 100, "instrument": {"symbol": "AAPL", "assetType": "EQUITY"}}
+          ]
+        }
+      ]
+    }
+  ]
+}

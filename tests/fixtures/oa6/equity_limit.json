@@ -1,0 +1,10 @@
+{
+  "orderType": "LIMIT",
+  "session": "NORMAL",
+  "duration": "DAY",
+  "orderStrategyType": "SINGLE",
+  "price": "187.25",
+  "orderLegCollection": [
+    {"instruction": "BUY", "quantity": 10, "instrument": {"symbol": "AAPL", "assetType": "EQUITY"}}
+  ]
+}
