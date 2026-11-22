@@ -1,0 +1,11 @@
+{
+  "orderType": "LIMIT",
+  "session": "NORMAL",
+  "duration": "GOOD_TILL_CANCEL",
+  "orderStrategyType": "SINGLE",
+  "price": "5.10",
+  "orderLegCollection": [
+    {"instruction": "BUY_TO_OPEN", "quantity": 2,
+     "instrument": {"symbol": "AAPL  261218C00200000", "assetType": "OPTION"}}
+  ]
+}
