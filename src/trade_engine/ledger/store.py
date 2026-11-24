@@ -311,6 +311,18 @@ class Ledger:
         """Fetch undelivered outbox entries in strict FIFO order (id ASC)."""
         return self._store.pending_outbox(destination, include_failed)
 
+    def outbox_row(self, event_seq: int, destination: str) -> OutboxItem | None:
+        """The row for one event and destination in any status, delivered included (I12).
+
+        The table's UNIQUE(event_seq, destination) refuses a second row, so a caller
+        that may be replaying an enqueue checks here first.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM outbox WHERE event_seq = ? AND destination = ?",
+            (event_seq, destination),
+        ).fetchone()
+        return None if row is None else self._row_to_outbox(row)
+
     def mark_outbox_delivered(self, outbox_id: int, delivered_at: datetime) -> None:
         """Mark an outbox item delivered with confirmation timestamp."""
         _rs.rs.ledger_outbox_delivered(self, outbox_id, delivered_at)

@@ -321,6 +321,16 @@ class OrderManager:
         """Persist a venue fill and synchronize bracket protection from folded state."""
         return _order(self._flow("record_fill", fill=fill))
 
+    def synchronize_bracket(self, order: Order, cause: str) -> None:
+        """Re-run a bracket's protection sync under ``cause`` (F2, after a crash).
+
+        Safe to repeat: a replayed command id with the same payload returns the stored
+        event, and a child already sized and submitted is left alone. ``cause`` must be
+        the bracket's latest fill; an older one can collide with a command id already
+        used for a different quantity, and that refuses.
+        """
+        self._flow("synchronize_bracket", order=order, cause=cause)
+
     def cancel(self, order_id: str, *, command_id: str) -> Order:
         """Cancel a working order; only a confirmed venue ack becomes CANCELLED."""
         return _order(self._flow("cancel", order_id=order_id, command_id=command_id))
