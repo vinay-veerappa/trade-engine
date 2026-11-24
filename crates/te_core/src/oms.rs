@@ -3,6 +3,7 @@
 //! (`oms/manager.py`, the rest of `oms/options.py`) follows in P3b.
 
 pub mod options;
+pub mod precheck;
 pub mod flow;
 pub mod manager;
 pub mod reconcile;

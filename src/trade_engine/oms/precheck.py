@@ -9,6 +9,9 @@ Modes (``riskguard.precheck``): ``off`` installs nothing; ``warn`` sends every o
 and logs what enforcement would refuse; ``enforce`` refuses the opening part. Every failure
 (timeout, network, non-200, a body that is not a valid response, an unmapped account) counts
 as a refusal of the opening part only.
+
+The decision rules (the split, the instrument root, the response check, the loopback URL and
+the replace's opening part) are ``te_core::oms::precheck``, reached through ``trade_engine_rs``.
 """
 
 from __future__ import annotations
@@ -17,14 +20,13 @@ import http.client
 import json
 import logging
 import queue
-import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from urllib.parse import quote, urlsplit
 
-from trade_engine.domain.instruments import Future, Instrument, Side
+from trade_engine.domain.instruments import Instrument, Side
 from trade_engine.domain.orders import Order
 from trade_engine.interfaces.broker import (
     OrderChanges,
@@ -34,30 +36,17 @@ from trade_engine.interfaces.broker import (
     VenueOrderAllocation,
 )
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Ledger
+from trade_engine.ledger import Ledger, codec
+from trade_engine.sim import _rs
 
 MODES = ("off", "warn", "enforce")
 CHECK_TIMEOUT_S = 0.25
 ORIGIN = "strategy"
 OPEN_SUFFIX = ":open"
-ROOT_PATTERN = re.compile(r"^[A-Z][A-Z0-9]{0,3}$")
 ACCOUNT_ENVS = ("live", "demo", "sim")
-REASON_CODES = frozenset(
-    {
-        "OK",
-        "OK_REDUCING",
-        "VERDICT_STALE",
-        "ACCOUNT_BLOCKED",
-        "BLOCK_ADD",
-        "INSTRUMENT_BLOCKED",
-        "MAX_QTY",
-        "COPY_OPENING_REFUSED",
-    }
-)
-RESPONSE_KEYS = frozenset({"allowed", "isReducing", "reasonCode", "detail", "ruleId", "verdictRevision", "checkedAt"})
-REQUIRED_RESPONSE_KEYS = frozenset({"allowed", "isReducing", "reasonCode"})
 ACCOUNT_KEY_FIELDS = frozenset({"venue", "env", "brokerAccountId"})
 
+_native = _rs.rs
 _LOG = logging.getLogger("trade_engine.oms.precheck")
 
 
@@ -102,15 +91,9 @@ def _loopback_base(value) -> str:
     if not isinstance(value, str):
         raise PrecheckConfigError("riskguard.precheck.baseUrl must be a string")
     try:
-        parts = urlsplit(value)
-        port = parts.port
+        return _native.precheck_loopback_base(value)
     except ValueError as err:
-        raise PrecheckConfigError(f"riskguard.precheck.baseUrl is not a URL: {err}") from err
-    if parts.scheme != "http" or parts.hostname not in ("127.0.0.1", "localhost"):
-        raise PrecheckConfigError("riskguard.precheck.baseUrl must be a loopback http URL")
-    if port is None or parts.path not in ("", "/"):
-        raise PrecheckConfigError("riskguard.precheck.baseUrl needs an explicit port and no path")
-    return f"http://{parts.hostname}:{port}"
+        raise PrecheckConfigError(err.args[1]) from err
 
 
 def _binding(engine_id: str, item: Mapping) -> AccountBinding:
@@ -141,29 +124,24 @@ class CheckResult:
         return RiskguardVerdict(self.allowed, self.verdict_revision, self.checked_at)
 
 
+def _text(value: Decimal) -> str:
+    """A Decimal as the plain text the Rust side parses (never an exponent)."""
+    return format(value, "f")
+
+
 def split_quantity(quantity: Decimal, side: Side, position: Decimal) -> tuple[Decimal, Decimal]:
     """Return ``(reducing, opening)``. A BUY closes a short first; a SELL closes a long first."""
-    opposite = max(-position, Decimal("0")) if side is Side.BUY else max(position, Decimal("0"))
-    reducing = min(quantity, opposite)
-    return reducing, quantity - reducing
+    reducing, opening = _rs.call(_native.precheck_split_quantity, _text(quantity), side.value, _text(position))
+    return Decimal(reducing), Decimal(opening)
 
 
-def _valid_response(body) -> bool:
-    """The hand-written ``singleResponse`` check (check.schema.json), exact keys and types."""
-    if not isinstance(body, dict) or not REQUIRED_RESPONSE_KEYS <= body.keys() <= RESPONSE_KEYS:
+def valid_response(body) -> bool:
+    """The hand-written ``singleResponse`` check (check.schema.json), run by te_core on the JSON text."""
+    try:
+        text = json.dumps(body)
+    except (TypeError, ValueError):
         return False
-    if not isinstance(body["allowed"], bool) or not isinstance(body["isReducing"], bool):
-        return False
-    if body["reasonCode"] not in REASON_CODES:
-        return False
-    if "detail" in body and not isinstance(body["detail"], str):
-        return False
-    if "ruleId" in body and not isinstance(body["ruleId"], str):
-        return False
-    if "checkedAt" in body and not isinstance(body["checkedAt"], str):
-        return False
-    revision = body.get("verdictRevision", 0)
-    return isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0
+    return _native.precheck_valid_response(text)
 
 
 class RiskGuardClient:
@@ -184,10 +162,14 @@ class RiskGuardClient:
         if status != 200:
             return CheckResult(False, f"http_{status}")
         try:
-            parsed = json.loads(body)
-        except ValueError:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
             return CheckResult(False, "invalid")
-        if not _valid_response(parsed):
+        if not _native.precheck_valid_response(text):
+            return CheckResult(False, "invalid")
+        try:
+            parsed = json.loads(text)
+        except ValueError:
             return CheckResult(False, "invalid")
         if parsed["allowed"] is True:
             return CheckResult(True, "allowed", parsed.get("verdictRevision"), parsed.get("checkedAt"))
@@ -230,8 +212,7 @@ class Precheck:
         return self._config.mode == "enforce"
 
     def submit(self, order: VenueOrder, send: Callable[[VenueOrder], VenueAck]) -> VenueAck:
-        reducing_allocs, opening_allocs, openings = _split_allocations(
-            order, lambda account: self._position(account, order.instrument))
+        reducing_allocs, opening_allocs, openings = self._split_allocations(order)
         reducing = _total(reducing_allocs)
         opening = _total(opening_allocs)
         if not self.enforcing:
@@ -298,15 +279,22 @@ class Precheck:
             _LOG.warning("riskguard precheck: replace of an unknown order not checked: venue_order=%s",
                          venue_order_id)
             return send(venue_order_id, changes)
-        new_quantity = order.quantity if changes.new_quantity is None else changes.new_quantity
         price_changed = (
             (changes.new_limit_price is not None and changes.new_limit_price != order.limit_price)
             or (changes.new_stop_price is not None and changes.new_stop_price != order.stop_price)
         )
-        grows = new_quantity > order.quantity
-        _, opening = split_quantity(new_quantity, order.side, self._position(order.account_id, order.instrument))
-        if not ((grows or price_changed) and opening > 0):
+        new_quantity = None if changes.new_quantity is None else _text(changes.new_quantity)
+        opening_text = _rs.call(
+            _native.precheck_replace_opening,
+            _text(order.quantity),
+            new_quantity,
+            order.side.value,
+            _text(self._position(order.account_id, order.instrument)),
+            price_changed,
+        )
+        if opening_text is None:
             return send(venue_order_id, changes)
+        opening = Decimal(opening_text)
         result = self._check(order.account_id, order.instrument, order.side, opening)
         if not result.allowed and self.enforcing:
             return self._refuse(venue_order_id, result)
@@ -326,7 +314,7 @@ class Precheck:
         binding = self._config.accounts.get(account_id) if account_id is not None else None
         if binding is None:
             return CheckResult(False, "unmapped_account")
-        root = _root(instrument)
+        root = _native.precheck_root(codec.text(codec.canon(instrument)))
         if root is None:
             return CheckResult(False, "invalid_instrument")
         request = {
@@ -352,57 +340,29 @@ class Precheck:
                     found.append(order)
         return found
 
+    def _split_allocations(self, order: VenueOrder) -> tuple[
+            tuple[VenueOrderAllocation, ...], tuple[VenueOrderAllocation, ...], dict[str, Decimal]]:
+        """Split a venue order's allocations into the reducing and the opening parts, per account.
 
-def _split_allocations(order: VenueOrder, position_of: Callable[[str], Decimal]) -> tuple[
-        tuple[VenueOrderAllocation, ...], tuple[VenueOrderAllocation, ...], dict[str, Decimal]]:
-    """Split a venue order's allocations into the reducing and the opening parts, per account.
-
-    Each account's quantity is the sum of its allocations (all share the order's side), classified
-    against that account's own position. Inside one account the reducing quantity goes to its
-    allocations in order, first come first served, cutting one in two where the boundary falls.
-    Returns ``(reducing_allocations, opening_allocations, opening_quantity_by_account)``; the
-    last holds only the accounts with an opening part, in first-appearance order.
-    """
-    totals: dict[str, Decimal] = {}
-    for item in order.allocations:
-        totals[item.account_id] = totals.get(item.account_id, Decimal("0")) + item.quantity
-    reducing_left: dict[str, Decimal] = {}
-    openings: dict[str, Decimal] = {}
-    for account, total in totals.items():
-        reducing, opening = split_quantity(total, order.side, position_of(account))
-        reducing_left[account] = reducing
-        if opening > 0:
-            openings[account] = opening
-    reducing_allocs: list[VenueOrderAllocation] = []
-    opening_allocs: list[VenueOrderAllocation] = []
-    for item in order.allocations:
-        take = min(item.quantity, reducing_left[item.account_id])
-        reducing_left[item.account_id] -= take
-        if take > 0:
-            reducing_allocs.append(replace(item, quantity=take))
-        if item.quantity > take:
-            opening_allocs.append(replace(item, quantity=item.quantity - take))
-    return tuple(reducing_allocs), tuple(opening_allocs), openings
+        The rule is te_core's ``split_allocations``; this reads each account's position once and
+        maps the indices it returns back onto the order's allocations. Returns
+        ``(reducing_allocations, opening_allocations, opening_quantity_by_account)``; the last
+        holds only the accounts with an opening part, in first-appearance order.
+        """
+        positions = {
+            account: _text(self._position(account, order.instrument))
+            for account in dict.fromkeys(item.account_id for item in order.allocations)
+        }
+        allocs = [(item.account_id, _text(item.quantity)) for item in order.allocations]
+        reducing, opening, openings = _rs.call(
+            _native.precheck_split_allocations, order.side.value, allocs, positions)
+        reducing_allocs = tuple(replace(order.allocations[i], quantity=Decimal(q)) for i, q in reducing)
+        opening_allocs = tuple(replace(order.allocations[i], quantity=Decimal(q)) for i, q in opening)
+        return reducing_allocs, opening_allocs, {account: Decimal(q) for account, q in openings}
 
 
 def _total(allocations: tuple[VenueOrderAllocation, ...]) -> Decimal:
     return sum((item.quantity for item in allocations), Decimal("0"))
-
-
-def _root(instrument: Instrument) -> str | None:
-    """The instrument text RiskGuard's schema takes: a futures ROOT (``NQ``), else the symbol.
-
-    A dated future's ``symbol`` is the contract (``NQZ6``), which RiskGuard never matches, so a
-    future sends its root instead. Either way the result must pass ``ROOT_PATTERN``.
-    """
-    if isinstance(instrument, Future):
-        text = instrument.root
-    else:
-        try:
-            text = instrument.symbol
-        except NotImplementedError:
-            return None
-    return text if isinstance(text, str) and ROOT_PATTERN.match(text) else None
 
 
 def _json_number(quantity: Decimal) -> int | float:

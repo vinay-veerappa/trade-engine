@@ -8,14 +8,14 @@ import socket
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from trade_engine.domain.instruments import Equity, Future, Side
+from trade_engine.domain.instruments import Combo, ComboLeg, Equity, Future, OptionContract, OptionRight, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType
 from trade_engine.interfaces.broker import OrderChanges, RiskguardVerdict, VenueAck, VenueOrder, VenueOrderAllocation
 from trade_engine.ledger import Ledger
@@ -27,6 +27,7 @@ from trade_engine.oms.precheck import (
     PrecheckConfigError,
     RiskGuardClient,
     split_quantity,
+    valid_response,
 )
 from test_oms import FakeBroker, FakeClock, make_fill
 
@@ -650,3 +651,75 @@ def test_a_replace_of_a_netted_order_is_sent_unchecked_and_logged(ledger, guard,
     assert [changes.new_quantity for _, changes in broker.replaced] == [Decimal("3"), None]
     assert [changes.new_limit_price for _, changes in broker.replaced] == [None, Decimal("101")]
     assert "replace of a netted order not checked: venue_order=net-1 accounts=acct-1,acct-2" in caplog.text
+
+
+# ---- instruments the guard can name, and the response contract ---------------------------
+
+def test_an_option_order_sends_its_underlying_root_and_is_allowed(ledger, guard):
+    guard.body = ALLOWED
+    manager, broker = gated(ledger, config_for(guard))
+    spy_call = OptionContract("SPY", date(2026, 12, 18), Decimal("500"), OptionRight.CALL)
+
+    result = manager.submit(order("spy-call-1", Side.BUY, "1", instrument=spy_call))
+
+    assert len(guard.requests) == 1
+    assert guard.requests[0]["body"]["instrument"] == "SPY"
+    assert [item.quantity for item in broker.submitted] == [Decimal("1")]
+    assert result.state is not OrderState.REJECTED
+
+
+def test_a_combo_order_is_refused_locally_and_the_guard_hears_nothing(ledger, guard):
+    guard.body = ALLOWED
+    manager, broker = gated(ledger, config_for(guard))
+    call = OptionContract("SPY", date(2026, 12, 18), Decimal("500"), OptionRight.CALL)
+    put = OptionContract("SPY", date(2026, 12, 18), Decimal("490"), OptionRight.PUT)
+    spread = Combo([ComboLeg(call, 1, Side.BUY), ComboLeg(put, 1, Side.SELL)])
+
+    result = manager.submit(order("spread-1", Side.BUY, "1", instrument=spread))
+
+    assert guard.requests == []
+    assert broker.submitted == []
+    assert result.state is OrderState.REJECTED
+
+
+@pytest.mark.parametrize(
+    ("update", "accepted"),
+    [
+        ({"verdictRevision": 0}, True),
+        ({"verdictRevision": 7}, True),
+        ({"verdictRevision": 10**30}, True),
+        ({"verdictRevision": 1.0}, False),
+        ({"verdictRevision": True}, False),
+        ({"verdictRevision": -1}, False),
+        ({"unexpected": 1}, False),
+    ],
+)
+def test_valid_response_checks_verdict_revision_and_unknown_keys(update, accepted):
+    assert valid_response({**ALLOWED, **update}) is accepted
+
+
+def test_valid_response_refuses_a_missing_reason_code():
+    assert valid_response({"allowed": True, "isReducing": False}) is False
+
+
+def test_config_normalises_a_localhost_base_url():
+    config = PrecheckConfig.from_mapping({"mode": "warn", "baseUrl": "http://LOCALHOST:8080/", "token": "t"})
+    assert config.base_url == "http://localhost:8080"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "message"),
+    [
+        ("https://127.0.0.1:9", "riskguard.precheck.baseUrl must be a loopback http URL"),
+        ("http://10.0.0.1:1", "riskguard.precheck.baseUrl must be a loopback http URL"),
+        ("http://u@127.0.0.1:1", "riskguard.precheck.baseUrl must be a loopback http URL"),
+        ("http://127.0.0.1:1?x", "riskguard.precheck.baseUrl must be a loopback http URL"),
+        ("http://127.0.0.1", "riskguard.precheck.baseUrl needs an explicit port and no path"),
+        ("http://127.0.0.1:1/x", "riskguard.precheck.baseUrl needs an explicit port and no path"),
+        ("http://127.0.0.1:99999", "riskguard.precheck.baseUrl is not a URL: bad port"),
+    ],
+)
+def test_config_refuses_a_base_url_that_is_not_an_explicit_loopback_port(base_url, message):
+    with pytest.raises(PrecheckConfigError) as refused:
+        PrecheckConfig.from_mapping({"mode": "warn", "baseUrl": base_url, "token": "t"})
+    assert message in str(refused.value)
