@@ -146,9 +146,11 @@ class Pair:
             self.rigs.append(rig)
 
     def runner(self, rig, changes):
-        config = rig.module.EodRunnerConfig(**(
-            vars(rig.config()) | changes
-        ))
+        # The frozen oracle predates F13's mark max-age field: pass only what each side knows.
+        known = rig.module.EodRunnerConfig.__dataclass_fields__
+        config = rig.module.EodRunnerConfig(**{
+            k: v for k, v in (vars(rig.config()) | changes).items() if k in known
+        })
         return rig.module.EodRunner(rig.ledger, rig.clock, CAL, NoBars(), config)
 
     def step(self, session, *, name=None, through=None, changes=None, family="run"):
