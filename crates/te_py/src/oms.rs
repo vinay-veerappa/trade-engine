@@ -71,6 +71,52 @@ pub(crate) fn oms_journal_payload(state: &str, fill_tree: &str, journal_account:
     r().map_err(refuse)
 }
 
+/// The account's FILL events as `(seq, order_id, fill_id)`, in ledger-seq order.
+fn fill_refs(raw: Vec<(i64, String, String)>) -> Vec<rc::FillRef> {
+    raw.into_iter().map(|(seq, order_id, fill_id)| rc::FillRef { seq, order_id, fill_id }).collect()
+}
+
+/// The bracket entry and resync fill id for one order, or None when no fill matches.
+#[pyfunction]
+pub(crate) fn oms_bracket_resync_cause(
+    state: &str,
+    fills: Vec<(i64, String, String)>,
+    order_id: &str,
+) -> PyResult<Option<(String, String)>> {
+    let r = || -> LR<Option<(String, String)>> {
+        let st = lb::account_from_text(state)?;
+        rc::bracket_resync_cause(&st, &fill_refs(fills), order_id)
+    };
+    r().map_err(refuse)
+}
+
+/// The `(entry_id, cause_fill_id)` of every bracket to re-sync, in the state's order.
+#[pyfunction]
+pub(crate) fn oms_brackets_to_resync(state: &str, fills: Vec<(i64, String, String)>) -> PyResult<Vec<(String, String)>> {
+    let r = || -> LR<Vec<(String, String)>> {
+        let st = lb::account_from_text(state)?;
+        Ok(rc::brackets_to_resync(&st, &fill_refs(fills)))
+    };
+    r().map_err(refuse)
+}
+
+/// What a recorded fill heals: `(resync, rejournal_candidate)`, `resync` as `(entry_id, fill_id)`.
+#[pyfunction]
+pub(crate) fn oms_heal_plan(
+    state: &str,
+    fills: Vec<(i64, String, String)>,
+    fill_id: &str,
+    order_id: &str,
+    fill_seq: Option<i64>,
+) -> PyResult<(Option<(String, String)>, bool)> {
+    let r = || -> LR<(Option<(String, String)>, bool)> {
+        let st = lb::account_from_text(state)?;
+        let plan = rc::heal_plan(&st, &fill_refs(fills), fill_id, order_id, fill_seq)?;
+        Ok((plan.resync, plan.rejournal_candidate))
+    };
+    r().map_err(refuse)
+}
+
 // --- restore ----------------------------------------------------------------------------
 
 type PendingT = (String, Option<String>, String);
@@ -247,6 +293,9 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(oms_orders_to_read, m)?)?;
     m.add_function(wrap_pyfunction!(oms_check_known_order, m)?)?;
     m.add_function(wrap_pyfunction!(oms_journal_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(oms_bracket_resync_cause, m)?)?;
+    m.add_function(wrap_pyfunction!(oms_brackets_to_resync, m)?)?;
+    m.add_function(wrap_pyfunction!(oms_heal_plan, m)?)?;
     m.add_function(wrap_pyfunction!(oms_pending_request, m)?)?;
     m.add_function(wrap_pyfunction!(oms_restorable, m)?)?;
     m.add_function(wrap_pyfunction!(oms_restorable_positions, m)?)?;

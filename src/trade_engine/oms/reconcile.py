@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any
 
 from trade_engine.domain.orders import Order, OrderState
@@ -137,13 +136,21 @@ def _heal_recorded_fill(
     fill at a time, so a crash can leave only the last one unjournaled.
     """
     fill_event = ledger.event_by_command(f"fill:{fill.fill_id}")
-    found = bracket_resync_cause(ledger, account_id, fill.order_id)
-    if found is not None and found[1] == fill.fill_id:
-        manager.synchronize_bracket(found[0], found[1])
-    if journal_account is None or fill_event is None:
-        return
-    latest = ledger.events_of_kind(EventKind.FILL, account=account_id)[-1]
-    if latest.seq != fill_event.seq:
+    state = ledger.state(account_id)
+    # Which bracket to re-sync, and whether this fill is the account's latest, is Rust's
+    # (``te_core::oms::reconcile::heal_plan``, W5 P2).
+    resync, rejournal_candidate = _rs.call(
+        _rs.rs.oms_heal_plan,
+        _state_text(state),
+        _fill_refs(ledger, account_id),
+        fill.fill_id,
+        fill.order_id,
+        fill_event.seq if fill_event is not None else None,
+    )
+    if resync is not None:
+        entry_id, cause = resync
+        manager.synchronize_bracket(state.orders[entry_id], cause)
+    if journal_account is None or fill_event is None or not rejournal_candidate:
         return
     if ledger.outbox_row(fill_event.seq, f"journal:{journal_account}") is None:
         enqueue_journal_fill(ledger, clock, journal_account, ledger.state(account_id), fill)
@@ -155,17 +162,19 @@ def bracket_resync_cause(ledger: Ledger, account_id: str, order_id: str) -> tupl
     ``order_id`` is the entry or one of its children. The latest fill is the last FILL
     event (by ledger seq) of the entry or of any order whose parent is the entry.
     """
-    orders = ledger.state(account_id).orders
-    order = orders[order_id]
-    entry = orders[order.parent_order_id] if order.parent_order_id is not None else order
-    members = {entry.order_id} | {
-        item.order_id for item in orders.values() if item.parent_order_id == entry.order_id
-    }
-    latest = None
-    for event in ledger.events_of_kind(EventKind.FILL, account=account_id):
-        if event.payload.order_id in members:
-            latest = event
-    return None if latest is None else (entry, latest.payload.fill_id)
+    state = ledger.state(account_id)
+    # The entry lookup and the cause are Rust's (``te_core::oms::reconcile``, W5 P2). An
+    # unknown order raises KeyError from there, as the Python lookup did.
+    found = _rs.call(
+        _rs.rs.oms_bracket_resync_cause,
+        _state_text(state),
+        _fill_refs(ledger, account_id),
+        order_id,
+    )
+    if found is None:
+        return None
+    entry_id, fill_id = found
+    return state.orders[entry_id], fill_id
 
 
 def resync_open_brackets(ledger: Ledger, manager: OrderManager, account_id: str) -> int:
@@ -175,21 +184,21 @@ def resync_open_brackets(ledger: Ledger, manager: OrderManager, account_id: str)
     may never report that fill again. Returns how many entries were synced.
     """
     state = ledger.state(account_id)
-    synced = 0
-    for order in list(state.orders.values()):
-        if order.parent_order_id is not None:
-            continue
-        if state.filled_quantity.get(order.order_id, Decimal("0")) == 0:
-            continue
-        children = [item for item in state.orders.values() if item.parent_order_id == order.order_id]
-        if all(child.state in TERMINAL for child in children):
-            continue
-        found = bracket_resync_cause(ledger, account_id, order.order_id)
-        if found is None:
-            continue
-        manager.synchronize_bracket(*found)
-        synced += 1
-    return synced
+    # Which entries to re-sync, and from which fill, is Rust's (``te_core::oms::reconcile``,
+    # W5 P2), in the state's order: the manager syncs them in that order.
+    pairs = _rs.call(
+        _rs.rs.oms_brackets_to_resync,
+        _state_text(state),
+        _fill_refs(ledger, account_id),
+    )
+    for entry_id, fill_id in pairs:
+        manager.synchronize_bracket(state.orders[entry_id], fill_id)
+    return len(pairs)
+
+
+def _fill_refs(ledger: Ledger, account_id: str) -> list[tuple[int, str, str]]:
+    """The account's FILL events as ``(seq, order_id, fill_id)``, in ledger-seq order."""
+    return [(e.seq, e.payload.order_id, e.payload.fill_id) for e in ledger.events_of_kind(EventKind.FILL, account=account_id)]
 
 
 def enqueue_journal_fill(
