@@ -6,6 +6,7 @@ pub mod intraday;
 pub mod intraday_flow;
 pub mod routing;
 pub mod lifecycle;
+pub mod lifecycle_glue;
 pub mod journal;
 
 use crate::ledger::model::{err, R};
