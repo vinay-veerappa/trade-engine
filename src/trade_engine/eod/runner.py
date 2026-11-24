@@ -61,6 +61,7 @@ market data comes from injected providers (I5: no default source).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from collections.abc import Iterable
@@ -283,7 +284,9 @@ class EodRunnerConfig:
     ``settlements``, the official closes that mark shares and underlyings; and, for an
     account that enters, ``option_risk_engines``. ``lifecycle`` settles expiries and
     assignments, and ``dividends`` credits dividends on shares held. ``settle_delay`` is
-    how long after the close the after-close work runs.
+    how long after the close the after-close work runs. ``mark_max_quote_age_seconds``
+    is how old an option's own quote may be against its snapshot before the mark is
+    flagged ``stale-quote:`` (the mark is still the mid: flagged, never refused).
     """
 
     job_name: str
@@ -301,6 +304,7 @@ class EodRunnerConfig:
     dividends: Any | None = None
     option_risk_engines: Mapping[str, Any] | None = None
     settle_delay: timedelta = timedelta(minutes=105)
+    mark_max_quote_age_seconds: float = 900.0
 
     @property
     def normalized(self) -> "EodRunnerConfig":
@@ -315,6 +319,9 @@ class EodRunnerConfig:
         )
 
     def __post_init__(self) -> None:
+        limit = self.mark_max_quote_age_seconds
+        if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit <= 0:
+            raise ValueError(f"mark_max_quote_age_seconds must be a positive finite number, not {limit!r}")
         age_type = isinstance(self.bars_max_age_seconds, (int, float)) and not isinstance(self.bars_max_age_seconds, bool)
         delay_type = isinstance(self.settle_delay, timedelta)
         decide("eod:config", numbers=(micros(self.settle_delay) if delay_type else 0,),
@@ -1030,7 +1037,13 @@ class EodRunner:
                 quote = None if snapshot is None else snapshot.get(instrument)
                 decide("eod:option_mark", (str(quote.mid) if quote is not None else "0",
                     session.isoformat(), instrument.occ.strip(), account_id), flags=(quote is not None,))
-                marks[instrument] = (quote.mid, f"snapshot:{snapshot.as_of.isoformat()}")
+                source = f"snapshot:{snapshot.as_of.isoformat()}"
+                age = (snapshot.as_of - quote.as_of).total_seconds()
+                if age > self._config.mark_max_quote_age_seconds:
+                    # Still the mid (a refused mark would block every run for one illiquid
+                    # contract), but its provenance names the quote's real time.
+                    source = f"stale-quote:{quote.as_of.isoformat()} {source}"
+                marks[instrument] = (quote.mid, source)
                 underlyings.add(underlying)
             elif isinstance(instrument, Equity):
                 marks[instrument] = self._official_close(instrument.symbol, session)

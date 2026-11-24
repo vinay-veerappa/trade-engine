@@ -869,7 +869,27 @@ def test_the_close_mark_needs_a_fresh_snapshot_near_the_close(tmp_path) -> None:
     far.ledger.close()
 
 
-# -- unexpected errors ----------------------------------------------------------------------
+def test_the_close_mark_skips_a_snapshot_whose_option_quote_is_older_than_the_limit(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    rig = Rig(tmp_path, name="stale.db")
+    rig.heartbeat = tmp_path / "stale.json"
+    rig.strategy.actions[at_et(SESSION, 9, 40)] = [spread("o-1")]
+    rig.snapshots = [snap(SESSION, 9, 40)]
+    rig.minutes((15, 50), (15, 59))
+    # As in the near-close test, a seven-hour quote limit keeps the 09:40 entry live all afternoon.
+    config = dict(flat_at=time(16, 0), flat_before_close=timedelta(seconds=1),
+                  entry_before_close=timedelta(seconds=1), max_quote_age_seconds=7 * 3600.0)
+    service = rig.service(**config)
+    service.run(SESSION, start_at=at_et(SESSION, 9, 40))
+    assert rig.held(SHORT) == -1
+    # The ticks cut stale quotes before they reach the close, so the close check is
+    # exercised directly: a 15:59 chain whose short leg was last quoted at 08:30 is 7.5 hours old.
+    stale_chain = snap(SESSION, 15, 59, quoted={SHORT: at_et(SESSION, 8, 30)})
+    _, marks, note = service._close_plan(SESSION, SimpleNamespace(snapshots={service._config.underlying: stale_chain}))
+    assert marks == {}
+    assert "marks left to the after-close pass" in note
+    rig.ledger.close()
 
 
 def test_an_unexpected_error_flattens_at_a_fresh_quote_alerts_and_exits(rig) -> None:
