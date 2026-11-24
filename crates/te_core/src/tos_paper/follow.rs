@@ -5,12 +5,12 @@
 
 use super::cover::{cover_reason, Sold};
 use super::exits::{units, FOLLOW_PREFIX};
-use super::wire::{jstr, obj, req, req_arr, req_str, wire};
-use crate::ledger::bridge::{uncanon_account, uncanon_mirror};
+use super::wire::wire;
 use crate::ledger::fold::AccountState;
-use crate::ledger::json::Json;
 use crate::ledger::mirror::MirrorState;
-use crate::ledger::model::{parse_datetime, DateTime, Instrument, Order, OrderState, Side, R};
+#[cfg(test)]
+use crate::ledger::model::parse_datetime;
+use crate::ledger::model::{DateTime, Instrument, Order, OrderState, Side, R};
 use crate::ledger::ops::{eq, zero, OMap};
 use crate::money::Money;
 use crate::options::Right;
@@ -125,70 +125,6 @@ pub fn follow_entries(
     Ok(out)
 }
 
-// -- the door ---------------------------------------------------------------------------------------
-
-fn aware(doc: &Json, key: &str) -> R<DateTime> {
-    let (t, is_aware) = parse_datetime(req_str(doc, key)?)?;
-    if !is_aware {
-        return wire(format!("{key} must be timezone-aware"));
-    }
-    Ok(t)
-}
-
-fn accounts_of(doc: &Json) -> R<OMap<String, AccountState>> {
-    let mut accounts = OMap::new();
-    for row in req_arr(doc, "accounts")? {
-        let Json::Arr(r) = row else { return wire("an account row is not a pair") };
-        let [Json::Str(name), tree] = r.as_slice() else { return wire("an account row is not a pair") };
-        accounts.insert(name.clone(), name.clone(), uncanon_account(tree)?);
-    }
-    Ok(accounts)
-}
-
-pub fn follow_entries_op(doc: &Json) -> R<Json> {
-    let mut mirrored = Vec::new();
-    for m in req_arr(doc, "mirrored")? {
-        let Json::Str(t) = m else { return wire("a mirrored account is not text") };
-        mirrored.push(t.clone());
-    }
-    let max_age: i128 = match req(doc, "max_age_us")? {
-        Json::Int(n) => *n as i128,
-        _ => return wire("max_age_us is not an integer"),
-    };
-    let got = follow_entries(
-        &uncanon_mirror(req(doc, "mirror")?)?,
-        &accounts_of(doc)?,
-        &mirrored,
-        &aware(doc, "session_open")?,
-        &aware(doc, "now")?,
-        max_age,
-    )?;
-    Ok(obj(vec![
-        ("send", Json::Arr(got.send.iter().map(|(a, o)| Json::Arr(vec![jstr(a.clone()), jstr(o.clone())])).collect())),
-        (
-            "refused",
-            Json::Arr(
-                got.refused
-                    .iter()
-                    .map(|(o, a, r)| Json::Arr(vec![jstr(o.clone()), jstr(a.clone()), jstr(r.clone())]))
-                    .collect(),
-            ),
-        ),
-    ]))
-}
-
-pub fn pass_name_op(doc: &Json) -> R<Json> {
-    Ok(obj(vec![("name", jstr(pass_name(&aware(doc, "now")?)?))]))
-}
-
-pub fn flat_op(doc: &Json) -> R<Json> {
-    let state = uncanon_account(req(doc, "account")?)?;
-    let id = req_str(doc, "order_id")?;
-    let Some(order) = state.orders.get(id) else { return wire("no such order") };
-    Ok(obj(vec![("flat", Json::Bool(flat(&state, order)?))]))
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,8 +185,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unaware_now_is_refused_at_the_door() {
-        let doc = crate::ledger::json::parse(r#"{"now": "2026-09-28T16:35:00"}"#).unwrap();
-        assert!(pass_name_op(&doc).is_err());
+    fn an_unaware_now_is_refused() {
+        // A naive datetime is never accepted as aware (I7); `pass_name` takes an aware `DateTime`.
+        let (_, aware) = parse_datetime("2026-09-28T16:35:00").unwrap();
+        assert!(!aware);
     }
 }

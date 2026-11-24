@@ -18,14 +18,17 @@ use chrono::NaiveDate;
 
 use super::cover::{self, Sold};
 use super::netting::Ticket;
-use super::wire::{dec_of, jstr, obj, req, req_arr, req_str, wire};
+use super::wire::dec_of;
+#[cfg(test)]
+use super::wire::{jstr, obj, req_arr, req_str, wire};
 use super::{SESSION, VALUE};
 use crate::ledger::codec;
+#[cfg(test)]
 use crate::ledger::json::Json;
 use crate::ledger::mirror::{ticket_contracts, MirrorState, MirrorTicketState};
 use crate::ledger::model::{
     date_iso, err, parse_datetime, DateTime, Instrument, MirrorAck, MirrorAllocation, MirrorFill,
-    MirrorQueued, MirrorRefused, Obj, Order, OrderState, Side, Val, VenueHaltCleared, VenueReconcile, R,
+    MirrorQueued, MirrorRefused, Obj, Order, OrderState, Side, VenueHaltCleared, VenueReconcile, R,
 };
 use crate::oms::options::sha256_hex;
 
@@ -596,35 +599,6 @@ pub struct MirrorRunReport {
     pub waiting: Vec<(String, String)>,
 }
 
-// -------------------------------------------------------------------------------------------------
-// Door JSON Handlers
-// -------------------------------------------------------------------------------------------------
-
-pub fn deferred_why_op(doc: &Json) -> R<Json> {
-    let doing = req_str(doc, "doing")?;
-    let exc = req_str(doc, "exc")?;
-    let recorded = match doc.get("recorded") {
-        Some(Json::Str(s)) => Some(s.as_str()),
-        _ => None,
-    };
-    Ok(obj(vec![("why", jstr(deferred_why(doing, exc, recorded)))]))
-}
-
-pub fn halt_unproven_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let phase = req_str(doc, "phase")?;
-    let (as_of, _) = parse_datetime(req_str(doc, "as_of")?)?;
-    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
-    let res = halt_unproven(venue, &mirror, &as_of, phase)?;
-    match res {
-        None => Ok(obj(vec![("halt", Json::Null)])),
-        Some((event, cmd)) => {
-            let encoded = codec::enc_obj(&Obj::Reconcile(event))?;
-            Ok(obj(vec![("event", encoded), ("command_id", jstr(cmd))]))
-        }
-    }
-}
-
 /// The `LedgerFoldError` halt of `session._collect`: the venue's fills the mirror cannot book.
 ///
 /// `drift` holds the sorted, de-duplicated symbols of every fill's contracts, or `[venue]` when
@@ -650,26 +624,6 @@ pub fn collect_items(venue: &str, fills: &[(String, String)], closes: &[(String,
         ids.push(format!("mirror:{venue}:book:{key}:{status}"));
     }
     Ok(ids)
-}
-
-pub fn collect_items_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let mut fills = Vec::new();
-    for fill in req_arr(doc, "fills")? {
-        fills.push((req_str(fill, "ticket_key")?.to_string(), req_str(fill, "filled")?.to_string()));
-    }
-    let mut closes = Vec::new();
-    for close in req_arr(doc, "closes")? {
-        let key = req_str(close, "ticket_key")?;
-        let status = match close.get("book_status") {
-            Some(Json::Str(s)) => Some(s.clone()),
-            None | Some(Json::Null) => None,
-            Some(other) => return wire(format!("\"book_status\" must be a string or null, got {}", other.type_name())),
-        };
-        closes.push((key.to_string(), status));
-    }
-    let ids = collect_items(venue, &fills, &closes)?;
-    Ok(obj(vec![("command_ids", Json::Arr(ids.into_iter().map(jstr).collect()))]))
 }
 
 /// Typed `fold_halt`: the venue reconcile that halts a venue whose fills the mirror cannot book.
@@ -702,415 +656,30 @@ pub fn fold_halt(
     })
 }
 
-pub fn fold_halt_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let (as_of, _) = parse_datetime(req_str(doc, "as_of")?)?;
-    let fold_err = req_str(doc, "err")?;
-    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
-    let mut fills = Vec::new();
-    for fill in req_arr(doc, "fills")? {
-        fills.push((req_str(fill, "ticket_key")?.to_string(), req_str(fill, "filled")?.to_string()));
-    }
-    let event = fold_halt(venue, &as_of, fold_err, &mirror, &fills)?;
-    Ok(obj(vec![("event", codec::enc_obj(&Obj::Reconcile(event))?)]))
-}
-
-pub fn clear_halt_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let reason = req_str(doc, "reason")?;
-    let (as_of, _) = parse_datetime(req_str(doc, "as_of")?)?;
-    let holders_arr = req_arr(doc, "holders")?;
-    let mut holders = Vec::new();
-    for h in holders_arr {
-        let Json::Str(s) = h else { return err(VALUE, "holder must be string"); };
-        holders.push(s.clone());
-    }
-    let reconciles_arr = req_arr(doc, "reconciles")?;
-    let mut reconciles = Vec::new();
-    for item in reconciles_arr {
-        let Json::Arr(pair) = item else { return err(VALUE, "reconcile entry must be [seq, event]"); };
-        if pair.len() != 2 {
-            return err(VALUE, "reconcile entry must be [seq, event]");
-        }
-        let seq = match &pair[0] {
-            Json::Int(n) => *n,
-            _ => return err(VALUE, "seq must be int"),
-        };
-        let val = codec::decode(&pair[1])?;
-        let Val::Obj(b) = val else {
-            return err(VALUE, "payload must be VenueReconcile");
-        };
-        let Obj::Reconcile(r) = *b else {
-            return err(VALUE, "payload must be VenueReconcile");
-        };
-        reconciles.push((seq, r));
-    }
-    let plan = clear_halt(venue, reason, &as_of, &holders, &reconciles)?;
-    let mut ev_json = Vec::new();
-    for (acct, ev, cmd) in plan.events {
-        let enc = codec::enc_obj(&Obj::HaltCleared(ev))?;
-        ev_json.push(obj(vec![("account", jstr(acct)), ("event", enc), ("command_id", jstr(cmd))]));
-    }
-    Ok(obj(vec![
-        ("holders", Json::Arr(plan.holders.into_iter().map(jstr).collect())),
-        ("events", Json::Arr(ev_json)),
-    ]))
-}
-
-pub fn reconcile_command_id_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let phase = req_str(doc, "phase")?;
-    let (as_of, _) = parse_datetime(req_str(doc, "as_of")?)?;
-    let val = codec::decode(req(doc, "event")?)?;
-    let Val::Obj(b) = val else {
-        return err(VALUE, "event must be VenueReconcile");
-    };
-    let Obj::Reconcile(event) = *b else {
-        return err(VALUE, "event must be VenueReconcile");
-    };
-    let cmd = reconcile_command_id(venue, phase, &as_of, &event)?;
-    Ok(obj(vec![("command_id", jstr(cmd))]))
-}
-
-pub fn working_orders_op(doc: &Json) -> R<Json> {
-    let mirrored_arr = req_arr(doc, "mirrored_accounts")?;
-    let mut mirrored_accounts = Vec::new();
-    for item in mirrored_arr {
-        let Json::Str(s) = item else { return err(VALUE, "mirrored account must be str"); };
-        mirrored_accounts.push(s.clone());
-    }
-    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
-    let acct_orders_val = req(doc, "account_orders")?;
-    let Json::Obj(pairs) = acct_orders_val else { return err(VALUE, "account_orders must be obj"); };
-    let mut orders_by_account = HashMap::new();
-    for (acct, ords_val) in pairs {
-        let Json::Arr(items) = ords_val else { return err(VALUE, "orders must be arr"); };
-        let mut ord_list = Vec::new();
-        for item in items {
-            let val = codec::decode(item)?;
-            let Val::Obj(b) = val else { return err(VALUE, "order must be Obj"); };
-            let Obj::Order(o) = *b else { return err(VALUE, "order must be Order"); };
-            ord_list.push(o);
-        }
-        orders_by_account.insert(acct.clone(), ord_list);
-    }
-    let found = working_orders(&mirrored_accounts, &orders_by_account, &mirror);
-    let mut encoded = Vec::new();
-    for o in found {
-        encoded.push(codec::enc_obj(&Obj::Order(o))?);
-    }
-    Ok(obj(vec![("orders", Json::Arr(encoded))]))
-}
-
-fn parse_account_batch_data(doc: &Json) -> R<AccountBatchData> {
-    let markers_arr = req_arr(doc, "markers")?;
-    let mut markers = Vec::new();
-    for m in markers_arr {
-        let seq = match req(m, "seq")? {
-            Json::Int(n) => *n,
-            _ => return err(VALUE, "marker seq must be int"),
-        };
-        let session = NaiveDate::parse_from_str(req_str(m, "session")?, "%Y-%m-%d")
-            .map_err(|e| crate::ledger::model::LErr { kind: VALUE, msg: format!("bad date: {e}") })?;
-        let job = req_str(m, "job")?.to_string();
-        markers.push(MarkerEvent { seq, session, job });
-    }
-    let created_arr = req_arr(doc, "created_events")?;
-    let mut created_events = Vec::new();
-    for c in created_arr {
-        let seq = match req(c, "seq")? {
-            Json::Int(n) => *n,
-            _ => return err(VALUE, "created event seq must be int"),
-        };
-        let ord_arr = req_arr(c, "orders")?;
-        let mut orders = Vec::new();
-        for ord_json in ord_arr {
-            let val = codec::decode(ord_json)?;
-            let Val::Obj(b) = val else { return err(VALUE, "order must be Obj"); };
-            let Obj::Order(o) = *b else { return err(VALUE, "order must be Order"); };
-            orders.push(o);
-        }
-        created_events.push(CreatedBatch { seq, orders });
-    }
-    let current_ords_val = req(doc, "current_orders")?;
-    let mut current_orders = HashMap::new();
-    if let Json::Arr(items) = current_ords_val {
-        for ord_json in items {
-            let val = codec::decode(ord_json)?;
-            let Val::Obj(b) = val else { return err(VALUE, "order must be Obj"); };
-            let Obj::Order(o) = *b else { return err(VALUE, "order must be Order"); };
-            current_orders.insert(o.order_id.clone(), o);
-        }
-    } else if let Json::Obj(pairs) = current_ords_val {
-        for (_, ord_json) in pairs {
-            let val = codec::decode(ord_json)?;
-            let Val::Obj(b) = val else { return err(VALUE, "order must be Obj"); };
-            let Obj::Order(o) = *b else { return err(VALUE, "order must be Order"); };
-            current_orders.insert(o.order_id.clone(), o);
-        }
-    } else {
-        return err(VALUE, "current_orders must be arr or obj");
-    }
-    Ok(AccountBatchData { markers, created_events, current_orders })
-}
-
-fn parse_accounts_data_map(doc: &Json) -> R<HashMap<String, AccountBatchData>> {
-    let accts_val = req(doc, "accounts_data")?;
-    let Json::Obj(pairs) = accts_val else { return err(VALUE, "accounts_data must be obj"); };
-    let mut map = HashMap::new();
-    for (acct, data_val) in pairs {
-        map.insert(acct.clone(), parse_account_batch_data(data_val)?);
-    }
-    Ok(map)
-}
-
-pub fn pending_orders_op(doc: &Json) -> R<Json> {
-    let mirrored_arr = req_arr(doc, "mirrored_accounts")?;
-    let mut mirrored_accounts = Vec::new();
-    for item in mirrored_arr {
-        let Json::Str(s) = item else { return err(VALUE, "mirrored account must be str"); };
-        mirrored_accounts.push(s.clone());
-    }
-    let accounts_data = parse_accounts_data_map(doc)?;
-    let session = NaiveDate::parse_from_str(req_str(doc, "session")?, "%Y-%m-%d")
-        .map_err(|e| crate::ledger::model::LErr { kind: VALUE, msg: format!("bad date: {e}") })?;
-    let (close, _) = parse_datetime(req_str(doc, "close")?)?;
-    let job = match doc.get("job") {
-        Some(Json::Str(s)) if !s.is_empty() => Some(s.as_str()),
-        _ => None,
-    };
-    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
-    let found = pending_orders(&mirrored_accounts, &accounts_data, session, &close, job, &mirror)?;
-    let mut encoded = Vec::new();
-    for o in found {
-        encoded.push(codec::enc_obj(&Obj::Order(o))?);
-    }
-    Ok(obj(vec![("orders", Json::Arr(encoded))]))
-}
-
-pub fn morning_orders_op(doc: &Json) -> R<Json> {
-    let mirrored_arr = req_arr(doc, "mirrored_accounts")?;
-    let mut mirrored_accounts = Vec::new();
-    for item in mirrored_arr {
-        let Json::Str(s) = item else { return err(VALUE, "mirrored account must be str"); };
-        mirrored_accounts.push(s.clone());
-    }
-    let accounts_data = parse_accounts_data_map(doc)?;
-    let session = NaiveDate::parse_from_str(req_str(doc, "session")?, "%Y-%m-%d")
-        .map_err(|e| crate::ledger::model::LErr { kind: VALUE, msg: format!("bad date: {e}") })?;
-    let (session_open, _) = parse_datetime(req_str(doc, "session_open")?)?;
-    let job = match doc.get("job") {
-        Some(Json::Str(s)) if !s.is_empty() => Some(s.as_str()),
-        _ => None,
-    };
-    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
-    let found = morning_orders(&mirrored_accounts, &accounts_data, session, &session_open, job, &mirror)?;
-    let mut encoded = Vec::new();
-    for o in found {
-        encoded.push(codec::enc_obj(&Obj::Order(o))?);
-    }
-    Ok(obj(vec![("orders", Json::Arr(encoded))]))
-}
-
-pub fn classify_cover_op(doc: &Json) -> R<Json> {
-    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
-    let orders_arr = req_arr(doc, "orders")?;
-    let mut orders = Vec::new();
-    for item in orders_arr {
-        let val = codec::decode(item)?;
-        let Val::Obj(b) = val else { return err(VALUE, "order must be Obj"); };
-        let Obj::Order(o) = *b else { return err(VALUE, "item must be Order"); };
-        orders.push(o);
-    }
-    let may_wait = match doc.get("may_wait") {
-        Some(Json::Bool(b)) => *b,
-        _ => false,
-    };
-    let candidates = filter_candidates(&orders, &mirror);
-    let (todo, waiting, refused) = classify_cover(&mirror, &candidates, may_wait)?;
-    let mut enc_todo = Vec::new();
-    for o in todo {
-        enc_todo.push(codec::enc_obj(&Obj::Order(o))?);
-    }
-    let enc_waiting: Vec<Json> = waiting
-        .into_iter()
-        .map(|(oid, why)| Json::Arr(vec![jstr(oid), jstr(why)]))
-        .collect();
-    let enc_refused: Vec<Json> = refused
-        .into_iter()
-        .map(|(oid, why)| Json::Arr(vec![jstr(oid), jstr(why)]))
-        .collect();
-    Ok(obj(vec![
-        ("todo", Json::Arr(enc_todo)),
-        ("waiting", Json::Arr(enc_waiting)),
-        ("refused", Json::Arr(enc_refused)),
-    ]))
-}
-
-pub fn prepare_write_ahead_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let accts_val = req(doc, "accounts")?;
-    let Json::Obj(acct_pairs) = accts_val else { return err(VALUE, "accounts must be obj"); };
-    let mut accounts = HashMap::new();
-    for (k, v) in acct_pairs {
-        let Json::Str(s) = v else { return err(VALUE, "account must be str"); };
-        accounts.insert(k.clone(), s.clone());
-    }
-    let cover_refused_arr = req_arr(doc, "cover_refused")?;
-    let mut cover_refused = Vec::new();
-    for pair in cover_refused_arr {
-        let Json::Arr(p) = pair else { return err(VALUE, "refused entry must be pair"); };
-        if p.len() != 2 { return err(VALUE, "refused entry must be pair"); }
-        let (Json::Str(oid), Json::Str(reason)) = (&p[0], &p[1]) else { return err(VALUE, "refused entry must be str pair"); };
-        cover_refused.push((oid.clone(), reason.clone()));
-    }
-    let batch_refused_arr = req_arr(doc, "batch_refused")?;
-    let mut batch_refused = Vec::new();
-    for pair in batch_refused_arr {
-        let Json::Arr(p) = pair else { return err(VALUE, "refused entry must be pair"); };
-        if p.len() != 2 { return err(VALUE, "refused entry must be pair"); }
-        let (Json::Str(oid), Json::Str(reason)) = (&p[0], &p[1]) else { return err(VALUE, "refused entry must be str pair"); };
-        batch_refused.push((oid.clone(), reason.clone()));
-    }
-    let tickets_arr = req_arr(doc, "batch_venue_orders")?;
-    let mut batch_venue_orders = Vec::new();
-    for t_json in tickets_arr {
-        batch_venue_orders.push(super::broker::ticket_of(t_json)?);
-    }
-    let keys_arr = req_arr(doc, "broker_queued_keys")?;
-    let mut broker_queued_keys = BTreeSet::new();
-    for k in keys_arr {
-        let Json::Str(s) = k else { return err(VALUE, "key must be str"); };
-        broker_queued_keys.insert(s.clone());
-    }
-    let (now, _) = parse_datetime(req_str(doc, "now")?)?;
-    let items = prepare_write_ahead(
-        venue,
-        &accounts,
-        &cover_refused,
-        &batch_refused,
-        &batch_venue_orders,
-        &broker_queued_keys,
-        &now,
-    );
-    let mut enc_items = Vec::new();
-    for item in items {
-        match item {
-            WriteAheadItem::Refused(r, cmd) => {
-                let enc = codec::enc_obj(&Obj::MRefused(r))?;
-                enc_items.push(obj(vec![
-                    ("type", jstr("refused")),
-                    ("payload", enc),
-                    ("command_id", jstr(cmd)),
-                ]));
-            }
-            WriteAheadItem::Queued(q, cmd) => {
-                let enc = codec::enc_obj(&Obj::MQueued(q))?;
-                enc_items.push(obj(vec![
-                    ("type", jstr("queued")),
-                    ("payload", enc),
-                    ("command_id", jstr(cmd)),
-                ]));
-            }
-        }
-    }
-    Ok(obj(vec![("items", Json::Arr(enc_items))]))
-}
-
-pub fn build_drain_acks_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let acks_arr = req_arr(doc, "acks")?;
-    let mut acks = Vec::new();
-    for a in acks_arr {
-        let Json::Arr(p) = a else { return err(VALUE, "ack entry must be [key, status, msg, ts]"); };
-        if p.len() != 4 { return err(VALUE, "ack entry must have 4 elements"); }
-        let Json::Str(key) = &p[0] else { return err(VALUE, "key must be str"); };
-        let Json::Str(status) = &p[1] else { return err(VALUE, "status must be str"); };
-        let msg = match &p[2] {
-            Json::Str(s) if !s.is_empty() => Some(s.clone()),
-            _ => None,
-        };
-        let (ts, _) = match &p[3] {
-            Json::Str(s) => parse_datetime(s)?,
-            _ => return err(VALUE, "ts must be str"),
-        };
-        acks.push((key.clone(), status.clone(), msg, ts));
-    }
-    let proven_val = req(doc, "proven")?;
-    let Json::Obj(proven_pairs) = proven_val else { return err(VALUE, "proven must be obj"); };
-    let mut proven = HashMap::new();
-    for (k, v) in proven_pairs {
-        let Json::Arr(p) = v else { return err(VALUE, "proven entry must be pair"); };
-        if p.len() != 2 { return err(VALUE, "proven entry must be pair"); }
-        let (Json::Str(oid), Json::Str(st_str)) = (&p[0], &p[1]) else { return err(VALUE, "proven entry must be str pair"); };
-        let book_st = super::wire::state_of(st_str)?;
-        proven.insert(k.clone(), (oid.clone(), book_st));
-    }
-    let built = build_drain_acks(venue, &acks, &proven);
-    let mut enc_acks = Vec::new();
-    for (ack, cmd) in built {
-        let enc = codec::enc_obj(&Obj::MAck(ack))?;
-        enc_acks.push(obj(vec![("payload", enc), ("command_id", jstr(cmd))]));
-    }
-    Ok(obj(vec![("acks", Json::Arr(enc_acks))]))
-}
-
-pub fn build_cancel_ack_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let ticket_key = req_str(doc, "ticket_key")?;
-    let order_id = match doc.get("order_id") {
-        Some(Json::Str(s)) if !s.is_empty() => Some(s.as_str()),
-        _ => None,
-    };
-    let ack_status = req_str(doc, "ack_status")?;
-    let ack_message = match doc.get("ack_message") {
-        Some(Json::Str(s)) => s.as_str(),
-        _ => "",
-    };
-    let (ack_ts, _) = parse_datetime(req_str(doc, "ack_timestamp")?)?;
-    let res = build_cancel_ack(venue, ticket_key, order_id, ack_status, ack_message, &ack_ts);
-    match res {
-        None => Ok(obj(vec![("ack", Json::Null)])),
-        Some((ack, cmd)) => {
-            let enc = codec::enc_obj(&Obj::MAck(ack))?;
-            Ok(obj(vec![("ack", obj(vec![("payload", enc), ("command_id", jstr(cmd))]))]))
-        }
-    }
-}
-
-pub fn decide(op: &str, text: &str) -> Result<String, crate::ledger::model::LErr> {
-    let doc = crate::ledger::json::parse(text).map_err(|e| crate::ledger::model::LErr { kind: crate::tos_paper::WIRE, msg: format!("bad door json: {}", e.message) })?;
-    let out = match op {
-        "session_deferred_why" | "deferred_why" => deferred_why_op(&doc)?,
-        "session_halt_unproven" | "halt_unproven" => halt_unproven_op(&doc)?,
-        "session_collect_items" | "collect_items" => collect_items_op(&doc)?,
-        "session_fold_halt" | "fold_halt" => fold_halt_op(&doc)?,
-        "session_clear_halt" | "clear_halt" => clear_halt_op(&doc)?,
-        "session_reconcile_command_id" | "reconcile_command_id" => reconcile_command_id_op(&doc)?,
-        "session_working_orders" | "working_orders" => working_orders_op(&doc)?,
-        "session_pending_orders" | "pending_orders" => pending_orders_op(&doc)?,
-        "session_morning_orders" | "morning_orders" => morning_orders_op(&doc)?,
-        "session_classify_cover" | "classify_cover" => classify_cover_op(&doc)?,
-        "session_prepare_write_ahead" | "prepare_write_ahead" => prepare_write_ahead_op(&doc)?,
-        "session_build_drain_acks" | "build_drain_acks" => build_drain_acks_op(&doc)?,
-        "session_build_cancel_ack" | "build_cancel_ack" => build_cancel_ack_op(&doc)?,
-        _ => return err(crate::tos_paper::WIRE, format!("unknown tos_paper_session op {op:?}")),
-    };
-    Ok(crate::ledger::json::dumps(&out))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::canon::canon_mirror_pub;
     use crate::ledger::model::{MirrorAllocation, MirrorQueued, OrderType, Tif};
     use crate::ledger::ops::OMap;
     use crate::money::Money;
 
     fn collect(doc: Json) -> R<Vec<String>> {
-        let out = collect_items_op(&doc)?;
-        let Some(Json::Arr(ids)) = out.get("command_ids") else { panic!("no command_ids") };
-        Ok(ids.iter().map(|j| match j { Json::Str(s) => s.clone(), _ => panic!("id not a string") }).collect())
+        let venue = req_str(&doc, "venue")?.to_string();
+        let mut fills = Vec::new();
+        for fill in req_arr(&doc, "fills")? {
+            fills.push((req_str(fill, "ticket_key")?.to_string(), req_str(fill, "filled")?.to_string()));
+        }
+        let mut closes = Vec::new();
+        for close in req_arr(&doc, "closes")? {
+            let key = req_str(close, "ticket_key")?.to_string();
+            let status = match close.get("book_status") {
+                Some(Json::Str(s)) => Some(s.clone()),
+                None | Some(Json::Null) => None,
+                Some(other) => return wire(format!("\"book_status\" must be a string or null, got {}", other.type_name())),
+            };
+            closes.push((key, status));
+        }
+        collect_items(&venue, &fills, &closes)
     }
 
     fn fill_row(key: &str, filled: &str) -> Json {
@@ -1184,8 +753,8 @@ mod tests {
         }
     }
 
-    /// The canon mirror holding one open ticket per queued order, keyed by its ticket key.
-    fn mirror_of_tickets(queueds: &[MirrorQueued]) -> Json {
+    /// A mirror holding one open ticket per queued order, keyed by its ticket key.
+    fn mirror_of_tickets(queueds: &[MirrorQueued]) -> MirrorState {
         let mut state = MirrorState::default();
         for q in queueds {
             let ticket = MirrorTicketState {
@@ -1200,65 +769,43 @@ mod tests {
             };
             state.tickets.insert(q.ticket_key.clone(), q.ticket_key.clone(), ticket);
         }
-        canon_mirror_pub(&state).unwrap()
+        state
     }
 
-    fn fold_doc(mirror: Json, fills: &[(&str, &str)]) -> Json {
-        let fills = fills
+    fn fold_halt_of(mirror: MirrorState, fills: &[(&str, &str)]) -> R<VenueReconcile> {
+        let fills: Vec<(String, String)> = fills
             .iter()
-            .map(|(key, filled)| obj(vec![("ticket_key", jstr(*key)), ("filled", jstr(*filled))]))
+            .map(|(key, filled)| (key.to_string(), filled.to_string()))
             .collect();
-        obj(vec![
-            ("venue", jstr("PM_A")),
-            ("as_of", jstr("2026-09-24T16:00:00+00:00")),
-            ("err", jstr("ledger refused")),
-            ("mirror", mirror),
-            ("fills", Json::Arr(fills)),
-        ])
-    }
-
-    fn event_fields(out: &Json) -> &Json {
-        out.get("event").unwrap().get("f").unwrap()
-    }
-
-    fn drift_of(out: &Json) -> Vec<String> {
-        match event_fields(out).get("drift").unwrap().get("t").unwrap() {
-            Json::Arr(items) => items
-                .iter()
-                .map(|s| match s {
-                    Json::Str(text) => text.clone(),
-                    other => panic!("drift entry is not a string: {other:?}"),
-                })
-                .collect(),
-            other => panic!("drift is not a tuple: {other:?}"),
-        }
+        let as_of = parse_datetime("2026-09-24T16:00:00+00:00").unwrap().0;
+        fold_halt("PM_A", &as_of, "ledger refused", &mirror, &fills)
     }
 
     #[test]
     fn fold_halt_two_fills_on_one_contract_give_one_symbol() {
         let mirror = mirror_of_tickets(&[queued("k1", "SPX", Side::Buy)]);
-        let out = fold_halt_op(&fold_doc(mirror, &[("k1", "2.50"), ("k1", "1E+1")])).unwrap();
-        assert_eq!(drift_of(&out), vec!["SPX".to_string()]);
+        let out = fold_halt_of(mirror, &[("k1", "2.50"), ("k1", "1E+1")]).unwrap();
+        assert_eq!(out.drift, vec!["SPX".to_string()]);
     }
 
     #[test]
     fn fold_halt_symbols_are_sorted_and_de_duplicated() {
         let mirror = mirror_of_tickets(&[queued("k1", "SPY", Side::Sell), queued("k2", "SPX", Side::Buy)]);
-        let out = fold_halt_op(&fold_doc(mirror, &[("k1", "1"), ("k2", "1"), ("k1", "3")])).unwrap();
-        assert_eq!(drift_of(&out), vec!["SPX".to_string(), "SPY".to_string()]);
+        let out = fold_halt_of(mirror, &[("k1", "1"), ("k2", "1"), ("k1", "3")]).unwrap();
+        assert_eq!(out.drift, vec!["SPX".to_string(), "SPY".to_string()]);
     }
 
     #[test]
     fn fold_halt_with_no_fills_drifts_the_venue_itself() {
         let mirror = mirror_of_tickets(&[queued("k1", "SPX", Side::Buy)]);
-        let out = fold_halt_op(&fold_doc(mirror, &[])).unwrap();
-        assert_eq!(drift_of(&out), vec!["PM_A".to_string()]);
+        let out = fold_halt_of(mirror, &[]).unwrap();
+        assert_eq!(out.drift, vec!["PM_A".to_string()]);
     }
 
     #[test]
     fn fold_halt_unknown_ticket_refuses_with_key() {
         let mirror = mirror_of_tickets(&[queued("k1", "SPX", Side::Buy)]);
-        match fold_halt_op(&fold_doc(mirror, &[("missing", "1")])) {
+        match fold_halt_of(mirror, &[("missing", "1")]) {
             Err(e) => assert_eq!(e.kind, "key"),
             Ok(out) => panic!("expected a key refusal, got {out:?}"),
         }
@@ -1267,11 +814,10 @@ mod tests {
     #[test]
     fn fold_halt_note_and_flags_are_exact() {
         let mirror = mirror_of_tickets(&[queued("k1", "SPX", Side::Buy)]);
-        let out = fold_halt_op(&fold_doc(mirror, &[("k1", "1")])).unwrap();
-        let f = event_fields(&out);
-        assert_eq!(f.get("venue"), Some(&jstr("PM_A")));
-        assert_eq!(f.get("reconciled"), Some(&Json::Bool(false)));
-        assert_eq!(f.get("note"), Some(&jstr("the mirror cannot book the venue's fills (ledger refused); venue halted")));
-        assert_eq!(f.get("as_of").unwrap().get("T"), Some(&jstr("2026-09-24T16:00:00+00:00")));
+        let out = fold_halt_of(mirror, &[("k1", "1")]).unwrap();
+        assert_eq!(out.venue, "PM_A");
+        assert_eq!(out.reconciled, false);
+        assert_eq!(out.note.as_deref(), Some("the mirror cannot book the venue's fills (ledger refused); venue halted"));
+        assert_eq!(out.as_of.iso(), "2026-09-24T16:00:00+00:00");
     }
 }

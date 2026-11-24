@@ -4,8 +4,7 @@
 //! tickets) converted with `store_ledger`; results are Python objects. There is no
 //! JSON-string round trip here, and no `_rs.decide` in the Python modules.
 //!
-//! A refusal crosses as `ValueError((kind, message))` for the module's own `_rs.call` to
-//! map, exactly as `tos_paper_decide` did.
+//! A refusal crosses as `ValueError((kind, message))` for the module's own `_rs.call` to map.
 
 use std::collections::HashSet;
 
