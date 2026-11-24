@@ -515,3 +515,8 @@ def test_a_settlement_is_found_by_its_stripped_upper_case_symbol() -> None:
 
 def test_a_dividend_is_found_by_its_stripped_upper_case_symbol() -> None:
     assert FixedDividends({"aapl": []}).dividends(" AAPL ", EXPIRY) == ()
+
+
+def test_a_dividend_symbol_strips_information_separators_like_python() -> None:
+    # Python's str.strip() drops U+001C..U+001F; the Rust symbol key must match it.
+    assert FixedDividends({"aapl": []}).dividends("\x1cAAPL", EXPIRY) == ()

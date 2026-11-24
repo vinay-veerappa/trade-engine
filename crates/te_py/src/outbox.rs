@@ -1,6 +1,6 @@
 use crate::store::{sql_error, value_from_python, value_to_python};
 use pyo3::{
-    exceptions::{PyException, PyValueError},
+    exceptions::{PyException, PyKeyError, PyValueError},
     prelude::*,
     types::{PyDict, PyList, PyString},
 };
@@ -260,8 +260,11 @@ pub(crate) fn delivered(
             },
             || {
                 let timestamp = at.call_method0("isoformat")?;
-                store
+                let changed = store
                     .deliver_outbox(value_from_python(id, 3)?, value_from_python(&timestamp, 2)?)?;
+                if changed == 0 {
+                    return Err(PyKeyError::new_err(id.clone().unbind()).into());
+                }
                 Ok(())
             },
         )
@@ -281,10 +284,13 @@ pub(crate) fn failed(
             },
             || {
                 let message = error.str()?;
-                store.fail_outbox(
+                let changed = store.fail_outbox(
                     value_from_python(id, 3)?,
                     value_from_python(message.as_any(), 2)?,
                 )?;
+                if changed == 0 {
+                    return Err(PyKeyError::new_err(id.clone().unbind()).into());
+                }
                 Ok(())
             },
         )

@@ -12,10 +12,7 @@ use crate::ledger::codec::py_repr;
 use crate::ledger::fold::AccountState;
 use crate::ledger::json::Json;
 use crate::ledger::model::{err, Fill, Instrument, LErr, Order, OrderState, OrderType, R};
-
-fn terminal(s: OrderState) -> bool {
-    matches!(s, OrderState::Filled | OrderState::Cancelled | OrderState::Expired | OrderState::Rejected)
-}
+use crate::oms::manager::terminal;
 
 /// Python's `KeyError(id)`: the refusal the ledger's `key` kind becomes.
 fn key_err(id: &str) -> LErr {

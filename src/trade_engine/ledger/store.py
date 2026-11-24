@@ -294,6 +294,12 @@ class Ledger:
         created_at: datetime | None = None,
     ) -> OutboxItem:
         """Enqueue an outbox item for delivery to an external sink."""
+        # Refuse wrong types here, before the Rust call, so they raise ValueError rather than
+        # an AttributeError from inside it. The Rust side still checks the destination is non-empty.
+        if not isinstance(destination, str):
+            raise ValueError(f"Outbox destination must be a str, got {type(destination).__name__}")
+        if created_at is not None and not isinstance(created_at, datetime):
+            raise ValueError(f"Outbox created_at must be a datetime or None, got {type(created_at).__name__}")
         return _rs.rs.ledger_outbox_enqueue(self, event_seq, destination, payload, created_at)
 
     def _insert_outbox(
@@ -350,6 +356,11 @@ class Ledger:
     # -- meta --------------------------------------------------------------------
 
     def set_meta(self, key: str, value: str) -> None:
+        # Both must be str: None or bytes would otherwise be stored or coerced silently.
+        if not isinstance(key, str):
+            raise ValueError(f"meta key must be a str, got {type(key).__name__}")
+        if not isinstance(value, str):
+            raise ValueError(f"meta value must be a str, got {type(value).__name__}")
         self._store.set_meta(key, value)
 
     def get_meta(self, key: str) -> str | None:

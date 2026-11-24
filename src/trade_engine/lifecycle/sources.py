@@ -79,6 +79,7 @@ class FixedSettlements:
         if found is not None:
             return found
         decide("settlement_missing", [settle_time.value, key[0], session.isoformat()])  # refuses (I5)
+        raise AssertionError("unreachable: decide refuses")
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ class FixedDividends:
         key = decide("symbol_key", [symbol])[0][0]
         if key not in self._by_symbol:
             decide("dividend_missing", [key])  # refuses (I5)
+            raise AssertionError("unreachable: decide refuses")
         return tuple(d for d in self._by_symbol[key] if d.ex_date == ex_date)
 
 
@@ -170,3 +172,4 @@ class SnapshotQuotes:
         if found is not None:
             return found
         decide("quote_missing", [contract.occ.strip(), underlying, snapshot.as_of.isoformat()])  # refuses (I5)
+        raise AssertionError("unreachable: decide refuses")

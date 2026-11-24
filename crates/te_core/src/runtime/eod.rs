@@ -1,14 +1,9 @@
-use super::Plan;
+use super::{py_strip, Plan};
 use crate::ledger::codec::py_repr;
 use crate::ledger::model::{derr, err, LErr, R};
 use crate::ledger::ops::*;
 use crate::money::Money;
 use num_bigint::BigUint;
-
-/// Python's `str.strip()` with no argument: Rust's Unicode whitespace plus U+001C..U+001F.
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-}
 
 fn dec(s: &str) -> R<Money> {
     Money::parse(s).ok_or_else(|| LErr { kind: "value", msg: "invalid runtime decimal".into() })
@@ -39,7 +34,7 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
         "config" => {
             if !b[0] { return err("runtime_eod", "job_name must be non-empty"); }
             if !b[1] { return err("runtime_eod", "at least one broker is required"); }
-            if !b[2] || f[0] <= 0.0 { return err("runtime_eod", "bars_max_age_seconds must be positive"); }
+            if !b[2] || !(f[0] > 0.0) { return err("runtime_eod", "bars_max_age_seconds must be positive"); }
             if !b[3] || n[0] < 0 { return err("runtime_eod", "settle_delay must be a non-negative timedelta"); }
         }
         "session_type" => if !b[0] { return err("runtime_eod",format!("session must be a date, got {}",s[0])); },
@@ -229,6 +224,7 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
         }
         // s: snapshot as_of, quote as_of. n: micros(snapshot.as_of - quote.as_of). f: the age limit in seconds.
         "quote_source" => {
+            if s.len() != 2 || n.len() != 1 || f.len() != 1 { return err("value", "quote_source arity"); }
             let age = n[0] as f64 / 1_000_000.0;
             let mut source = format!("snapshot:{}", s[0]);
             if age > f[0] { source = format!("stale-quote:{} {}", s[1], source); }
@@ -410,6 +406,19 @@ mod tests {
         assert_eq!(run(900_000_001), strs(&["stale-quote:Q0 snapshot:Q1"]));
         // a negative age is not stale
         assert_eq!(run(-5_000_000), strs(&["snapshot:Q1"]));
+    }
+    #[test]
+    fn quote_source_short_input_refuses_as_value() {
+        // one string, no micros, no limit: the arity guard refuses instead of panicking
+        let (kind, msg) = refusal(decide("quote_source", &strs(&["Q1"]), &[], &[], &[]));
+        assert_eq!((kind, msg.as_str()), ("value", "quote_source arity"));
+    }
+    #[test]
+    fn config_refuses_nan_bar_age() {
+        // NaN compares false with everything, so `> 0.0` must be the accepted form
+        let (kind, msg) = refusal(decide("config", &[], &[0], &[true, true, true, true], &[f64::NAN]));
+        assert_eq!((kind, msg.as_str()), ("runtime_eod", "bars_max_age_seconds must be positive"));
+        assert!(decide("config", &[], &[0], &[true, true, true, true], &[1.0]).is_ok());
     }
     proptest! {
         #[test]

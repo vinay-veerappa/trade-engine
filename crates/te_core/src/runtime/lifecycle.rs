@@ -145,9 +145,9 @@ pub fn decide(op: &str, t: &[String], n: &[i64], b: &[bool], _f: &[f64]) -> R<Pl
                 }
             }
         },
-        // Python's str.strip() and Rust's str::trim() both drop Unicode whitespace. They differ
-        // only on U+001C..U+001F, which Python's isspace() counts and Rust's White_Space omits.
-        "symbol_key" => p.text.push(t[0].trim().to_uppercase()),
+        // Python's str.strip() also strips U+001C..U+001F, which Rust's trim() does not, so use
+        // the shared py_strip to match the Python side exactly.
+        "symbol_key" => p.text.push(super::py_strip(&t[0]).to_uppercase()),
         "settlement_conflict" => if b[0] {
             return err("value", format!("Two different {} settlements for {} on {} (I5)", t[0], t[1], t[2]));
         },
@@ -201,6 +201,11 @@ mod tests {
     fn symbol_key_trims_and_uppercases() {
         assert_eq!(decide("symbol_key", &texts(&[" aapl\t"]), &[], &[], &[]).unwrap().text, ["AAPL"]);
         assert_eq!(decide("symbol_key", &texts(&["\u{a0}spx\u{3000}"]), &[], &[], &[]).unwrap().text, ["SPX"]);
+    }
+    #[test]
+    fn symbol_key_strips_information_separators_like_python() {
+        // Python's str.strip() drops U+001C..U+001F; Rust's trim() does not.
+        assert_eq!(decide("symbol_key", &texts(&["\u{1c}spx\u{1f}"]), &[], &[], &[]).unwrap().text, ["SPX"]);
     }
     #[test]
     fn settlement_conflict_passes_when_the_prices_agree() {

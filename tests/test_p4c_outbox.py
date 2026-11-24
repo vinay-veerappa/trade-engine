@@ -115,9 +115,10 @@ def test_seeded_outbox_meta_operations(tmp_path):
 @pytest.mark.parametrize("destination,expected", [
     ("", ("refusal", "ValueError", "Outbox destination must be non-empty string", None)),
     (" ", ("refusal", "ValueError", "Outbox destination must be non-empty string", None)),
-    (None, ("refusal", "ValueError", "Outbox destination must be non-empty string", None)),
-    (42, ("refusal", "AttributeError", "'int' object has no attribute 'strip'", None)),
-    (b"journal", ("refusal", "RuntimeError", "Ledger is not open; use `with Ledger(path):`", None)),
+    (None, ("refusal", "ValueError", "Outbox destination must be a str, got NoneType", None)),
+    (42, ("refusal", "ValueError", "Outbox destination must be a str, got int", None)),
+    # The type check runs in Python before the Rust call, so it also precedes the not-open check.
+    (b"journal", ("refusal", "ValueError", "Outbox destination must be a str, got bytes", None)),
 ])
 def test_destination_and_unopened_validation_order(tmp_path, destination, expected):
     ledger = Ledger(tmp_path / "unopened.db")
@@ -156,7 +157,7 @@ def test_enqueue_defaults_constraints_and_timestamp_refusals(ledger):
         (lambda: ledger.enqueue_outbox(1, "bad-json", {"x": Decimal("1.0")}, created_at=AT),
          ("refusal", "TypeError", "Object of type Decimal is not JSON serializable")),
         (lambda: ledger.enqueue_outbox(1, "bad-id", {}, created_at="not-time"),
-         ("refusal", "AttributeError", "'str' object has no attribute 'tzinfo'")),
+         ("refusal", "ValueError", "Outbox created_at must be a datetime or None, got str")),
         (lambda: ledger.enqueue_outbox(Decimal("1"), "type", {}),
          ("refusal", "ProgrammingError", "Error binding parameter 1: type 'decimal.Decimal' is not supported")),
     ]
@@ -284,21 +285,29 @@ def test_meta_schema_conversion(ledger, value, expected):
 
 
 @pytest.mark.parametrize("key,value,set_expected,get_expected", [
-    (None, "x", ("ok", None), ("ok", None)),
-    ("x", None, ("refusal", "IntegrityError", "NOT NULL constraint failed: meta.value", None), ("ok", None)),
+    (None, "x", ("refusal", "ValueError", "meta key must be a str, got NoneType", None), ("ok", None)),
+    ("x", None, ("refusal", "ValueError", "meta value must be a str, got NoneType", None), ("ok", None)),
     (Decimal(1), "x",
-     ("refusal", "ProgrammingError", "Error binding parameter 1: type 'decimal.Decimal' is not supported", None),
+     ("refusal", "ValueError", "meta key must be a str, got Decimal", None),
      ("refusal", "ProgrammingError", "Error binding parameter 1: type 'decimal.Decimal' is not supported", None)),
-    ("x", b"bytes", ("ok", None), ("ok", "b'bytes'")),
+    ("x", b"bytes", ("refusal", "ValueError", "meta value must be a str, got bytes", None), ("ok", None)),
 ])
-def test_meta_binding_and_constraints(ledger, key, value, set_expected, get_expected):
+def test_meta_refuses_non_str_key_or_value(ledger, key, value, set_expected, get_expected):
+    # Refused before the write, so nothing is stored under either key.
     assert outcome(lambda: ledger.set_meta(key, value)) == set_expected
     assert outcome(lambda: ledger.get_meta(key)) == get_expected
 
 
-def test_unknown_mark_ids_and_readonly_meta(ledger):
-    assert outcome(lambda: ledger.mark_outbox_failed(999, "missing")) == ("ok", None)
-    assert outcome(lambda: ledger.mark_outbox_delivered(999, AT)) == ("ok", None)
+def test_unknown_mark_ids_refuse_with_key_error_and_store_nothing(ledger):
+    assert outcome(lambda: ledger.append(event(0), outbox={"sink": {}}))[0] == "ok"
+    assert outcome(lambda: ledger.mark_outbox_failed(999, "missing")) == ("refusal", "KeyError", "999", None)
+    assert outcome(lambda: ledger.mark_outbox_delivered(999, AT)) == ("refusal", "KeyError", "999", None)
+    # The real row is untouched by the refused calls.
+    pending = ledger.pending_outbox()
+    assert [(item.status.value, item.last_error) for item in pending] == [("PENDING", None)]
+
+
+def test_readonly_meta_write_is_refused_by_sqlite(ledger):
     ledger.conn.execute("PRAGMA query_only=ON")
     assert outcome(lambda: ledger.set_meta("cannot", "write")) == (
         "refusal", "OperationalError", "attempt to write a readonly database", None)
@@ -364,11 +373,11 @@ def test_refusal_success_counterparts(ledger):
         ("delivered_timezone", lambda: ledger.mark_outbox_delivered(1, AT.replace(tzinfo=None)),
          ("refusal", "ValueError", "delivered_at must be timezone-aware UTC datetime (I7)"),
          lambda: ledger.mark_outbox_delivered(1, AT)),
-        ("binding", lambda: ledger.set_meta(Decimal("1"), "bad"),
-         ("refusal", "ProgrammingError", "Error binding parameter 1: type 'decimal.Decimal' is not supported"),
+        ("meta_key", lambda: ledger.set_meta(Decimal("1"), "bad"),
+         ("refusal", "ValueError", "meta key must be a str, got Decimal"),
          lambda: ledger.set_meta("binding", "good")),
-        ("constraint", lambda: ledger.set_meta("constraint", None),
-         ("refusal", "IntegrityError", "NOT NULL constraint failed: meta.value"),
+        ("meta_value", lambda: ledger.set_meta("constraint", None),
+         ("refusal", "ValueError", "meta value must be a str, got NoneType"),
          lambda: ledger.set_meta("constraint", "good")),
     ]
     for family, refused, expected_refusal, succeeds in cases:
