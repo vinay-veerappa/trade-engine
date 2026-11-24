@@ -1,11 +1,11 @@
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::ParseIntError;
 
 use chrono::NaiveDate;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDate, PyDateTime, PyDict, PyList, PyTuple};
+use pyo3::types::{PyBool, PyCFunction, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyTuple};
 use te_core::ledger::model::{err, parse_datetime, DateTime, Instrument, LErr, Obj, R as LR};
 use te_core::money::Money;
 use te_core::runtime::eod as rules;
@@ -278,6 +278,49 @@ impl<'py> Host<'py> {
         kwargs.set_item("account_id", account)?;
         Ok(kwargs)
     }
+    /// The venue's working book: venue order id to filled quantity, as the native prepare checks it (I5).
+    fn held_at_venue(&self, broker: &Value<'py>) -> PyResult<BTreeMap<String, Money>> {
+        let min_time = self.module()?.getattr("MIN_TIME")?;
+        let mut held = BTreeMap::new();
+        for order in values(&broker.call_method1("orders", (&min_time,))?)? {
+            let venue_id: String = order.getattr("venue_order_id")?.extract()?;
+            held.insert(venue_id, sl::money(&order.getattr("filled_quantity")?)?);
+        }
+        Ok(held)
+    }
+    /// One instrument's one-minute bars for the session, each with whether it is
+    /// a regular-hours bar. The fetch stays Python; the series checks are the typed `eod::bars`.
+    fn load_bars(&self, instrument: &Value<'py>, open: &Value<'py>, close: &Value<'py>)
+        -> PyResult<Vec<(Value<'py>, bool)>> {
+        let py = self.runner.py();
+        let symbol: String = instrument.getattr("symbol")?.extract()?;
+        let max_age = self.config()?.getattr("bars_max_age_seconds")?;
+        let raw = values(&self.runner.getattr("_market_data")?.call_method1("bars",
+            (instrument, "1m", open, close, max_age))?)?;
+        let final_minute = {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("minutes", 1)?;
+            close.sub(py.import("datetime")?.getattr("timedelta")?.call((), Some(&kwargs))?)?
+        };
+        let (open_us, close_us) = (micros(open)?, micros(close)?);
+        let (first_us, last_us, first_text, last_text) = match (raw.first(), raw.last()) {
+            (Some(first), Some(last)) => {
+                let (first_at, last_at) = (first.getattr("timestamp")?, last.getattr("timestamp")?);
+                (micros(&first_at)?, micros(&last_at)?, iso(&first_at)?, iso(&last_at)?)
+            }
+            _ => (0, 0, String::new(), String::new()),
+        };
+        let (open_text, final_text) = (iso(open)?, iso(&final_minute)?);
+        rules::bars(&symbol, !raw.is_empty(), [first_us, open_us, last_us, close_us],
+            [&first_text, &open_text, &last_text, &final_text]).map_err(super::flow_refusal)?;
+        let mut bars = Vec::with_capacity(raw.len());
+        for bar in raw {
+            let at = micros(&bar.getattr("timestamp")?)?;
+            let regular = rules::regular(open_us, at, close_us);
+            bars.push((bar, regular));
+        }
+        Ok(bars)
+    }
 }
 
 impl<'py> EodHost for Host<'py> {
@@ -325,7 +368,28 @@ impl<'py> EodHost for Host<'py> {
         Ok(mode == Mode::Pass && self.has_marker(&self.command(account, true)?)?)
     }
     fn prepare(&mut self, account: &str) -> PyResult<Self::Value> {
-        self.runner.call_method1("_prepare_account", (account,))
+        let py = self.runner.py();
+        let broker = self.config()?.getattr("brokers")?.get_item(account)?;
+        broker.call_method0("connect")?;
+        // An options account's orders fill at snapshots and its shares are marked at the
+        // official close, so it replays no bars.
+        let mut instruments = Vec::new();
+        if !self.is_options(account)? {
+            let replay = with_native(&self.native, &self.clock()?, &self.pending, |l, _| {
+                let state = l.state(account)?;
+                glue::replay_instruments(&state)
+            })?;
+            for instrument in &replay {
+                instruments.push(sl::instrument_py(py, instrument)?);
+            }
+        }
+        self.runner.call_method1("_restore_venue", (account, &broker))?;
+        let held = self.held_at_venue(&broker)?;
+        with_native(&self.native, &self.clock()?, &self.pending, |l, _| {
+            let state = l.state(account)?;
+            glue::check_venue(account, &state, &held)
+        })?;
+        Ok(PyTuple::new(py, instruments)?.into_any())
     }
     fn tally(&self, account: &str) -> PyResult<Self::Value> {
         let kwargs = PyDict::new(self.runner.py());
@@ -404,10 +468,8 @@ impl<'py> EodHost for Host<'py> {
         let timeline = PyList::empty(py);
         for instrument in instruments.try_iter()? {
             let instrument = instrument?;
-            for row in self.runner.call_method1("_load_bars", (&instrument, &open, &close))?.try_iter()? {
-                let row = row?;
-                let bar = row.get_item(0)?;
-                timeline.append((&bar.getattr("timestamp")?, 1, instrument.getattr("symbol")?, &bar, row.get_item(1)?))?;
+            for (bar, regular) in self.load_bars(&instrument, &open, &close)? {
+                timeline.append((&bar.getattr("timestamp")?, 1, instrument.getattr("symbol")?, &bar, regular))?;
             }
         }
         for snapshot in snapshots {
@@ -621,8 +683,32 @@ impl<'py> EodHost for Host<'py> {
     fn empty_result(&self, account: &str) -> PyResult<Self::Value> {
         self.module()?.getattr("AccountRunResult")?.call((), Some(&self.result_kwargs(account)?))
     }
+    /// Each sink in destination order. A sink without a callable `publish`
+    /// refuses (I5); the outbox calls `publish(event_seq, payload)` for each item.
     fn drain(&self) -> PyResult<()> {
-        self.runner.call_method0("_drain_outbox")?;
+        let py = self.runner.py();
+        let ledger = self.runner.getattr("_ledger")?;
+        let clock = self.clock()?;
+        let sinks = self.config()?.getattr("sinks")?;
+        for pair in sorted(&sinks.call_method0("items")?)? {
+            let destination: String = pair.get_item(0)?.extract()?;
+            let sink = pair.get_item(1)?;
+            let publish = match sink.getattr("publish") {
+                Ok(publish) => Some(publish).filter(|publish| publish.is_callable()),
+                Err(e) if e.is_instance_of::<PyAttributeError>(py) => None,
+                Err(e) => return Err(e),
+            };
+            rules::sink(&destination, publish.is_some()).map_err(super::flow_refusal)?;
+            if let Some(publish) = publish {
+                let publish = publish.unbind();
+                let deliver = PyCFunction::new_closure(py, None, None, move |args: &Bound<'_, PyTuple>, _| -> PyResult<Py<PyAny>> {
+                    let item = args.get_item(0)?;
+                    let delivered = publish.bind(args.py()).call1((item.getattr("event_seq")?, item.getattr("payload")?))?;
+                    Ok(delivered.unbind())
+                })?;
+                ledger.call_method1("drain_outbox", (&destination, deliver, &clock))?;
+            }
+        }
         Ok(())
     }
 }
@@ -717,7 +803,30 @@ fn eod_write_off<'py>(ledger: Value<'py>, clock: Value<'py>, account: String, or
     })
 }
 
+/// `EodRunnerConfig.__post_init__`'s checks (`eod:config`): the job, the brokers, the bar age
+/// and the settle delay. The mark-quote check stays in Python.
+#[pyfunction]
+fn eod_config_check(job_name: Value<'_>, brokers: Value<'_>, bars_max_age_seconds: Value<'_>,
+    settle_delay: Value<'_>) -> PyResult<()> {
+    let py = settle_delay.py();
+    let age_type = (bars_max_age_seconds.is_instance_of::<PyInt>() || bars_max_age_seconds.is_instance_of::<PyFloat>())
+        && !bars_max_age_seconds.is_instance_of::<PyBool>();
+    let delay_type = settle_delay.is_instance(&py.import("datetime")?.getattr("timedelta")?)?;
+    let delay = if delay_type { micros(&settle_delay)? } else { 0 };
+    let bars_age = if age_type { bars_max_age_seconds.extract::<f64>()? } else { 0.0 };
+    rules::config(job_name.is_truthy()?, brokers.is_truthy()?, age_type, bars_age, delay_type, delay)
+        .map_err(super::flow_refusal)
+}
+
+/// The command id of an account's session void.
+#[pyfunction]
+fn eod_void_command(job: String, account: String, session: Value<'_>) -> PyResult<String> {
+    glue::void_command(&job, &account, sl::date_of(&session)?).map_err(super::flow_refusal)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(eod_config_check, m)?)?;
+    m.add_function(wrap_pyfunction!(eod_void_command, m)?)?;
     m.add_function(wrap_pyfunction!(eod_run, m)?)?;
     m.add_function(wrap_pyfunction!(eod_pass, m)?)?;
     m.add_function(wrap_pyfunction!(eod_finish, m)?)?;

@@ -74,7 +74,7 @@ from decimal import Decimal
 from typing import Any
 
 from trade_engine.calendar.sessions import ExchangeCalendar
-from trade_engine.domain.instruments import Equity, Instrument
+from trade_engine.domain.instruments import Instrument
 from trade_engine.domain.orders import OrderState
 from trade_engine.domain.signals import OrderIntent
 from trade_engine.interfaces.broker import (
@@ -96,17 +96,11 @@ from trade_engine.oms.restore import RestoreError
 from trade_engine.risk import RiskContext, RiskEngine
 from trade_engine.sim import SimBroker, SnapshotVenue
 from trade_engine.sim._rs import register, rs
-from trade_engine.eod._runtime import decide, flag, micros
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 # The in-session passes, in the order a session runs them: the morning's entries, then
 # the midday and late exits (owner, 2026-09-26: exits reach the venue the same day).
 PASSES = ("morning", "midday", "late")
-
-
-def _void_command(job: str, account_id: str, session: date) -> str:
-    """The command id of an account's session void: ``eod-void:<job>:<account>:<session>``."""
-    return decide("eod:command", ("eod-void", job, account_id, session.isoformat()))[0][0]
 
 
 class EodRunnerError(RuntimeError):
@@ -164,7 +158,7 @@ def write_off_order(
 ) -> tuple[str, ...]:
     """Record the owner's write-off of one stuck working order (SCAN-WRITEOFF-1).
 
-    A working entry that never fills makes ``_replay_instruments`` demand bars for its
+    A working entry that never fills makes the session replay demand bars for its
     name every session; with none to be had, the I3 gate refuses every later run. The
     write-off is the owner's signed cancel: the entry and each non-terminal bracket child
     become CANCELLED through the fold's ordinary ORDER_CANCELLED step. No Fill, CashFlow,
@@ -246,11 +240,7 @@ class EodRunnerConfig:
         limit = self.mark_max_quote_age_seconds
         if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit <= 0:
             raise ValueError(f"mark_max_quote_age_seconds must be a positive finite number, not {limit!r}")
-        age_type = isinstance(self.bars_max_age_seconds, (int, float)) and not isinstance(self.bars_max_age_seconds, bool)
-        delay_type = isinstance(self.settle_delay, timedelta)
-        decide("eod:config", numbers=(micros(self.settle_delay) if delay_type else 0,),
-            flags=(bool(self.job_name), bool(self.brokers), age_type, delay_type),
-            floats=(self.bars_max_age_seconds if age_type else 0,))
+        rs.eod_config_check(self.job_name, self.brokers, self.bars_max_age_seconds, self.settle_delay)
 
 
 @dataclass(frozen=True)
@@ -363,16 +353,6 @@ class EodRunner:
 
     # -- per-account run ---------------------------------------------------------
 
-    def _prepare_account(self, account_id: str) -> tuple[Instrument, ...]:
-        broker = self._config.brokers[account_id]
-        broker.connect()
-        state = self._ledger.state(account_id)
-        # An options account's orders fill at snapshots and its shares are marked at the
-        # official close, so it replays no bars.
-        instruments = () if self._is_options(account_id) else self._replay_instruments(state)
-        self._rehydrate_venue(account_id, broker, state)
-        return instruments
-
     def _replay_session(
         self,
         session: date,
@@ -404,37 +384,25 @@ class EodRunner:
     ) -> AccountRunResult:
         return rs.eod_finish(self, account_id, session, instruments, tally, False)
 
-    def _rehydrate_venue(
-        self, account_id: str, broker: BrokerAdapter, state: AccountState
-    ) -> None:
-        """Make sure the venue holds what the ledger says it holds.
+    def _restore_venue(self, account_id: str, broker: BrokerAdapter) -> None:
+        """Restore an empty simulated venue from the ledger.
 
         A SimBroker lives in memory, so a new process starts with an empty book while
         the ledger still holds yesterday's D+1 entries and GTC stops. An empty
         SimBroker is restored from the fold (I2), positions included: a held stock or
-        option with no working order is still held at the venue. Any venue is then
-        checked: a working order it does not hold would silently never fill, so the run
-        refuses (I5).
+        option with no working order is still held at the venue. The native prepare
+        then checks every working order against the venue (I5).
         """
         if (
             isinstance(broker, (SimBroker, SnapshotVenue))
             and not broker.orders(MIN_TIME)
             and not broker.fills(MIN_TIME)
         ):
+            state = self._ledger.state(account_id)
             orders, fills = self._restorable(account_id, state)
             positions = self._restorable_positions(state)
             if orders or positions:
                 broker.restore(orders, fills, positions)
-        held = {item.venue_order_id: item for item in broker.orders(MIN_TIME)}
-        for order in sorted(state.orders.values(), key=lambda value: value.order_id):
-            if not flag("eod:working", (order.state.value,)):
-                continue
-            venue_id = state.venue_order_ids.get(order.order_id, order.order_id)
-            found = held.get(venue_id)
-            recorded = state.filled_quantity.get(order.order_id, Decimal("0"))
-            decide("eod:rehydrate", (account_id, order.order_id, order.state.value,
-                str(found.filled_quantity) if found is not None else "0", str(recorded)),
-                flags=(found is not None,))
 
     def _restorable(
         self, account_id: str, state: AccountState
@@ -453,47 +421,6 @@ class EodRunner:
         from trade_engine.oms.restore import restorable_positions
 
         return restorable_positions(state)
-
-    def _replay_instruments(self, state: AccountState) -> tuple[Instrument, ...]:
-        """Instruments the session can change: open positions and working orders.
-
-        A finished order has nothing left to fill; replaying its symbol forever would
-        grow every run and let one delisted name with no bars block the account.
-        """
-        instruments: set[Instrument] = {
-            instrument
-            for instrument, position in state.positions.items()
-            if flag("eod:nonzero", (str(position.quantity),))
-        }
-        for order in state.orders.values():
-            if flag("eod:working", (order.state.value,)):
-                instruments.add(order.instrument)
-        ordered = tuple(sorted(instruments, key=lambda value: value.symbol))
-        for instrument in ordered:
-            decide("eod:replay_instrument", (instrument.symbol,), flags=(isinstance(instrument, Equity),))
-        return ordered
-
-    def _load_bars(
-        self, instrument: Instrument, session_open: datetime, session_close: datetime
-    ) -> list[Any]:
-        raw = self._market_data.bars(
-            instrument,
-            "1m",
-            session_open,
-            session_close,
-            self._config.bars_max_age_seconds,
-        )
-        final = session_close - timedelta(minutes=1)
-        decide("eod:bars", (instrument.symbol,
-            raw[0].timestamp.isoformat() if raw else "", session_open.isoformat(),
-            raw[-1].timestamp.isoformat() if raw else "", final.isoformat()),
-            numbers=(micros(raw[0].timestamp) if raw else 0, micros(session_open),
-                micros(raw[-1].timestamp) if raw else 0, micros(session_close)), flags=(bool(raw),))
-        regular = []
-        for bar in raw:
-            is_regular = flag("eod:regular", numbers=(micros(session_open), micros(bar.timestamp), micros(session_close)))
-            regular.append((bar, is_regular))
-        return regular
 
     def _advance_clock(self, bar_timestamp: datetime) -> None:
         advance = getattr(self._clock, "advance_to", None)
@@ -592,16 +519,3 @@ class EodRunner:
 
     def _submit_new_option_entries(self, account_id: str, session: date, tally: "_Tally") -> None:
         rs.eod_entries(self, account_id, session, tally, True)
-
-    # -- sinks -------------------------------------------------------------------
-
-    def _drain_outbox(self) -> None:
-        for destination, sink in sorted(self._config.sinks.items()):
-            publisher = getattr(sink, "publish", None)
-            decide("eod:sink", (destination,), flags=(callable(publisher),))
-            # The outbox calls publisher(item); a JournalSink takes (event_seq, event).
-            self._ledger.drain_outbox(
-                destination,
-                lambda item, _publish=publisher: _publish(item.event_seq, item.payload),
-                self._clock,
-            )
