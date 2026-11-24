@@ -299,8 +299,14 @@ fn book(intent: &Intent, price: &Option<Money>, ctx: &Context<'_>) -> R<Book> {
         if terminal(order.state) || order.parent_order_id.is_some() || order.account_id != st.account_id {
             continue;
         }
+        // Only the unfilled part is pending: a partial fill is already in `positions`.
+        let filled = st.filled_quantity.get(&order.order_id).cloned().unwrap_or_else(zero);
+        let pending = sub(&order.quantity, &filled)?;
+        if le(&pending, &zero())? {
+            continue;
+        }
         let legs = legs_of(&order.instrument, order.side);
-        if !opens_exposure(&work, &legs, &order.quantity)? {
+        if !opens_exposure(&work, &legs, &pending)? {
             continue;
         }
         let working_error = |order_id: &str| Book {
@@ -312,7 +318,7 @@ fn book(intent: &Intent, price: &Option<Money>, ctx: &Context<'_>) -> R<Book> {
         let Some(limit) = order.limit_price.clone() else {
             return Ok(working_error(&order.order_id));
         };
-        if apply_legs(&mut work, st, &legs, &order.quantity, &limit, ctx)?.is_some() {
+        if apply_legs(&mut work, st, &legs, &pending, &limit, ctx)?.is_some() {
             return Ok(working_error(&order.order_id));
         }
     }

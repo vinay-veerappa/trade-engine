@@ -774,3 +774,38 @@ fn working_opening_order_without_limit_price_refuses() {
     let text = measured_text(row);
     assert!(text.contains("no price for working order W2"), "{text}");
 }
+
+#[test]
+fn partially_filled_working_order_counts_only_its_unfilled_part() {
+    // One unit of a 2-unit opening order has filled and is already held. Only the other unit
+    // is pending, so the book must match "held 1 + a fresh 1-unit working order".
+    let rules = spread_rules();
+    let snap = spread_snapshot();
+    let mut held = account_with("1000.00");
+    for (contract, qty) in [(spy_put("100.00"), -1), (spy_put("95.00"), 1)] {
+        let pos = make_position(
+            "ACC_OPT",
+            contract.clone(),
+            Money::from_i128(qty).unwrap(),
+            Money::parse("1.00").unwrap(),
+            Money::zero(),
+            vec![],
+        )
+        .unwrap();
+        held.marks.insert(contract.hk(), contract.clone(), Money::parse("1.00").unwrap());
+        held.positions.insert(contract.hk(), contract, pos);
+    }
+
+    let mut partial = held.clone();
+    let mut order = working_order("W3", put_spread(), LedgerSide::Sell, 2, Some("1.00"));
+    order.state = OrderState::PartiallyFilled;
+    partial.orders.put("W3", order);
+    partial.filled_quantity.insert("W3".to_string(), "W3".to_string(), Money::from_i128(1).unwrap());
+
+    let mut fresh = held.clone();
+    fresh.orders.put("W4", working_order("W4", put_spread(), LedgerSide::Sell, 1, Some("1.00")));
+
+    let a = run_options(&rules, &spread_entry(Some("1.00")), &partial, &snap);
+    let b = run_options(&rules, &spread_entry(Some("1.00")), &fresh, &snap);
+    assert_eq!(measured_text(margin_row(&a)), measured_text(margin_row(&b)));
+}
