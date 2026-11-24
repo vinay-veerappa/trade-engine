@@ -1,8 +1,14 @@
 use super::Plan;
+use crate::ledger::codec::py_repr;
 use crate::ledger::model::{derr, err, LErr, R};
 use crate::ledger::ops::*;
 use crate::money::Money;
 use num_bigint::BigUint;
+
+/// Python's `str.strip()` with no argument: Rust's Unicode whitespace plus U+001C..U+001F.
+fn py_strip(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
 
 fn dec(s: &str) -> R<Money> {
     Money::parse(s).ok_or_else(|| LErr { kind: "value", msg: "invalid runtime decimal".into() })
@@ -157,6 +163,77 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
         "official_future" => if n[0] > n[1] { return err("runtime_replay",format!("{} close is stamped {}, after the clock {}: look-ahead (I7)",s[0],s[1],s[2])); },
         "official_close" => if n[0] < n[1] { return err("runtime_replay",format!("{} close is stamped {}, before the session closed; it cannot be the official close (I9)",s[0],s[1])); },
         "sink" => if !b[0] { return err("runtime_eod",format!("Sink for '{}' does not declare a publish method (I5)",s[0])); },
+        // s: reason, owner, session repr, session text, then one account per entry.
+        // b: is_date, reason is str, owner is str, is_session, then (is_str, known, ran) per account.
+        "void_check" => {
+            if s.len() < 4 || b.len() != 4 + 3 * (s.len() - 4) { return err("value", "void_check arity"); }
+            let accounts = &s[4..];
+            let flags = &b[4..];
+            let k = accounts.len();
+            if !b[0] { return err("runtime_eod", format!("void session must be a date, got {}", s[0])); }
+            if !b[1] || py_strip(&s[2]).is_empty() { return err("runtime_eod", "a void needs a non-empty reason (I5)"); }
+            if !b[2] || py_strip(&s[3]).is_empty() { return err("runtime_eod", "a void needs a non-empty owner (I5)"); }
+            if !b[3] { return err("runtime_eod", format!("{} is not a trading session; nothing to void (I5)", s[1])); }
+            if k == 0 || (0..k).any(|i| !flags[3 * i] || py_strip(&accounts[i]).is_empty()) {
+                return err("runtime_eod", "a void needs at least one non-empty account (I5)");
+            }
+            let unknown: Vec<String> = (0..k).filter(|&i| !flags[3 * i + 1]).map(|i| py_repr(&accounts[i])).collect();
+            if !unknown.is_empty() {
+                return err("runtime_eod", format!("unknown account(s) [{}]: not in the ledger (I5)", unknown.join(", ")));
+            }
+            if let Some(i) = (0..k).find(|&i| flags[3 * i + 2]) {
+                return err("runtime_eod", format!("{} already ran {}: a session that ran cannot be voided (I3)", accounts[i], s[1]));
+            }
+            p.text = vec![py_strip(&s[2]).to_string(), py_strip(&s[3]).to_string()];
+        }
+        // s: reason, owner, account, order, order state, order filled, parent id, parent filled,
+        // order venue id, then (child id, child state, child venue id) per child of the order.
+        // b: reason is str, owner is str, known, already, exists, venue_cancel_confirmed.
+        "writeoff_check" => {
+            if s.len() < 9 || (s.len() - 9) % 3 != 0 || b.len() != 6 { return err("value", "writeoff_check arity"); }
+            let (account, order) = (s[2].as_str(), s[3].as_str());
+            if !b[0] || py_strip(&s[0]).is_empty() { return err("runtime_eod", "a write-off needs a non-empty reason (I5)"); }
+            if !b[1] || py_strip(&s[1]).is_empty() { return err("runtime_eod", "a write-off needs a non-empty owner (I5)"); }
+            if !b[2] { return err("runtime_eod", format!("unknown account {}: not in the ledger (I5)", py_repr(account))); }
+            if b[3] {
+                p.flags.push(false);
+                return Ok(p);
+            }
+            if !b[4] { return err("runtime_eod", format!("{account} has no order {} (I5)", py_repr(order))); }
+            if !eq(&dec(&s[5])?, &zero())? {
+                return err("runtime_eod", format!("order {} has fills: a filled or partly filled order is a position, not a write-off (I5)", py_repr(order)));
+            }
+            if !s[6].is_empty() && !eq(&dec(&s[7])?, &zero())? {
+                return err("runtime_eod", format!("order {} protects {}, which has fills: writing it off would leave a live position unprotected (I5)", py_repr(order), py_repr(&s[6])));
+            }
+            if !matches!(s[4].as_str(), "SUBMITTED" | "ACCEPTED" | "PENDING_UNKNOWN") {
+                return err("runtime_eod", format!("order {} is {}, not working; nothing to write off (I5)", py_repr(order), s[4]));
+            }
+            let children = 0..(s.len() - 9) / 3;
+            let kept: Vec<usize> = children
+                .filter(|&i| !matches!(s[10 + 3 * i].as_str(), "FILLED" | "CANCELLED" | "EXPIRED" | "REJECTED"))
+                .collect();
+            if !b[5] {
+                let targets = std::iter::once((order, s[8].as_str()))
+                    .chain(kept.iter().map(|&i| (s[9 + 3 * i].as_str(), s[11 + 3 * i].as_str())));
+                for (id, venue) in targets {
+                    if !venue.is_empty() {
+                        return err("runtime_eod", format!("order {} has venue order id {}: the venue may still hold it. Cancel it at the venue first, then pass --venue-cancel-confirmed (I5)", py_repr(id), py_repr(venue)));
+                    }
+                }
+            }
+            p.flags.push(true);
+            let mut text = vec![format!("Owner write-off: {} (owner: {})", py_strip(&s[0]), py_strip(&s[1])), order.to_string()];
+            text.extend(kept.iter().map(|&i| s[9 + 3 * i].clone()));
+            p.text = text;
+        }
+        // s: snapshot as_of, quote as_of. n: micros(snapshot.as_of - quote.as_of). f: the age limit in seconds.
+        "quote_source" => {
+            let age = n[0] as f64 / 1_000_000.0;
+            let mut source = format!("snapshot:{}", s[0]);
+            if age > f[0] { source = format!("stale-quote:{} {}", s[1], source); }
+            p.text.push(source);
+        }
         _ => return err("value",format!("Unknown EOD decision {op}")),
     }
     Ok(p)
@@ -187,6 +264,152 @@ mod tests {
         assert!(decide("preopen",&[],&[4,5],&[],&[]).unwrap().flags[0]);
         assert!(!decide("preopen",&[],&[5,5],&[],&[]).unwrap().flags[0]);
         assert!(decide("config",&[],&[0],&[false,true,true,true],&[1.0]).is_err());
+    }
+    fn strs(v: &[&str]) -> Vec<String> { v.iter().map(|x| x.to_string()).collect() }
+    /// (kind, message) of a refusal; panics on success.
+    fn refusal(r: R<Plan>) -> (&'static str, String) {
+        match r { Err(e) => (e.kind, e.msg), Ok(_) => panic!("expected a refusal") }
+    }
+    const DATE_REPR: &str = "datetime.date(2026, 9, 23)";
+    const SESSION: &str = "2026-09-23";
+    /// void_check with the session a trading date unless `is_session` says otherwise.
+    fn void_check(is_session: bool, reason: &str, owner: &str, accounts: &[(&str, bool, bool)]) -> R<Plan> {
+        let mut s = strs(&[DATE_REPR, SESSION, reason, owner]);
+        let mut b = vec![true, true, true, is_session];
+        for (account, known, ran) in accounts {
+            s.push(account.to_string());
+            b.extend([true, *known, *ran]);
+        }
+        decide("void_check", &s, &[], &b, &[])
+    }
+    /// writeoff_check on an ACCEPTED order `o1` of `acct` with no fills, no parent, no venue id.
+    /// `children` are (id, state, venue) triples in insertion order.
+    fn writeoff_check(children: &[(&str, &str, &str)]) -> Vec<String> {
+        let mut s = strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", ""]);
+        for (id, state, venue) in children {
+            s.extend(strs(&[*id, *state, *venue]));
+        }
+        let b = [true, true, true, false, true, false];
+        decide("writeoff_check", &s, &[], &b, &[]).map(|p| p.text).unwrap_or_else(|e| panic!("{}", e.msg))
+    }
+    #[test]
+    fn void_check_refuses_each_rule_with_its_message() {
+        let (kind, msg) = refusal(decide("void_check", &strs(&[DATE_REPR, SESSION, "r", "o"]), &[], &[false, true, true, true], &[]));
+        assert_eq!((kind, msg.as_str()), ("runtime_eod", "void session must be a date, got datetime.date(2026, 9, 23)"));
+        assert_eq!(refusal(void_check(true, " ", "o", &[("A", true, false)])).1, "a void needs a non-empty reason (I5)");
+        assert_eq!(refusal(void_check(true, "r", "\t", &[("A", true, false)])).1, "a void needs a non-empty owner (I5)");
+        assert_eq!(refusal(void_check(false, "r", "o", &[("A", true, false)])).1, "2026-09-23 is not a trading session; nothing to void (I5)");
+        assert_eq!(refusal(void_check(true, "r", "o", &[])).1, "a void needs at least one non-empty account (I5)");
+        assert_eq!(refusal(void_check(true, "r", "o", &[("  ", true, false)])).1, "a void needs at least one non-empty account (I5)");
+        assert_eq!(refusal(void_check(true, "r", "o", &[("A", true, false), ("B", true, true)])).1,
+            "B already ran 2026-09-23: a session that ran cannot be voided (I3)");
+    }
+    #[test]
+    fn void_check_lists_unknown_accounts_in_python_repr() {
+        let (kind, msg) = refusal(void_check(true, "r", "o", &[("X", false, false), ("a'b", false, false)]));
+        assert_eq!(kind, "runtime_eod");
+        assert_eq!(msg, "unknown account(s) ['X', \"a'b\"]: not in the ledger (I5)");
+    }
+    #[test]
+    fn void_check_success_returns_stripped_reason_and_owner() {
+        let p = void_check(true, "  why\t", "\u{1c}me\u{1f}", &[("A", true, false), ("B", true, false)]).unwrap_or_else(|e| panic!("{}", e.msg));
+        assert_eq!(p.text, vec!["why".to_string(), "me".to_string()]);
+    }
+    #[test]
+    fn void_check_counts_information_separators_as_blank() {
+        assert_eq!(refusal(void_check(true, "\u{1c}", "o", &[("A", true, false)])).1, "a void needs a non-empty reason (I5)");
+        assert_eq!(refusal(void_check(true, "r", "\u{1d}\u{1e}\u{1f}", &[("A", true, false)])).1, "a void needs a non-empty owner (I5)");
+    }
+    #[test]
+    fn void_check_arity_is_refused() {
+        assert_eq!(refusal(decide("void_check", &strs(&[DATE_REPR, SESSION, "r"]), &[], &[true, true, true], &[])).1, "void_check arity");
+        // one account needs three flags, not two
+        assert_eq!(refusal(decide("void_check", &strs(&[DATE_REPR, SESSION, "r", "o", "A"]), &[], &[true, true, true, true, true, true], &[])).1, "void_check arity");
+    }
+    #[test]
+    fn writeoff_check_refuses_each_rule_with_its_message() {
+        let base = strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", ""]);
+        let run = |s: &[&str], b: &[bool]| refusal(decide("writeoff_check", &strs(s), &[], b, &[]));
+        let ok = [true, true, true, false, true, false];
+        assert_eq!(run(&["", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", ""], &ok).1, "a write-off needs a non-empty reason (I5)");
+        assert_eq!(run(&["reason", "\u{1c}", "acct", "o1", "ACCEPTED", "0", "", "0", ""], &ok).1, "a write-off needs a non-empty owner (I5)");
+        assert_eq!(decide("writeoff_check", &base, &[], &[true, true, false, false, true, false], &[]).err().map(|e| e.msg).as_deref(),
+            Some("unknown account 'acct': not in the ledger (I5)"));
+        assert_eq!(decide("writeoff_check", &strs(&["reason", "owner", "a'b", "o1", "", "0", "", "0", ""]), &[], &[true, true, false, false, true, false], &[])
+            .err().map(|e| e.msg).as_deref(), Some("unknown account \"a'b\": not in the ledger (I5)"));
+        assert_eq!(run(&["reason", "owner", "acct", "o1", "", "0", "", "0", ""], &[true, true, true, false, false, false]).1,
+            "acct has no order 'o1' (I5)");
+        assert_eq!(run(&["reason", "owner", "acct", "o1", "ACCEPTED", "1", "", "0", ""], &ok).1,
+            "order 'o1' has fills: a filled or partly filled order is a position, not a write-off (I5)");
+        assert_eq!(run(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "p1", "2", ""], &ok).1,
+            "order 'o1' protects 'p1', which has fills: writing it off would leave a live position unprotected (I5)");
+        assert_eq!(run(&["reason", "owner", "acct", "o1", "FILLED", "0", "", "0", ""], &ok).1,
+            "order 'o1' is FILLED, not working; nothing to write off (I5)");
+        assert_eq!(run(&["reason", "owner", "acct", "o1", "EXPIRED", "0", "", "0", ""], &ok).1,
+            "order 'o1' is EXPIRED, not working; nothing to write off (I5)");
+        assert_eq!(run(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", "v1"], &[true, true, true, false, true, false]).1,
+            "order 'o1' has venue order id 'v1': the venue may still hold it. Cancel it at the venue first, then pass --venue-cancel-confirmed (I5)");
+    }
+    #[test]
+    fn writeoff_check_already_is_an_idempotent_repeat_even_with_blank_order_fields() {
+        let s = strs(&["reason", "owner", "acct", "o1", "", "0", "", "0", ""]);
+        let p = decide("writeoff_check", &s, &[], &[true, true, true, true, false, false], &[]).unwrap_or_else(|e| panic!("{}", e.msg));
+        assert_eq!(p.flags, vec![false]);
+        assert!(p.text.is_empty());
+    }
+    #[test]
+    fn writeoff_check_partially_filled_with_no_fills_is_not_working() {
+        let s = strs(&["reason", "owner", "acct", "o1", "PARTIALLY_FILLED", "0", "", "0", ""]);
+        let (kind, msg) = refusal(decide("writeoff_check", &s, &[], &[true, true, true, false, true, false], &[]));
+        assert_eq!(kind, "runtime_eod");
+        assert_eq!(msg, "order 'o1' is PARTIALLY_FILLED, not working; nothing to write off (I5)");
+    }
+    #[test]
+    fn writeoff_check_keeps_non_terminal_children_in_insertion_order() {
+        let text = writeoff_check(&[("c1", "ACCEPTED", ""), ("c2", "FILLED", ""), ("c3", "PARTIALLY_FILLED", ""),
+            ("c4", "CANCELLED", ""), ("c5", "SUBMITTED", "")]);
+        assert_eq!(text, strs(&["Owner write-off: reason (owner: owner)", "o1", "c1", "c3", "c5"]));
+    }
+    #[test]
+    fn writeoff_check_refuses_a_venue_id_on_a_live_child_but_not_a_terminal_one() {
+        let (kind, msg) = refusal(decide("writeoff_check",
+            &strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", "", "c1", "ACCEPTED", "v9"]),
+            &[], &[true, true, true, false, true, false], &[]));
+        assert_eq!(kind, "runtime_eod");
+        assert_eq!(msg, "order 'c1' has venue order id 'v9': the venue may still hold it. Cancel it at the venue first, then pass --venue-cancel-confirmed (I5)");
+        let text = writeoff_check(&[("c2", "FILLED", "v8")]);
+        assert_eq!(text, strs(&["Owner write-off: reason (owner: owner)", "o1"]));
+    }
+    #[test]
+    fn writeoff_check_venue_cancel_confirmed_skips_the_venue_checks() {
+        let s = strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", "v1", "c1", "ACCEPTED", "v9"]);
+        let p = decide("writeoff_check", &s, &[], &[true, true, true, false, true, true], &[]).unwrap_or_else(|e| panic!("{}", e.msg));
+        assert_eq!(p.flags, vec![true]);
+        assert_eq!(p.text, strs(&["Owner write-off: reason (owner: owner)", "o1", "c1"]));
+    }
+    #[test]
+    fn writeoff_check_an_empty_parent_skips_the_parent_check() {
+        let s = strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "5", ""]);
+        let p = decide("writeoff_check", &s, &[], &[true, true, true, false, true, false], &[]).unwrap_or_else(|e| panic!("{}", e.msg));
+        assert_eq!(p.flags, vec![true]);
+    }
+    #[test]
+    fn writeoff_check_arity_is_refused() {
+        let b = [true, true, true, false, true, false];
+        assert_eq!(refusal(decide("writeoff_check", &strs(&["r", "o", "a", "o1", "ACCEPTED", "0", "", "0"]), &[], &b, &[])).1, "writeoff_check arity");
+        // a child needs three fields: this one has two
+        assert_eq!(refusal(decide("writeoff_check", &strs(&["r", "o", "a", "o1", "ACCEPTED", "0", "", "0", "", "c1", "ACCEPTED"]), &[], &b, &[])).1, "writeoff_check arity");
+        assert_eq!(refusal(decide("writeoff_check", &strs(&["r", "o", "a", "o1", "ACCEPTED", "0", "", "0", ""]), &[], &b[..5], &[])).1, "writeoff_check arity");
+    }
+    #[test]
+    fn quote_source_is_stale_only_strictly_over_the_limit() {
+        let run = |micros: i64| decide("quote_source", &strs(&["Q1", "Q0"]), &[micros], &[], &[900.0]).unwrap_or_else(|e| panic!("{}", e.msg)).text;
+        // age equal to the limit is not stale
+        assert_eq!(run(900_000_000), strs(&["snapshot:Q1"]));
+        // one microsecond over the limit is stale
+        assert_eq!(run(900_000_001), strs(&["stale-quote:Q0 snapshot:Q1"]));
+        // a negative age is not stale
+        assert_eq!(run(-5_000_000), strs(&["snapshot:Q1"]));
     }
     proptest! {
         #[test]

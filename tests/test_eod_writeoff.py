@@ -24,7 +24,7 @@ from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.signals import OrderIntent
 from trade_engine.eod import EodRunner, EodRunnerConfig
 from trade_engine.eod.runner import EodRunnerError, write_off_order
-from trade_engine.ledger import Event, EventKind, Ledger, OrderStateChange
+from trade_engine.ledger import Event, EventKind, Ledger, OrderStateChange, OrderUpdated
 from trade_engine.oms.manager import OrderManager
 from trade_engine.sim import SimBroker
 
@@ -112,6 +112,29 @@ def test_entry_and_both_children_are_cancelled_with_zero_pnl(rig) -> None:
     text = [e.payload.reason for e in ledger.events_of_kind(EventKind.ORDER_CANCELLED)]
     assert text[0] == f"Owner write-off: {REASON} (owner: {OWNER})"
     assert text[1].endswith(f"(bracket child of {bracket.entry.order_id})")
+
+
+def test_a_reason_with_surrounding_whitespace_is_written_stripped(rig) -> None:
+    ledger, clock, _b, _m, bracket = rig
+    _writeoff(ledger, clock, bracket.entry.order_id, reason=f"  {REASON}\t", owner=f" {OWNER} ",
+              venue_cancel_confirmed=True)
+    text = [e.payload.reason for e in ledger.events_of_kind(EventKind.ORDER_CANCELLED)]
+    assert text[0] == f"Owner write-off: {REASON} (owner: {OWNER})"
+
+
+def test_a_partly_filled_state_with_no_fills_is_not_working(rig) -> None:
+    ledger, clock, _b, _m, bracket = rig
+    partly = replace(bracket.entry, state=OrderState.PARTIALLY_FILLED)
+    ledger.append(Event(
+        account=ACCOUNT, kind=EventKind.ORDER_UPDATED,
+        payload=OrderUpdated(partly, reason="test: partly filled, zero fills"),
+        ts_utc=PREV_EOD, command_id="test-partly-filled-no-fills",
+    ))
+    assert ledger.state(ACCOUNT).orders[bracket.entry.order_id].state is OrderState.PARTIALLY_FILLED
+    size = _count(ledger)
+    with pytest.raises(EodRunnerError, match="not working"):
+        _writeoff(ledger, clock, bracket.entry.order_id)
+    assert _count(ledger) == size
 
 
 def test_the_session_no_longer_asks_for_the_instruments_bars(rig) -> None:

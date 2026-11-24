@@ -222,6 +222,26 @@ def test_an_option_quote_just_within_the_limit_keeps_the_plain_snapshot_source(r
     assert rig.marks(S2)[P270] == (D("10.35"), f"snapshot:{snap_time(S2).isoformat()}")
 
 
+def test_an_option_quote_exactly_at_the_limit_is_not_stale(rig) -> None:
+    rig.strategy.entries[S1] = [csp()]
+    rig.run(S1)
+    early = chain_quoting(S2, {}, at=snap_time(S2) - timedelta(minutes=30))
+    at_limit = snap_time(S2) - timedelta(seconds=900)
+    rig.run(S2, chain_snapshots=lambda s: [early, chain_quoting(s, {P270: at_limit})])
+    assert rig.marks(S2)[P270] == (D("10.35"), f"snapshot:{snap_time(S2).isoformat()}")
+
+
+def test_an_option_quote_one_microsecond_over_the_limit_is_stale(rig) -> None:
+    rig.strategy.entries[S1] = [csp()]
+    rig.run(S1)
+    early = chain_quoting(S2, {}, at=snap_time(S2) - timedelta(minutes=30))
+    just_over = snap_time(S2) - timedelta(seconds=900, microseconds=1)
+    rig.run(S2, chain_snapshots=lambda s: [early, chain_quoting(s, {P270: just_over})])
+    price, source = rig.marks(S2)[P270]
+    assert price == D("10.35")
+    assert source.startswith(f"stale-quote:{just_over.isoformat()} ")
+
+
 @pytest.mark.parametrize("limit", [0, -5, True, float("nan"), float("inf")])
 def test_the_mark_quote_age_limit_must_be_a_positive_finite_number(rig, limit) -> None:
     with pytest.raises(ValueError):
