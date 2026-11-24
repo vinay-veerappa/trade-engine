@@ -68,8 +68,6 @@
           "symbols": [
             "IntradayService.run",
             "IntradayService._tick",
-            "IntradayService._rehydrate",
-            "IntradayService._emergency",
             "IntradayService._close_mark",
             "IntradayService._write_heartbeat",
             "IntradayService._read_heartbeat"
