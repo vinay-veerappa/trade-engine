@@ -60,7 +60,6 @@ ENTRY_POINTS = (
     "trade_engine.eod.cli",
     "trade_engine.server.http",
     "trade_engine.runtime.plugins",
-    "trade_engine._lifecycle_runtime",
 )
 
 HEADER_RE = re.compile(
