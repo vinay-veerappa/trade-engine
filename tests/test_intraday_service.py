@@ -892,6 +892,38 @@ def test_the_close_mark_skips_a_snapshot_whose_option_quote_is_older_than_the_li
     rig.ledger.close()
 
 
+def run_to_close_on_afternoon_chains(tmp_path, name: str, **afternoon) -> Rig:
+    """Hold the spread from 09:40 and run to 15:59 on the afternoon chains ``afternoon`` builds."""
+    rig = Rig(tmp_path, name=name)
+    rig.heartbeat = tmp_path / f"{name}.json"
+    rig.strategy.actions[at_et(SESSION, 9, 40)] = [spread("o-1")]
+    rig.snapshots = [snap(SESSION, 9, 40)]
+    rig.minutes((15, 50), (15, 59), **afternoon)
+    # As in the near-close test, a seven-hour quote limit keeps the 09:40 entry live all afternoon.
+    config = dict(flat_at=time(16, 0), flat_before_close=timedelta(seconds=1),
+                  entry_before_close=timedelta(seconds=1), max_quote_age_seconds=7 * 3600.0)
+    rig.service(**config).run(SESSION, start_at=at_et(SESSION, 9, 40))
+    return rig
+
+
+def test_a_held_quote_stale_at_the_close_leaves_marks_to_the_after_close_pass(tmp_path) -> None:
+    # The short leg was last quoted at 08:30: 7.5 hours before the close, past the 7-hour limit.
+    rig = run_to_close_on_afternoon_chains(tmp_path, "close-stale.db", quoted={SHORT: at_et(SESSION, 8, 30)})
+    assert rig.held(SHORT) == -1
+    assert not rig.events("intraday:mark:")
+    assert rig.events(f"intraday:intraday:{ACCOUNT}:{SESSION}", EventKind.EOD_RUN)
+    rig.ledger.close()
+
+
+def test_a_held_contract_with_a_zero_mid_at_the_close_leaves_marks_to_the_after_close_pass(tmp_path) -> None:
+    rig = run_to_close_on_afternoon_chains(tmp_path, "close-zero.db",
+                                           quotes={SHORT: ("0", "0"), LONG: BOOK["long"]})
+    assert rig.held(SHORT) == -1
+    assert not rig.events("intraday:mark:")
+    assert rig.events(f"intraday:intraday:{ACCOUNT}:{SESSION}", EventKind.EOD_RUN)
+    rig.ledger.close()
+
+
 # -- unexpected errors ----------------------------------------------------------------------
 
 

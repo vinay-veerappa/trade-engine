@@ -23,7 +23,7 @@ from trade_engine.ledger.events import (
     VenueReconcile,
     mirror_account,
 )
-from trade_engine.ledger.mirror import MirrorState, ticket_contracts
+from trade_engine.ledger.mirror import MirrorState
 from trade_engine.ledger.state import LedgerFoldError, halted_venues, mirror_state
 from trade_engine.tos_paper import _rs
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker, VenueUnreadable
@@ -83,6 +83,43 @@ def _halted(ledger: Ledger) -> frozenset[str]:
 # -- what to mirror --------------------------------------------------------------------
 
 
+def _items(venue: str, rows: Sequence[dict]) -> list[tuple[object, str]]:
+    """Rust's ``{payload, command_id}`` rows as the (payload, command suffix) pairs :func:`_append` takes."""
+    return [(codec.decode_payload(r["payload"]), r["command_id"].removeprefix(f"mirror:{venue}:")) for r in rows]
+
+
+def _decoded_orders(ledger: Ledger, res: dict) -> tuple[Order, ...]:
+    """Rust's chosen orders, each as the sim holds it now (the decoded copy when the sim lost it)."""
+    found: list[Order] = []
+    for item in res["orders"]:
+        decoded = codec.decode_payload(item)
+        state = ledger.state(decoded.account_id)
+        found.append(state.orders.get(decoded.order_id, decoded))
+    return tuple(found)
+
+
+def _accounts_data(ledger: Ledger, binding: MirrorBinding) -> dict:
+    """Each mirrored account's EOD markers, created-order events and current orders: the batch doors' input."""
+    accounts_data = {}
+    for account in binding.mirrored_accounts:
+        markers = [
+            {"seq": e.seq, "session": e.payload.session.isoformat(), "job": e.payload.job}
+            for e in ledger.events_of_kind(EventKind.EOD_RUN, account=account)
+        ]
+        created_events = [
+            {"seq": e.seq, "orders": [codec.encode_payload(o) for o in e.payload.orders]}
+            for e in ledger.events_of_kind(EventKind.ORDERS_CREATED, account=account)
+        ]
+        state = ledger.state(account)
+        current_orders = [codec.encode_payload(o) for o in state.orders.values()]
+        accounts_data[account] = {
+            "markers": markers,
+            "created_events": created_events,
+            "current_orders": current_orders,
+        }
+    return accounts_data
+
+
 def working_orders(ledger: Ledger, binding: MirrorBinding) -> tuple[Order, ...]:
     """Every entry the mirrored accounts' sim still works that this venue has not handled.
 
@@ -100,12 +137,7 @@ def working_orders(ledger: Ledger, binding: MirrorBinding) -> tuple[Order, ...]:
         "mirror": codec.canon(mirror),
     }
     res = _rs.session_decide("session_working_orders", doc)
-    found: list[Order] = []
-    for item in res["orders"]:
-        decoded = codec.decode_payload(item)
-        state = ledger.state(decoded.account_id)
-        found.append(state.orders.get(decoded.order_id, decoded))
-    return tuple(found)
+    return _decoded_orders(ledger, res)
 
 
 def pending_orders(
@@ -126,23 +158,7 @@ def pending_orders(
     """
     close = calendar.session_close(session)
     mirror = mirror_of(ledger, binding.venue_account)
-    accounts_data = {}
-    for account in binding.mirrored_accounts:
-        markers = [
-            {"seq": e.seq, "session": e.payload.session.isoformat(), "job": e.payload.job}
-            for e in ledger.events_of_kind(EventKind.EOD_RUN, account=account)
-        ]
-        created_events = [
-            {"seq": e.seq, "orders": [codec.encode_payload(o) for o in e.payload.orders]}
-            for e in ledger.events_of_kind(EventKind.ORDERS_CREATED, account=account)
-        ]
-        state = ledger.state(account)
-        current_orders = [codec.encode_payload(o) for o in state.orders.values()]
-        accounts_data[account] = {
-            "markers": markers,
-            "created_events": created_events,
-            "current_orders": current_orders,
-        }
+    accounts_data = _accounts_data(ledger, binding)
     doc = {
         "mirrored_accounts": list(binding.mirrored_accounts),
         "accounts_data": accounts_data,
@@ -152,12 +168,7 @@ def pending_orders(
         "mirror": codec.canon(mirror),
     }
     res = _rs.session_decide("session_pending_orders", doc)
-    found: list[Order] = []
-    for item in res["orders"]:
-        decoded = codec.decode_payload(item)
-        state = ledger.state(decoded.account_id)
-        found.append(state.orders.get(decoded.order_id, decoded))
-    return tuple(found)
+    return _decoded_orders(ledger, res)
 
 
 def morning_orders(
@@ -179,23 +190,7 @@ def morning_orders(
     """
     session_open = calendar.session_open(session)
     mirror = mirror_of(ledger, binding.venue_account)
-    accounts_data = {}
-    for account in binding.mirrored_accounts:
-        markers = [
-            {"seq": e.seq, "session": e.payload.session.isoformat(), "job": e.payload.job}
-            for e in ledger.events_of_kind(EventKind.EOD_RUN, account=account)
-        ]
-        created_events = [
-            {"seq": e.seq, "orders": [codec.encode_payload(o) for o in e.payload.orders]}
-            for e in ledger.events_of_kind(EventKind.ORDERS_CREATED, account=account)
-        ]
-        state = ledger.state(account)
-        current_orders = [codec.encode_payload(o) for o in state.orders.values()]
-        accounts_data[account] = {
-            "markers": markers,
-            "created_events": created_events,
-            "current_orders": current_orders,
-        }
+    accounts_data = _accounts_data(ledger, binding)
     doc = {
         "mirrored_accounts": list(binding.mirrored_accounts),
         "accounts_data": accounts_data,
@@ -205,12 +200,7 @@ def morning_orders(
         "mirror": codec.canon(mirror),
     }
     res = _rs.session_decide("session_morning_orders", doc)
-    found: list[Order] = []
-    for item in res["orders"]:
-        decoded = codec.decode_payload(item)
-        state = ledger.state(decoded.account_id)
-        found.append(state.orders.get(decoded.order_id, decoded))
-    return tuple(found)
+    return _decoded_orders(ledger, res)
 
 
 # -- the session -----------------------------------------------------------------------
@@ -296,30 +286,27 @@ def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock, settle=None) 
         expired, unsettled = _settle_pass(ledger, venue, clock, settle)
         written = _reconcile(ledger, broker, clock, refused.reconcile, "collect")
         return MirrorRunReport(venue=venue, reconcile=written, halted=True, expired=expired, unsettled=unsettled)
-    items: list[tuple[object, str]] = [
-        (fill, f"fill:{fill.ticket_key}:{fill.filled}") for fill in collection.fills
-    ] + [
-        (close, f"book:{close.ticket_key}:{close.book_status.value}") for close in collection.closes
-    ]
+    collected: list[object] = [*collection.fills, *collection.closes]
+    ids = _rs.session_decide("session_collect_items", {
+        "venue": venue,
+        # str(Decimal), not the codec's canon text: the ids are idempotency keys already in ledgers
+        "fills": [{"ticket_key": f.ticket_key, "filled": str(f.filled)} for f in collection.fills],
+        "closes": [{"ticket_key": c.ticket_key, "book_status": None if c.book_status is None else c.book_status.value}
+                   for c in collection.closes],
+    })["command_ids"]
+    items = [(obj, cid.removeprefix(f"mirror:{venue}:")) for obj, cid in zip(collected, ids, strict=True)]
     try:
         written = _append(ledger, venue, clock, items)
     except LedgerFoldError as err:  # the mirror cannot book these fills honestly: halt
         expired, unsettled = _settle_pass(ledger, venue, clock, settle)
-        tickets = mirror_of(ledger, venue).tickets
-        names = sorted(
-            {
-                contract.symbol
-                for fill in collection.fills
-                for contract in ticket_contracts(tickets[fill.ticket_key].queued, fill.filled)
-            }
-        ) or [venue]
-        halt = VenueReconcile(
-            venue=venue,
-            as_of=clock.now_utc(),
-            reconciled=False,
-            drift=tuple(names),
-            note=f"the mirror cannot book the venue's fills ({err}); venue halted",
-        )
+        doc = {
+            "venue": venue,
+            "as_of": clock.now_utc().isoformat(),
+            "err": str(err),
+            "mirror": codec.canon(mirror_of(ledger, venue)),
+            "fills": [{"ticket_key": f.ticket_key, "filled": str(f.filled)} for f in collection.fills],
+        }
+        halt = codec.decode_payload(_rs.session_decide("session_fold_halt", doc)["event"])
         written_halt = _reconcile(ledger, broker, clock, halt, "collect")
         broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
         return MirrorRunReport(venue=venue, reconcile=written_halt, halted=True, expired=expired, unsettled=unsettled)
@@ -434,11 +421,7 @@ def run_mirror(
             "now": now.isoformat(),
         }
         wa_res = _rs.session_decide("session_prepare_write_ahead", doc_wa)
-        items = [
-            (codec.decode_payload(it["payload"]), it["command_id"].removeprefix(f"mirror:{venue}:"))
-            for it in wa_res["items"]
-        ]
-        written = _append(ledger, venue, clock, items)
+        written = _append(ledger, venue, clock, _items(venue, wa_res["items"]))
         return _with(collected, refused=tuple(written), waiting=waiting)
     if not broker.halted:
         # Read the venue BEFORE the write-ahead: a venue that cannot be asked defers the whole batch
@@ -467,10 +450,7 @@ def run_mirror(
         "now": now.isoformat(),
     }
     wa_res = _rs.session_decide("session_prepare_write_ahead", doc_wa)
-    items = [
-        (codec.decode_payload(it["payload"]), it["command_id"].removeprefix(f"mirror:{venue}:"))
-        for it in wa_res["items"]
-    ]
+    items = _items(venue, wa_res["items"])
     try:
         written = _append(ledger, venue, clock, items)  # write-ahead: before any send
     except Exception:
@@ -491,10 +471,7 @@ def run_mirror(
         "proven": proven_input,
     }
     drain_res = _rs.session_decide("session_build_drain_acks", doc_drain)
-    acks_items = [
-        (codec.decode_payload(a["payload"]), a["command_id"].removeprefix(f"mirror:{venue}:"))
-        for a in drain_res["acks"]
-    ]
+    acks_items = _items(venue, drain_res["acks"])
     acked = _append(ledger, venue, clock, acks_items)
     if _halt_unproven(ledger, broker, clock, "drain") is not None:
         broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))

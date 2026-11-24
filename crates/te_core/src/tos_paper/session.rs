@@ -18,7 +18,7 @@ use chrono::NaiveDate;
 
 use super::cover::{self, Sold};
 use super::netting::Ticket;
-use super::wire::{jstr, obj, req, req_arr, req_str};
+use super::wire::{dec_of, jstr, obj, req, req_arr, req_dec, req_str, wire};
 use super::{SESSION, VALUE};
 use crate::ledger::codec;
 use crate::ledger::json::Json;
@@ -625,6 +625,64 @@ pub fn halt_unproven_op(doc: &Json) -> R<Json> {
     }
 }
 
+/// The `LedgerFoldError` halt of `session._collect`: the venue's fills the mirror cannot book.
+///
+/// `drift` holds the sorted, de-duplicated symbols of every fill's contracts, or `[venue]` when
+/// there are none. A `ticket_key` missing from the mirror refuses with `"key"` (Python's `KeyError`).
+/// The command id of each collected fill and book close, fills first, in input order.
+///
+/// These ids are idempotency keys already stored in live ledgers, so `filled` is the host's
+/// own decimal text (`str(Decimal)`), joined verbatim: `"2.50"` stays `2.50` and `"1E+1"`
+/// stays `1E+1`. It is checked to be a decimal but never re-formatted (the codec's canon
+/// text differs, and a different spelling would book a fill twice).
+pub fn collect_items_op(doc: &Json) -> R<Json> {
+    let venue = req_str(doc, "venue")?;
+    let mut ids = Vec::new();
+    for fill in req_arr(doc, "fills")? {
+        let key = req_str(fill, "ticket_key")?;
+        let filled = req_str(fill, "filled")?;
+        dec_of(filled)?;
+        ids.push(jstr(format!("mirror:{venue}:fill:{key}:{filled}")));
+    }
+    for close in req_arr(doc, "closes")? {
+        let key = req_str(close, "ticket_key")?;
+        let status = match close.get("book_status") {
+            Some(Json::Str(s)) => s.as_str(),
+            None | Some(Json::Null) => return err(VALUE, format!("mirror ack {key:?} has no book_status")),
+            Some(other) => return wire(format!("\"book_status\" must be a string or null, got {}", other.type_name())),
+        };
+        ids.push(jstr(format!("mirror:{venue}:book:{key}:{status}")));
+    }
+    Ok(obj(vec![("command_ids", Json::Arr(ids))]))
+}
+
+pub fn fold_halt_op(doc: &Json) -> R<Json> {
+    let venue = req_str(doc, "venue")?;
+    let (as_of, _) = parse_datetime(req_str(doc, "as_of")?)?;
+    let fold_err = req_str(doc, "err")?;
+    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
+    let mut symbols = BTreeSet::new();
+    for fill in req_arr(doc, "fills")? {
+        let key = req_str(fill, "ticket_key")?;
+        let filled = req_dec(fill, "filled")?;
+        let Some(ticket) = mirror.tickets.get(key) else {
+            return err("key", format!("no mirror ticket {key:?}"));
+        };
+        for (contract, _) in ticket_contracts(&ticket.queued, &filled)?.iter() {
+            symbols.insert(contract.symbol()?);
+        }
+    }
+    let drift: Vec<String> = if symbols.is_empty() { vec![venue.to_string()] } else { symbols.into_iter().collect() };
+    let event = VenueReconcile {
+        venue: venue.to_string(),
+        as_of,
+        reconciled: false,
+        drift,
+        note: Some(format!("the mirror cannot book the venue's fills ({fold_err}); venue halted")),
+    };
+    Ok(obj(vec![("event", codec::enc_obj(&Obj::Reconcile(event))?)]))
+}
+
 pub fn clear_halt_op(doc: &Json) -> R<Json> {
     let venue = req_str(doc, "venue")?;
     let reason = req_str(doc, "reason")?;
@@ -993,6 +1051,8 @@ pub fn decide(op: &str, text: &str) -> Result<String, crate::ledger::model::LErr
     let out = match op {
         "session_deferred_why" | "deferred_why" => deferred_why_op(&doc)?,
         "session_halt_unproven" | "halt_unproven" => halt_unproven_op(&doc)?,
+        "session_collect_items" | "collect_items" => collect_items_op(&doc)?,
+        "session_fold_halt" | "fold_halt" => fold_halt_op(&doc)?,
         "session_clear_halt" | "clear_halt" => clear_halt_op(&doc)?,
         "session_reconcile_command_id" | "reconcile_command_id" => reconcile_command_id_op(&doc)?,
         "session_working_orders" | "working_orders" => working_orders_op(&doc)?,
@@ -1005,4 +1065,181 @@ pub fn decide(op: &str, text: &str) -> Result<String, crate::ledger::model::LErr
         _ => return err(crate::tos_paper::WIRE, format!("unknown tos_paper_session op {op:?}")),
     };
     Ok(crate::ledger::json::dumps(&out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ledger::canon::canon_mirror_pub;
+    use crate::ledger::model::{MirrorAllocation, MirrorQueued, OrderType, Tif};
+    use crate::ledger::ops::OMap;
+    use crate::money::Money;
+
+    fn collect(doc: Json) -> R<Vec<String>> {
+        let out = collect_items_op(&doc)?;
+        let Some(Json::Arr(ids)) = out.get("command_ids") else { panic!("no command_ids") };
+        Ok(ids.iter().map(|j| match j { Json::Str(s) => s.clone(), _ => panic!("id not a string") }).collect())
+    }
+
+    fn fill_row(key: &str, filled: &str) -> Json {
+        obj(vec![("ticket_key", jstr(key)), ("filled", jstr(filled))])
+    }
+
+    fn close_row(key: &str, status: Json) -> Json {
+        obj(vec![("ticket_key", jstr(key)), ("book_status", status)])
+    }
+
+    #[test]
+    fn collect_items_keeps_order_and_exact_ids() {
+        let doc = obj(vec![
+            ("venue", jstr("PM-A")),
+            ("fills", Json::Arr(vec![fill_row("t1", "2.50"), fill_row("t2", "1E+1"), fill_row("t3", "0.000001")])),
+            ("closes", Json::Arr(vec![close_row("t4", jstr("CANCELLED"))])),
+        ]);
+        assert_eq!(
+            collect(doc).unwrap(),
+            vec![
+                "mirror:PM-A:fill:t1:2.50",
+                "mirror:PM-A:fill:t2:1E+1",
+                "mirror:PM-A:fill:t3:0.000001",
+                "mirror:PM-A:book:t4:CANCELLED",
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_items_empty_gives_empty() {
+        let doc = obj(vec![("venue", jstr("PM-A")), ("fills", Json::Arr(vec![])), ("closes", Json::Arr(vec![]))]);
+        assert!(collect(doc).unwrap().is_empty());
+    }
+
+    #[test]
+    fn collect_items_null_book_status_refuses_value() {
+        let doc = obj(vec![
+            ("venue", jstr("PM-A")),
+            ("fills", Json::Arr(vec![])),
+            ("closes", Json::Arr(vec![close_row("t4", Json::Null)])),
+        ]);
+        assert_eq!(collect(doc).unwrap_err().kind, VALUE);
+    }
+
+    #[test]
+    fn collect_items_rejects_a_non_decimal_fill() {
+        let doc = obj(vec![
+            ("venue", jstr("PM-A")),
+            ("fills", Json::Arr(vec![fill_row("t1", "two")])),
+            ("closes", Json::Arr(vec![])),
+        ]);
+        assert!(collect(doc).is_err());
+    }
+
+    fn queued(key: &str, symbol: &str, side: Side) -> MirrorQueued {
+        MirrorQueued {
+            venue: "PM_A".to_string(),
+            ticket_key: key.to_string(),
+            instrument: Instrument::Equity(symbol.to_string()),
+            side,
+            quantity: Money::int(5),
+            order_type: OrderType::Market,
+            limit_price: None,
+            tif: Tif::Day,
+            allocations: vec![MirrorAllocation {
+                strategy_order_id: format!("{key}-order"),
+                strategy_account: "ACCT_A".to_string(),
+                quantity: Money::int(5),
+            }],
+            at: parse_datetime("2026-09-24T14:00:00+00:00").unwrap().0,
+        }
+    }
+
+    /// The canon mirror holding one open ticket per queued order, keyed by its ticket key.
+    fn mirror_of_tickets(queueds: &[MirrorQueued]) -> Json {
+        let mut state = MirrorState::default();
+        for q in queueds {
+            let ticket = MirrorTicketState {
+                queued: q.clone(),
+                ack: None,
+                venue_order_id: Some("5400000001".to_string()),
+                book_status: None,
+                filled: Money::int(0),
+                avg_price: None,
+                closed: false,
+                allocated: OMap::new(),
+            };
+            state.tickets.insert(q.ticket_key.clone(), q.ticket_key.clone(), ticket);
+        }
+        canon_mirror_pub(&state).unwrap()
+    }
+
+    fn fold_doc(mirror: Json, fills: &[(&str, &str)]) -> Json {
+        let fills = fills
+            .iter()
+            .map(|(key, filled)| obj(vec![("ticket_key", jstr(*key)), ("filled", jstr(*filled))]))
+            .collect();
+        obj(vec![
+            ("venue", jstr("PM_A")),
+            ("as_of", jstr("2026-09-24T16:00:00+00:00")),
+            ("err", jstr("ledger refused")),
+            ("mirror", mirror),
+            ("fills", Json::Arr(fills)),
+        ])
+    }
+
+    fn event_fields(out: &Json) -> &Json {
+        out.get("event").unwrap().get("f").unwrap()
+    }
+
+    fn drift_of(out: &Json) -> Vec<String> {
+        match event_fields(out).get("drift").unwrap().get("t").unwrap() {
+            Json::Arr(items) => items
+                .iter()
+                .map(|s| match s {
+                    Json::Str(text) => text.clone(),
+                    other => panic!("drift entry is not a string: {other:?}"),
+                })
+                .collect(),
+            other => panic!("drift is not a tuple: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_halt_two_fills_on_one_contract_give_one_symbol() {
+        let mirror = mirror_of_tickets(&[queued("k1", "SPX", Side::Buy)]);
+        let out = fold_halt_op(&fold_doc(mirror, &[("k1", "2.50"), ("k1", "1E+1")])).unwrap();
+        assert_eq!(drift_of(&out), vec!["SPX".to_string()]);
+    }
+
+    #[test]
+    fn fold_halt_symbols_are_sorted_and_de_duplicated() {
+        let mirror = mirror_of_tickets(&[queued("k1", "SPY", Side::Sell), queued("k2", "SPX", Side::Buy)]);
+        let out = fold_halt_op(&fold_doc(mirror, &[("k1", "1"), ("k2", "1"), ("k1", "3")])).unwrap();
+        assert_eq!(drift_of(&out), vec!["SPX".to_string(), "SPY".to_string()]);
+    }
+
+    #[test]
+    fn fold_halt_with_no_fills_drifts_the_venue_itself() {
+        let mirror = mirror_of_tickets(&[queued("k1", "SPX", Side::Buy)]);
+        let out = fold_halt_op(&fold_doc(mirror, &[])).unwrap();
+        assert_eq!(drift_of(&out), vec!["PM_A".to_string()]);
+    }
+
+    #[test]
+    fn fold_halt_unknown_ticket_refuses_with_key() {
+        let mirror = mirror_of_tickets(&[queued("k1", "SPX", Side::Buy)]);
+        match fold_halt_op(&fold_doc(mirror, &[("missing", "1")])) {
+            Err(e) => assert_eq!(e.kind, "key"),
+            Ok(out) => panic!("expected a key refusal, got {out:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_halt_note_and_flags_are_exact() {
+        let mirror = mirror_of_tickets(&[queued("k1", "SPX", Side::Buy)]);
+        let out = fold_halt_op(&fold_doc(mirror, &[("k1", "1")])).unwrap();
+        let f = event_fields(&out);
+        assert_eq!(f.get("venue"), Some(&jstr("PM_A")));
+        assert_eq!(f.get("reconciled"), Some(&Json::Bool(false)));
+        assert_eq!(f.get("note"), Some(&jstr("the mirror cannot book the venue's fills (ledger refused); venue halted")));
+        assert_eq!(f.get("as_of").unwrap().get("T"), Some(&jstr("2026-09-24T16:00:00+00:00")));
+    }
 }
