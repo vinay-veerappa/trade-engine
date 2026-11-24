@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from urllib.parse import quote, urlsplit
 
-from trade_engine.domain.instruments import Instrument, Side
+from trade_engine.domain.instruments import Future, Instrument, Side
 from trade_engine.domain.orders import Order
 from trade_engine.interfaces.broker import (
     OrderChanges,
@@ -390,11 +390,19 @@ def _total(allocations: tuple[VenueOrderAllocation, ...]) -> Decimal:
 
 
 def _root(instrument: Instrument) -> str | None:
-    try:
-        symbol = instrument.symbol
-    except NotImplementedError:
-        return None
-    return symbol if isinstance(symbol, str) and ROOT_PATTERN.match(symbol) else None
+    """The instrument text RiskGuard's schema takes: a futures ROOT (``NQ``), else the symbol.
+
+    A dated future's ``symbol`` is the contract (``NQZ6``), which RiskGuard never matches, so a
+    future sends its root instead. Either way the result must pass ``ROOT_PATTERN``.
+    """
+    if isinstance(instrument, Future):
+        text = instrument.root
+    else:
+        try:
+            text = instrument.symbol
+        except NotImplementedError:
+            return None
+    return text if isinstance(text, str) and ROOT_PATTERN.match(text) else None
 
 
 def _json_number(quantity: Decimal) -> int | float:
