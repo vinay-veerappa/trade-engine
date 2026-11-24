@@ -841,7 +841,7 @@ pub fn derive_risk_context(state: &AccountState, instrument: &Instrument) -> R<R
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ledger::fold::fold_account;
     use crate::ledger::model::{
@@ -851,7 +851,7 @@ mod tests {
 
     /// An in-memory ledger: events in seq order, and a command index.
     #[derive(Default)]
-    struct MemLedger {
+    pub(crate) struct MemLedger {
         events: Vec<Event>,
         commands: HashMap<String, usize>,
     }
@@ -917,11 +917,11 @@ mod tests {
         }
     }
 
-    fn at(s: &str) -> DateTime {
+    pub(crate) fn at(s: &str) -> DateTime {
         parse_datetime(s).expect("iso").0
     }
 
-    fn money(s: &str) -> Money {
+    pub(crate) fn money(s: &str) -> Money {
         Money::parse(s).expect("decimal")
     }
 
@@ -933,7 +933,7 @@ mod tests {
         FixedClock(at("2026-11-24T12:00:00-05:00"))
     }
 
-    fn put(l: &mut MemLedger, account: &str, kind: EventKind, payload: Obj, command: &str) {
+    pub(crate) fn put(l: &mut MemLedger, account: &str, kind: EventKind, payload: Obj, command: &str) {
         l.append(vec![event(account, kind, payload, at("2026-11-24T12:00:00-05:00"), Some(command.to_string()))])
             .expect("append");
     }

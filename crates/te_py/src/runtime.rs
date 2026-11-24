@@ -11,6 +11,8 @@ mod options_flow;
 mod equity_flow;
 #[path = "intraday_flow.rs"]
 mod intraday_flow;
+#[path = "lifecycle_pass.rs"]
+mod lifecycle_pass;
 
 pub(super) fn flow_refusal(error: te_core::ledger::model::LErr) -> PyErr {
     Python::with_gil(|py| {
@@ -34,5 +36,6 @@ pub fn register(m: &Bound<'_,PyModule>) -> PyResult<()> {
     options_flow::register(m)?;
     equity_flow::register(m)?;
     intraday_flow::register(m)?;
+    lifecycle_pass::register(m)?;
     Ok(())
 }
