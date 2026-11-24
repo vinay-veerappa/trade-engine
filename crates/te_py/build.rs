@@ -50,6 +50,15 @@ fn main() {
             }
         }
     }
+    // Emitting any rerun-if-changed stops cargo from rerunning this script on
+    // source edits, so the `-dirty` stamp would go stale: commit X, build,
+    // edit, rebuild, and the binary carries the edit while claiming a clean X.
+    // Watch the compiled sources of te.exe (this crate, its path deps and the
+    // runtime binary) so an edit re-stamps; a Python-only edit does not change
+    // the binary and needs no rebuild.
+    for path in ["src", "../te_core/src", "../te_host/src", "../te_runtime/src", "../Cargo.lock"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     // On a branch, HEAD only names a ref: the ref's file moves without the
     // HEAD file moving, so watch it as well.
     if let Some(name) = git(dir, &["rev-parse", "--symbolic-full-name", "HEAD"]) {
