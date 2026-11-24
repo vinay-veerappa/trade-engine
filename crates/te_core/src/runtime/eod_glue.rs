@@ -87,7 +87,7 @@ fn text(value: &Money) -> String {
     ops::s(value)
 }
 
-fn iso(d: NaiveDate) -> String {
+pub(crate) fn iso(d: NaiveDate) -> String {
     format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day())
 }
 
@@ -102,7 +102,7 @@ fn micros(dt: &DateTime) -> i64 {
     secs * 1_000_000 + us as i64
 }
 
-fn event(account: &str, kind: EventKind, payload: Obj, ts: DateTime, command: Option<String>) -> Event {
+pub(crate) fn event(account: &str, kind: EventKind, payload: Obj, ts: DateTime, command: Option<String>) -> Event {
     Event {
         account: account.to_string(),
         kind,
@@ -124,7 +124,7 @@ fn to_chrono_utc(dt: &DateTime) -> R<chrono::DateTime<Utc>> {
 }
 
 /// `(kind, command_id or "")` pairs, flattened, for the typed `count_events` rule.
-fn kind_rows<L: Ledger>(l: &L, account: &str) -> R<Vec<String>> {
+pub(crate) fn kind_rows<L: Ledger>(l: &L, account: &str) -> R<Vec<String>> {
     let mut rows = Vec::new();
     for e in l.events(account)? {
         rows.push(e.kind.value().to_string());
@@ -815,7 +815,7 @@ pub fn derive_risk_context(state: &AccountState, instrument: &Instrument) -> R<R
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ledger::fold::fold_account;
     use crate::ledger::model::{
@@ -825,7 +825,7 @@ mod tests {
 
     /// An in-memory ledger: events in seq order, and a command index.
     #[derive(Default)]
-    struct MemLedger {
+    pub(crate) struct MemLedger {
         events: Vec<Event>,
         commands: HashMap<String, usize>,
     }
@@ -883,7 +883,7 @@ mod tests {
         }
     }
 
-    struct FixedClock(DateTime);
+    pub(crate) struct FixedClock(pub(crate) DateTime);
 
     impl Clock for FixedClock {
         fn now_utc(&self) -> DateTime {

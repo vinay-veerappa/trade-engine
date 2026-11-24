@@ -122,7 +122,7 @@ def seed_previous(rig):
 
 def test_native_bindings_exposed():
     for name in ("run", "tick", "wait", "advance", "refuse", "emergency", "flatten", "cancel",
-                 "restore", "close", "live_guard", "previous_guard", "heartbeat_write", "heartbeat_read"):
+                 "restore", "close", "live_guard", "heartbeat_write", "heartbeat_read"):
         assert callable(getattr(trade_engine_rs, f"intraday_{name}"))
 
 

@@ -416,13 +416,6 @@ def test_a_flatten_the_venue_rejects_is_asked_again_under_a_new_id(rig) -> None:
     assert rig.held(SHORT) == 0 and rig.held(LONG) == 0
 
 
-def test_the_deadlines_follow_the_rules_on_a_full_day_and_pull_in_on_an_early_close(rig) -> None:
-    service = rig.service()
-    assert service._deadlines(SESSION) == (at_et(SESSION, 12, 0), at_et(SESSION, 15, 30))
-    assert service._deadlines(EARLY) == (at_et(EARLY, 11, 30), at_et(EARLY, 12, 30))
-    assert service._deadlines(date(2026, 12, 24)) == (at_et(date(2026, 12, 24), 11, 30), at_et(date(2026, 12, 24), 12, 30))
-
-
 def test_an_early_close_sweeps_at_1230_and_ends_entries_at_1130(tmp_path) -> None:
     rig = Rig(tmp_path, session=EARLY)
     short, long = legs(EARLY)
@@ -881,14 +874,15 @@ def test_the_close_mark_skips_a_snapshot_whose_option_quote_is_older_than_the_li
     config = dict(flat_at=time(16, 0), flat_before_close=timedelta(seconds=1),
                   entry_before_close=timedelta(seconds=1), max_quote_age_seconds=7 * 3600.0)
     service = rig.service(**config)
-    service.run(SESSION, start_at=at_et(SESSION, 9, 40))
+    # Stop before the close (a crash leaves no marker), so the close is run by hand below.
+    service.run(SESSION, start_at=at_et(SESSION, 9, 40), stop_at=at_et(SESSION, 15, 58))
     assert rig.held(SHORT) == -1
     # The ticks cut stale quotes before they reach the close, so the close check is
     # exercised directly: a 15:59 chain whose short leg was last quoted at 08:30 is 7.5 hours old.
     stale_chain = snap(SESSION, 15, 59, quoted={SHORT: at_et(SESSION, 8, 30)})
-    _, marks, note = service._close_plan(SESSION, SimpleNamespace(snapshots={service._config.underlying: stale_chain}))
-    assert marks == {}
+    note = service._close_mark(SESSION, SimpleNamespace(snapshots={service._config.underlying: stale_chain}))
     assert "marks left to the after-close pass" in note
+    assert not rig.events("intraday:mark:")
     rig.ledger.close()
 
 

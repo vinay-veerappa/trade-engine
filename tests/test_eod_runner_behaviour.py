@@ -27,6 +27,7 @@ from trade_engine.eod.runner import (
 )
 from trade_engine.interfaces.market_data import StaleDataError
 from trade_engine.intraday.service import IntradayServiceError
+from trade_engine.sim._rs import rs as native
 
 AFTER = datetime(2026, 10, 16, 21, 45, tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
@@ -97,7 +98,7 @@ def test_quotes_older_than_thirty_seconds_are_dropped(intraday: Rig, age_seconds
     base = snap(SESSION, 10, 0)
     quoted = base.as_of - timedelta(seconds=age_seconds)
     stale = replace(base, quotes=tuple(replace(q, as_of=quoted) for q in base.quotes))
-    view = intraday.service()._fresh_view(stale, base.as_of)
+    view = native.intraday_fresh_view(intraday.service(), stale, base.as_of)
     assert len(view.quotes) == kept
     assert view.underlying_as_of is not None
 
@@ -105,7 +106,7 @@ def test_quotes_older_than_thirty_seconds_are_dropped(intraday: Rig, age_seconds
 def test_snapshot_without_the_underlying_quote_time_is_stale(intraday: Rig) -> None:
     base = snap(SESSION, 10, 0)
     with pytest.raises(StaleDataError, match="does not say when SPX itself was quoted"):
-        intraday.service()._fresh_view(replace(base, underlying_as_of=None), base.as_of)
+        native.intraday_fresh_view(intraday.service(), replace(base, underlying_as_of=None), base.as_of)
 
 
 @pytest.mark.parametrize(

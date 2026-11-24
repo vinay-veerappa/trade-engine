@@ -38,26 +38,25 @@ previous session gates this one, and its marker for this session ends it.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from trade_engine.calendar.sessions import ExchangeCalendar
-from trade_engine.domain.instruments import OptionContract
-from trade_engine.domain.option_orders import CloseStructure, OptionIntent
+from trade_engine.domain.option_orders import OptionIntent
 from trade_engine.eod.options_routing import OptionRouter, RoutingTally
 from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import StaleDataError
-from trade_engine.ledger import Event, EventKind, Ledger, VenueReconcile
+from trade_engine.ledger import Ledger
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.reconcile import resync_open_brackets
-from trade_engine.sim import underlying_of
 from trade_engine.sim._rs import register, rs as native
-from trade_engine.eod._runtime import decide, flag, micros
 
 NEW_YORK = ZoneInfo("America/New_York")
+
+
 class IntradayServiceError(RuntimeError):
     """A refused intraday run (I5)."""
 
@@ -127,15 +126,7 @@ class IntradayConfig:
     journal_account: str | None = None
 
     def __post_init__(self) -> None:
-        decide("intraday:config_identity",
-            flags=tuple(bool(v) for v in (self.job_name, self.account_id, self.underlying, self.eod_job_name)))
-        decide("intraday:config_rates",
-            floats=(self.max_quote_age_seconds, self.tick_seconds, self.heartbeat_ttl_seconds, self.close_mark_window_seconds))
-        midnight = date(2000, 1, 1)
-        decide("intraday:config_wall",
-            numbers=(micros(datetime.combine(midnight, self.entry_end, tzinfo=NEW_YORK)),
-                micros(datetime.combine(midnight, self.flat_at, tzinfo=NEW_YORK))))
-        decide("intraday:config_early",numbers=(micros(self.flat_before_close),micros(self.entry_before_close)))
+        native.intraday_config_check(self)
 
 
 class _EntryGate:
@@ -157,10 +148,9 @@ class _EntryGate:
         if not callable(manage):
             return []
         actions = list(manage(context))
-        keep = decide("intraday:gate", flags=(self.allow, *(isinstance(action, OptionIntent) for action in actions)))[2]
-        kept = [action for action, selected in zip(actions, keep) if selected]
-        self.dropped = decide("routing:increment", numbers=(self.dropped, len(actions) - len(kept)))[1][0]
-        return kept
+        keep, self.dropped = native.intraday_gate(
+            self.allow, [isinstance(action, OptionIntent) for action in actions], self.dropped)
+        return [action for action, selected in zip(actions, keep) if selected]
 
 
 class IntradayService:
@@ -175,6 +165,7 @@ class IntradayService:
         *,
         heartbeat_path: Any | None = None,
     ) -> None:
+        native.intraday_require_native(ledger, calendar)
         self._ledger = ledger
         self._clock = clock
         self._calendar = calendar
@@ -214,40 +205,6 @@ class IntradayService:
     def _tick(self, session: date, state: "_TickState") -> None:
         native.intraday_tick(self, session, state)
 
-    def _fresh_view(self, snapshot: ChainSnapshot, now: datetime) -> ChainSnapshot:
-        """``snapshot`` cut to its fresh quotes, if it proves a live market; else refuse."""
-        limit = self._config.max_quote_age_seconds
-        decide("intraday:snapshot_identity", (type(snapshot).__name__, self._config.underlying,
-            snapshot.underlying if isinstance(snapshot, ChainSnapshot) else ""),
-            flags=(isinstance(snapshot, ChainSnapshot),))
-        snapshot.require_fresh(now, limit)
-        quoted = snapshot.underlying_as_of
-        decide("intraday:underlying_stamp", (snapshot.underlying, snapshot.as_of.isoformat()), flags=(quoted is not None,))
-        age = (now - quoted).total_seconds()
-        decide("intraday:underlying_age", (snapshot.underlying, f"{age:.0f}", quoted.isoformat(), f"{limit:.0f}"),
-            floats=(age, limit))
-        for contract in self._held_contracts():
-            quote = snapshot.get(contract)
-            leg_age = (now - quote.as_of).total_seconds() if quote is not None else 0
-            decide("intraday:leg", (contract.occ.strip(), snapshot.underlying, f"{leg_age:.0f}", f"{limit:.0f}"),
-                flags=(quote is not None,), floats=(leg_age, limit))
-        selected = decide("intraday:fresh", floats=(limit, *((now - q.as_of).total_seconds() for q in snapshot.quotes)))[2]
-        fresh = tuple(q for q, keep in zip(snapshot.quotes, selected) if keep)
-        return snapshot if len(fresh) == len(snapshot.quotes) else replace(snapshot, quotes=fresh)
-
-    def _held_contracts(self) -> list[OptionContract]:
-        folded = self._ledger.state(self._config.account_id)
-        return sorted(
-            (
-                instrument
-                for instrument, position in folded.positions.items()
-                if isinstance(instrument, OptionContract) and flag("intraday:held",
-                    (underlying_of(instrument), self._config.underlying),
-                    flags=(True, flag("eod:nonzero", (str(position.quantity),))))
-            ),
-            key=lambda contract: contract.occ,
-        )
-
     def _go_flat_and_refuse(self, session: date, state: "_TickState", why: str) -> None:
         """Stale quote: cancel working entries, ask to be flat, refuse entries (I5).
 
@@ -263,47 +220,6 @@ class IntradayService:
     def _cancel_working_entries(self, session: date, code: str) -> None:
         """Cancel every entry still working: past the entry end, at the sweep, when stale."""
         native.intraday_cancel(self, session, code)
-
-    def _record_tick(self, session: date, snapshot: ChainSnapshot) -> None:
-        """One position check per fresh snapshot: the session's record of it (I2, I11)."""
-        command = f"{self._cause(session)}:tick:{snapshot.as_of.isoformat()}"
-        if self._ledger.has_command(command):
-            return  # the same snapshot twice (a restart re-reading it) is one tick
-        folded = self._ledger.state(self._config.account_id)
-        ledger_side = {i: p.quantity for i, p in folded.positions.items() if p.quantity != 0}
-        venue_side = {p.instrument: p.quantity for p in self._config.broker.positions() if p.quantity != 0}
-        drift = tuple(decide("intraday:drift", tuple(value
-            for instrument in set(ledger_side) | set(venue_side)
-            for value in (instrument.symbol, str(ledger_side.get(instrument)), str(venue_side.get(instrument)))))[0])
-        now = self._clock.now_utc()
-        self._ledger.append(
-            Event(
-                account=self._config.account_id,
-                kind=EventKind.VENUE_RECONCILE,
-                payload=VenueReconcile(
-                    venue=getattr(self._config.broker, "name", type(self._config.broker).__name__),
-                    as_of=now,
-                    reconciled=not drift,
-                    drift=drift,
-                    note=f"{snapshot.underlying} snapshot {snapshot.as_of.isoformat()}",
-                ),
-                ts_utc=now,
-                command_id=command,
-            )
-        )
-        decide("intraday:drift_refuse", (self._config.account_id, ", ".join(drift)))
-
-    # -- clock rules ---------------------------------------------------------------
-
-    def _deadlines(self, session: date) -> tuple[datetime, datetime]:
-        """(the last instant an entry may be made, the sweep instant), early closes included."""
-        close = self._calendar.session_close(session)
-        flat = datetime.combine(session, self._config.flat_at, tzinfo=NEW_YORK)
-        entry_end = datetime.combine(session, self._config.entry_end, tzinfo=NEW_YORK)
-        times = decide("intraday:deadlines", numbers=(micros(flat), micros(entry_end), micros(close),
-            micros(self._config.flat_before_close), micros(self._config.entry_before_close)))[1]
-        chosen_flat = (flat, close - self._config.flat_before_close)[times[1]]
-        return (entry_end, close - self._config.entry_before_close, chosen_flat)[times[0]], chosen_flat
 
     # -- restart -------------------------------------------------------------------
 
@@ -333,64 +249,7 @@ class IntradayService:
     def _close_mark(self, session: date, state: "_TickState") -> str:
         return native.intraday_close(self, session, state)
 
-    def _close_plan(
-        self, session: date, state: "_TickState"
-    ) -> tuple[datetime, dict[Any, tuple[Any, str]], str]:
-        """Mark at a fresh snapshot taken near the close, then the run marker.
-
-        Without such a snapshot (the service was refusing at the close, or restarted
-        after it) nothing is marked here: the after-close pass marks at its own
-        snapshot and the official close (O2). A guessed mark is not a mark (I5).
-        """
-        from trade_engine.domain.instruments import Equity
-
-        now = self._clock.now_utc()
-        close = self._calendar.session_close(session)
-        folded = self._ledger.state(self._config.account_id)
-        held = sorted(
-            (i for i, p in folded.positions.items() if p.quantity != 0), key=lambda i: i.symbol
-        )
-        snapshot = state.snapshots.get(self._config.underlying)
-        marks: dict[Any, tuple[Any, str]] = {}
-        note = "nothing held at the close"
-        if held:
-            usable = flag("intraday:close_usable", flags=(snapshot is not None,),
-                floats=((close - snapshot.as_of).total_seconds() if snapshot is not None else 0,
-                    self._config.close_mark_window_seconds))
-            quotes = {i: snapshot.get(i) for i in held if isinstance(i, OptionContract)} if usable else {}
-            # A quote the snapshot carries but nobody re-quoted is no mark: each must be fresh too.
-            qs = list(quotes.values())
-            quotes_ok = flag("intraday:close_quotes_ok",
-                tuple("None" if q is None else str(q.mid) for q in qs),
-                floats=(float(self._config.max_quote_age_seconds),
-                        *(0.0 if q is None else (snapshot.as_of - q.as_of).total_seconds() for q in qs)))
-            if not flag("intraday:close_plan", flags=(usable, quotes_ok),
-                numbers=(len(quotes), len(held))):
-                note = "no fresh snapshot near the close; marks left to the after-close pass"
-            else:
-                source = f"snapshot:{snapshot.as_of.isoformat()}"
-                marks = {i: (q.mid, source) for i, q in quotes.items()}
-                marks[Equity(self._config.underlying)] = (snapshot.underlying_price, source)
-                note = f"marked at {source}"
-        return now, marks, note
-
-    def _session_snapshot_count(self, session: date) -> int:
-        """Fresh snapshots processed this session, across every process (I2, I3)."""
-        prefix = f"{self._cause(session)}:tick:"
-        return decide("eod:count_events", (EventKind.VENUE_RECONCILE.value, prefix, *(value
-            for event in self._ledger.events(account=self._config.account_id)
-            for value in (event.kind.value, event.command_id or ""))))[1][0]
-
     # -- restart gate, heartbeat, plumbing ---------------------------------------
-
-    def _cause(self, session: date) -> str:
-        return decide("eod:command", ("intraday", self._config.job_name, self._config.account_id, session.isoformat()))[0][0]
-
-    def _own_marker(self, session: date) -> str:
-        return self._cause(session)
-
-    def _eod_marker(self, session: date) -> str:
-        return decide("eod:command", ("eod", self._config.eod_job_name, self._config.account_id, session.isoformat()))[0][0]
 
     def _result(self, session: date, state: "_TickState", **extra: Any) -> dict[str, Any]:
         result = {
@@ -408,12 +267,6 @@ class IntradayService:
 
     def _refuse_other_live_instance(self, session: date) -> None:
         native.intraday_live_guard(self, session)
-
-    def _require_previous_eod_complete(self, session: date) -> None:
-        native.intraday_previous_guard(self, session)
-
-    def _has_history(self, account_id: str) -> bool:
-        return flag("eod:any_history", tuple(e.kind.value for e in self._ledger.events(account=account_id)))
 
     def _write_heartbeat(
         self,
@@ -449,14 +302,3 @@ class _TickState:
     snapshots: dict[str, ChainSnapshot] = field(default_factory=dict)
 
 
-def flat_close(
-    structure: Any, session: date, code: str, attempt: int = 1, reason: str | None = None
-) -> CloseStructure:
-    """The market close that undoes whatever is still open of ``structure``."""
-    values = decide("intraday:flat_close", (reason or "", code, structure.entry_order_id, session.isoformat()),
-        numbers=(attempt,))[0]
-    return CloseStructure(
-        entry_order_id=structure.entry_order_id,
-        reason=values[0],
-        command_id=values[1],
-    )
