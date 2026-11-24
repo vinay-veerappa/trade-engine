@@ -4,6 +4,7 @@ pub mod eod_glue;
 pub mod eod_flow;
 pub mod intraday;
 pub mod intraday_flow;
+pub mod intraday_glue;
 pub mod routing;
 pub mod lifecycle;
 pub mod lifecycle_glue;

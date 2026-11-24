@@ -6,7 +6,6 @@ from trade_engine.intraday.service import (
     IntradayService,
     IntradayServiceAlert,
     IntradayServiceError,
-    flat_close,
 )
 
 __all__ = [
@@ -15,5 +14,4 @@ __all__ = [
     "IntradayService",
     "IntradayServiceAlert",
     "IntradayServiceError",
-    "flat_close",
 ]

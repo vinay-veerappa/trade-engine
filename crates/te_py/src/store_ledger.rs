@@ -125,16 +125,26 @@ impl Clock for PyClock<'_, '_> {
     }
 }
 
-/// The refusal the EOD gate raises: `EodRunnerError(msg)`, the error the runner raises for a bad run.
-pub(crate) fn refuse(py: Python<'_>, msg: &str) -> PyErr {
+/// `module.class(msg)`, the error a Python gate raises for a bad run.
+fn refuse_as(py: Python<'_>, module: &str, class: &str, msg: &str) -> PyErr {
     let raised = py
-        .import("trade_engine.eod.runner")
-        .and_then(|module| module.getattr("EodRunnerError"))
+        .import(module)
+        .and_then(|module| module.getattr(class))
         .and_then(|cls| cls.call1((msg,)));
     match raised {
         Ok(value) => PyErr::from_value(value),
         Err(error) => error,
     }
+}
+
+/// The refusal the EOD gate raises: `EodRunnerError(msg)`, the error the runner raises for a bad run.
+pub(crate) fn refuse(py: Python<'_>, msg: &str) -> PyErr {
+    refuse_as(py, "trade_engine.eod.runner", "EodRunnerError", msg)
+}
+
+/// The refusal the intraday gate raises: `IntradayServiceError(msg)`.
+pub(crate) fn refuse_intraday(py: Python<'_>, msg: &str) -> PyErr {
+    refuse_as(py, "trade_engine.intraday.service", "IntradayServiceError", msg)
 }
 
 /// The exception a gate raises for its refusal text: `refuse` for EOD, the lifecycle pass's own class otherwise.
@@ -177,6 +187,14 @@ pub(crate) fn require_native<'py>(
     calendar: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, LedgerStore>> {
     require_native_with(ledger, calendar, refuse, "EOD needs a plain Ledger on the XNYS ExchangeCalendar")
+}
+
+/// The store behind the native intraday path (`IntradayServiceError` on a refusal).
+pub(crate) fn require_native_intraday<'py>(
+    ledger: &Bound<'py, PyAny>,
+    calendar: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, LedgerStore>> {
+    require_native_with(ledger, calendar, refuse_intraday, "intraday needs a plain Ledger on the XNYS ExchangeCalendar")
 }
 
 /// The store behind the runner's ledger and calendar (`require_native` on the runner's attributes).
