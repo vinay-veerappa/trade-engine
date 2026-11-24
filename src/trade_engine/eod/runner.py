@@ -1,68 +1,8 @@
 """End-of-day runner (E7, Architecture §4.9).
 
-The 17:45 ET job per account and session, in order:
-
-1. Gate: a session whose previous session has no completed run for the account
-   refuses (bootstrap: an account's first run has no previous marker to demand).
-2. Replay: one-minute bars for every instrument an account orders or holds, merged
-   into one timeline across accounts and instruments so a single clock walks the
-   session minute by minute. After **every** bar the runner reconciles every order
-   the venue touched that bar — fills recorded, states read back, brackets
-   synchronized. SimBroker rejects a protective stop submitted after later bars were
-   simulated, and the OMS raises; the runner never batches reconciliation to the end
-   of the session, because the bars in between are gone.
-3. Close: the clock moves to the session close, so marks are dated at the close and a
-   D+1 DAY entry belongs to the next session instead of expiring at its open. Each
-   account then finishes in this order (``eod_flow.finish``): reconcile; for options
-   accounts, sync and dividends; Marks; Manage; Entries; Marker.
-   Dividends: options accounts are credited (or charged) today's ex-dividends.
-   Marks: MTM, one Mark per open position at the last regular bar's close; a missing
-   regular bar refuses (I5).
-   Manage (exits): a strategy with ``manage_positions`` sees its open brackets and may
-   tighten stops, close positions or reduce them at the next open (``domain.exits``);
-   the OMS applies them.
-   Entries for D+1: discovered signals and strategies produce intents; the risk layer
-   evaluates each; approved intents become brackets whose DAY entry works the next
-   session. A verdict an interrupted run already recorded is resumed, not decided again.
-4. Marker: one ``EodRun`` event per account, claimed by
-   ``eod:<job>:<account>:<session>``, written after Entries. A re-run replays
-   deterministically and every command id it derives is already claimed, so the
-   second run appends nothing.
-5. Outbox: every configured destination drains in order (I12).
-
-Options accounts (O4) are those whose venue matches chain snapshots
-(``SnapshotVenue``). They replay no bars. Instead:
-
-- each of the session's chain snapshots (``chain_snapshots``) is matched at its own
-  ``as_of`` inside the same timeline, and the strategy's ``manage_options`` runs right
-  after it (``eod.options``); a strategy may narrow which snapshots its account sees by
-  exposing ``option_universe(session)``, and the account's held option and share
-  underlyings always keep their snapshots;
-- after the close the clock moves on by ``settle_delay``, to when the official close is
-  known (daily bars settle at 17:00 ET). The O2 lifecycle pass then settles expiries and
-  assignments, dividends going ex next session are credited on the shares held at the
-  close, and positions are marked: options at the newest snapshot's mid, shares and
-  underlyings at the official close (``settlements``);
-- close-phase exits and D+1 entries go through the options OMS (``oms.options``), with the
-  C3/C4/C5 guards, and entries through the account's options risk engine.
-
-Equity accounts finish at the close before any of that, so their marks keep the close's
-stamp.
-
-An in-session pass (``run_pass(session, through, name)``, ``name`` one of ``PASSES``;
-``run_morning`` is the morning one) runs an options account's part of the session up to
-``through``, while the market is open: the session's snapshots taken since the account's
-previous pass are matched and the strategy acts on them, exactly as the after-close run
-would have. What the strategy decides at a pass's snapshot is decided and filled on those
-quotes, so the host can send it to a venue while the market is still open. Each pass
-claims its own marker (``eod:<job>-<name>:<account>:<session>``, ``at_close`` =
-``through``); a later pass, and the after-close run, skip every snapshot at or before the
-newest of them, taking each only as the newest quote of its underlying. Nothing is
-settled, marked or entered from signals in a pass: that is still the after-close run's.
-
-The runner owns orchestration only. Expiry/assignment semantics stay with O2, EOD exit
-rules belong to strategy plugins (I13) and reach the venue only through the OMS, and
-market data comes from injected providers (I5: no default source).
+The 17:45 ET job per account and session, run through the native ``trade_engine_rs``
+flow (``rs.eod_run`` / ``rs.eod_pass``). The phases, the options-account path and the
+in-session passes are documented in ``docs/design/EOD_FLOW.md``.
 """
 
 from __future__ import annotations
@@ -350,43 +290,7 @@ class EodRunner:
             reason=reason, owner=owner,
         )
 
-    def _is_options(self, account_id: str) -> bool:
-        return callable(getattr(self._config.brokers[account_id], "process_snapshot", None))
-
     # -- per-account run ---------------------------------------------------------
-
-    def _replay_session(
-        self,
-        session: date,
-        replays: Mapping[str, tuple[Instrument, ...]],
-        tallies: Mapping[str, "_Tally"],
-        snapshots: Sequence[ChainSnapshot] = (),
-        options: Sequence[str] = (),
-        mornings: Mapping[str, datetime] | None = None,
-    ) -> None:
-        """Feed every account's bars on one timeline, minute by minute.
-
-        One clock serves every account, and the ledger records events in the order they
-        happened: instrument by instrument, a 09:31 fill in the second symbol would land
-        after a 15:00 exit in the first, stamped 15:59 (I7). Each bar goes to every
-        account holding its instrument, and each account reconciles immediately. A chain
-        snapshot takes its place at its own ``as_of``, ahead of the bar that opens at the
-        same instant, and goes to every options account (a strategy may narrow this with
-        ``option_universe(session)``; the account's held option and share underlyings
-        always get their snapshots). A snapshot an account's morning
-        pass already matched (``mornings``: when that pass stopped) is not matched again:
-        it only stands as the newest quote of its underlying.
-        """
-        rs.eod_replay(self, session, replays, tallies, snapshots, options, mornings)
-
-    def _finish_account(
-        self,
-        account_id: str,
-        session: date,
-        instruments: tuple[Instrument, ...],
-        tally: "_Tally",
-    ) -> AccountRunResult:
-        return rs.eod_finish(self, account_id, session, instruments, tally, False)
 
     def _restore_venue(self, account_id: str, broker: BrokerAdapter) -> None:
         """Restore an empty simulated venue from the ledger.
@@ -426,12 +330,6 @@ class EodRunner:
 
         return restorable_positions(state)
 
-    def _advance_clock(self, bar_timestamp: datetime) -> None:
-        advance = getattr(self._clock, "advance_to", None)
-        now = self._clock.now_utc()
-        if callable(advance) and now < bar_timestamp:
-            advance(bar_timestamp)
-
     def _reconcile_after_bar(
         self,
         account_id: str,
@@ -460,35 +358,13 @@ class EodRunner:
             raise EodRunnerError(str(err)) from err
 
     def _manager_for(self, account_id: str, broker: BrokerAdapter) -> OrderManager:
-        if self._is_options(account_id):
+        if callable(getattr(self._config.brokers[account_id], "process_snapshot", None)):
             return self._option_manager(account_id).orders
         manager = self._managers.get(account_id)
         if manager is None:
             manager = OrderManager(broker, self._clock, self._ledger)
             self._managers[account_id] = manager
         return manager
-
-    # -- exits: strategy exit rules at the close ---------------------------------
-
-    def _manage_positions(
-        self,
-        account_id: str,
-        session: date,
-        last_regular_closes: Mapping[Instrument, Decimal],
-    ) -> int:
-        """Hand the strategy its open brackets and apply the exits it asks for.
-
-        Runs after marks and before D+1 entries. ``manage_positions`` is optional on a
-        strategy; one without it keeps only its stops and targets. Every action goes
-        through the OMS, which refuses a stop that would loosen (I5); a refused action
-        fails the run loudly rather than leaving a position managed by half its rules.
-        """
-        return rs.eod_manage_positions(self, account_id, session, last_regular_closes)
-
-    # -- entries for D+1 ---------------------------------------------------------
-
-    def _submit_new_orders(self, account_id: str, session: date) -> int:
-        return rs.eod_entries(self, account_id, session, None, False)
 
     # -- options accounts (O4) ---------------------------------------------------
 
@@ -501,11 +377,6 @@ class EodRunner:
 
     def _router(self, account_id: str) -> "OptionRouter":
         return self._option_routers[account_id]
-
-    def _finish_options_account(
-        self, account_id: str, session: date, tally: "_Tally"
-    ) -> AccountRunResult:
-        return rs.eod_finish(self, account_id, session, (), tally, True)
 
     def _enter_option(
         self,
@@ -520,6 +391,3 @@ class EodRunner:
         return self._router(account_id).enter_option(
             account_id, session, intent, snapshot, tally.snapshots
         )
-
-    def _submit_new_option_entries(self, account_id: str, session: date, tally: "_Tally") -> None:
-        rs.eod_entries(self, account_id, session, tally, True)

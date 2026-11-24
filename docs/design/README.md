@@ -45,3 +45,5 @@ design doc is updated and agreed again.
 | Doc | Status | Scope |
 |---|---|---|
 | [BROKER-PLATFORM.md](BROKER-PLATFORM.md) | In review | trade-engine as the single broker port: the canonical futures instrument and account registry, used by riskguard and Vela. Tradovate first (via ntx), then Schwab and IBKR. |
+| [EOD_FLOW.md](EOD_FLOW.md) | Draft | The end-of-day runner: the 17:45 ET job per account and session, the options-account path and the in-session passes. |
+| [INTRADAY_SERVICE.md](INTRADAY_SERVICE.md) | Draft | The intraday service for 0DTE strategies: the live tick loop, stale-quote flat-and-refuse, heartbeat and restart idempotency. |

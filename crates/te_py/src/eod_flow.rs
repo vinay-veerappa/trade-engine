@@ -407,8 +407,18 @@ impl<'py> EodHost for Host<'py> {
         Ok(())
     }
     fn accounts(&self) -> PyResult<Vec<String>> { strings(&self.config()?.getattr("brokers")?) }
+    /// `_is_options`, natively: the broker is an options account exactly when it has a
+    /// callable ``process_snapshot`` (a missing attribute is `None`, so not options).
     fn is_options(&self, account: &str) -> PyResult<bool> {
-        self.runner.call_method1("_is_options", (account,))?.extract()
+        let broker = self.config()?.getattr("brokers")?.get_item(account)?;
+        let process = broker.getattr("process_snapshot").or_else(|e| {
+            if e.is_instance_of::<PyAttributeError>(self.runner.py()) {
+                Ok(self.runner.py().None().into_bound(self.runner.py()))
+            } else {
+                Err(e)
+            }
+        })?;
+        Ok(process.is_callable())
     }
     fn completed(&self, account: &str, mode: Mode) -> PyResult<bool> {
         if self.has_marker(&self.command(account, false)?)? { return Ok(true); }
@@ -553,23 +563,28 @@ impl<'py> EodHost for Host<'py> {
         }
         Ok(rows)
     }
+    /// `_replay_session`, natively: feed every account's bars on one timeline, minute by
+    /// minute. One clock serves every account, and the ledger records events in the order
+    /// they happened: instrument by instrument, a 09:31 fill in the second symbol would
+    /// land after a 15:00 exit in the first, stamped 15:59 (I7). Each bar goes to every
+    /// account holding its instrument, and each account reconciles immediately. A chain
+    /// snapshot takes its place at its own ``as_of``, ahead of the bar that opens at the
+    /// same instant, and goes to every options account (a strategy may narrow this with
+    /// ``option_universe(session)``; the account's held option and share underlyings always
+    /// get their snapshots). A snapshot an account's morning pass already matched
+    /// (``mornings``: when that pass stopped) is not matched again: it only stands as the
+    /// newest quote of its underlying.
     fn replay_accounts(&self, accounts: &[Account<Self::Value>], snapshots: &[Self::Value],
         options: &[String], ends: &[(String, Self::Value)]) -> PyResult<()> {
-        let py = self.runner.py();
-        let replays = PyDict::new(py);
-        let tallies = PyDict::new(py);
-        let mornings = PyDict::new(py);
-        for account in accounts {
-            replays.set_item(&account.id, &account.instruments)?;
-            tallies.set_item(&account.id, &account.tally)?;
-        }
-        for (id, end) in ends { mornings.set_item(id, end)?; }
-        self.runner.call_method1("_replay_session",
-            (&self.session, replays, tallies, PyList::new(py, snapshots)?, options.to_vec(), mornings))?;
-        Ok(())
+        flow::replay(self, accounts, snapshots, options, ends)
     }
     fn advance(&self, at: &Self::Value) -> PyResult<()> {
-        self.runner.call_method1("_advance_clock", (at,))?;
+        let py = self.runner.py();
+        let clock = self.clock()?;
+        let advance = py.import("builtins")?.call_method1("getattr", (&clock, "advance_to", py.None()))?;
+        if advance.is_callable() && clock.call_method0("now_utc")?.lt(at)? {
+            advance.call1((at,))?;
+        }
         Ok(())
     }
     fn covered(&self, snapshot: &Self::Value, end: &Self::Value) -> PyResult<bool> {
@@ -694,12 +709,18 @@ impl<'py> EodHost for Host<'py> {
                         }
                     }
                 } else {
-                    return self.runner.call_method1("_manage_positions", (id, &self.session, tally.getattr("last_regular_closes")?))?.extract();
+                    return super::equity_flow::manage_positions(self.runner.clone(), id.clone(),
+                        self.session.clone(), tally.getattr("last_regular_closes")?);
                 }
             }
             Finish::Entries => {
-                if account.options { self.runner.call_method1("_submit_new_option_entries", (id, &self.session, tally))?; }
-                else { return self.runner.call_method1("_submit_new_orders", (id, &self.session))?.extract(); }
+                if account.options {
+                    super::equity_flow::entries(self.runner.clone(), id.clone(), self.session.clone(),
+                        tally.clone(), true)?;
+                } else {
+                    return super::equity_flow::entries(self.runner.clone(), id.clone(), self.session.clone(),
+                        self.runner.py().None().into_bound(self.runner.py()), false);
+                }
             }
             Finish::Marker => {
                 let job = self.job()?;
@@ -737,12 +758,7 @@ impl<'py> EodHost for Host<'py> {
         self.module()?.getattr("AccountRunResult")?.call((), Some(&kwargs))
     }
     fn finish_account(&self, account: &Account<Self::Value>) -> PyResult<Self::Value> {
-        if account.options {
-            self.runner.call_method1("_finish_options_account", (&account.id, &self.session, &account.tally))
-        } else {
-            self.runner.call_method1("_finish_account",
-                (&account.id, &self.session, &account.instruments, &account.tally))
-        }
+        flow::finish(self, account, Mode::Close)
     }
     fn empty_result(&self, account: &str) -> PyResult<Self::Value> {
         self.module()?.getattr("AccountRunResult")?.call((), Some(&self.result_kwargs(account)?))

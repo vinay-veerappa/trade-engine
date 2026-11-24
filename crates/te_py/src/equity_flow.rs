@@ -319,22 +319,25 @@ impl<'py> ExitHost for Exits<'py> {
     }
 }
 
-#[pyfunction]
-fn eod_entries<'py>(runner: Value<'py>, account: String, session: Value<'py>, tally: Value<'py>, options: bool) -> PyResult<i64> {
+/// `_submit_new_orders` / `_submit_new_option_entries`, natively: the account's D+1 entries
+/// (``eod_entries`` with ``tally=None`` for equity accounts, ``tally`` for options accounts).
+pub(crate) fn entries<'py>(runner: Value<'py>, account: String, session: Value<'py>, tally: Value<'py>, options: bool) -> PyResult<i64> {
     let native = sl::native_store(&runner)?;
     let mut host = Inputs { runner, account, session, tally, options, signals: None,
         iterator: None, strategy: None, risk: None, manager: None, native, pending: Pending::default() };
     flow::entries(&mut host)
 }
-#[pyfunction]
-fn eod_manage_positions<'py>(runner: Value<'py>, account: String, session: Value<'py>, closes: Value<'py>) -> PyResult<i64> {
+/// `_manage_positions`, natively: hand the strategy its open brackets and apply the exits it
+/// asks for. Runs after marks and before D+1 entries. ``manage_positions`` is optional on a
+/// strategy; one without it keeps only its stops and targets. Every action goes through the
+/// OMS, which refuses a stop that would loosen (I5); a refused action fails the run loudly
+/// rather than leaving a position managed by half its rules.
+pub(crate) fn manage_positions<'py>(runner: Value<'py>, account: String, session: Value<'py>, closes: Value<'py>) -> PyResult<i64> {
     let native = sl::native_store(&runner)?;
     let mut host = Exits { runner, account, session, closes, manager: None, by_entry: None,
         native, pending: Pending::default() };
     flow::manage_positions(&mut host)
 }
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(eod_entries, m)?)?;
-    m.add_function(wrap_pyfunction!(eod_manage_positions, m)?)?;
+pub fn register(_m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
