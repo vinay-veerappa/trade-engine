@@ -200,6 +200,7 @@ def write_off_order(
     *,
     reason: str,
     owner: str,
+    venue_cancel_confirmed: bool = False,
 ) -> tuple[str, ...]:
     """Record the owner's write-off of one stuck working order (SCAN-WRITEOFF-1).
 
@@ -212,7 +213,16 @@ def write_off_order(
     Everything is validated before anything is written: a non-empty reason and owner, a
     known account, an order that exists, is still working and has no fills (a filled or
     partly filled order is a position, not a write-off). A repeat (the entry's command id
-    already in the ledger) is checked first and writes nothing. Returns the ids cancelled.
+    already in the ledger) is checked first and writes nothing.
+
+    F4 refusals (also before any write): a protective child (a bracket stop or target)
+    whose parent entry has fills protects a live position, so it is refused (I5). An
+    order, or a child it would cancel, with a venue order id may still be live at the
+    venue, so it is refused unless the owner passes ``venue_cancel_confirmed=True`` after
+    cancelling it at the venue. The entry and its children are written in one
+    ``Ledger.extend`` transaction, and each cancel keeps its venue order id.
+
+    Returns the ids cancelled.
     """
     if not isinstance(reason, str) or not reason.strip():
         raise EodRunnerError("a write-off needs a non-empty reason (I5)")
@@ -232,33 +242,51 @@ def write_off_order(
             f"order {order_id!r} has fills: a filled or partly filled order is a position, "
             "not a write-off (I5)"
         )
+    if order.parent_order_id is not None and state.filled_quantity.get(order.parent_order_id, Decimal("0")) != 0:
+        raise EodRunnerError(
+            f"order {order_id!r} protects {order.parent_order_id!r}, which has fills: writing it off "
+            "would leave a live position unprotected (I5)"
+        )
     if order.state not in _WORKING_STATES:
         raise EodRunnerError(
             f"order {order_id!r} is {order.state.value}, not working; nothing to write off (I5)"
         )
+    children = [
+        (child_id, child) for child_id, child in state.orders.items()
+        if child.parent_order_id == order_id and child.state not in _TERMINAL_STATES
+    ]
+    if not venue_cancel_confirmed:
+        for target_id in [order_id, *(child_id for child_id, _ in children)]:
+            venue_id = state.venue_order_ids.get(target_id)
+            if venue_id:
+                raise EodRunnerError(
+                    f"order {target_id!r} has venue order id {venue_id!r}: the venue may still hold it. "
+                    "Cancel it at the venue first, then pass --venue-cancel-confirmed (I5)"
+                )
     text = f"Owner write-off: {reason.strip()} (owner: {owner.strip()})"
     ts = clock.now_utc()
-    cancelled = [order_id]
-    ledger.append(Event(
+    events = [Event(
         account=account_id,
         kind=EventKind.ORDER_CANCELLED,
         payload=OrderStateChange(order_id, reason=text, venue_order_id=state.venue_order_ids.get(order_id)),
         ts_utc=ts,
         command_id=command,
-    ))
-    for child_id, child in state.orders.items():
-        if child.parent_order_id != order_id or child.state in _TERMINAL_STATES:
-            continue
-        ledger.append(Event(
+    )]
+    cancelled = [order_id]
+    for child_id, _child in children:
+        events.append(Event(
             account=account_id,
             kind=EventKind.ORDER_CANCELLED,
             payload=OrderStateChange(
-                child_id, reason=f"{text} (bracket child of {order_id})", venue_order_id=None
+                child_id,
+                reason=f"{text} (bracket child of {order_id})",
+                venue_order_id=state.venue_order_ids.get(child_id),
             ),
             ts_utc=ts,
             command_id=f"{command}:child:{child_id}",
         ))
         cancelled.append(child_id)
+    ledger.extend(events)
     return tuple(cancelled)
 register("runtime_incomplete", SessionIncompleteError)
 register("runtime_replay", ReplayDataError)

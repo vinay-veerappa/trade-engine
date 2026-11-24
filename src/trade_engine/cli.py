@@ -77,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     eod_parser.add_argument("--order", default="", help="Order id to write off (--write-off)")
     eod_parser.add_argument("--reason", default="", help="Why the session is voided or the order written off")
     eod_parser.add_argument("--owner", default="", help="Who signs the void or write-off")
+    eod_parser.add_argument(
+        "--venue-cancel-confirmed",
+        action="store_true",
+        help="--write-off only: confirm you cancelled the order (and any bracket child) at the "
+        "venue first. Without it a venue-live order is refused (F4)",
+    )
 
     feed_parser = subparsers.add_parser(
         "registry-feed", help="Run the Tradovate registry feed to riskguard (BP-4d)"
