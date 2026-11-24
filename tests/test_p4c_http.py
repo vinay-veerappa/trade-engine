@@ -201,14 +201,22 @@ def test_cursor_refusal_wire_parity(paired, query, headers):
         servers[0], request("/events" + query, headers=("Host: localhost", *headers)))
 
 
-def test_sqlite_cursor_overflow_after_retry(paired):
+def test_cursor_overflow_is_refused_before_stream(paired):
     _, servers, _ = paired
-    for server in servers:
-        with stream(server, request("/events?after=9223372036854775808")) as (_, reader, header):
-            assert header.startswith(b"HTTP/1.0 200 OK")
-            assert next_frame(reader) == b"retry: 1000\n\n"
-            assert reader.read() == b""
-    assert any(error == "OverflowError: Python int too large to convert to SQLite INTEGER" for error in servers[1]._server.errors)
+    # The frozen oracle keeps its historical 200-then-error stream.
+    with stream(servers[0], request("/events?after=9223372036854775808")) as (_, reader, header):
+        assert header.startswith(b"HTTP/1.0 200 OK")
+        assert next_frame(reader) == b"retry: 1000\n\n"
+        assert reader.read() == b""
+    # The native server answers 400 with a JSON body before any stream is reserved.
+    response = exchange(servers[1], request("/events?after=9223372036854775808"))
+    head, _, payload = response.partition(b"\r\n\r\n")
+    assert head.split(b"\r\n")[0].split(b" ")[1] == b"400"
+    assert b"Content-Type: application/json" in head
+    assert b"text/event-stream" not in head
+    assert json.loads(payload) == {"error": {"type": "RuntimeRequestError", "message": "event cursor out of range"}}
+    assert payload == b'{"error":{"message":"event cursor out of range","type":"RuntimeRequestError"}}'
+    assert not any("OverflowError" in error for error in servers[1]._server.errors)
 
 
 def test_lifecycle_handover_dedup_shutdown(tmp_path):

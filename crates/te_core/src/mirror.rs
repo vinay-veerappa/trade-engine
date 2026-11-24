@@ -26,38 +26,6 @@ pub struct FollowReport {
 }
 
 impl FollowReport {
-    fn from_cycle(value: &Value) -> Option<Self> {
-        let object = value.as_object()?;
-        let strings = |key: &str| {
-            object
-                .get(key)
-                .and_then(Value::as_array)
-                .map(|rows| {
-                    rows.iter()
-                        .map(|row| match row {
-                            Value::Array(pair) => pair.first().and_then(Value::as_str).unwrap_or("").to_owned(),
-                            _ => row.as_str().unwrap_or("").to_owned(),
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        };
-        Some(Self {
-            halted: object.get("halted").and_then(Value::as_bool).unwrap_or(false),
-            refused: None,
-            deferred: object
-                .get("deferred")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            queued: object.get("queued").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
-            fills: object.get("fills").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
-            closes: object.get("closes").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
-            refused_count: object.get("refused").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
-            waiting: strings("waiting"),
-            line: object.get("line").and_then(Value::as_str).map(str::to_owned).unwrap_or_default(),
-        })
-    }
-
     fn refused(reason: String) -> Self {
         Self {
             halted: false,
