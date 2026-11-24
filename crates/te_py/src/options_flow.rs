@@ -3,13 +3,10 @@ use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use te_core::runtime::eod_flow::{self as flow, ActionKind, EntryHost, RoutingHost};
+use te_core::runtime::routing;
 
 type Value<'py> = Bound<'py, PyAny>;
 
-fn rule(op: &str, text: Vec<String>, numbers: Vec<i64>, flags: Vec<bool>) -> PyResult<te_core::runtime::Plan> {
-    te_core::runtime::decide(op, &text, &numbers, &flags, &[])
-        .map_err(super::flow_refusal)
-}
 fn optional<'py>(value: &Value<'py>, name: &str) -> PyResult<Value<'py>> {
     match value.getattr(name) {
         Ok(value) => Ok(value),
@@ -86,10 +83,10 @@ impl<'py> RoutingHost for Router<'py> {
         let structure = action.is_instance(&classes.getattr("CloseStructure")?)?;
         let holding = action.is_instance(&classes.getattr("CloseHolding")?)?;
         let command = optional(action, "command_id")?;
-        rule("routing:action", vec![self.account.clone(), typename(action)?,
-            if command.is_none() { "?".into() } else { text(&command)? }, underlying,
-            if self.snapshot.is_none() { String::new() } else { self.snapshot.getattr("underlying")?.extract()? }],
-            vec![], vec![!self.snapshot.is_none(), entry || structure || holding])?;
+        let name = if command.is_none() { "?".to_string() } else { text(&command)? };
+        let snapshot_underlying = if self.snapshot.is_none() { String::new() } else { self.snapshot.getattr("underlying")?.extract::<String>()? };
+        routing::action(&self.account, &typename(action)?, &name, &underlying, &snapshot_underlying,
+            !self.snapshot.is_none(), entry || structure || holding).map_err(super::flow_refusal)?;
         if entry { Ok(ActionKind::Entry) }
         else if structure { Ok(ActionKind::Structure) }
         else if holding { Ok(ActionKind::Holding) }
@@ -117,8 +114,9 @@ impl<'py> RoutingHost for Router<'py> {
     }
     fn rounds_refusal(&self) -> PyErr {
         match (|| {
-            let rounds = self.owner.py().import("trade_engine.eod.options_routing")?.getattr("ROUNDS")?.extract()?;
-            rule("routing:rounds", vec![self.account.clone(), self.snapshot.getattr("underlying")?.extract()?], vec![rounds], vec![])?;
+            let rounds: i64 = self.owner.py().import("trade_engine.eod.options_routing")?.getattr("ROUNDS")?.extract()?;
+            routing::rounds(&self.account, &self.snapshot.getattr("underlying")?.extract::<String>()?, rounds)
+                .map_err(super::flow_refusal)?;
             Err(PyValueError::new_err("snapshot round guard did not refuse"))
         })() {
             Err(e) => e,
@@ -147,11 +145,12 @@ impl<'py> EntryHost for Entry<'py> {
         let valid = intent.is_instance(&self.owner.py().import("trade_engine.domain.option_orders")?.getattr("OptionIntent")?)?;
         let account = optional(intent, "account_id")?;
         let id = optional(intent, "intent_id")?;
-        rule("routing:entry", vec![self.account.clone(), typename(intent)?,
-            if account.is_none() { String::new() } else { text(&account)? },
-            if id.is_none() { String::new() } else { text(&id)? }], vec![], vec![valid])?;
+        let account_text = if account.is_none() { String::new() } else { text(&account)? };
+        let id_text = if id.is_none() { String::new() } else { text(&id)? };
+        routing::entry(&self.account, &typename(intent)?, &account_text, &id_text, valid).map_err(super::flow_refusal)?;
         let engine = self.owner.getattr("_option_risk_engines")?.call_method1("get", (&self.account,))?;
-        rule("routing:engine", vec![self.account.clone(), intent.getattr("intent_id")?.extract()?], vec![], vec![!engine.is_none()])?;
+        routing::engine(&self.account, &intent.getattr("intent_id")?.extract::<String>()?, !engine.is_none())
+            .map_err(super::flow_refusal)?;
         self.engine = Some(engine);
         Ok(())
     }
@@ -172,9 +171,9 @@ impl<'py> EntryHost for Entry<'py> {
     }
     fn approved(&self, intent: &Self::Value, verdict: &Self::Value) -> PyResult<(bool, bool)> {
         let quantity = verdict.getattr("approved_quantity")?;
-        let flags = rule("routing:approved", vec![text(&quantity)?, text(&intent.getattr("quantity")?)?],
-            vec![], vec![verdict.getattr("accepted")?.is_truthy()?, !quantity.is_none()])?.flags;
-        Ok((flags[0], flags[1]))
+        let accepted = verdict.getattr("accepted")?.is_truthy()?;
+        routing::approved(accepted, !quantity.is_none(), &text(&quantity)?, &text(&intent.getattr("quantity")?)?)
+            .map_err(super::flow_refusal)
     }
     fn resize(&self, intent: &Self::Value, verdict: &Self::Value) -> PyResult<Self::Value> {
         let kwargs = PyDict::new(self.owner.py());

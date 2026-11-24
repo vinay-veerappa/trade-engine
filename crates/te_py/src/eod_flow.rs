@@ -1,13 +1,11 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
+use te_core::runtime::eod as rules;
 use te_core::runtime::eod_flow::{self as flow, Account, Boundary, EodHost, Finish, Mode, Observation};
+use te_core::runtime::routing;
 
 type Value<'py> = Bound<'py, PyAny>;
 
-fn rule(op: &str, text: Vec<String>, numbers: Vec<i64>, flags: Vec<bool>) -> PyResult<te_core::runtime::Plan> {
-    te_core::runtime::decide(op, &text, &numbers, &flags, &[])
-        .map_err(super::flow_refusal)
-}
 fn iso(value: &Value<'_>) -> PyResult<String> {
     value.call_method0("isoformat")?.extract()
 }
@@ -69,25 +67,26 @@ impl<'py> EodHost for Host<'py> {
     fn validate(&mut self, mode: Mode) -> PyResult<()> {
         let py = self.runner.py();
         if mode == Mode::Pass {
-            let text = PyList::new(py, [&self.name, &self.name.repr()?.into_any()])?;
-            py.import("trade_engine.eod._runtime")?.call_method1("decide", ("eod:pass_name", text))?;
+            rules::pass_name(&self.name.extract::<String>()?, &repr(&self.name)?).map_err(super::flow_refusal)?;
         }
         let dt = py.import("datetime")?;
         let valid = self.session.is_instance(&dt.getattr("date")?)?
             && !self.session.is_instance(&dt.getattr("datetime")?)?;
-        rule("eod:session_type", vec![self.session.get_type().getattr("__name__")?.extract()?], vec![], vec![valid])?;
+        let type_name: String = self.session.get_type().getattr("__name__")?.extract()?;
+        rules::session_type(&type_name, valid).map_err(super::flow_refusal)?;
         let calendar = self.calendar()?;
-        rule("eod:session", vec![iso(&self.session)?, calendar.getattr("exchange")?.extract()?], vec![],
-            vec![calendar.call_method1("is_session", (&self.session,))?.is_truthy()?])?;
+        let exchange: String = calendar.getattr("exchange")?.extract()?;
+        let is_session = calendar.call_method1("is_session", (&self.session,))?.is_truthy()?;
+        rules::session(&iso(&self.session)?, &exchange, is_session).map_err(super::flow_refusal)?;
         if mode == Mode::Pass {
             let valid = self.through.is_instance(&dt.getattr("datetime")?)?
                 && !self.through.getattr("tzinfo")?.is_none()
                 && !self.through.call_method0("utcoffset")?.is_none();
-            rule("eod:through", vec![repr(&self.through)?], vec![], vec![valid])?;
+            rules::through(&repr(&self.through)?, valid).map_err(super::flow_refusal)?;
             let open = calendar.call_method1("session_open", (&self.session,))?;
             let close = self.close()?;
-            rule("eod:pass_boundary", vec![self.name.extract()?, iso(&self.session)?, iso(&open)?, iso(&close)?, iso(&self.through)?],
-                vec![micros(&open)?, micros(&self.through)?, micros(&close)?], vec![])?;
+            rules::pass_boundary(&self.name.extract::<String>()?, &iso(&self.session)?, &iso(&open)?, &iso(&close)?,
+                &iso(&self.through)?, micros(&open)?, micros(&self.through)?, micros(&close)?).map_err(super::flow_refusal)?;
         }
         self.runner.call_method1("_require_previous_session_complete", (&self.session,))?;
         Ok(())
@@ -127,8 +126,8 @@ impl<'py> EodHost for Host<'py> {
         Ok(if end.is_none() { None } else { Some(end) })
     }
     fn validate_resume(&self, account: &str, end: &Self::Value) -> PyResult<()> {
-        rule("eod:resume", vec![self.name.extract()?, iso(&self.session)?, account.into(), iso(end)?, iso(&self.through)?],
-            vec![micros(&self.through)?, micros(end)?], vec![])?;
+        rules::resume(&self.name.extract::<String>()?, &iso(&self.session)?, account, &iso(end)?, &iso(&self.through)?,
+            micros(&self.through)?, micros(end)?).map_err(super::flow_refusal)?;
         Ok(())
     }
     fn timeline(&self, accounts: &[Account<Self::Value>], snapshots: &[Self::Value],
@@ -153,9 +152,9 @@ impl<'py> EodHost for Host<'py> {
         let open = self.calendar()?.call_method1("session_open", (&self.session,))?;
         let close = self.close()?;
         let read = self.clock()?.call_method0("now_utc")?;
-        if rule("eod:after", vec![], vec![micros(&read)?, micros(&open)?], vec![])?.flags[0] {
-            rule("eod:replay_clock", vec![iso(&self.session)?, iso(&self.clock()?.call_method0("now_utc")?)?, iso(&open)?],
-                vec![micros(&read)?, micros(&open)?], vec![])?;
+        if rules::after(micros(&read)?, micros(&open)?) {
+            rules::replay_clock(&iso(&self.session)?, &iso(&self.clock()?.call_method0("now_utc")?)?, &iso(&open)?,
+                micros(&read)?, micros(&open)?).map_err(super::flow_refusal)?;
         }
         let operator = py.import("operator")?;
         let kwargs = PyDict::new(py);
@@ -207,7 +206,7 @@ impl<'py> EodHost for Host<'py> {
         Ok(())
     }
     fn covered(&self, snapshot: &Self::Value, end: &Self::Value) -> PyResult<bool> {
-        Ok(rule("eod:cutoff", vec![], vec![micros(&snapshot.getattr("as_of")?)?, micros(end)?], vec![])?.flags[0])
+        Ok(rules::cutoff(micros(&snapshot.getattr("as_of")?)?, micros(end)?))
     }
     fn remember(&self, account: &Account<Self::Value>, snapshot: &Self::Value) -> PyResult<()> {
         account.tally.getattr("snapshots")?.set_item(snapshot.getattr("underlying")?, snapshot)
@@ -226,8 +225,7 @@ impl<'py> EodHost for Host<'py> {
         let manager = self.runner.call_method1("_manager_for", (&account.id, &broker))?;
         self.runner.call_method1("_reconcile_after_bar", (&account.id, broker, manager, &row.at))?;
         let count = account.tally.getattr("bars_processed")?.extract::<i64>()?;
-        account.tally.setattr("bars_processed",
-            rule("routing:increment", vec![], vec![count, 1], vec![])?.numbers[0])
+        account.tally.setattr("bars_processed", routing::increment(count, 1))
     }
     fn boundary(&self, boundary: Boundary) -> PyResult<()> {
         let at = match boundary {
@@ -323,7 +321,7 @@ impl<'py> EodHost for Host<'py> {
         let tally = &account.tally;
         let fills = self.runner.call_method1("_fill_count", (&account.id,))?.extract::<i64>()?;
         let before = tally.getattr("fills_before")?.extract::<i64>()?;
-        kwargs.set_item("fills_recorded", rule("eod:difference", vec![], vec![fills, before], vec![])?.numbers[0])?;
+        kwargs.set_item("fills_recorded", rules::difference(fills, before))?;
         if mode == Mode::Close {
             kwargs.set_item("marks_appended", self.runner.call_method1("_marks_appended", (&account.id, &self.session))?)?;
         }

@@ -9,7 +9,12 @@ from datetime import date, timedelta
 
 import exchange_calendars as xcals
 import pandas as pd
+import pytest
 import trade_engine_rs as rs  # a missing module is an ERROR, never a skip (D5)
+
+# exchange_calendars reads Series.values on tz-aware schedules inside pandas;
+# our code never does. The warning is third-party, so it is filtered here.
+pytestmark = pytest.mark.filterwarnings("ignore::pandas.errors.Pandas4Warning")
 
 FIRST, LAST = date(2000, 1, 1), date(2040, 12, 31)
 
@@ -78,8 +83,6 @@ def test_is_open_at_matches_the_oracle_around_each_boundary() -> None:
 
 
 def test_out_of_range_refuses_rather_than_guessing() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="outside the XNYS calendar range"):
         rs.calendar_is_session("1999-12-31")
     with pytest.raises(ValueError, match="outside the XNYS calendar range"):

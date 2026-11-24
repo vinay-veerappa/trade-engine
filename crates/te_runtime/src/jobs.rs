@@ -115,10 +115,6 @@ impl Owner {
             },
         })
     }
-
-    pub fn job_names(&self) -> BTreeSet<String> {
-        BTreeSet::from_iter(self.identity.jobs.iter().cloned())
-    }
 }
 
 /// The immutable configuration generation: content digest of the config the

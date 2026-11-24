@@ -1,15 +1,13 @@
 use pyo3::exceptions::{PyException, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
+use te_core::runtime::intraday as typed;
 use te_core::runtime::intraday_flow::{self as flow, Host as FlowHost};
 
 type Value<'py> = Bound<'py, PyAny>;
 
 fn iso(value: &Value<'_>) -> PyResult<String> { value.call_method0("isoformat")?.extract() }
 fn text(value: &Value<'_>) -> PyResult<String> { value.str()?.extract() }
-fn rule(op: &str, text: Vec<String>, numbers: Vec<i64>, flags: Vec<bool>) -> PyResult<te_core::runtime::Plan> {
-    te_core::runtime::decide(op, &text, &numbers, &flags, &[]).map_err(super::flow_refusal)
-}
 fn kwargs<'py>(py: Python<'py>, alert: bool, exited: bool) -> PyResult<Bound<'py, PyDict>> {
     let args = PyDict::new(py);
     if alert { args.set_item("alert", true)?; }
@@ -59,8 +57,10 @@ impl<'py> FlowHost for Host<'py> {
     type Value = Value<'py>;
     fn validate(&mut self) -> PyResult<()> {
         let calendar = self.calendar()?;
-        rule("intraday:session", vec![iso(&self.session)?, calendar.getattr("exchange")?.extract()?], vec![],
-            vec![calendar.call_method1("is_session", (&self.session,))?.is_truthy()?])?;
+        let session_text = iso(&self.session)?;
+        let exchange: String = calendar.getattr("exchange")?.extract()?;
+        let is_session = calendar.call_method1("is_session", (&self.session,))?.is_truthy()?;
+        typed::session(is_session, &session_text, &exchange).map_err(super::flow_refusal)?;
         Ok(())
     }
     fn init_state(&mut self) -> PyResult<()> {
@@ -154,10 +154,11 @@ impl<'py> FlowHost for Host<'py> {
         let flat = deadlines.get_item(1)?;
         let module = self.service.py().import("trade_engine.eod._runtime")?;
         let micros = |v: &Value<'py>| -> PyResult<i64> { module.call_method1("micros", (v,))?.extract() };
-        let plan = rule("intraday:tick", vec![], vec![micros(now)?, micros(&entry)?, micros(&flat)?],
-            vec![!self.state.getattr("barred")?.is_none()])?;
+        let (now_us, entry_us, flat_us) = (micros(now)?, micros(&entry)?, micros(&flat)?);
+        let barred = !self.state.getattr("barred")?.is_none();
+        let (flat_due, may_enter) = typed::tick(now_us, entry_us, flat_us, barred).map_err(super::flow_refusal)?;
         self.flat = Some(flat);
-        Ok((plan.flags[0], plan.flags[1]))
+        Ok((flat_due, may_enter))
     }
     fn cancel(&mut self, code: &str) -> PyResult<()> {
         self.service.call_method1("_cancel_working_entries", (&self.session, code))?;
@@ -245,13 +246,12 @@ fn intraday_flatten(service: Value<'_>, session: Value<'_>, code: &str, reason: 
     let mut closed = 0;
     for structure in structures.try_iter()? {
         let structure = structure?;
-        let plan = rule("intraday:flatten", vec![
-            sim.call_method1("underlying_of", (structure.getattr("instrument")?,))?.extract()?, underlying.clone()],
-            vec![], vec![!structure.getattr("closing_order_id")?.is_none()])?;
-        if !plan.flags[0] { continue; }
-        let mut ids = vec![structure.getattr("entry_order_id")?.extract()?];
+        let underlying_of: String = sim.call_method1("underlying_of", (structure.getattr("instrument")?,))?.extract()?;
+        let closing_sent = !structure.getattr("closing_order_id")?.is_none();
+        if !typed::flatten(&underlying_of, &underlying, closing_sent).map_err(super::flow_refusal)? { continue; }
+        let mut ids: Vec<String> = vec![structure.getattr("entry_order_id")?.extract()?];
         for id in folded.getattr("orders")?.try_iter()? { ids.push(id?.extract()?); }
-        let attempt = rule("intraday:attempt", ids, vec![], vec![])?.numbers[0];
+        let attempt = typed::attempt(&ids[0], &ids).map_err(super::flow_refusal)?;
         let close = host.module()?.getattr("flat_close")?.call1((structure, &host.session, code, attempt, reason))?;
         manager.call_method1("close", (host.account()?, close))?;
         closed += 1;
@@ -276,9 +276,10 @@ fn intraday_cancel(service: Value<'_>, session: Value<'_>, code: &str) -> PyResu
         let instrument = order.getattr("instrument")?;
         let is_structure = domain.call_method1("is_structure", (&instrument,))?.is_truthy()?;
         let underlying = if is_structure { sim.call_method1("underlying_of", (&instrument,))?.extract()? } else { String::new() };
-        let allowed = rule("intraday:cancel", vec![order.getattr("state")?.getattr("value")?.extract()?,
-            underlying, host.config()?.getattr("underlying")?.extract()?], vec![],
-            vec![order.getattr("parent_order_id")?.is_none(), is_structure])?.flags[0];
+        let state: String = order.getattr("state")?.getattr("value")?.extract()?;
+        let configured: String = host.config()?.getattr("underlying")?.extract()?;
+        let top_level = order.getattr("parent_order_id")?.is_none();
+        let allowed = typed::cancel(top_level, is_structure, &state, &underlying, &configured).map_err(super::flow_refusal)?;
         if !allowed { continue; }
         let id = order.getattr("order_id")?;
         let args = PyDict::new(py);
@@ -329,10 +330,13 @@ fn intraday_restore(service: Value<'_>, session: Value<'_>, state: Value<'_>) ->
     let domain = py.import("trade_engine.domain.option_orders")?;
     let terminals = py.import("trade_engine.domain.orders")?.getattr("OrderState")?;
     for order in sorted_orders(py, ledger.call_method1("state", (&account,))?)? {
-        let action = rule("intraday:restart", vec![order.getattr("state")?.getattr("value")?.extract()?,
-            order.getattr("order_id")?.extract()?, text(&order.getattr("parent_order_id")?)?], vec![],
-            vec![order.getattr("parent_order_id")?.is_none(), domain.call_method1("is_structure", (order.getattr("instrument")?,))?.is_truthy()?])?.text;
-        match action[0].as_str() {
+        let state: String = order.getattr("state")?.getattr("value")?.extract()?;
+        let order_id: String = order.getattr("order_id")?.extract()?;
+        let parent_id = text(&order.getattr("parent_order_id")?)?;
+        let top_level = order.getattr("parent_order_id")?.is_none();
+        let structure = domain.call_method1("is_structure", (order.getattr("instrument")?,))?.is_truthy()?;
+        let action = typed::restart(&state, top_level, structure, &order_id, &parent_id).map_err(super::flow_refusal)?;
+        match action.as_str() {
             "cancel" => {
                 let args = PyDict::new(py);
                 let id = order.getattr("order_id")?;
@@ -410,15 +414,18 @@ fn intraday_live_guard(service: Value<'_>, session: Value<'_>) -> PyResult<()> {
     let host = host(service, session, py.None().into_bound(py));
     let heartbeat = host.service.call_method0("_read_heartbeat")?;
     if heartbeat.is_none() { return Ok(()); }
-    rule("intraday:heartbeat_account", vec![heartbeat.getattr("account_id")?.extract()?,
-        host.account()?.extract()?, text(&host.service.getattr("_heartbeat_path")?)?], vec![], vec![])?;
+    let file_account: String = heartbeat.getattr("account_id")?.extract()?;
+    let account: String = host.account()?.extract()?;
+    let path = text(&host.service.getattr("_heartbeat_path")?)?;
+    typed::heartbeat_account(&file_account, &account, &path).map_err(super::flow_refusal)?;
     if heartbeat.getattr("exited")?.is_truthy()? { return Ok(()); }
     let at = heartbeat.getattr("at_utc")?;
     let age: f64 = host.clock()?.call_method0("now_utc")?.call_method1("__sub__", (&at,))?.call_method0("total_seconds")?.extract()?;
-    te_core::runtime::decide("intraday:heartbeat",
-        &[host.account()?.extract()?, iso(&at)?], &[],
-        &[heartbeat.getattr("session")?.eq(&host.session)?],
-        &[age, host.config()?.getattr("heartbeat_ttl_seconds")?.extract()?]).map_err(super::flow_refusal)?;
+    let account: String = host.account()?.extract()?;
+    let written = iso(&at)?;
+    let same_session = heartbeat.getattr("session")?.eq(&host.session)?;
+    let ttl: f64 = host.config()?.getattr("heartbeat_ttl_seconds")?.extract()?;
+    typed::heartbeat(&account, &written, same_session, age, ttl).map_err(super::flow_refusal)?;
     Ok(())
 }
 #[pyfunction]
@@ -433,9 +440,13 @@ fn intraday_previous_guard(service: Value<'_>, session: Value<'_>) -> PyResult<(
     if !ledger.call_method1("event_by_command", (host.service.call_method1("_eod_marker", (&previous,))?,))?.is_none() {
         return Ok(());
     }
-    rule("intraday:previous", vec![iso(&host.session)?, host.account()?.extract()?, iso(&previous)?,
-        host.config()?.getattr("eod_job_name")?.extract()?, host.service.call_method1("_eod_marker", (&previous,))?.extract()?],
-        vec![], vec![host.service.call_method1("_has_history", (host.account()?,))?.is_truthy()?])?;
+    let session_text = iso(&host.session)?;
+    let account: String = host.account()?.extract()?;
+    let previous_text = iso(&previous)?;
+    let eod_job: String = host.config()?.getattr("eod_job_name")?.extract()?;
+    let marker: String = host.service.call_method1("_eod_marker", (&previous,))?.extract()?;
+    let has_history = host.service.call_method1("_has_history", (host.account()?,))?.is_truthy()?;
+    typed::previous(has_history, &session_text, &account, &previous_text, &eod_job, &marker).map_err(super::flow_refusal)?;
     Ok(())
 }
 #[pyfunction]
