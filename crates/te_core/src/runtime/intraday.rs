@@ -1,5 +1,6 @@
 use super::Plan;
 use crate::ledger::model::{derr, err, LErr, R};
+use crate::ledger::ops::{gt, zero};
 use crate::money::Money;
 
 pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Plan> {
@@ -62,6 +63,16 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
         }
         "close_usable" => p.flags.push(b[0] && f[0] <= f[1]),
         "close_plan" => p.flags.push(b[0] && b[1] && n[0] == n[1]),
+        "close_quotes_ok" => {
+            if f.len() != s.len() + 1 { return err("value",format!("close_quotes_ok needs the max age and one age per quote ({} values); got {}",s.len() + 1,f.len())); }
+            let mut ok = true;
+            for (mid, age) in s.iter().zip(&f[1..]) {
+                if mid == "None" { ok = false; break; }
+                let price = Money::parse(mid).ok_or_else(|| LErr {kind: "value", msg: "invalid runtime decimal".into()})?;
+                if !gt(&price, &zero())? || *age > f[0] { ok = false; break; }
+            }
+            p.flags.push(ok);
+        }
         "heartbeat_account" => if s[0] != s[1] { return err("runtime_intraday",format!("The heartbeat file {} belongs to '{}', not '{}'; two accounts must not share one (C4)",s[2],s[0],s[1])); },
         "heartbeat" => if b[0] && f[0] <= f[1] {
             return err("runtime_intraday",format!("A heartbeat for '{}' written {} is still fresh; another instance is running this session — refusing to start a second one (C4)",s[0],s[1]));
@@ -80,5 +91,54 @@ mod tests {
     fn early_close_and_entry_tie() {
         assert_eq!(decide("deadlines",&[],&[1530,1200,1300,30,90],&[],&[]).unwrap().numbers,vec![0,1]);
         assert_eq!(decide("tick",&[],&[12,12,13],&[false],&[]).unwrap().flags,vec![false,true]);
+    }
+
+    fn quotes_ok(mids: &[&str], floats: &[f64]) -> R<bool> {
+        let s: Vec<String> = mids.iter().map(|m| m.to_string()).collect();
+        decide("close_quotes_ok",&s,&[],&[],floats).map(|p| p.flags[0])
+    }
+
+    #[test]
+    fn close_quotes_ok_all_fresh_and_positive_is_true() {
+        assert!(quotes_ok(&["1.5","2"],&[30.0,1.0,5.0]).unwrap());
+    }
+
+    #[test]
+    fn close_quotes_ok_missing_quote_is_false_and_its_mid_is_not_parsed() {
+        assert!(!quotes_ok(&["1.5","None"],&[30.0,1.0,0.0]).unwrap());
+        assert!(!quotes_ok(&["None","abc"],&[30.0,0.0,0.0]).unwrap());
+    }
+
+    #[test]
+    fn close_quotes_ok_non_positive_mid_is_false_whatever_its_age() {
+        assert!(!quotes_ok(&["0"],&[30.0,1.0]).unwrap());
+        assert!(!quotes_ok(&["-1.5"],&[30.0,1.0]).unwrap());
+    }
+
+    #[test]
+    fn close_quotes_ok_age_limit_is_inclusive() {
+        assert!(quotes_ok(&["1.5"],&[30.0,30.0]).unwrap());
+        assert!(!quotes_ok(&["1.5"],&[30.0,30.5]).unwrap());
+    }
+
+    #[test]
+    fn close_quotes_ok_empty_input_is_true() {
+        assert!(quotes_ok(&[],&[30.0]).unwrap());
+    }
+
+    #[test]
+    fn close_quotes_ok_length_mismatch_refuses() {
+        match quotes_ok(&["1.5"],&[30.0]) {
+            Err(e) => assert_eq!(e.kind, "value"),
+            Ok(_) => panic!("a length mismatch must refuse"),
+        }
+    }
+
+    #[test]
+    fn close_quotes_ok_bad_decimal_refuses_with_the_drift_text() {
+        match quotes_ok(&["abc"],&[30.0,1.0]) {
+            Err(e) => assert_eq!(e.msg, "invalid runtime decimal"),
+            Ok(_) => panic!("a bad decimal must refuse"),
+        }
     }
 }

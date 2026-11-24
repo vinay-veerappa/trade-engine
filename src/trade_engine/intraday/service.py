@@ -359,10 +359,12 @@ class IntradayService:
                     self._config.close_mark_window_seconds))
             quotes = {i: snapshot.get(i) for i in held if isinstance(i, OptionContract)} if usable else {}
             # A quote the snapshot carries but nobody re-quoted is no mark: each must be fresh too.
-            if not flag("intraday:close_plan", flags=(usable,
-                all(q is not None and flag("eod:positive", (str(q.mid),))
-                    and (snapshot.as_of - q.as_of).total_seconds() <= self._config.max_quote_age_seconds
-                    for q in quotes.values())),
+            qs = list(quotes.values())
+            quotes_ok = flag("intraday:close_quotes_ok",
+                tuple("None" if q is None else str(q.mid) for q in qs),
+                floats=(float(self._config.max_quote_age_seconds),
+                        *(0.0 if q is None else (snapshot.as_of - q.as_of).total_seconds() for q in qs)))
+            if not flag("intraday:close_plan", flags=(usable, quotes_ok),
                 numbers=(len(quotes), len(held))):
                 note = "no fresh snapshot near the close; marks left to the after-close pass"
             else:
@@ -411,10 +413,7 @@ class IntradayService:
         native.intraday_previous_guard(self, session)
 
     def _has_history(self, account_id: str) -> bool:
-        for event in self._ledger.events(account=account_id):
-            if flag("eod:any_history", (event.kind.value,)):
-                return True
-        return False
+        return flag("eod:any_history", tuple(e.kind.value for e in self._ledger.events(account=account_id)))
 
     def _write_heartbeat(
         self,
