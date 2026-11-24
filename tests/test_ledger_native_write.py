@@ -216,3 +216,33 @@ def test_binding_write_still_notifies_each_listener_once(py_ledger: Ledger) -> N
     py_ledger.add_listener(seen.append)
     py_ledger._write([(_order_event("c1"), [])])
     assert [event.command_id for event in seen] == ["c1"]
+
+
+def test_native_rewrite_of_the_eod_golden_ledgers_is_byte_identical(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Every event the EOD golden scenarios write (fills, orders, marks, run markers, signals,
+    verdicts, voids, write-offs) re-written natively, in seq order, leaves identical rows."""
+    from tests.test_eod_cli_golden import LEDGER, _transcript
+
+    source_root = tmp_path / "golden"
+    source_root.mkdir()
+    _transcript(source_root, monkeypatch, capsys)
+    sources = sorted(source_root.glob(f"*/{LEDGER}"))
+    assert sources, "the golden scenarios wrote no ledgers"
+    kinds: set[str] = set()
+    for index, source in enumerate(sources):
+        with Ledger(source) as src:
+            events = src.events()
+            accounts = src.accounts()
+            expected = [tuple(row) for row in src._conn.execute("SELECT * FROM events ORDER BY seq")]
+            snapshots = {account: src.snapshot(account) for account in accounts}
+        kinds.update(event.kind.value for event in events)
+        with Ledger(tmp_path / f"native-{index}.db") as dst:
+            for event in events:
+                written = dst._native.write_encoded(
+                    [(codec.event_bytes(dataclasses.replace(event, seq=None)), [])]
+                )
+                assert written == 1, event
+            assert [tuple(row) for row in dst._conn.execute("SELECT * FROM events ORDER BY seq")] == expected
+            assert dst.accounts() == accounts
+            assert {account: dst.snapshot(account) for account in accounts} == snapshots
+    assert {"Fill", "Mark", "EodRun", "EodVoid", "OrdersCreated", "OrderCancelled"} <= kinds, sorted(kinds)
