@@ -1316,15 +1316,6 @@ pub fn attach_owner_parts(
     Ok(())
 }
 
-/// Detach the owner's store without closing it (crate-internal; the actor
-/// owns the close).
-pub(crate) fn detach_owner() {
-    OWNER
-        .lock()
-        .expect("owner mutex poisoned")
-        .take();
-}
-
 /// Whether an owner store is attached and held.
 #[pyfunction]
 fn owner_attached() -> bool {

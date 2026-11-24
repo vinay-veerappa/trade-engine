@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use te_host::actor::Actor;
 use te_host::http::{Control, ControlError};
-use te_host::jobs::{Record, State};
+use te_host::jobs::Record;
 
 /// JSON shape of one record, preserving exact refusal/result information.
 fn record_json(record: &Record) -> Value {
@@ -149,9 +149,4 @@ fn to_json(value: &Value) -> te_core::ledger::json::Json {
 fn json_value(record: &te_core::ledger::json::Json) -> Value {
     let text = te_core::ledger::json::dumps(record);
     serde_json::from_str(&text).expect("codec JSON is valid")
-}
-
-/// The state of one record as the journal spells it, for tests.
-pub fn state_of(record: &Record) -> State {
-    record.state
 }

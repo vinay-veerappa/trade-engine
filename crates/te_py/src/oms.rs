@@ -102,6 +102,7 @@ pub(crate) fn oms_brackets_to_resync(state: &str, fills: Vec<(i64, String, Strin
 
 /// What a recorded fill heals: `(resync, rejournal_candidate)`, `resync` as `(entry_id, fill_id)`.
 #[pyfunction]
+#[pyo3(signature = (state, fills, fill_id, order_id, fill_seq=None))]
 pub(crate) fn oms_heal_plan(
     state: &str,
     fills: Vec<(i64, String, String)>,
