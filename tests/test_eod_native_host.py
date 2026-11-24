@@ -11,19 +11,37 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
-from trade_engine.calendar.sessions import ExchangeCalendar
-from trade_engine.eod import EodRunner, EodRunnerConfig
-from trade_engine.ledger import Ledger
-from trade_engine.sim import SimBroker
-
-from test_eod_options import Rig, midday_time, morning_time, new_process, passes_rig, run_morning, run_pass, S2
+from test_eod_options import (
+    ACCOUNT as OPTIONS_ACCOUNT,
+)
+from test_eod_options import (
+    CAL,
+    COHR,
+    EXPIRY,
+    S1,
+    S2,
+    S3,
+    SESSIONS,
+    Rig,
+    close_price,
+    csp,
+    dividend,
+    midday_time,
+    new_process,
+    passes_rig,
+    run_morning,
+    run_pass,
+    snap_time,
+)
 from test_eod_runner import (
     ACCOUNT,
     CALENDAR,
     EOD_CLOCK,
+    INSTRUMENT,
     NEXT_SESSION,
     PREV_EOD,
     PREV_SESSION_PREV,
@@ -32,7 +50,6 @@ from test_eod_runner import (
     DeterministicStrategy,
     FakeMarketData,
     FixedRiskEngine,
-    INSTRUMENT,
     SessionSignalAdapter,
     SettableClock,
     _fixed_context_builder,
@@ -40,6 +57,17 @@ from test_eod_runner import (
     _seed_bracket,
     _signal,
 )
+
+from trade_engine.calendar.sessions import ExchangeCalendar
+from trade_engine.domain.instruments import Side
+from trade_engine.domain.option_orders import OptionIntent
+from trade_engine.domain.orders import OrderType
+from trade_engine.eod import EodRunner, EodRunnerConfig
+from trade_engine.interfaces.market_data import StaleDataError
+from trade_engine.ledger import Ledger
+from trade_engine.lifecycle import FixedDividends
+from trade_engine.market_data.chains import ChainSnapshot
+from trade_engine.sim import SimBroker
 
 ROWS = "SELECT kind, account, payload_json, ts_utc, command_id, schema_version FROM events ORDER BY seq"
 OUTBOX = "SELECT * FROM outbox ORDER BY id"
@@ -237,7 +265,7 @@ def test_missing_previous_session_refuses_identically(tmp_path: Path) -> None:
 
 
 def test_an_already_completed_rerun_matches_on_both_paths(tmp_path: Path) -> None:
-    (outcomes, (rows, _outbox)), _python = _assert_parity(tmp_path, _rerun_run)
+    (outcomes, _stored_rows), _python = _assert_parity(tmp_path, _rerun_run)
     # The second run of a completed session is a no-op, not a refusal: its marker is found.
     assert outcomes[0][0] == "ok" and outcomes[1][0] == "ok", outcomes
 
@@ -273,3 +301,146 @@ def test_the_calendar_gate_sends_only_a_non_xnys_or_non_plain_book_to_python(
 
     assert native_calls == 0
     assert subclass_calls > 0
+
+
+# -- 4. the options book: dividends, marks, settlement and snapshot coverage ---------------
+
+
+def _buy_shares() -> OptionIntent:
+    return OptionIntent(
+        intent_id="buy", account_id=OPTIONS_ACCOUNT, instrument=COHR, side=Side.BUY, quantity=Decimal(100),
+        reason="buy-write", command_id="buy", order_type=OrderType.MARKET,
+    )
+
+
+class StaleDividends:
+    """A dividend source whose feed stops before the session it is asked for."""
+
+    def dividends(self, symbol, session):
+        raise StaleDataError(f"the dividend feed for {symbol} stops before {session}")
+
+
+def _options_run(root: Path, native: bool, steps, **rig_options):
+    """A fresh options rig on the native or the Python path; ``steps`` returns the captured runs."""
+    root.mkdir(parents=True, exist_ok=True)
+    rig = Rig(root, **rig_options)
+    if not native:
+        rig.ledger = PassThrough(rig.ledger)
+    outcomes = steps(rig)
+    rig.ledger.close()
+    return outcomes, _stored(root / "ledger.db")
+
+
+def _options_book(rig) -> tuple:
+    """Shares bought at S1's snapshot, a put sold at S1's close, then six sessions to expiry."""
+    rig.strategy.at_snapshot[S1] = [_buy_shares()]
+    rig.strategy.entries[S1] = [csp()]
+    return tuple(_capture(lambda session=session: rig.run(session)) for session in SESSIONS)
+
+
+def _no_dividend_source(rig) -> tuple:
+    rig.strategy.at_snapshot[S1] = [_buy_shares()]
+    first = _capture(lambda: rig.run(S1))
+    rig.dividends = None
+    rig.lifecycle = None
+    return first, _capture(lambda: rig.run(S2))
+
+
+def _stale_dividend_source(rig) -> tuple:
+    rig.strategy.at_snapshot[S1] = [_buy_shares()]
+    first = _capture(lambda: rig.run(S1))
+    rig.dividends = StaleDividends()
+    rig.lifecycle = None
+    return first, _capture(lambda: rig.run(S2))
+
+
+def _entered_then_run(rig) -> tuple:
+    """The put is entered at S1's close and held from S2's snapshot."""
+    rig.strategy.entries[S1] = [csp()]
+    return _capture(lambda: rig.run(S1)), _capture(lambda: rig.run(S2))
+
+
+def _unquoted_option(rig) -> tuple:
+    rig.strategy.entries[S1] = [csp(target=None)]
+    first = _capture(lambda: rig.run(S1))
+    second = _capture(lambda: rig.run(S2))
+    bare = ChainSnapshot("COHR", snap_time(S3), Decimal("300"), (), None, None, "test")
+    return first, second, _capture(lambda: rig.run(S3, chain_snapshots=lambda s: [bare]))
+
+
+def _missing_snapshot(rig) -> tuple:
+    rig.strategy.entries[S1] = [csp()]
+    first = _capture(lambda: rig.run(S1))
+    second = _capture(lambda: rig.run(S2))
+    return first, second, _capture(lambda: rig.run(S3, chain_snapshots=lambda s: []))
+
+
+def _no_lifecycle(rig) -> tuple:
+    rig.strategy.entries[S1] = [csp()]
+    first = _capture(lambda: rig.run(S1))
+    rig.lifecycle = None
+    return first, _capture(lambda: rig.run(S2))
+
+
+def _refused(outcome, kind: str, text: str) -> None:
+    assert outcome[0] == "error" and outcome[1] == kind and text in outcome[2], outcome
+
+
+def test_the_options_book_matches_the_python_callbacks(tmp_path: Path) -> None:
+    closes = [close_price(s) for s in SESSIONS[:-1]] + [close_price(EXPIRY, "250")]
+    run = partial(
+        _options_run, steps=_options_book,
+        dividends=FixedDividends({"COHR": [dividend(S2)]}), closes=closes,
+    )
+    (outcomes, (rows, _outbox)), _python = _assert_parity(tmp_path, run)
+    assert all(outcome[0] == "ok" for outcome in outcomes), outcomes
+    kinds = [row[0] for row in rows]
+    assert kinds.count("Mark") > 0, kinds
+    assert any("dividend" in row[2] for row in rows), "the dividend was not booked"
+    assert any(row[0] == "Fill" for row in rows), "the assignment did not fill"
+
+
+# -- 5. refusal parity for the options callbacks -------------------------------------------
+
+
+def test_a_missing_dividend_source_refuses_identically(tmp_path: Path) -> None:
+    run = partial(_options_run, steps=_no_dividend_source)
+    (outcomes, _rows), _python = _assert_parity(tmp_path, run)
+    _refused(outcomes[1], "EodRunnerError", "no dividend source")
+
+
+def test_a_stale_dividend_feed_refuses_identically(tmp_path: Path) -> None:
+    run = partial(_options_run, steps=_stale_dividend_source)
+    (outcomes, _rows), _python = _assert_parity(tmp_path, run)
+    assert outcomes[1][0] == "error" and outcomes[1][1] == "ReplayDataError", outcomes
+
+
+def test_a_missing_option_quote_refuses_identically(tmp_path: Path) -> None:
+    run = partial(_options_run, steps=_unquoted_option)
+    (outcomes, _rows), _python = _assert_parity(tmp_path, run)
+    _refused(outcomes[2], "ReplayDataError", "refusing to mark it")
+
+
+def test_a_stale_official_close_refuses_identically(tmp_path: Path) -> None:
+    run = partial(_options_run, steps=_entered_then_run, closes=[close_price(s) for s in SESSIONS if s != S2])
+    (outcomes, _rows), _python = _assert_parity(tmp_path, run)
+    _refused(outcomes[1], "ReplayDataError", "No official 2026-09-28 close for COHR")
+
+
+def test_a_look_ahead_official_close_refuses_identically(tmp_path: Path) -> None:
+    late = [close_price(s, at=CAL.session_close(s) + timedelta(hours=3)) for s in SESSIONS]
+    run = partial(_options_run, steps=_entered_then_run, closes=late)
+    (outcomes, _rows), _python = _assert_parity(tmp_path, run)
+    _refused(outcomes[1], "ReplayDataError", "look-ahead")
+
+
+def test_a_missing_snapshot_refuses_identically(tmp_path: Path) -> None:
+    run = partial(_options_run, steps=_missing_snapshot)
+    (outcomes, _rows), _python = _assert_parity(tmp_path, run)
+    _refused(outcomes[2], "ReplayDataError", "No 2026-09-29 chain snapshot for COHR")
+
+
+def test_no_lifecycle_pass_refuses_identically(tmp_path: Path) -> None:
+    run = partial(_options_run, steps=_no_lifecycle)
+    (outcomes, _rows), _python = _assert_parity(tmp_path, run)
+    _refused(outcomes[1], "EodRunnerError", "no lifecycle pass")
