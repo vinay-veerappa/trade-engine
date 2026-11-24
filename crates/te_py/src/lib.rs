@@ -883,6 +883,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     plugins::register(m)?;
     sim::register(m)?;
     oms::register(m)?;
+    m.add_function(wrap_pyfunction!(flow::oms_flow_native, m)?)?;
     precheck::register(m)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_holiday, m)?)?;
