@@ -139,6 +139,10 @@ struct Entry<'py> {
 impl<'py> EntryHost for Entry<'py> {
     type Value = Value<'py>;
     type Error = PyErr;
+    fn recorded(&self, intent: &Self::Value) -> PyResult<Option<Self::Value>> {
+        let verdict = self.owner.call_method1("recorded_verdict", (&self.account, intent))?;
+        Ok(if verdict.is_none() { None } else { Some(verdict) })
+    }
     fn validate(&mut self, intent: &Self::Value) -> PyResult<()> {
         let valid = intent.is_instance(&self.owner.py().import("trade_engine.domain.option_orders")?.getattr("OptionIntent")?)?;
         let account = optional(intent, "account_id")?;

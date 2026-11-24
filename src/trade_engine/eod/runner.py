@@ -12,19 +12,23 @@ The 17:45 ET job per account and session, in order:
    simulated, and the OMS raises; the runner never batches reconciliation to the end
    of the session, because the bars in between are gone.
 3. Close: the clock moves to the session close, so marks are dated at the close and a
-   D+1 DAY entry belongs to the next session instead of expiring at its open.
-   MTM: one Mark per open position at the last regular bar's close; a missing
+   D+1 DAY entry belongs to the next session instead of expiring at its open. Each
+   account then finishes in this order (``eod_flow.finish``): reconcile; for options
+   accounts, sync and dividends; Marks; Manage; Entries; Marker.
+   Dividends: options accounts are credited (or charged) today's ex-dividends.
+   Marks: MTM, one Mark per open position at the last regular bar's close; a missing
    regular bar refuses (I5).
-   Exits: a strategy with ``manage_positions`` sees its open brackets and may tighten
-   stops, close positions or reduce them at the next open (``domain.exits``); the OMS
-   applies them.
-4. Marker: one ``EodRun`` event per account, claimed by
-   ``eod:<job>:<account>:<session>``. A re-run replays deterministically and every
-   command id it derives is already claimed, so the second run appends nothing.
-5. Entries for D+1: discovered signals and strategies produce intents; the risk layer
+   Manage (exits): a strategy with ``manage_positions`` sees its open brackets and may
+   tighten stops, close positions or reduce them at the next open (``domain.exits``);
+   the OMS applies them.
+   Entries for D+1: discovered signals and strategies produce intents; the risk layer
    evaluates each; approved intents become brackets whose DAY entry works the next
-   session.
-6. Outbox: every configured destination drains in order (I12).
+   session. A verdict an interrupted run already recorded is resumed, not decided again.
+4. Marker: one ``EodRun`` event per account, claimed by
+   ``eod:<job>:<account>:<session>``, written after Entries. A re-run replays
+   deterministically and every command id it derives is already claimed, so the
+   second run appends nothing.
+5. Outbox: every configured destination drains in order (I12).
 
 Options accounts (O4) are those whose venue matches chain snapshots
 (``SnapshotVenue``). They replay no bars. Instead:
@@ -848,6 +852,11 @@ class EodRunner:
                 command_id=f"signal:{signal.signal_id}",
             )
         )
+
+    def recorded_verdict(self, account_id: str, intent: OrderIntent) -> RiskVerdict | None:
+        """The verdict an earlier, interrupted run recorded for this intent, if any (F3)."""
+        event = self._ledger.event_by_command(f"risk:{intent.command_id}")
+        return None if event is None else event.payload
 
     def _record_verdict(self, account_id: str, intent: OrderIntent, verdict: RiskVerdict) -> None:
         now = self._clock.now_utc()

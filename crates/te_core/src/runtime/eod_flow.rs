@@ -253,6 +253,8 @@ pub trait EntryHost {
     type Value: Clone;
     type Error;
     fn validate(&mut self, intent: &Self::Value) -> Result<(), Self::Error>;
+    /// The verdict already recorded for this intent by an earlier, interrupted run, if any.
+    fn recorded(&self, intent: &Self::Value) -> Result<Option<Self::Value>, Self::Error>;
     fn evaluate(&self, intent: &Self::Value) -> Result<Self::Value, Self::Error>;
     fn record(&self, intent: &Self::Value, verdict: &Self::Value) -> Result<(), Self::Error>;
     fn approved(&self, intent: &Self::Value, verdict: &Self::Value) -> Result<(bool, bool), Self::Error>;
@@ -262,8 +264,15 @@ pub trait EntryHost {
 
 pub fn enter_option<H: EntryHost>(host: &mut H, intent: H::Value) -> Result<i64, H::Error> {
     host.validate(&intent)?;
-    let verdict = host.evaluate(&intent)?;
-    host.record(&intent, &verdict)?;
+    // A verdict recorded before a crash is resumed, never decided again (F3).
+    let verdict = match host.recorded(&intent)? {
+        Some(verdict) => verdict,
+        None => {
+            let verdict = host.evaluate(&intent)?;
+            host.record(&intent, &verdict)?;
+            verdict
+        }
+    };
     let (accepted, resize) = host.approved(&intent, &verdict)?;
     if !accepted { return Ok(0); }
     let intent = if resize { host.resize(&intent, &verdict)? } else { intent };
@@ -302,6 +311,8 @@ pub trait EquityEntryHost {
     type Value;
     type Error;
     fn validate(&self, intent: &Self::Value) -> Result<(), Self::Error>;
+    /// The verdict already recorded for this intent by an earlier, interrupted run, if any.
+    fn recorded(&self, intent: &Self::Value) -> Result<Option<Self::Value>, Self::Error>;
     fn evaluate(&self, intent: &Self::Value) -> Result<Self::Value, Self::Error>;
     fn record(&self, intent: &Self::Value, verdict: &Self::Value) -> Result<(), Self::Error>;
     fn approved(&self, verdict: &Self::Value) -> Result<bool, Self::Error>;
@@ -313,8 +324,15 @@ pub trait EquityEntryHost {
 
 pub fn enter_equity<H: EquityEntryHost>(host: &H, intent: &H::Value) -> Result<i64, H::Error> {
     host.validate(intent)?;
-    let verdict = host.evaluate(intent)?;
-    host.record(intent, &verdict)?;
+    // A verdict recorded before a crash is resumed, never decided again (F3).
+    let verdict = match host.recorded(intent)? {
+        Some(verdict) => verdict,
+        None => {
+            let verdict = host.evaluate(intent)?;
+            host.record(intent, &verdict)?;
+            verdict
+        }
+    };
     if !host.approved(&verdict)? { return Ok(0); }
     let bracket = host.bracket(intent, &verdict)?;
     let submitted = host.submit(&bracket)?;
@@ -418,6 +436,7 @@ mod tests {
         calls: RefCell<Vec<&'static str>>,
         accepted: bool,
         resize: bool,
+        recorded: Option<i64>,
     }
     impl EntryHost for Entry {
         type Value = i64;
@@ -425,6 +444,10 @@ mod tests {
         fn validate(&mut self, _: &i64) -> Result<(), Self::Error> {
             self.calls.borrow_mut().push("validate");
             Ok(())
+        }
+        fn recorded(&self, _: &i64) -> Result<Option<i64>, Self::Error> {
+            self.calls.borrow_mut().push("recorded");
+            Ok(self.recorded)
         }
         fn evaluate(&self, _: &i64) -> Result<i64, Self::Error> {
             self.calls.borrow_mut().push("evaluate");
@@ -447,18 +470,104 @@ mod tests {
             if *intent == 1 { Ok(()) } else { Err("wrong quantity") }
         }
     }
+    fn entry(accepted: bool, resize: bool, recorded: Option<i64>) -> Entry {
+        Entry { calls: RefCell::new(Vec::new()), accepted, resize, recorded }
+    }
     #[test]
     fn refused_entry_still_records_verdict() {
-        let mut host = Entry { calls: RefCell::new(Vec::new()), accepted: false, resize: false };
+        let mut host = entry(false, false, None);
         assert_eq!(enter_option(&mut host, 2), Ok(0));
-        assert_eq!(*host.calls.borrow(), ["validate", "evaluate", "record", "approved"]);
+        assert_eq!(*host.calls.borrow(), ["validate", "recorded", "evaluate", "record", "approved"]);
     }
     #[test]
     fn resize_precedes_open_and_host_error_is_not_swallowed() {
-        let mut host = Entry { calls: RefCell::new(Vec::new()), accepted: true, resize: true };
+        let mut host = entry(true, true, None);
         assert_eq!(enter_option(&mut host, 2), Ok(1));
-        assert_eq!(*host.calls.borrow(), ["validate", "evaluate", "record", "approved", "resize", "open"]);
+        assert_eq!(*host.calls.borrow(), ["validate", "recorded", "evaluate", "record", "approved", "resize", "open"]);
         host.resize = false;
         assert_eq!(enter_option(&mut host, 2), Err("wrong quantity"));
+    }
+    #[test]
+    fn recorded_accepted_verdict_skips_evaluate_and_record_then_opens() {
+        // Intent 1: the mock's open accepts only quantity 1.
+        let mut host = entry(true, false, Some(1));
+        assert_eq!(enter_option(&mut host, 1), Ok(1));
+        assert_eq!(*host.calls.borrow(), ["validate", "recorded", "approved", "open"]);
+    }
+    #[test]
+    fn recorded_rejected_verdict_returns_zero_without_evaluate_record_or_open() {
+        let mut host = entry(false, false, Some(1));
+        assert_eq!(enter_option(&mut host, 1), Ok(0));
+        assert_eq!(*host.calls.borrow(), ["validate", "recorded", "approved"]);
+    }
+
+    struct Equity {
+        calls: RefCell<Vec<&'static str>>,
+        accepted: bool,
+        recorded: Option<i64>,
+    }
+    impl EquityEntryHost for Equity {
+        type Value = i64;
+        type Error = &'static str;
+        fn validate(&self, _: &i64) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push("validate");
+            Ok(())
+        }
+        fn recorded(&self, _: &i64) -> Result<Option<i64>, Self::Error> {
+            self.calls.borrow_mut().push("recorded");
+            Ok(self.recorded)
+        }
+        fn evaluate(&self, _: &i64) -> Result<i64, Self::Error> {
+            self.calls.borrow_mut().push("evaluate");
+            Ok(1)
+        }
+        fn record(&self, _: &i64, _: &i64) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push("record");
+            Ok(())
+        }
+        fn approved(&self, _: &i64) -> Result<bool, Self::Error> {
+            self.calls.borrow_mut().push("approved");
+            Ok(self.accepted)
+        }
+        fn bracket(&self, _: &i64, _: &i64) -> Result<i64, Self::Error> {
+            self.calls.borrow_mut().push("bracket");
+            Ok(7)
+        }
+        fn submit(&self, _: &i64) -> Result<i64, Self::Error> {
+            self.calls.borrow_mut().push("submit");
+            Ok(8)
+        }
+        fn terminal(&self, _: &i64) -> Result<bool, Self::Error> {
+            self.calls.borrow_mut().push("terminal");
+            Ok(true)
+        }
+        fn reconcile(&self, _: &i64) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push("reconcile");
+            Ok(())
+        }
+    }
+    fn equity(accepted: bool, recorded: Option<i64>) -> Equity {
+        Equity { calls: RefCell::new(Vec::new()), accepted, recorded }
+    }
+    #[test]
+    fn equity_recorded_accepted_verdict_skips_evaluate_and_record_then_opens() {
+        let host = equity(true, Some(1));
+        assert_eq!(enter_equity(&host, &2), Ok(1));
+        assert_eq!(*host.calls.borrow(), ["validate", "recorded", "approved", "bracket", "submit", "terminal"]);
+    }
+    #[test]
+    fn equity_recorded_rejected_verdict_returns_zero_without_evaluate_record_or_open() {
+        let host = equity(false, Some(1));
+        assert_eq!(enter_equity(&host, &2), Ok(0));
+        assert_eq!(*host.calls.borrow(), ["validate", "recorded", "approved"]);
+    }
+    #[test]
+    fn equity_without_recorded_verdict_evaluates_records_then_opens() {
+        let host = equity(true, None);
+        assert_eq!(enter_equity(&host, &2), Ok(1));
+        assert_eq!(
+            *host.calls.borrow(),
+            ["validate", "recorded", "evaluate", "record", "approved", "bracket", "submit", "terminal"]
+        );
     }
 }

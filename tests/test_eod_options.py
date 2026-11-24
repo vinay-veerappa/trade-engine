@@ -20,7 +20,7 @@ from trade_engine.interfaces.market_data import OptionQuote
 from trade_engine.ledger import CashFlow, Event, EventKind, Ledger
 from trade_engine.lifecycle import Dividend, FixedDividends, FixedSettlements, LifecyclePass, SettlementPrice
 from trade_engine.market_data.chains import ChainSnapshot
-from trade_engine.oms.options import open_structures
+from trade_engine.oms.options import OptionOrderManager, open_structures
 from trade_engine.sim import SnapshotVenue
 
 D = Decimal
@@ -898,3 +898,61 @@ def test_a_session_begun_with_a_midday_pass_still_needs_its_after_close_run(rig)
     new_process(rig, S2)
     with pytest.raises(EodRunnerError, match="no eod marker"):
         rig.run(S2)
+
+
+# -- F3: an entry whose open crashed after its risk verdict is opened on rerun -----------
+
+
+class OpenCrash(RuntimeError):
+    pass
+
+
+@pytest.fixture
+def open_crashes_once(monkeypatch):
+    """The next option open raises: a crash between the recorded verdict and the order."""
+    real = OptionOrderManager.open
+    crashes = [OpenCrash("crashed after the verdict")]
+
+    def open_once(self, intent):
+        if crashes:
+            raise crashes.pop()
+        return real(self, intent)
+
+    monkeypatch.setattr(OptionOrderManager, "open", open_once)
+
+
+def _verdicts(rig: Rig, command_id: str) -> list:
+    return [
+        e for e in rig.ledger.events(account=ACCOUNT)
+        if e.kind is EventKind.RISK_VERDICT and e.command_id == f"risk:{command_id}"
+    ]
+
+
+@pytest.mark.parametrize("decided", ["at_snapshot", "at_close"])
+def test_an_entry_whose_open_crashed_after_its_verdict_is_opened_on_rerun(tmp_path, open_crashes_once, decided) -> None:
+    rig = Rig(tmp_path)
+    table = rig.strategy.at_snapshot if decided == "at_snapshot" else rig.strategy.entries
+    table[S1] = [csp()]
+    with pytest.raises(OpenCrash):
+        rig.run(S1)
+    assert "csp:entry" not in rig.state.orders
+    new_process(rig, S1)  # the rerun is a restart: its clock is back at the open
+    rerun = rig.run(S1)
+    assert rerun.accounts[0].orders_submitted == 1
+    assert "csp:entry" in rig.state.orders
+    assert len(_verdicts(rig, "csp")) == 1
+    assert len(rig.risk.seen) == 1  # the rerun resumed the recorded verdict; it did not decide again
+
+
+@pytest.mark.parametrize("decided", ["at_snapshot", "at_close"])
+def test_a_refused_intent_stays_skipped_on_rerun(tmp_path, decided) -> None:
+    rig = Rig(tmp_path, risk=Approve(accept=False))
+    table = rig.strategy.at_snapshot if decided == "at_snapshot" else rig.strategy.entries
+    table[S1] = [csp()]
+    rig.run(S1)
+    rerun = rig.run(S1)
+    assert rerun.accounts[0].orders_submitted == 0
+    assert "csp:entry" not in rig.state.orders
+    [verdict] = _verdicts(rig, "csp")
+    assert not verdict.payload.accepted
+    assert len(rig.risk.seen) == 1
