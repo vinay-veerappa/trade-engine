@@ -155,16 +155,16 @@ class _Host:
 
     def _ask(self, call):
         try:
-            # ``default=str``: a row holding a value JSON cannot carry reaches the core as its text.
-            return ("ok", json.dumps(call(), default=str), "", "")
+            # The row crosses as-is; the core reads it with `default=str` semantics (plain_of).
+            return ("ok", call(), "", "")
         except Exception as exc:  # noqa: BLE001 - the core classifies; a BaseException unwinds as itself
             self._last = exc
             kind = ("refused" if isinstance(exc, TransportRefused) else "replay" if isinstance(exc, TransportReplay)
                     else "unavailable" if isinstance(exc, TransportUnavailable) else "other")
             return ("exc", kind, type(exc).__name__, str(exc))
 
-    def place_order(self, spec: str, key: str):
-        return self._ask(lambda: self._b.transport.place_order(ticket_of(json.loads(spec)), key))
+    def place_order(self, spec: Mapping, key: str):
+        return self._ask(lambda: self._b.transport.place_order(ticket_of(spec), key))
 
     def cancel_order(self, order_id: str):
         return self._ask(lambda: self._b.transport.cancel_order(order_id))
@@ -243,7 +243,7 @@ class TosPaperBroker(BrokerAdapter):
 
     @property
     def queued(self) -> tuple[VenueOrder, ...]:
-        return tuple(_rs.venue_order(d) for d in json.loads(self._core.state())["queued"])
+        return tuple(_rs.venue_order(d) for d in self._core.state()["queued"])
 
     def _go(self, method, *args):
         return _rs.call(method, self._host, *args)
@@ -326,10 +326,10 @@ class TosPaperBroker(BrokerAdapter):
         here are venue refusals the caller records (I11).
         """
         self._require_connected("mirror_batch")
-        out = json.loads(self._go(
+        out = self._go(
             self._core.mirror_batch,
-            json.dumps([_rs.order_doc(o) for o in list(strategy_orders)], default=str),
-            json.dumps(_rs.holdings_doc(holdings))))
+            [_rs.order_doc(o) for o in list(strategy_orders)],
+            _rs.holdings_doc(holdings))
         return NettedBatch(venue_orders=tuple(_rs.venue_order(d) for d in out["venue_orders"]),
                            refused=tuple((o, r) for o, r in out["refused"]))
 
@@ -346,12 +346,12 @@ class TosPaperBroker(BrokerAdapter):
 
         Refuses over an undrained queue: the queue would be lost or sent twice.
         """
-        _rs.call(self._core.restore, json.dumps(codec.canon(mirror)), list(halted_venues))
+        _rs.call(self._core.restore, codec.canon(mirror), list(halted_venues))
 
     def collect_fills(self, mirror: MirrorState) -> FillCollection:
         """Read the venue's cumulative fills per Order ID: the ``MirrorFill`` increments, and the
         Order Book closes, for the host to append (see ``tos_paper.session_native``)."""
-        out = json.loads(self._go(self._core.collect_fills, json.dumps(codec.canon(mirror))))
+        out = self._go(self._core.collect_fills, codec.canon(mirror))
         return FillCollection(
             fills=tuple(MirrorFill(venue=f["venue"], ticket_key=f["ticket_key"], venue_order_id=f["venue_order_id"],
                                    filled=Decimal(f["filled"]), avg_price=_rs.dec(f["avg_price"]),
@@ -375,7 +375,7 @@ class TosPaperBroker(BrokerAdapter):
 
     def drain(self) -> DrainReport:
         """Send the queue one ticket at a time, each read back before the next, then reconcile."""
-        out = json.loads(self._go(self._core.drain))
+        out = self._go(self._core.drain)
         return DrainReport(
             acks=tuple(_rs.ack(a) for a in out["acks"]),
             reconcile=None if out["reconcile"] is None else _rs.event(out["reconcile"]),
@@ -383,13 +383,13 @@ class TosPaperBroker(BrokerAdapter):
 
     def reconcile_now(self, *, defer_unavailable: bool = False) -> VenueReconcile:
         """Read the venue and compare it with what the mirror expects (drift halts the venue)."""
-        return _rs.event(json.loads(self._go(self._core.reconcile_now, defer_unavailable)))
+        return _rs.event(self._go(self._core.reconcile_now, defer_unavailable))
 
     def submit(self, order: VenueOrder) -> VenueAck:
-        return _rs.ack(json.loads(self._go(self._core.submit, json.dumps(_rs.venue_order_doc(order)))))
+        return _rs.ack(self._go(self._core.submit, _rs.venue_order_doc(order)))
 
     def cancel(self, venue_order_id: str) -> VenueAck:
-        return _rs.ack(json.loads(self._go(self._core.cancel, venue_order_id)))
+        return _rs.ack(self._go(self._core.cancel, venue_order_id))
 
     def proven_order_id(self, ticket_key: str) -> str | None:
         """The venue Order ID a send (or the restored fold) proved for a ticket, or None."""
@@ -417,7 +417,7 @@ class TosPaperBroker(BrokerAdapter):
         self._require_connected("positions")
         return [VenuePosition(_rs.unwire(p["instrument"]), Decimal(p["quantity"]), Decimal(p["avg_price"]),
                               datetime.fromisoformat(p["as_of"]))
-                for p in json.loads(self._go(self._core.positions))]
+                for p in self._go(self._core.positions)]
 
     def cash_events(self, since: datetime) -> list[VenueCashEvent]:
         raise TosPaperBrokerError("venue cash events (assignment/exercise) cannot be read yet")

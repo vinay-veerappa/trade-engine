@@ -3,16 +3,18 @@
 //! Refusals cross as `ValueError((kind, message))` for `sim/_rs.py` to map.
 //!
 //! The broker takes the host's callbacks (the clock, the transport reads, sends and cancels)
-//! as methods of one adapter object, and answers JSON text. An `Exception` the transport
-//! raised crosses as a tagged result (the adapter classifies it); a `BaseException` unwinds
-//! as itself, and an exception the broker lets through (`TransportUnavailable`) is re-raised
-//! by the adapter's `reraise()` as the very object it raised.
+//! as methods of one adapter object, and answers Python objects (`plain_of`/`plain_py` convert
+//! them, not JSON text). An `Exception` the transport raised crosses as a tagged result (the
+//! adapter classifies it); a `BaseException` unwinds as itself, and an exception the broker
+//! lets through (`TransportUnavailable`) is re-raised by the adapter's `reraise()` as the
+//! very object it raised.
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use te_core::ledger::json::{self, Json};
+use te_core::ledger::json::Json;
 use te_core::ledger::model::{LErr, R as LR};
 use te_core::tos_paper::broker::{Broker, Class, Fault, Host as BrokerHost, Raised};
 
+use crate::plain::{plain_of, plain_py};
 use crate::sim::{refuse, Host};
 
 #[pyfunction]
@@ -20,16 +22,13 @@ fn tos_paper_decide(op: &str, json: &str) -> PyResult<String> {
     te_core::tos_paper::decide(op, json).map_err(|e| PyValueError::new_err((e.kind, e.msg)))
 }
 
-/// `("ok", json, "", "")` or `("exc", class, type name, str(exc))`.
-type Tagged = (String, String, String, String);
+/// `("ok", value, "", "")` or `("exc", class, type name, str(exc))`: the `"ok"` payload is a
+/// Python object (read with `plain_of`); the `"exc"` class name is a string.
+type Tagged = (String, Py<PyAny>, String, String);
 
 struct PyBrokerHost<'py> {
     host: Bound<'py, PyAny>,
     stash: Host,
-}
-
-fn parse(text: &str) -> Result<Json, Fault> {
-    json::parse(text).map_err(|e| Fault::from(LErr { kind: "tos_wire", msg: format!("bad host json: {}", e.message) }))
 }
 
 impl<'py> PyBrokerHost<'py> {
@@ -55,12 +54,12 @@ impl<'py> PyBrokerHost<'py> {
     ) -> Result<Json, Fault> {
         let (tag, a, b, c): Tagged = self.call(name, args)?;
         if tag == "ok" {
-            return parse(&a);
+            return plain_of(&a.bind(self.host.py())).map_err(|e| Fault::Fatal(self.stash.fail(e)));
         }
-        let class = match a.as_str() {
-            "refused" => Class::Refused,
-            "replay" => Class::Replay,
-            "unavailable" => Class::Unavailable,
+        let class = match a.bind(self.host.py()).extract::<String>().as_deref() {
+            Ok("refused") => Class::Refused,
+            Ok("replay") => Class::Replay,
+            Ok("unavailable") => Class::Unavailable,
             _ => Class::Other,
         };
         Err(Fault::Raised(Raised { class, name: b, text: c }))
@@ -90,7 +89,9 @@ impl<'py> BrokerHost for PyBrokerHost<'py> {
     }
 
     fn place_order(&mut self, spec: &Json, key: &str) -> Result<Json, Fault> {
-        self.net("place_order", (json::dumps(spec), key.to_string()))
+        let py = self.host.py();
+        let spec = plain_py(py, spec).map_err(|e| Fault::Fatal(self.stash.fail(e)))?;
+        self.net("place_order", (spec, key.to_string()))
     }
 
     fn read_positions(&mut self) -> Result<Vec<Json>, Fault> {
@@ -118,12 +119,8 @@ impl<'py> BrokerHost for PyBrokerHost<'py> {
     }
 }
 
-fn doc(text: &str) -> PyResult<Json> {
-    json::parse(text).map_err(|e| PyValueError::new_err(("tos_wire", format!("bad door json: {}", e.message))))
-}
-
-fn list(text: &str) -> PyResult<Vec<Json>> {
-    match doc(text)? {
+fn list_of(value: &Bound<'_, PyAny>) -> PyResult<Vec<Json>> {
+    match plain_of(value)? {
         Json::Arr(a) => Ok(a),
         _ => Err(PyValueError::new_err(("tos_wire", "a list was expected".to_string()))),
     }
@@ -151,22 +148,24 @@ impl TosBroker {
         self.core.halted()
     }
 
-    fn mirror_batch(&mut self, host: &Bound<'_, PyAny>, orders: &str, holdings: &str) -> PyResult<String> {
-        let (orders, holdings) = (list(orders)?, list(holdings)?);
+    fn mirror_batch(&mut self, host: &Bound<'_, PyAny>, orders: &Bound<'_, PyAny>, holdings: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let (orders, holdings) = (list_of(orders)?, list_of(holdings)?);
         let mut h = PyBrokerHost::new(host);
         let r = self.core.mirror_batch(&mut h, &orders, &holdings);
-        h.finish(r).map(|j| json::dumps(&j))
+        let j = h.finish(r)?;
+        Ok(plain_py(host.py(), &j)?.unbind())
     }
 
-    fn restore(&mut self, mirror: &str, halted_venues: Vec<String>) -> PyResult<()> {
-        self.core.restore(&doc(mirror)?, &halted_venues).map_err(refuse)
+    fn restore(&mut self, mirror: &Bound<'_, PyAny>, halted_venues: Vec<String>) -> PyResult<()> {
+        self.core.restore(&plain_of(mirror)?, &halted_venues).map_err(refuse)
     }
 
-    fn collect_fills(&mut self, host: &Bound<'_, PyAny>, mirror: &str) -> PyResult<String> {
-        let mirror = doc(mirror)?;
+    fn collect_fills(&mut self, host: &Bound<'_, PyAny>, mirror: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let mirror = plain_of(mirror)?;
         let mut h = PyBrokerHost::new(host);
         let r = self.core.collect_fills(&mut h, &mirror);
-        h.finish(r).map(|j| json::dumps(&j))
+        let j = h.finish(r)?;
+        Ok(plain_py(host.py(), &j)?.unbind())
     }
 
     fn preflight(&mut self, host: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -175,35 +174,40 @@ impl TosBroker {
         h.finish(r)
     }
 
-    fn drain(&mut self, host: &Bound<'_, PyAny>) -> PyResult<String> {
+    fn drain(&mut self, host: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         let mut h = PyBrokerHost::new(host);
         let r = self.core.drain(&mut h);
-        h.finish(r).map(|j| json::dumps(&j))
+        let j = h.finish(r)?;
+        Ok(plain_py(host.py(), &j)?.unbind())
     }
 
-    fn reconcile_now(&mut self, host: &Bound<'_, PyAny>, defer_unavailable: bool) -> PyResult<String> {
+    fn reconcile_now(&mut self, host: &Bound<'_, PyAny>, defer_unavailable: bool) -> PyResult<PyObject> {
         let mut h = PyBrokerHost::new(host);
         let r = self.core.reconcile_now(&mut h, defer_unavailable);
-        h.finish(r).map(|j| json::dumps(&j))
+        let j = h.finish(r)?;
+        Ok(plain_py(host.py(), &j)?.unbind())
     }
 
-    fn submit(&mut self, host: &Bound<'_, PyAny>, ticket: &str) -> PyResult<String> {
-        let ticket = doc(ticket)?;
+    fn submit(&mut self, host: &Bound<'_, PyAny>, ticket: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let ticket = plain_of(ticket)?;
         let mut h = PyBrokerHost::new(host);
         let r = self.core.submit(&mut h, &ticket);
-        h.finish(r).map(|j| json::dumps(&j))
+        let j = h.finish(r)?;
+        Ok(plain_py(host.py(), &j)?.unbind())
     }
 
-    fn cancel(&mut self, host: &Bound<'_, PyAny>, venue_order_id: &str) -> PyResult<String> {
+    fn cancel(&mut self, host: &Bound<'_, PyAny>, venue_order_id: &str) -> PyResult<PyObject> {
         let mut h = PyBrokerHost::new(host);
         let r = self.core.cancel(&mut h, venue_order_id);
-        h.finish(r).map(|j| json::dumps(&j))
+        let j = h.finish(r)?;
+        Ok(plain_py(host.py(), &j)?.unbind())
     }
 
-    fn positions(&mut self, host: &Bound<'_, PyAny>) -> PyResult<String> {
+    fn positions(&mut self, host: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         let mut h = PyBrokerHost::new(host);
         let r = self.core.positions(&mut h);
-        h.finish(r).map(|j| json::dumps(&j))
+        let j = h.finish(r)?;
+        Ok(plain_py(host.py(), &j)?.unbind())
     }
 
     fn proven_order_id(&self, ticket_key: &str) -> Option<String> {
@@ -213,8 +217,8 @@ impl TosBroker {
         }
     }
 
-    fn state(&self) -> String {
-        json::dumps(&self.core.state())
+    fn state(&self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(plain_py(py, &self.core.state())?.unbind())
     }
 }
 
