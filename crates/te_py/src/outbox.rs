@@ -6,7 +6,10 @@ use pyo3::{
 };
 use te_host::{
     outbox::{self, DrainHost, OutboxRow, TransactionHost},
-    store::{sql, Store},
+    store::{
+        sql::{self, types::Value},
+        Store,
+    },
 };
 
 struct Error(PyErr);
@@ -146,14 +149,34 @@ pub(crate) fn insert(
         .getattr("dumps")?
         .call((payload,), Some(&kwargs))?;
     let ts = created_at.call_method0("isoformat")?;
+    insert_row(
+        py,
+        store,
+        value_from_python(seq, 1)?,
+        value_from_python(&destination, 2)?,
+        value_from_python(&json, 3)?,
+        value_from_python(&ts, 5)?,
+    )
+}
+
+/// The one outbox INSERT, shared by the Python-argument path and the native write path.
+pub(crate) fn insert_row(
+    py: Python<'_>,
+    store: &Store,
+    seq: Value,
+    destination: Value,
+    payload: Value,
+    created_at: Value,
+) -> PyResult<i64> {
     store
-        .insert_outbox(
-            value_from_python(seq, 1)?,
-            value_from_python(&destination, 2)?,
-            value_from_python(&json, 3)?,
-            value_from_python(&ts, 5)?,
-        )
+        .insert_outbox(seq, destination, payload, created_at)
         .map_err(|e| sql_error(py, e))
+}
+
+/// Python's `str.strip()`: Rust's `char::is_whitespace` plus the U+001C..U+001F separators
+/// that Python also strips.
+pub(crate) fn strip_python(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
 pub(crate) fn enqueue(
