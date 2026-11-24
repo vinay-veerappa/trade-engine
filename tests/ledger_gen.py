@@ -1,14 +1,13 @@
-"""Event generators and the Python oracle for the P2a ledger parity tests.
+"""Event generators and outcome helpers for the ledger tests.
 
 Not a test module. `event_zoo()` builds one valid event for every `EventKind`
 (every optional-field variant, all three instrument kinds, Decimal edge cases);
-`py_reencode` / `py_fold` are the oracle the Rust port must reproduce, expressed in
-the shape `trade_engine_rs.ledger_*` returns, so a comparison is a plain `==`.
+`random_stream()` builds seeded random streams for the fold and store tests.
 
-Since P2b the oracle is the FROZEN pre-port Python (`tests/frozen_ledger/`), never the
-production modules, which are now shims over Rust: parity is Rust vs pre-port Python.
-`prod_*` run the production path (codec / fold shims) in the same shape, so the glue
-between Python and Rust is held to the same oracle.
+`py_reencode`, `py_fold` and `py_fold_all` run the PRODUCTION codec and fold
+(`trade_engine.ledger`, the Rust-backed shims) and return the outcome in a plain shape,
+`('ok', bytes)` or `('err', kind, message)`, so a test can assert it with `==`.
+The frozen pre-port Python oracle is retired (P0a-T1); nothing in this module imports it.
 """
 
 from __future__ import annotations
@@ -44,8 +43,8 @@ from trade_engine.domain.portfolio import Fill, Lot, Position  # noqa: E402
 from trade_engine.domain.risk import RiskControlChange, RiskRuleResult, RiskVerdict  # noqa: E402
 from trade_engine.domain.signals import Signal  # noqa: E402
 from trade_engine.interfaces.market_data import CorporateAction  # noqa: E402
-from frozen_ledger import codec  # noqa: E402  - the frozen oracle (P2b)
 from trade_engine.interfaces.broker import Route  # noqa: E402
+from trade_engine.ledger import codec  # noqa: E402
 from trade_engine.ledger.events import (  # noqa: E402
     ACCOUNTS_ACCOUNT,
     AccountLedgerRecord,
@@ -71,7 +70,7 @@ from trade_engine.ledger.events import (  # noqa: E402
     VenueReconcile,
     mirror_account,
 )
-from frozen_ledger.state import AccountState, fold_account  # noqa: E402  - the frozen oracle (P2b)
+from trade_engine.ledger.state import AccountState, fold, fold_account  # noqa: E402
 
 UTC = timezone.utc
 ET = timezone(timedelta(hours=-4))
@@ -88,8 +87,8 @@ SPREAD = Combo((ComboLeg(P200, 1, Side.SELL), ComboLeg(P190, 1, Side.BUY)))
 def kind_of(err: BaseException) -> str:
     """The refusal category: what `rs_call` carries across the boundary.
 
-    Matched by class NAME along the MRO: the frozen oracle and the production shims each
-    define their own `LedgerFoldError` / `PayloadCodecError` / ..., and both must classify.
+    Matched by class NAME along the MRO, so an exception class defined in another module (the
+    `trade_engine.ledger` refusals, the `trade_engine_rs` boundary types) still classifies.
     """
     table = (
         ("PayloadCodecError", "codec"),
@@ -140,8 +139,8 @@ _CARRIERS = frozenset({"AccountState", "Position", "MirrorState", "MirrorTicketS
 def canon(value):
     """Canonical JSON rendering of a fold result (AccountState, MirrorState, ...).
 
-    Carriers are matched by class NAME, so a frozen-oracle state and a production state
-    render identically when (and only when) their contents agree.
+    Carriers are matched by class NAME, so a state rebuilt by another path renders identically
+    when (and only when) its contents agree.
     """
     import dataclasses
 
@@ -161,18 +160,15 @@ def canon(value):
 
 
 def py_fold(events: list[Event], account: str):
-    """('ok', canonical-bytes) or ('err', kind, message) for `fold_account`."""
+    """('ok', canonical-bytes) or ('err', kind, message): production `fold_account`."""
     try:
-        state = fold_account(events, account)
-        return ("ok", dumps(canon(state)))
+        return ("ok", dumps(canon(fold_account(events, account))))
     except Exception as err:  # noqa: BLE001 - classified, never swallowed
         return ("err", kind_of(err), str(err))
 
 
 def py_fold_all(events: list[Event]):
-    """('ok', canonical-bytes of {account: state}) or ('err', kind, message) for `fold`."""
-    from frozen_ledger.state import fold
-
+    """('ok', canonical-bytes of {account: state}) or ('err', kind, message): production `fold`."""
     try:
         return ("ok", dumps(canon(fold(events))))
     except Exception as err:  # noqa: BLE001 - classified, never swallowed
@@ -181,40 +177,6 @@ def py_fold_all(events: list[Event]):
 
 def encoded(events: list[Event]) -> list[bytes]:
     return [dumps(codec.encode_event(e)) for e in events]
-
-
-# --- the production path, in the oracle's shape (P2b) ---------------------------------
-
-
-def prod_reencode(data: bytes):
-    """('ok', bytes) or ('err', kind, message): what the PRODUCTION codec does with `data`."""
-    from trade_engine.ledger import codec as prod_codec
-
-    try:
-        node = json.loads(data.decode("utf-8"))
-        return ("ok", dumps(prod_codec.encode_event(prod_codec.decode_event(node))))
-    except Exception as err:  # noqa: BLE001 - classified, never swallowed
-        return ("err", kind_of(err), str(err))
-
-
-def prod_fold(events: list[Event], account: str):
-    """`py_fold`, through the production `fold_account`."""
-    from trade_engine.ledger.state import fold_account as prod_fold_account
-
-    try:
-        return ("ok", dumps(canon(prod_fold_account(events, account))))
-    except Exception as err:  # noqa: BLE001 - classified, never swallowed
-        return ("err", kind_of(err), str(err))
-
-
-def prod_fold_all(events: list[Event]):
-    """`py_fold_all`, through the production `fold`."""
-    from trade_engine.ledger.state import fold as prod_fold_fn
-
-    try:
-        return ("ok", dumps(canon(prod_fold_fn(events))))
-    except Exception as err:  # noqa: BLE001 - classified, never swallowed
-        return ("err", kind_of(err), str(err))
 
 
 # --- the zoo --------------------------------------------------------------------------
@@ -644,13 +606,12 @@ def random_stream(seed: int) -> tuple[list[Event], str]:
     return evs, acct
 
 
-# --- P7: the oracles keep their old spelling; parity is by VALUE ------------------------------
+# --- P7: decimals compare by VALUE, not spelling ----------------------------------------------
 #
-# The frozen oracles (and the pre-P7 fixtures) spell a decimal as `str(Decimal)`; the
-# production path spells it canonically (docs/RUST_PORT.md P7 S1). Comparing the two is done
-# after re-spelling BOTH sides with `norm`, so a value difference still fails and a spelling
-# difference does not. A literal outside the canonical bound is refused by production and
-# accepted by the oracle: `outside_bound` names those, the one sanctioned asymmetry.
+# Pre-P7 fixtures spell a decimal as `str(Decimal)`; the production path spells it canonically
+# (docs/RUST_PORT.md P7 S1). `norm` re-spells a document so two spellings of one value compare
+# equal. A literal outside the canonical bound is refused by production: `outside_bound` names
+# those inputs.
 
 
 def _respell(node):
@@ -679,7 +640,7 @@ def norm_outcome(outcome):
         return ("ok", norm(bytes(outcome[1])))
     if outcome[0] == "err" and len(outcome) == 3 and isinstance(outcome[2], str):
         from p7_compare import respell_text
-        return (*outcome[:2], respell_text(outcome[2]))      # P7: the oracle quotes a decimal as stored
+        return (*outcome[:2], respell_text(outcome[2]))      # P7: a refusal may quote a decimal as given
     return outcome
 
 

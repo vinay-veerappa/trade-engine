@@ -5,8 +5,8 @@
 The file is opened READ ONLY (`file:<path>?mode=ro`, uri=True); rows come from the
 `events(seq, ts_utc, account, kind, command_id, payload_json, schema_version)` table.
 The rows are folded with the Rust fold through `trade_engine_rs` (the production
-`trade_engine.ledger.state.fold_account`, one call per account, exactly the call
-`tools/ledger_parity.py`'s reader side is backed by). No rule is reimplemented in
+`trade_engine.ledger.state.fold_account`, one call per account, exactly the call the
+store's reader is backed by). No rule is reimplemented in
 Python: the Rust fold is the thing under audit; this tool only asserts properties of
 its output and of the raw rows, and derives cash expectations from the flows
 `crates/te_core/src/ledger/fold.rs` states directly.
