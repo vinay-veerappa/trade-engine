@@ -14,6 +14,7 @@ mod registry_outbox;
 mod flow;
 mod oms;
 mod oms_native;
+mod oms_manager;
 mod precheck;
 mod sim;
 mod lock;
@@ -886,6 +887,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     sim::register(m)?;
     oms::register(m)?;
     oms_native::register(m)?;
+    oms_manager::register(m)?;
     m.add_function(wrap_pyfunction!(flow::oms_flow_native, m)?)?;
     precheck::register(m)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;
