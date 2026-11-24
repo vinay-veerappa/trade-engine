@@ -1,10 +1,8 @@
 //! P3b-2a manager decisions. The host reads carriers and executes plans in order;
 //! this module never reads a clock, a ledger or a venue.
 //!
-//! P3b-2b: every decision is a typed fn the command flow (`oms::flow`) calls directly.
-//! `decide` keeps the JSON door the P3b-2a shims use: each arm parses its request and
-//! calls the same fn, so there is one reader of each rule.
-use crate::ledger::bridge;
+//! P3b-2b: every decision is a typed fn the command flow (`oms::flow`) and the typed
+//! pyfunctions (`te_py::oms_manager`) call directly.
 use crate::ledger::codec::{enc_obj, enc_order, py_repr};
 use crate::ledger::fold::AccountState;
 use crate::ledger::json::{Json, dumps};
@@ -25,27 +23,11 @@ fn text(j: &Json) -> R<&str> {
     match j { Json::Str(s) => Ok(s), _ => err("value", "manager expected string") }
 }
 fn st<'a>(j: &'a Json, k: &str) -> R<&'a str> { text(field(j, k)?) }
-fn array(j: &Json) -> R<&[Json]> {
-    match j { Json::Arr(a) => Ok(a), _ => err("value", "manager expected array") }
-}
-fn flag(j: &Json, k: &str) -> R<bool> {
-    match field(j,k)? { Json::Bool(b) => Ok(*b), _ => err("value", "manager expected bool") }
-}
 fn dec(j: &Json) -> R<Money> {
     Money::parse(text(j)?).ok_or_else(|| LErr {kind: "value", msg: "invalid decimal".into()})
 }
-fn d(j: &Json, k: &str) -> R<Money> { dec(field(j,k)?) }
-fn optional(j: &Json, k: &str) -> R<Option<Money>> {
-    match field(j,k)? { Json::Null => Ok(None), v => Ok(Some(dec(v)?)) }
-}
-fn order(j: &Json) -> R<Order> {
-    match bridge::obj_from_text(&dumps(j))? { Obj::Order(o) => Ok(o), _ => err("value", "manager expected order") }
-}
 fn js(s: impl Into<String>) -> Json { Json::Str(s.into()) }
 fn jd(d: &Money) -> Json { js(s(d)) }
-fn jod(d: &Option<Money>) -> Json { d.as_ref().map_or(Json::Null, jd) }
-fn ds(a: &[Money]) -> Json { Json::Arr(a.iter().map(jd).collect()) }
-fn tuple(a: Vec<Json>) -> Json { Json::Arr(a) }
 
 /// `OrderState` in FILLED, CANCELLED, REJECTED or EXPIRED.
 pub fn terminal(s: OrderState) -> bool {
@@ -81,7 +63,7 @@ fn big_integer(q: &Money) -> R<BigInt> {
 }
 
 /// Largest remainder, stable by index. Python integer products remain unbounded.
-fn allocate(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
+pub fn allocate(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
     if w.is_empty() { return Ok(vec![]); }
     for v in w {
         if le(v,&zero())? { return err("value","target allocation weights must be positive"); }
@@ -145,7 +127,7 @@ pub fn split_quantity(q: &Money, count: usize, instrument: &Instrument) -> R<Vec
     split(q, &vec![Money::int(1); count], equity(instrument))
 }
 
-fn split(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
+pub fn split(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
     if w.is_empty() { return Ok(vec![]); }
     quantity(equity,q)?;
     let portions=allocate(q,w,equity)?;
@@ -162,7 +144,7 @@ pub fn fraction_quantities(q: &Money, w: &[Money], instrument: &Instrument) -> R
     fractions(q, w, equity(instrument))
 }
 
-fn fractions(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
+pub fn fractions(q: &Money, w: &[Money], equity: bool) -> R<Vec<Money>> {
     quantity(equity,q)?;
     let runner=sub(&Money::int(1),&sum(w)?)?;
     let mut weights=w.to_vec();
@@ -863,42 +845,6 @@ pub fn stop_observation(o: &Order, price: &Money) -> R<(Money, bool)> {
     };
     let triggered=if o.side==Side::Buy { ge(price,stop)? } else { le(price,stop)? };
     Ok((stop.clone(),triggered))
-}
-
-/// Each operation is a pure, narrow ownership boundary. Requests use the ledger's
-/// existing exact carrier trees; returned decimal strings retain Python scale.
-pub fn decide(op: &str, raw: &str) -> R<String> {
-    let j = bridge::json_from_text(raw)?;
-    Ok(dumps(&decision(op,&j)?))
-}
-
-fn decision(op: &str, j: &Json) -> R<Json> {
-    match op {
-        "allocate" | "split" | "fractions" => {
-            let q=d(j,"quantity")?;
-            let equity=flag(j,"equity")?;
-            let w: Vec<Money>=array(field(j,"weights")?)?.iter().map(dec).collect::<R<_>>()?;
-            Ok(ds(&match op { "allocate"=>allocate(&q,&w,equity)?, "split"=>split(&q,&w,equity)?, _=>fractions(&q,&w,equity)? }))
-        }
-        "fingerprint" => Ok(js(sha256_hex(dumps(field(j,"payload")?).as_bytes()))),
-        "reduce_fingerprint" => Ok(js(reduce_fingerprint(st(j,"entry")?,&d(j,"fraction")?,st(j,"reason")?))),
-        "bracket_fingerprint" => Ok(js(bracket_fingerprint(field(j,"intent")?,&d(j,"quantity")?)?)),
-        "is_reduce" => Ok(Json::Bool(is_reduce(st(j,"entry")?,st(j,"order_id")?))),
-        "replace_quantity" => {
-            let q=optional(j,"quantity")?;
-            let filled=if q.is_some() { d(j,"filled")? } else { zero() };
-            let equity=match &q { Some(v) if v.is_finite() && !lt(v,&filled)? && !le(v,&zero())? => flag(j,"equity")?, _=>false };
-            replace_quantity(q.as_ref(),&filled,equity)?;
-            Ok(Json::Null)
-        }
-        "replace_terms" => {
-            let o=order(field(j,"order")?)?;
-            let (q,limit,stop)=(optional(j,"quantity")?,optional(j,"limit")?,optional(j,"stop")?);
-            let (updated,same)=replace_terms(&o,q.as_ref(),limit.as_ref(),stop.as_ref());
-            Ok(tuple(vec![jd(&updated.quantity),jod(&updated.limit_price),jod(&updated.stop_price),Json::Bool(same)]))
-        }
-        _ => err("value",format!("unknown manager decision {op}")),
-    }
 }
 
 #[cfg(test)]
