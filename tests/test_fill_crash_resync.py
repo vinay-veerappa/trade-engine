@@ -253,3 +253,32 @@ def test_intraday_service_sweeps_its_account_at_run_start(rig, monkeypatch) -> N
     rig.snapshots = [snap(SESSION, 15, 59)]
     rig.service().run(SESSION, start_at=at_et(SESSION, 15, 58))
     assert calls == [rig.config().account_id]
+
+
+def test_bracket_resync_cause_on_an_unknown_order_raises_key_error(tmp_path: Path) -> None:
+    from trade_engine.oms.reconcile import bracket_resync_cause
+
+    ledger, clock, broker, manager, bracket = _open_bracket(tmp_path)
+    with pytest.raises(KeyError):
+        bracket_resync_cause(ledger, ACCOUNT, "no-such-order")
+    ledger.close()
+
+
+def test_resync_open_brackets_skips_a_bracket_whose_children_are_all_terminal(tmp_path: Path) -> None:
+    from trade_engine.oms.reconcile import TERMINAL, resync_open_brackets
+
+    ledger, clock, broker, manager, bracket = _open_bracket(tmp_path)
+    _reconcile(ledger, clock, broker, manager)
+    # A bar through the profit target (110) fills the target, which closes the position and
+    # cancels the stop: every child is terminal.
+    exit_at = SESSION_OPEN + timedelta(minutes=1)
+    clock.set(exit_at)
+    broker.process_bar(_bar(exit_at, open_="105", high="111", low="104", close="110"))
+    _reconcile(ledger, clock, broker, manager)
+    children = (bracket.stop, *bracket.targets)
+    assert all(manager.get_order(child.order_id).state in TERMINAL for child in children)
+
+    count = ledger.count()
+    assert resync_open_brackets(ledger, manager, ACCOUNT) == 0
+    assert ledger.count() == count
+    ledger.close()
