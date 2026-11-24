@@ -494,3 +494,24 @@ def test_a_position_already_settled_refuses_a_second_settlement(book) -> None:
     again = Event(account="OPT_CSP", kind=EventKind.ASSIGNMENT, payload=notice(put), ts_utc=AFTER, command_id="again")
     with pytest.raises(LedgerFoldError, match="no open position"):
         book.ledger.append(again)
+
+
+# -- the source tables (lifecycle/sources.py) --------------------------------------------
+
+
+def test_two_different_settlements_for_one_key_refuse() -> None:
+    with pytest.raises(ValueError, match="Two different PM settlements for AAPL on 2026-10-16"):
+        FixedSettlements([pm("240"), pm("241")])
+
+
+def test_the_same_settlement_given_twice_is_accepted() -> None:
+    assert FixedSettlements([pm("240"), pm("240")]).settlement("AAPL", EXPIRY, SettleTime.PM).price == D("240")
+
+
+def test_a_settlement_is_found_by_its_stripped_upper_case_symbol() -> None:
+    spx = SettlementPrice("SPX", EXPIRY, SettleTime.AM, D("5000"), "special opening quotation", CLOSE)
+    assert FixedSettlements([spx]).settlement(" spx ", EXPIRY, SettleTime.AM) is spx
+
+
+def test_a_dividend_is_found_by_its_stripped_upper_case_symbol() -> None:
+    assert FixedDividends({"aapl": []}).dividends(" AAPL ", EXPIRY) == ()

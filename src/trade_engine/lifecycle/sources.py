@@ -69,18 +69,16 @@ class FixedSettlements:
         self._prices: dict[tuple[str, date, SettleTime], SettlementPrice] = {}
         for price in items:
             key = (price.underlying, price.session, price.settle_time)
-            if key in self._prices and self._prices[key] != price:
-                raise ValueError(f"Two different {key[2].value} settlements for {key[0]} on {key[1]} (I5)")
+            differs = key in self._prices and self._prices[key] != price
+            decide("settlement_conflict", [key[2].value, key[0], str(key[1])], flags=[differs])
             self._prices[key] = price
 
     def settlement(self, underlying: str, session: date, settle_time: SettleTime) -> SettlementPrice:
-        key = (underlying.strip().upper(), session, settle_time)
+        key = (decide("symbol_key", [underlying])[0][0], session, settle_time)
         found = self._prices.get(key)
-        if found is None:
-            raise StaleDataError(
-                f"No {settle_time.value} settlement for {key[0]} on {session.isoformat()} (I5)"
-            )
-        return found
+        if found is not None:
+            return found
+        decide("settlement_missing", [settle_time.value, key[0], session.isoformat()])  # refuses (I5)
 
 
 @dataclass(frozen=True)
@@ -113,12 +111,12 @@ class FixedDividends:
     with no dividends to say it pays none."""
 
     def __init__(self, by_symbol: Mapping[str, list[Dividend] | tuple[Dividend, ...]]) -> None:
-        self._by_symbol = {symbol.strip().upper(): tuple(items) for symbol, items in by_symbol.items()}
+        self._by_symbol = {decide("symbol_key", [symbol])[0][0]: tuple(items) for symbol, items in by_symbol.items()}
 
     def dividends(self, symbol: str, ex_date: date) -> tuple[Dividend, ...]:
-        key = symbol.strip().upper()
+        key = decide("symbol_key", [symbol])[0][0]
         if key not in self._by_symbol:
-            raise StaleDataError(f"No dividend record for {key} (I5)")
+            decide("dividend_missing", [key])  # refuses (I5)
         return tuple(d for d in self._by_symbol[key] if d.ex_date == ex_date)
 
 
@@ -169,9 +167,6 @@ class SnapshotQuotes:
         underlying = option_style(contract.underlying).underlying
         snapshot = self._store.latest(underlying, now, self._max_age)
         found = snapshot.get(contract)
-        if found is None:
-            raise StaleDataError(
-                f"{contract.occ.strip()} is not in the {underlying} chain snapshot of "
-                f"{snapshot.as_of.isoformat()} (I5)"
-            )
-        return found
+        if found is not None:
+            return found
+        decide("quote_missing", [contract.occ.strip(), underlying, snapshot.as_of.isoformat()])  # refuses (I5)
