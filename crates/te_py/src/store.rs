@@ -797,13 +797,20 @@ impl LedgerStore {
             .collect()
     }
     /// The stored rows matching `filters`, in append order (`events`' query).
-    fn query_rows(&self, py: Python<'_>, filters: Vec<(&str, &str, Value)>) -> PyResult<Vec<StoredRow>> {
+    pub(crate) fn query_rows(&self, py: Python<'_>, filters: Vec<(&str, &str, Value)>) -> PyResult<Vec<StoredRow>> {
         self.check(py)?;
         self.store.query_events(filters).map_err(|e| sql_error(py, e))
     }
     /// Events of one kind in append order, filtered in SQL (`Ledger.events_of_kind`).
     pub(crate) fn kind_events(&self, py: Python<'_>, kind: &str) -> PyResult<Vec<Event>> {
         self.query_rows(py, vec![("kind", "=", Value::Text(kind.to_owned()))])?
+            .iter()
+            .map(event_of_row)
+            .collect()
+    }
+    /// Events of one account in append order, filtered in SQL (`Ledger.events(account)`).
+    pub(crate) fn account_events(&self, py: Python<'_>, account: &str) -> PyResult<Vec<Event>> {
+        self.query_rows(py, vec![("account", "=", Value::Text(account.to_owned()))])?
             .iter()
             .map(event_of_row)
             .collect()
@@ -1721,6 +1728,8 @@ fn owner_ledger(py: Python<'_>) -> PyResult<Py<PyAny>> {
         py.import("builtins")?.getattr("dict")?.call0()?,
     )?;
     ledger.setattr("_listeners", py.import("builtins")?.getattr("list")?.call0()?)?;
+    // As `Ledger.open` does: committed native writes notify the owner's listeners.
+    ledger.getattr("_native")?.call_method1("set_notifier", (ledger.getattr("_notify_listeners")?,))?;
     let lock_view = py
         .import("trade_engine.ledger.store")?
         .getattr("_LockView")?

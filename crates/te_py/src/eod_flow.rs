@@ -1,8 +1,15 @@
+use std::cell::RefCell;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
+use te_core::ledger::model::{err, Obj};
 use te_core::runtime::eod as rules;
 use te_core::runtime::eod_flow::{self as flow, Account, Boundary, EodHost, Finish, Mode, Observation};
+use te_core::runtime::eod_glue::{self as glue, Ledger as _};
 use te_core::runtime::routing;
+
+use crate::store::LedgerStore;
+use crate::store_ledger::{self as sl, native_store, with_native, Pending};
 
 type Value<'py> = Bound<'py, PyAny>;
 
@@ -31,24 +38,73 @@ struct Host<'py> {
     through: Value<'py>,
     name: Value<'py>,
     closed: RefCell<Option<Value<'py>>>,
+    /// The plain ledger's store when the native gate holds; `None` keeps the Python callbacks.
+    native: Option<Bound<'py, LedgerStore>>,
+    /// A Python error held while the native glue unwinds (see `store_ledger::Pending`).
+    pending: Pending,
 }
 
 impl<'py> Host<'py> {
+    fn new(runner: Value<'py>, session: Value<'py>, through: Value<'py>, name: Value<'py>) -> PyResult<Self> {
+        let native = native_store(&runner)?;
+        Ok(Host { runner, session, through, name, closed: RefCell::new(None), native, pending: Pending::default() })
+    }
     fn config(&self) -> PyResult<Value<'py>> { self.runner.getattr("_config") }
     fn clock(&self) -> PyResult<Value<'py>> { self.runner.getattr("_clock") }
     fn calendar(&self) -> PyResult<Value<'py>> { self.runner.getattr("_calendar") }
     fn module(&self) -> PyResult<Value<'py>> {
         Ok(self.runner.py().import("trade_engine.eod.runner")?.into_any())
     }
-    fn command(&self, account: &str, pass: bool) -> PyResult<Value<'py>> {
+    fn job(&self) -> PyResult<String> {
+        self.config()?.getattr("job_name")?.extract()
+    }
+    fn passes(&self) -> PyResult<Vec<String>> {
+        values(&self.module()?.getattr("PASSES")?)?.iter().map(|name| name.extract()).collect()
+    }
+    /// The command id of the account's run, or of its pass named by `self.name`
+    /// (`_run_command` / `_pass_command`; the glue's builders when native).
+    fn command(&self, account: &str, pass: bool) -> PyResult<String> {
+        if self.native.is_none() {
+            let command = if pass {
+                self.runner.call_method1("_pass_command", (account, &self.session, &self.name))?
+            } else {
+                self.runner.call_method1("_run_command", (account, &self.session))?
+            };
+            return command.extract();
+        }
+        let job = self.job()?;
+        let session = sl::date_of(&self.session)?;
         if pass {
-            self.runner.call_method1("_pass_command", (account, &self.session, &self.name))
+            let name: String = self.name.extract()?;
+            Ok(rules::command("eod", &rules::pass_job(&job, &name), account, &session.to_string()))
         } else {
-            self.runner.call_method1("_run_command", (account, &self.session))
+            glue::run_command(&job, account, session).map_err(super::flow_refusal)
         }
     }
-    fn marker(&self, command: &Value<'py>) -> PyResult<Value<'py>> {
-        self.runner.getattr("_ledger")?.call_method1("event_by_command", (command,))
+    /// Whether the ledger holds an event for this command (`event_by_command` is not None).
+    fn has_marker(&self, command: &str) -> PyResult<bool> {
+        match &self.native {
+            Some(store) => with_native(store, &self.clock()?, &self.pending, |l, _| l.event_by_command(command))
+                .map(|event| event.is_some()),
+            None => Ok(!self.runner.getattr("_ledger")?.call_method1("event_by_command", (command,))?.is_none()),
+        }
+    }
+    /// `_fill_count(account)`.
+    fn fill_count(&self, account: &str) -> PyResult<i64> {
+        match &self.native {
+            Some(store) => with_native(store, &self.clock()?, &self.pending, |l, _| glue::fill_count(&*l, account)),
+            None => self.runner.call_method1("_fill_count", (account,))?.extract(),
+        }
+    }
+    /// `_marks_appended(account, session)`.
+    fn marks_appended(&self, account: &str) -> PyResult<i64> {
+        match &self.native {
+            Some(store) => {
+                let session = sl::date_of(&self.session)?;
+                with_native(store, &self.clock()?, &self.pending, |l, _| glue::marks_appended(&*l, account, session))
+            }
+            None => self.runner.call_method1("_marks_appended", (account, &self.session))?.extract(),
+        }
     }
     fn close(&self) -> PyResult<Value<'py>> {
         self.calendar()?.call_method1("session_close", (&self.session,))
@@ -88,7 +144,16 @@ impl<'py> EodHost for Host<'py> {
             rules::pass_boundary(&self.name.extract::<String>()?, &iso(&self.session)?, &iso(&open)?, &iso(&close)?,
                 &iso(&self.through)?, micros(&open)?, micros(&self.through)?, micros(&close)?).map_err(super::flow_refusal)?;
         }
-        self.runner.call_method1("_require_previous_session_complete", (&self.session,))?;
+        if let Some(store) = &self.native {
+            let job = self.job()?;
+            let accounts = self.accounts()?;
+            let session = sl::date_of(&self.session)?;
+            with_native(store, &self.clock()?, &self.pending, |l, _| {
+                glue::require_previous_session_complete(&*l, &job, &accounts, session)
+            })?;
+        } else {
+            self.runner.call_method1("_require_previous_session_complete", (&self.session,))?;
+        }
         Ok(())
     }
     fn accounts(&self) -> PyResult<Vec<String>> { strings(&self.config()?.getattr("brokers")?) }
@@ -96,15 +161,15 @@ impl<'py> EodHost for Host<'py> {
         self.runner.call_method1("_is_options", (account,))?.extract()
     }
     fn completed(&self, account: &str, mode: Mode) -> PyResult<bool> {
-        if !self.marker(&self.command(account, false)?)?.is_none() { return Ok(true); }
-        Ok(mode == Mode::Pass && !self.marker(&self.command(account, true)?)?.is_none())
+        if self.has_marker(&self.command(account, false)?)? { return Ok(true); }
+        Ok(mode == Mode::Pass && self.has_marker(&self.command(account, true)?)?)
     }
     fn prepare(&mut self, account: &str) -> PyResult<Self::Value> {
         self.runner.call_method1("_prepare_account", (account,))
     }
     fn tally(&self, account: &str) -> PyResult<Self::Value> {
         let kwargs = PyDict::new(self.runner.py());
-        kwargs.set_item("fills_before", self.runner.call_method1("_fill_count", (account,))?)?;
+        kwargs.set_item("fills_before", self.fill_count(account)?)?;
         self.module()?.getattr("_Tally")?.call((), Some(&kwargs))
     }
     fn snapshots(&self, options: &[String], mode: Mode) -> PyResult<Vec<Self::Value>> {
@@ -122,8 +187,32 @@ impl<'py> EodHost for Host<'py> {
         Ok(out)
     }
     fn pass_end(&self, account: &str) -> PyResult<Option<Self::Value>> {
-        let end = self.runner.call_method1("_passes_through", (account, &self.session))?;
-        Ok(if end.is_none() { None } else { Some(end) })
+        let Some(store) = &self.native else {
+            let end = self.runner.call_method1("_passes_through", (account, &self.session))?;
+            return Ok(if end.is_none() { None } else { Some(end) });
+        };
+        // `_passes_through`: the at_close of each pass that ran, and the latest of them.
+        let job = self.job()?;
+        let session = sl::date_of(&self.session)?;
+        let names = self.passes()?;
+        let ends = with_native(store, &self.clock()?, &self.pending, |l, _| {
+            let mut ends = Vec::new();
+            for name in &names {
+                let command = rules::command("eod", &rules::pass_job(&job, name), account, &session.to_string());
+                if let Some(event) = l.event_by_command(&command)? {
+                    match event.payload {
+                        Obj::EodRun(run) => ends.push(run.at_close),
+                        _ => return err("value", format!("pass command {command:?} is not a run marker")),
+                    }
+                }
+            }
+            Ok(ends)
+        })?;
+        let times: Vec<i64> = ends.iter().map(sl::micros).collect();
+        match rules::latest(&times) {
+            Some(index) => Ok(Some(sl::datetime_py(self.runner.py(), &ends[index])?)),
+            None => Ok(None),
+        }
     }
     fn validate_resume(&self, account: &str, end: &Self::Value) -> PyResult<()> {
         rules::resume(&self.name.extract::<String>()?, &iso(&self.session)?, account, &iso(end)?, &iso(&self.through)?,
@@ -268,6 +357,13 @@ impl<'py> EodHost for Host<'py> {
             Finish::Marks => {
                 if account.options {
                     self.runner.call_method1("_mark_options_account", (id, &self.session, tally))?;
+                } else if let Some(store) = &self.native {
+                    let job = self.job()?;
+                    let closes = sl::closes(&tally.getattr("last_regular_closes")?)?;
+                    let session = sl::date_of(&self.session)?;
+                    with_native(store, &self.clock()?, &self.pending, |l, c| {
+                        glue::mark_positions(l, c, &job, id, &closes, session)
+                    })?;
                 } else {
                     self.runner.call_method1("_mark_positions", (id, tally.getattr("last_regular_closes")?, &self.session))?;
                 }
@@ -304,26 +400,40 @@ impl<'py> EodHost for Host<'py> {
                 if account.options { self.runner.call_method1("_submit_new_option_entries", (id, &self.session, tally))?; }
                 else { return self.runner.call_method1("_submit_new_orders", (id, &self.session))?.extract(); }
             }
-            Finish::Marker => {
-                let kwargs = PyDict::new(self.runner.py());
-                let bars = if self.name.is_none() { tally.getattr("bars_processed")? } else {
-                    kwargs.set_item("job", self.runner.call_method1("_pass_job", (&self.name,))?)?;
-                    kwargs.set_item("command_id", self.command(id, true)?)?;
-                    0_i64.into_pyobject(self.runner.py())?.into_any()
-                };
-                self.runner.call_method("_append_run_marker", (id, &self.session, bars), Some(&kwargs))?;
-            }
+            Finish::Marker => match &self.native {
+                Some(store) => {
+                    let job = self.job()?;
+                    let session = sl::date_of(&self.session)?;
+                    let (job, command, bars) = if self.name.is_none() {
+                        (job, None, tally.getattr("bars_processed")?.extract::<i64>()?)
+                    } else {
+                        (rules::pass_job(&job, &self.name.extract::<String>()?), Some(self.command(id, true)?), 0)
+                    };
+                    with_native(store, &self.clock()?, &self.pending, |l, c| {
+                        glue::append_run_marker(l, c, &job, id, session, i128::from(bars), command.as_deref())
+                    })?;
+                }
+                None => {
+                    let kwargs = PyDict::new(self.runner.py());
+                    let bars = if self.name.is_none() { tally.getattr("bars_processed")? } else {
+                        kwargs.set_item("job", self.runner.call_method1("_pass_job", (&self.name,))?)?;
+                        kwargs.set_item("command_id", self.command(id, true)?)?;
+                        0_i64.into_pyobject(self.runner.py())?.into_any()
+                    };
+                    self.runner.call_method("_append_run_marker", (id, &self.session, bars), Some(&kwargs))?;
+                }
+            },
         }
         Ok(0)
     }
     fn result(&self, account: &Account<Self::Value>, mode: Mode, orders: i64, exits: i64) -> PyResult<Self::Value> {
         let kwargs = self.result_kwargs(&account.id)?;
         let tally = &account.tally;
-        let fills = self.runner.call_method1("_fill_count", (&account.id,))?.extract::<i64>()?;
+        let fills = self.fill_count(&account.id)?;
         let before = tally.getattr("fills_before")?.extract::<i64>()?;
         kwargs.set_item("fills_recorded", rules::difference(fills, before))?;
         if mode == Mode::Close {
-            kwargs.set_item("marks_appended", self.runner.call_method1("_marks_appended", (&account.id, &self.session))?)?;
+            kwargs.set_item("marks_appended", self.marks_appended(&account.id)?)?;
         }
         if account.options {
             for field in ["orders_submitted", "exit_actions", "snapshots_processed"] {
@@ -365,21 +475,19 @@ fn run<'py>(mut host: Host<'py>, mode: Mode) -> PyResult<Value<'py>> {
 #[pyfunction]
 fn eod_run<'py>(runner: Value<'py>, session: Value<'py>) -> PyResult<Value<'py>> {
     let py = runner.py();
-    run(Host { runner, session, through: py.None().into_bound(py), name: py.None().into_bound(py),
-        closed: RefCell::new(None) }, Mode::Close)
+    run(Host::new(runner, session, py.None().into_bound(py), py.None().into_bound(py))?, Mode::Close)
 }
 
 #[pyfunction]
 fn eod_pass<'py>(runner: Value<'py>, session: Value<'py>, through: Value<'py>, name: Value<'py>) -> PyResult<Value<'py>> {
-    run(Host { runner, session, through, name, closed: RefCell::new(None) }, Mode::Pass)
+    run(Host::new(runner, session, through, name)?, Mode::Pass)
 }
 
 #[pyfunction]
 fn eod_finish<'py>(runner: Value<'py>, account: String, session: Value<'py>, instruments: Value<'py>,
     tally: Value<'py>, options: bool) -> PyResult<Value<'py>> {
     let py = runner.py();
-    let host = Host { runner, session, through: py.None().into_bound(py), name: py.None().into_bound(py),
-        closed: RefCell::new(None) };
+    let host = Host::new(runner, session, py.None().into_bound(py), py.None().into_bound(py))?;
     flow::finish(&host, &Account { id: account, instruments, tally, options }, Mode::Close)
 }
 
@@ -388,8 +496,7 @@ fn eod_finish<'py>(runner: Value<'py>, account: String, session: Value<'py>, ins
 fn eod_replay<'py>(runner: Value<'py>, session: Value<'py>, replays: Value<'py>, tallies: Value<'py>,
     snapshots: Value<'py>, options: Vec<String>, mornings: Option<Value<'py>>) -> PyResult<()> {
     let py = runner.py();
-    let host = Host { runner, session, through: py.None().into_bound(py), name: py.None().into_bound(py),
-        closed: RefCell::new(None) };
+    let host = Host::new(runner, session, py.None().into_bound(py), py.None().into_bound(py))?;
     let mut accounts = Vec::new();
     for id in replays.try_iter()? {
         let id = id?;
@@ -416,4 +523,3 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eod_replay, m)?)?;
     Ok(())
 }
-use std::cell::RefCell;
