@@ -1,9 +1,14 @@
 use pyo3::exceptions::PyAttributeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyIterator};
+use pyo3::types::{PyDict, PyIterator, PyList, PyTuple};
+use te_core::ledger::model::Obj;
 use te_core::runtime::eod as rules;
 use te_core::runtime::eod_flow::{self as flow, EquityEntryHost, ExitHost, ExitKind, SignalHost};
+use te_core::runtime::eod_glue::{self as glue, Ledger as _, OpenBracket, RiskContext};
 use te_core::runtime::routing;
+
+use crate::store::LedgerStore;
+use crate::store_ledger::{self as sl, Pending};
 
 type Value<'py> = Bound<'py, PyAny>;
 fn optional<'py>(value: &Value<'py>, name: &str) -> PyResult<Value<'py>> {
@@ -17,6 +22,58 @@ fn terminal(order: &Value<'_>) -> PyResult<bool> {
     Ok(rules::terminal(&order.getattr("state")?.getattr("value")?.extract::<String>()?))
 }
 
+/// The fields `RiskContext` takes that the fold cannot supply: `None`, as `_derive_risk_context` sets them.
+const UNSOURCED: [&str; 12] = [
+    "current_price", "portfolio_heat", "industry", "industry_positions", "average_dollar_volume_20d",
+    "sessions_until_earnings", "regime", "macro_high_risk_day", "drawdown_from_peak_frac",
+    "previous_session_pnl_frac", "venue_orders_today", "venue_daily_pnl",
+];
+
+/// The fold's risk inputs as the Python `RiskContext` (`_derive_risk_context`'s return).
+fn risk_context_py<'py>(py: Python<'py>, context: &RiskContext) -> PyResult<Value<'py>> {
+    let kwargs = PyDict::new(py);
+    let equity = match &context.equity {
+        Some(equity) => sl::decimal_py(py, equity)?,
+        None => py.None().into_bound(py),
+    };
+    kwargs.set_item("equity", equity)?;
+    kwargs.set_item("gross_exposure", sl::decimal_py(py, &context.gross_exposure)?)?;
+    kwargs.set_item("open_positions", context.open_positions)?;
+    kwargs.set_item("current_position_quantity", context.current_position_quantity)?;
+    for name in UNSOURCED {
+        kwargs.set_item(name, py.None())?;
+    }
+    py.import("trade_engine.risk")?.getattr("RiskContext")?.call((), Some(&kwargs))
+}
+
+/// A te_core open bracket as the Python `OpenBracket` `_open_brackets` builds.
+fn open_bracket_py<'py>(py: Python<'py>, bracket: &OpenBracket) -> PyResult<Value<'py>> {
+    let mut targets = Vec::with_capacity(bracket.open_targets.len());
+    for (limit, remaining) in &bracket.open_targets {
+        targets.push(PyTuple::new(py, [sl::decimal_py(py, limit)?, sl::decimal_py(py, remaining)?])?);
+    }
+    let last_close = match &bracket.last_close {
+        Some(close) => sl::decimal_py(py, close)?,
+        None => py.None().into_bound(py),
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("entry_order_id", &bracket.entry_order_id)?;
+    kwargs.set_item("account_id", &bracket.account_id)?;
+    kwargs.set_item("instrument", sl::instrument_py(py, &bracket.instrument)?)?;
+    kwargs.set_item("side", sl::side_py(py, bracket.side)?)?;
+    kwargs.set_item("entry_quantity", sl::decimal_py(py, &bracket.entry_quantity)?)?;
+    kwargs.set_item("open_quantity", sl::decimal_py(py, &bracket.open_quantity)?)?;
+    kwargs.set_item("average_entry_price", sl::decimal_py(py, &bracket.average_entry_price)?)?;
+    kwargs.set_item("entry_filled_at", sl::datetime_py(py, &bracket.entry_filled_at)?)?;
+    kwargs.set_item("entry_session", sl::date_py(py, bracket.entry_session)?)?;
+    kwargs.set_item("sessions_held", bracket.sessions_held)?;
+    kwargs.set_item("stop_price", sl::decimal_py(py, &bracket.stop_price)?)?;
+    kwargs.set_item("targets_filled", bracket.targets_filled)?;
+    kwargs.set_item("open_targets", PyTuple::new(py, targets)?)?;
+    kwargs.set_item("last_close", last_close)?;
+    py.import("trade_engine.domain.exits")?.getattr("OpenBracket")?.call((), Some(&kwargs))
+}
+
 struct Inputs<'py> {
     runner: Value<'py>,
     account: String,
@@ -28,10 +85,14 @@ struct Inputs<'py> {
     strategy: Option<Value<'py>>,
     risk: Option<Value<'py>>,
     manager: Option<Value<'py>>,
+    /// The plain ledger's store when the native gate holds; `None` keeps the Python callbacks.
+    native: Option<Bound<'py, LedgerStore>>,
+    pending: Pending,
 }
 
 impl<'py> Inputs<'py> {
     fn config(&self) -> PyResult<Value<'py>> { self.runner.getattr("_config") }
+    fn clock(&self) -> PyResult<Value<'py>> { self.runner.getattr("_clock") }
     fn context(&self) -> PyResult<Value<'py>> {
         let py = self.runner.py();
         if !self.options {
@@ -78,8 +139,17 @@ impl<'py> SignalHost for Inputs<'py> {
     }
     fn next_signal(&mut self) -> PyResult<Option<Self::Value>> { self.next() }
     fn record_signal(&self, signal: &Self::Value) -> PyResult<()> {
-        self.runner.call_method1("_record_signal", (&self.account, signal))?;
-        Ok(())
+        match &self.native {
+            Some(store) => {
+                let signal = sl::signal_of(signal)?;
+                let account = self.account.as_str();
+                sl::with_native(store, &self.clock()?, &self.pending, |l, c| glue::record_signal(l, c, account, signal))
+            }
+            None => {
+                self.runner.call_method1("_record_signal", (&self.account, signal))?;
+                Ok(())
+            }
+        }
     }
     fn start_intents(&mut self) -> PyResult<()> {
         let context = self.context()?;
@@ -115,20 +185,58 @@ impl<'py> EquityEntryHost for Inputs<'py> {
         Ok(())
     }
     fn recorded(&self, intent: &Self::Value) -> PyResult<Option<Self::Value>> {
-        let verdict = self.runner.call_method1("recorded_verdict", (&self.account, intent))?;
-        Ok(if verdict.is_none() { None } else { Some(verdict) })
+        match &self.native {
+            Some(store) => {
+                let command: String = intent.getattr("command_id")?.extract()?;
+                let verdict = sl::with_native(store, &self.clock()?, &self.pending,
+                    |l, _| glue::recorded_verdict(&*l, &command))?;
+                match verdict {
+                    Some(verdict) => Ok(Some(sl::obj_py(self.runner.py(), &Obj::RiskVerdict(verdict))?)),
+                    None => Ok(None),
+                }
+            }
+            None => {
+                let verdict = self.runner.call_method1("recorded_verdict", (&self.account, intent))?;
+                Ok(if verdict.is_none() { None } else { Some(verdict) })
+            }
+        }
     }
     fn evaluate(&self, intent: &Self::Value) -> PyResult<Self::Value> {
-        let state = self.runner.getattr("_ledger")?.call_method1("state", (&self.account,))?;
+        let py = self.runner.py();
         let builder = self.config()?.getattr("context_builder")?;
-        let context = if builder.is_none() {
-            self.runner.call_method1("_derive_risk_context", (intent, state))?
-        } else { builder.call1((intent, state, &self.session))? };
+        let context = match &self.native {
+            Some(store) if builder.is_none() => {
+                let instrument = sl::instrument_of(&intent.getattr("instrument")?)?;
+                let account = self.account.as_str();
+                let context = sl::with_native(store, &self.clock()?, &self.pending, |l, _| {
+                    let state = l.state(account)?;
+                    glue::derive_risk_context(&state, &instrument)
+                })?;
+                risk_context_py(py, &context)?
+            }
+            _ => {
+                let state = self.runner.getattr("_ledger")?.call_method1("state", (&self.account,))?;
+                if builder.is_none() {
+                    self.runner.call_method1("_derive_risk_context", (intent, state))?
+                } else { builder.call1((intent, state, &self.session))? }
+            }
+        };
         self.risk.as_ref().expect("configured risk").call_method1("evaluate", (intent, context))
     }
     fn record(&self, intent: &Self::Value, verdict: &Self::Value) -> PyResult<()> {
-        self.runner.call_method1("_record_verdict", (&self.account, intent, verdict))?;
-        Ok(())
+        match &self.native {
+            Some(store) => {
+                let command: String = intent.getattr("command_id")?.extract()?;
+                let verdict = sl::verdict_of(verdict)?;
+                let account = self.account.as_str();
+                sl::with_native(store, &self.clock()?, &self.pending,
+                    |l, c| glue::record_verdict(l, c, account, &command, verdict))
+            }
+            None => {
+                self.runner.call_method1("_record_verdict", (&self.account, intent, verdict))?;
+                Ok(())
+            }
+        }
     }
     fn approved(&self, verdict: &Self::Value) -> PyResult<bool> {
         let accepted = verdict.getattr("accepted")?.is_truthy()?;
@@ -156,7 +264,33 @@ struct Exits<'py> {
     closes: Value<'py>,
     manager: Option<Value<'py>>,
     by_entry: Option<Bound<'py, PyDict>>,
+    /// The plain ledger's store when the native gate holds; `None` keeps the Python callbacks.
+    native: Option<Bound<'py, LedgerStore>>,
+    pending: Pending,
 }
+
+impl<'py> Exits<'py> {
+    /// `_open_brackets(account, session, closes)`: the glue's brackets when native.
+    fn brackets(&self) -> PyResult<Value<'py>> {
+        let py = self.runner.py();
+        match &self.native {
+            Some(store) => {
+                let closes = sl::closes(&self.closes)?;
+                let account = self.account.as_str();
+                let session = sl::date_of(&self.session)?;
+                let clock = self.runner.getattr("_clock")?;
+                let brackets = sl::with_native(store, &clock, &self.pending, |l, _| {
+                    let state = l.state(account)?;
+                    glue::open_brackets(&state, account, session, &closes)
+                })?;
+                let items = brackets.iter().map(|bracket| open_bracket_py(py, bracket)).collect::<PyResult<Vec<_>>>()?;
+                Ok(PyList::new(py, items)?.into_any())
+            }
+            None => self.runner.call_method1("_open_brackets", (&self.account, &self.session, &self.closes)),
+        }
+    }
+}
+
 impl<'py> ExitHost for Exits<'py> {
     type Value = Value<'py>;
     type Error = PyErr;
@@ -166,7 +300,7 @@ impl<'py> ExitHost for Exits<'py> {
         let strategy = config.getattr("strategies")?.call_method1("get", (&self.account,))?;
         let manage = optional(&strategy, "manage_positions")?;
         if !manage.is_callable() { return Ok(Vec::new()); }
-        let brackets = self.runner.call_method1("_open_brackets", (&self.account, &self.session, &self.closes))?;
+        let brackets = self.brackets()?;
         if !brackets.is_truthy()? { return Ok(Vec::new()); }
         let context = PyDict::new(py);
         context.set_item("session", &self.session)?;
@@ -221,13 +355,16 @@ impl<'py> ExitHost for Exits<'py> {
 
 #[pyfunction]
 fn eod_entries<'py>(runner: Value<'py>, account: String, session: Value<'py>, tally: Value<'py>, options: bool) -> PyResult<i64> {
+    let native = sl::native_store(&runner)?;
     let mut host = Inputs { runner, account, session, tally, options, signals: None,
-        iterator: None, strategy: None, risk: None, manager: None };
+        iterator: None, strategy: None, risk: None, manager: None, native, pending: Pending::default() };
     flow::entries(&mut host)
 }
 #[pyfunction]
 fn eod_manage_positions<'py>(runner: Value<'py>, account: String, session: Value<'py>, closes: Value<'py>) -> PyResult<i64> {
-    let mut host = Exits { runner, account, session, closes, manager: None, by_entry: None };
+    let native = sl::native_store(&runner)?;
+    let mut host = Exits { runner, account, session, closes, manager: None, by_entry: None,
+        native, pending: Pending::default() };
     flow::manage_positions(&mut host)
 }
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

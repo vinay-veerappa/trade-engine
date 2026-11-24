@@ -17,6 +17,7 @@ mod precheck;
 mod sim;
 mod lock;
 pub mod store;
+mod store_ledger;
 mod outbox;
 mod clock;
 pub mod http;
