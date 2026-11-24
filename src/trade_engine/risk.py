@@ -19,6 +19,7 @@ from typing import Any, Literal
 import trade_engine_rs as _rs
 
 from trade_engine.domain.instruments import Equity, Side
+from trade_engine.domain.orders import OrderType
 from trade_engine.domain.portfolio import VenueEnv
 from trade_engine.domain.risk import RiskControlChange, RiskRuleResult, RiskVerdict
 from trade_engine.domain.signals import OrderIntent
@@ -369,6 +370,12 @@ class RiskEngine:
         )
         rails = self.venue_rails
         now = self._now()
+        # Size on the worst fill: a STOP_LIMIT fills no worse than its limit, not its trigger.
+        worst_fill = (
+            intent.entry_limit_price
+            if intent.entry_type is OrderType.STOP_LIMIT and intent.entry_limit_price is not None
+            else intent.entry_price
+        )
         reply = _call(
             _rs.risk_evaluate,
             {
@@ -380,7 +387,7 @@ class RiskEngine:
                     "symbol": intent.instrument.symbol if is_equity else "",
                     "side": str(intent.side.value),
                     "quantity_rule": intent.quantity_rule,
-                    "entry_price": str(intent.entry_price),
+                    "entry_price": str(worst_fill),
                     "stop_loss": str(intent.stop_loss),
                     "command_id": intent.command_id,
                 },
