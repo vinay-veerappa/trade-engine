@@ -1026,7 +1026,6 @@ impl Obj {
 
 /// The keyword fields of a dataclass being rebuilt (`target(**kwargs)`).
 pub struct Kw {
-    tag: &'static str,
     f: Vec<(String, Val)>,
 }
 
@@ -1044,7 +1043,7 @@ impl Kw {
                 return err("type", format!("{tag}() missing required argument: '{n}'"));
             }
         }
-        Ok(Kw { tag, f })
+        Ok(Kw { f })
     }
 
     fn take(&mut self, name: &str) -> Option<Val> {
