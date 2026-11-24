@@ -326,3 +326,24 @@ pub fn state_of(text: &str) -> R<lm::OrderState> {
 pub fn tif_of(text: &str) -> R<lm::Tif> {
     lm::Tif::parse(text).map_or_else(|| wire(format!("bad tif {text:?}")), Ok)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_text_probe_classifies_explicit_code_points() {
+        // digit seven, superscript two, A, tab, no-break space, unassigned U+0378
+        let doc = obj(vec![("chars", jstr("7\u{00B2}A\t\u{00A0}\u{0378}"))]);
+        let row = |d: bool, p: bool, s: bool| Json::Arr(vec![Json::Bool(d), Json::Bool(p), Json::Bool(s)]);
+        let expected = Json::Arr(vec![
+            row(true, true, false),   // '7': a digit, printable, not space
+            row(true, true, false),   // '²': isdigit (superscript), printable
+            row(false, true, false),  // 'A'
+            row(false, false, true),  // tab: not printable, space
+            row(false, false, true),  // no-break space: not printable, space
+            row(false, false, false), // U+0378: unassigned, not printable
+        ]);
+        assert_eq!(text_probe(&doc).unwrap(), expected);
+    }
+}

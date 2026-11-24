@@ -1,5 +1,4 @@
-//! P5's doors: `tos_paper_decide(op, json) -> json` (the stateless decisions), and the
-//! `TosBroker` pyclass (the `TosPaperBroker` state machine, `te_core::tos_paper::broker`).
+//! The `TosBroker` pyclass (the `TosPaperBroker` state machine, `te_core::tos_paper::broker`).
 //! Refusals cross as `ValueError((kind, message))` for `sim/_rs.py` to map.
 //!
 //! The broker takes the host's callbacks (the clock, the transport reads, sends and cancels)
@@ -14,11 +13,6 @@ use te_core::ledger::model::{LErr, R as LR};
 use te_core::tos_paper::broker::{Broker, Class, Fault, Host as BrokerHost, Raised};
 
 use crate::sim::{refuse, Host};
-
-#[pyfunction]
-fn tos_paper_decide(op: &str, json: &str) -> PyResult<String> {
-    te_core::tos_paper::decide(op, json).map_err(|e| PyValueError::new_err((e.kind, e.msg)))
-}
 
 /// `("ok", json, "", "")` or `("exc", class, type name, str(exc))`.
 type Tagged = (String, String, String, String);
@@ -219,7 +213,6 @@ impl TosBroker {
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(tos_paper_decide, m)?)?;
     m.add_class::<TosBroker>()?;
     Ok(())
 }
