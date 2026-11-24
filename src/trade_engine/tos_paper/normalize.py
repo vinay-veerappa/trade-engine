@@ -42,24 +42,20 @@ class NormalizeError(ValueError):
     """A raw venue row the adapter cannot read without guessing."""
 
 
-def _exc(exc: BaseException) -> dict:
+def _exc(exc: BaseException) -> tuple[str, str, str]:
     kind = "refused" if isinstance(exc, TransportRefused) else "replay" if isinstance(exc, TransportReplay) else "other"
-    return {"exc": {"class": kind, "type": type(exc).__name__, "text": str(exc)}}
-
-
-def _ack(op: str, doc: dict, venue_order_id: str, at: datetime) -> VenueAck:
-    out = _rs.decide(op, doc)
-    return VenueAck(venue_order_id, out["status"], at, out["message"])
+    return kind, type(exc).__name__, str(exc)
 
 
 def normalize_place_result(raw: object, venue_order_id: str, at: datetime) -> VenueAck:
     """A transport result → a PENDING or REJECTED ack. Never ACCEPTED (I5)."""
-    return _ack("place_result", {"raw": raw}, venue_order_id, at)
+    return _rs.call(_rs.rs.tos_normalize_place_result, raw, venue_order_id, at)
 
 
 def normalize_place_exception(exc: BaseException, venue_order_id: str, at: datetime) -> VenueAck:
     """A transport exception → REJECTED if provably nothing was sent, else PENDING."""
-    return _ack("place_exception", _exc(exc), venue_order_id, at)
+    kind, name, text = _exc(exc)
+    return _rs.call(_rs.rs.tos_normalize_place_exception, kind, name, text, venue_order_id, at)
 
 
 def placed_order_id(raw: object) -> str | None:
@@ -68,17 +64,18 @@ def placed_order_id(raw: object) -> str | None:
     Only a SENT result whose new Order Book row was matched to this ticket (a
     ``book_status`` other than UNKNOWN) names the order, and only an all-digit id.
     """
-    return _rs.decide("placed_order_id", {"raw": raw})["order_id"]
+    return _rs.call(_rs.rs.tos_normalize_placed_order_id, raw)
 
 
 def normalize_cancel_result(raw: object, venue_order_id: str, at: datetime) -> VenueAck:
     """A cancel result → ACCEPTED only for a CANCELED Order Book row, else PENDING."""
-    return _ack("cancel_result", {"raw": raw}, venue_order_id, at)
+    return _rs.call(_rs.rs.tos_normalize_cancel_result, raw, venue_order_id, at)
 
 
 def normalize_cancel_exception(exc: BaseException, venue_order_id: str, at: datetime) -> VenueAck:
     """A cancel exception → REJECTED if provably nothing was clicked, else PENDING."""
-    return _ack("cancel_exception", _exc(exc), venue_order_id, at)
+    kind, name, text = _exc(exc)
+    return _rs.call(_rs.rs.tos_normalize_cancel_exception, kind, name, text, venue_order_id, at)
 
 
 @dataclass(frozen=True)
@@ -117,12 +114,12 @@ def working_order_doc(row: WorkingOrder) -> dict:
 
 def normalize_working_order(raw: Mapping[str, object]) -> WorkingOrder:
     """One Order Book row → WorkingOrder. An unknown status is PENDING_UNKNOWN."""
-    return working_order_of(_rs.decide("working_order", {"raw": raw}))
+    return _rs.call(_rs.rs.tos_normalize_working_order, raw)
 
 
 def book_state(raw_status: object) -> OrderState:
     """An Order Book status string → OrderState; anything unrecognised is PENDING_UNKNOWN."""
-    return OrderState(_rs.decide("book_state", {"status": raw_status})["state"])
+    return OrderState(_rs.call(_rs.rs.tos_normalize_book_state, raw_status))
 
 
 @dataclass(frozen=True)
@@ -141,13 +138,9 @@ def normalize_order_fill(raw: Mapping[str, object]) -> OrderFill:
     ``filled`` is a non-negative whole number; a positive fill needs a positive average
     price; a FILLED row with nothing filled is a contradiction.
     """
-    out = _rs.decide("order_fill", {"raw": raw})
-    return OrderFill(order_id=out["order_id"], filled=Decimal(out["filled"]), avg_price=_rs.dec(out["avg_price"]),
-                     state=OrderState(out["state"]))
+    return _rs.call(_rs.rs.tos_normalize_order_fill, raw)
 
 
 def normalize_position(raw: Mapping[str, object], as_of: datetime) -> VenuePosition:
     """One Position row → VenuePosition (signed quantity)."""
-    out = _rs.decide("position", {"raw": raw})
-    return VenuePosition(instrument=_rs.unwire(out["instrument"]), quantity=Decimal(out["quantity"]),
-                         avg_price=Decimal(out["avg_price"]), as_of=as_of)
+    return _rs.call(_rs.rs.tos_normalize_position, raw, as_of)

@@ -47,25 +47,7 @@ def allocate_venue_fill(
     venue fills allocated here match the mirror book exactly. Fees split pro-rata to the
     cent, remainder to the first-in order.
     """
-    out = _rs.decide("allocate_venue_fill", {
-        "fill": {"venue_fill_id": fill.venue_fill_id, "venue_order_id": fill.venue_order_id,
-                 "instrument": _rs.wire(fill.instrument), "side": fill.side.value, "quantity": str(fill.quantity),
-                 "price": str(fill.price), "filled_at": fill.filled_at.isoformat(), "fee": str(fill.fee)},
-        "ticket": {"venue_order_id": ticket.venue_order_id, "instrument": _rs.wire(ticket.instrument),
-                   "side": ticket.side.value, "quantity": str(ticket.quantity),
-                   "allocations": [{"strategy_order_id": a.strategy_order_id, "account_id": a.account_id,
-                                    "quantity": str(a.quantity)} for a in ticket.allocations]},
-        "already_filled": None if already_filled is None else {k: str(v) for k, v in already_filled.items()},
-    })
-    return tuple(
-        Fill(
-            fill_id=f["fill_id"], order_id=f["order_id"], account_id=f["account_id"], instrument=fill.instrument,
-            quantity=Decimal(f["quantity"]), price=Decimal(f["price"]), venue_env=f["venue_env"],
-            filled_at=fill.filled_at, side=Side(f["side"]), fee=Decimal(f["fee"]),
-            venue_order_id=f["venue_order_id"], venue_execution_id=f["venue_execution_id"],
-        )
-        for f in out
-    )
+    return tuple(_rs.call(_rs.rs.tos_slippage_allocate_venue_fill, fill, ticket, already_filled))
 
 
 # -- the report --------------------------------------------------------------
@@ -106,11 +88,6 @@ class SlippageReport:
             raise SlippageError("venue must be non-empty")
 
 
-def _fill_doc(f: Fill) -> dict:
-    return {"fill_id": f.fill_id, "order_id": f.order_id, "instrument": _rs.wire(f.instrument),
-            "side": f.side.value, "quantity": str(f.quantity), "price": str(f.price)}
-
-
 def slippage_report(
     venue: str,
     as_of: datetime,
@@ -118,16 +95,4 @@ def slippage_report(
     venue_fills: Sequence[Fill],
 ) -> SlippageReport:
     """Pair sim and venue fills per strategy order; refuse per order, never per report."""
-    r = _rs.decide("slippage_report", {
-        "venue": venue, "as_of": as_of.isoformat(),
-        "sim_fills": [_fill_doc(f) for f in sim_fills], "venue_fills": [_fill_doc(f) for f in venue_fills],
-    })
-    pairs = tuple(
-        SlippagePair(p["order_id"], p["instrument"], Side(p["side"]), Decimal(p["quantity"]),
-                     Decimal(p["sim_price"]), Decimal(p["venue_price"]), Decimal(p["slippage_points"]),
-                     _rs.dec(p["slippage_bps"]))
-        for p in r["pairs"]
-    )
-    return SlippageReport(r["venue"], datetime.fromisoformat(r["as_of"]), pairs, tuple(r["unmatched_sim"]),
-                          tuple(r["unmatched_venue"]), tuple(tuple(x) for x in r["refused"]),
-                          _rs.dec(r["mean_slippage_bps"]))
+    return _rs.call(_rs.rs.tos_slippage_report, venue, as_of, sim_fills, venue_fills)

@@ -24,17 +24,13 @@ from trade_engine.domain.instruments import Instrument
 from trade_engine.interfaces.broker import VenueOrder, VenuePosition
 from trade_engine.ledger.events import VenueReconcile
 from trade_engine.tos_paper import _rs
-from trade_engine.tos_paper.normalize import WorkingOrder, working_order_doc
+from trade_engine.tos_paper.normalize import WorkingOrder
 
 UNREADABLE = "<venue unreadable>"
 
 
-def _positions(positions: Sequence[VenuePosition]) -> list:
-    return [{"instrument": _rs.wire(p.instrument), "quantity": str(p.quantity)} for p in positions]
-
-
 def position_book(positions: Sequence[VenuePosition]) -> dict[Instrument, Decimal]:
-    return _rs.unpairs(_rs.decide("position_book", {"positions": _positions(positions)}))
+    return _rs.call(_rs.rs.tos_reconcile_position_book, positions)
 
 
 def reconcile(
@@ -45,15 +41,12 @@ def reconcile(
     working: Sequence[WorkingOrder],
 ) -> VenueReconcile:
     """Per contract: venue position + live working remainder must equal expected."""
-    return _rs.event(_rs.decide("reconcile", {
-        "venue": venue, "as_of": as_of.isoformat(), "expected": _rs.pairs(expected),
-        "positions": _positions(positions), "working": [working_order_doc(r) for r in working]}))
+    return _rs.call(_rs.rs.tos_reconcile_reconcile, venue, as_of, expected, positions, working)
 
 
 def unreadable(venue: str, as_of: datetime, contracts: Sequence[Instrument], why: str) -> VenueReconcile:
     """A reconcile that could not read the venue: drift on every contract in play."""
-    return _rs.event(_rs.decide("unreadable", {
-        "venue": venue, "as_of": as_of.isoformat(), "contracts": [_rs.wire(c) for c in contracts], "why": why}))
+    return _rs.call(_rs.rs.tos_reconcile_unreadable, venue, as_of, contracts, why)
 
 
 def confirm_ticket(
@@ -68,14 +61,12 @@ def confirm_ticket(
     ``claimed`` holds indexes of ``working`` rows already matched to earlier tickets of
     this batch, so two identical tickets cannot both claim one row.
     """
-    out = _rs.decide("confirm_ticket", {
-        "ticket": _rs.ticket_doc(ticket), "before": _rs.pairs(before), "positions": _positions(positions),
-        "working": [working_order_doc(r) for r in working], "claimed": sorted(claimed)})
-    claimed.update(out["claimed"])
-    return out["status"], out["reason"]
+    status, reason, indexes = _rs.call(_rs.rs.tos_reconcile_confirm_ticket, ticket, before, positions,
+                                       working, sorted(claimed))
+    claimed.update(indexes)
+    return status, reason
 
 
 def ticket_contracts(ticket: VenueOrder, units: Decimal | None = None) -> dict[Instrument, Decimal]:
     """Signed contracts ``units`` of a ticket (default: all of it) put on the venue, per contract."""
-    return _rs.unpairs(_rs.decide("ticket_contracts", {
-        "ticket": _rs.ticket_doc(ticket), "units": None if units is None else str(units)}))
+    return _rs.call(_rs.rs.tos_reconcile_ticket_contracts, ticket, units)

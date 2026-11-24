@@ -5,17 +5,20 @@
 //! still stands.
 //!
 //! The split reuses `ledger::mirror::pro_rata`, the one allocation rule for venue fills
-//! (the mirror fold splits each increment with it too). Fills cross as JSON; `filled_at`
-//! and `as_of` are carried through untouched (no clock here, I7).
+//! (the mirror fold splits each increment with it too). `filled_at` and `as_of` are
+//! carried through untouched (no clock here, I7).
+//!
+//! The `*_raw` typed fns take plain Rust structs and return plain Rust structs; the
+//! `allocate_venue_fill`/`slippage_report` door fns are thin JSON wrappers over them.
 
 use std::collections::HashSet;
 
 use super::pytext::repr_str;
-use super::wire::{instrument, jopt_dec, jstr, obj, req, req_arr, req_dec, req_str, Instrument};
+use super::wire::{jopt_dec, jstr, linstr, obj, req, req_arr, req_dec, req_str, side_of};
 use super::SLIPPAGE;
 use crate::ledger::json::Json;
 use crate::ledger::mirror::pro_rata;
-use crate::ledger::model::{derr, err, R};
+use crate::ledger::model::{derr, err, Instrument, Side, R};
 use crate::ledger::ops::{add, div as ops_div, gt, lt, mul, sub};
 use crate::money::{Money, Round};
 
@@ -55,31 +58,166 @@ fn to_bps_places(d: &Money) -> R<Money> {
     d.quantize(-4).map_err(derr)
 }
 
+/// One venue fill of a netted ticket.
+#[derive(Debug)]
+pub struct VenueFill {
+    pub venue_fill_id: String,
+    pub venue_order_id: String,
+    pub instrument: Instrument,
+    pub side: Side,
+    pub quantity: Money,
+    pub price: Money,
+    /// Carried through untouched (the caller already holds the instant).
+    pub filled_at: String,
+    pub fee: Money,
+}
+
+/// The part of a netted ticket a fill is judged against.
+#[derive(Debug)]
+pub struct VenueTicket {
+    pub venue_order_id: String,
+    pub instrument: Instrument,
+    pub side: Side,
+    pub quantity: Money,
+    /// `(strategy_order_id, account_id, quantity)` in allocation order.
+    pub allocations: Vec<(String, String, Money)>,
+}
+
+/// One strategy-order fill the allocator produces.
+#[derive(Debug)]
+pub struct AllocFill {
+    pub fill_id: String,
+    pub order_id: String,
+    pub account_id: String,
+    pub quantity: Money,
+    pub price: Money,
+    pub venue_env: &'static str,
+    pub side: Side,
+    pub fee: Money,
+    pub venue_order_id: String,
+    pub venue_execution_id: String,
+}
+
+/// `allocate_venue_fill`: one venue fill of a netted ticket -> one fill per strategy order
+/// (§4.4). The fill is split pro-rata over what each order still lacks; fees split pro-rata
+/// to the cent, the remainder to the first-in order.
+pub fn allocate_venue_fill_raw(
+    fill: &VenueFill,
+    ticket: &VenueTicket,
+    already_filled: &[(String, Money)],
+) -> R<Vec<AllocFill>> {
+    if fill.venue_order_id != ticket.venue_order_id {
+        return slippage(format!(
+            "fill {} is for {}, not {}",
+            fill.venue_fill_id, fill.venue_order_id, ticket.venue_order_id
+        ));
+    }
+    if !fill.instrument.same(&ticket.instrument) {
+        return slippage(format!("fill {} instrument does not match the ticket (I6)", fill.venue_fill_id));
+    }
+    if fill.side != ticket.side {
+        return slippage(format!(
+            "fill {} side {} != ticket side {}",
+            fill.venue_fill_id,
+            fill.side.value(),
+            ticket.side.value()
+        ));
+    }
+    let done = sum(already_filled.iter().map(|(_, q)| q))?;
+    let total = add(&done, &fill.quantity)?;
+    if gt(&total, &ticket.quantity)? {
+        return slippage(format!(
+            "fill {} takes the ticket to {} of {}; overfill (I5)",
+            fill.venue_fill_id,
+            total.canon(),
+            ticket.quantity.canon()
+        ));
+    }
+    // `{id: quantity}`: a repeated id keeps its last quantity.
+    let known = |id: &str| ticket.allocations.iter().rev().find(|(oid, _, _)| oid == id).map(|(_, _, q)| q);
+    for (order_id, quantity) in already_filled {
+        let bad = match known(order_id) {
+            None => true,
+            Some(cap) => lt(quantity, &zero())? || gt(quantity, cap)?,
+        };
+        if bad {
+            return slippage(format!(
+                "already_filled gives {order_id} {}, which ticket {} cannot have allocated (I5)",
+                quantity.canon(),
+                ticket.venue_order_id
+            ));
+        }
+    }
+    let mut lacking = Vec::new();
+    for (oid, _, qty) in &ticket.allocations {
+        let had = already_filled.iter().find(|(id, _)| *id == *oid).map(|(_, q)| q.clone()).unwrap_or_else(zero);
+        lacking.push(sub(qty, &had)?);
+    }
+    let shares = pro_rata(&lacking, &sub(&ticket.quantity, &done)?, &fill.quantity)?;
+    let mut pieces: Vec<(usize, Money)> = Vec::new();
+    for (index, piece) in shares.into_iter().enumerate() {
+        if gt(&piece, &zero())? {
+            pieces.push((index, piece));
+        }
+    }
+    let mut fees = Vec::new();
+    for (_, piece) in &pieces {
+        fees.push(floor_to_cent(&div(&mul(&fill.fee, piece)?, &fill.quantity)?)?);
+    }
+    if !fees.is_empty() {
+        let remainder = sub(&fill.fee, &sum(fees.iter())?)?;
+        fees[0] = add(&fees[0], &remainder)?;
+    }
+    let mut out = Vec::new();
+    for ((index, piece), fee) in pieces.iter().zip(&fees) {
+        let (oid, account_id, _) = &ticket.allocations[*index];
+        out.push(AllocFill {
+            fill_id: format!("{}:{}", fill.venue_fill_id, oid),
+            order_id: oid.clone(),
+            account_id: account_id.clone(),
+            quantity: piece.clone(),
+            price: fill.price.clone(),
+            venue_env: "paper",
+            side: fill.side,
+            fee: fee.clone(),
+            venue_order_id: fill.venue_order_id.clone(),
+            venue_execution_id: fill.venue_fill_id.clone(),
+        });
+    }
+    Ok(out)
+}
+
 /// `allocate_venue_fill`: one venue fill of a netted ticket -> one fill per strategy order
 /// (§4.4). `{"fill", "ticket", "already_filled"}` -> a list of fills.
-///
-/// The fill is split pro-rata over what each order still lacks (the mirror fold's rule);
-/// fees split pro-rata to the cent, the remainder to the first-in order.
 pub fn allocate_venue_fill(doc: &Json) -> R<Json> {
     let fill = req(doc, "fill")?;
     let ticket = req(doc, "ticket")?;
-    let fill_id = req_str(fill, "venue_fill_id")?;
-    let fill_order = req_str(fill, "venue_order_id")?;
-    let ticket_order = req_str(ticket, "venue_order_id")?;
-    if fill_order != ticket_order {
-        return slippage(format!("fill {fill_id} is for {fill_order}, not {ticket_order}"));
-    }
-    let fill_inst = instrument(req(fill, "instrument")?)?;
-    if !fill_inst.same(&instrument(req(ticket, "instrument")?)?)? {
-        return slippage(format!("fill {fill_id} instrument does not match the ticket (I6)"));
-    }
-    let fill_side = req_str(fill, "side")?;
-    let ticket_side = req_str(ticket, "side")?;
-    if fill_side != ticket_side {
-        return slippage(format!("fill {fill_id} side {fill_side} != ticket side {ticket_side}"));
-    }
-    let fill_qty = req_dec(fill, "quantity")?;
-    let ticket_qty = req_dec(ticket, "quantity")?;
+    let fill = VenueFill {
+        venue_fill_id: req_str(fill, "venue_fill_id")?.to_string(),
+        venue_order_id: req_str(fill, "venue_order_id")?.to_string(),
+        instrument: linstr(req(fill, "instrument")?)?,
+        side: side_of(req_str(fill, "side")?)?,
+        quantity: req_dec(fill, "quantity")?,
+        price: req_dec(fill, "price")?,
+        filled_at: req_str(fill, "filled_at")?.to_string(),
+        fee: req_dec(fill, "fee")?,
+    };
+    let ticket = VenueTicket {
+        venue_order_id: req_str(ticket, "venue_order_id")?.to_string(),
+        instrument: linstr(req(ticket, "instrument")?)?,
+        side: side_of(req_str(ticket, "side")?)?,
+        quantity: req_dec(ticket, "quantity")?,
+        allocations: req_arr(ticket, "allocations")?
+            .iter()
+            .map(|a| {
+                Ok((
+                    req_str(a, "strategy_order_id")?.to_string(),
+                    req_str(a, "account_id")?.to_string(),
+                    req_dec(a, "quantity")?,
+                ))
+            })
+            .collect::<R<Vec<_>>>()?,
+    };
     let mut prior: Vec<(String, Money)> = Vec::new();
     match doc.get("already_filled") {
         None | Some(Json::Null) => {}
@@ -93,91 +231,37 @@ pub fn allocate_venue_fill(doc: &Json) -> R<Json> {
         }
         Some(_) => return super::wire::wire("already_filled is a mapping or null"),
     }
-    let done = sum(prior.iter().map(|(_, q)| q))?;
-    let total = add(&done, &fill_qty)?;
-    if gt(&total, &ticket_qty)? {
-        return slippage(format!(
-            "fill {fill_id} takes the ticket to {} of {}; overfill (I5)",
-            total.canon(),
-            ticket_qty.canon()
-        ));
-    }
-    struct Alloc {
-        strategy_order_id: String,
-        account_id: String,
-        quantity: Money,
-    }
-    let mut allocations = Vec::new();
-    for a in req_arr(ticket, "allocations")? {
-        allocations.push(Alloc {
-            strategy_order_id: req_str(a, "strategy_order_id")?.to_string(),
-            account_id: req_str(a, "account_id")?.to_string(),
-            quantity: req_dec(a, "quantity")?,
-        });
-    }
-    // `{id: quantity}`: a repeated id keeps its last quantity.
-    let known = |id: &str| allocations.iter().rev().find(|a| a.strategy_order_id == id).map(|a| &a.quantity);
-    for (order_id, quantity) in &prior {
-        let bad = match known(order_id) {
-            None => true,
-            Some(cap) => lt(quantity, &zero())? || gt(quantity, cap)?,
-        };
-        if bad {
-            return slippage(format!(
-                "already_filled gives {order_id} {}, which ticket {ticket_order} cannot have allocated (I5)",
-                quantity.canon()
-            ));
-        }
-    }
-    let mut lacking = Vec::new();
-    for a in &allocations {
-        let had = prior.iter().find(|(id, _)| *id == a.strategy_order_id).map(|(_, q)| q.clone()).unwrap_or_else(zero);
-        lacking.push(sub(&a.quantity, &had)?);
-    }
-    let shares = pro_rata(&lacking, &sub(&ticket_qty, &done)?, &fill_qty)?;
-    let mut pieces: Vec<(usize, Money)> = Vec::new();
-    for (index, piece) in shares.into_iter().enumerate() {
-        if gt(&piece, &zero())? {
-            pieces.push((index, piece));
-        }
-    }
-    let fee = req_dec(fill, "fee")?;
-    let mut fees = Vec::new();
-    for (_, piece) in &pieces {
-        fees.push(floor_to_cent(&div(&mul(&fee, piece)?, &fill_qty)?)?);
-    }
-    if !fees.is_empty() {
-        let remainder = sub(&fee, &sum(fees.iter())?)?;
-        fees[0] = add(&fees[0], &remainder)?;
-    }
-    let price = req_dec(fill, "price")?;
-    let mut out = Vec::new();
-    for ((index, piece), fee) in pieces.iter().zip(&fees) {
-        let allocation = &allocations[*index];
-        out.push(obj(vec![
-            ("fill_id", jstr(format!("{fill_id}:{}", allocation.strategy_order_id))),
-            ("order_id", jstr(allocation.strategy_order_id.clone())),
-            ("account_id", jstr(allocation.account_id.clone())),
-            ("quantity", jstr(piece.canon())),
-            ("price", jstr(price.canon())),
-            ("venue_env", jstr("paper")),
-            ("filled_at", req(fill, "filled_at")?.clone()),
-            ("side", jstr(fill_side)),
-            ("fee", jstr(fee.canon())),
-            ("venue_order_id", jstr(fill_order)),
-            ("venue_execution_id", jstr(fill_id)),
-        ]));
-    }
-    Ok(Json::Arr(out))
+    let fills = allocate_venue_fill_raw(&fill, &ticket, &prior)?;
+    Ok(Json::Arr(
+        fills
+            .iter()
+            .map(|f| {
+                obj(vec![
+                    ("fill_id", jstr(f.fill_id.clone())),
+                    ("order_id", jstr(f.order_id.clone())),
+                    ("account_id", jstr(f.account_id.clone())),
+                    ("quantity", jstr(f.quantity.canon())),
+                    ("price", jstr(f.price.canon())),
+                    ("venue_env", jstr(f.venue_env)),
+                    ("filled_at", jstr(fill.filled_at.clone())),
+                    ("side", jstr(f.side.value())),
+                    ("fee", jstr(f.fee.canon())),
+                    ("venue_order_id", jstr(f.venue_order_id.clone())),
+                    ("venue_execution_id", jstr(f.venue_execution_id.clone())),
+                ])
+            })
+            .collect(),
+    ))
 }
 
-struct SimFill {
-    fill_id: String,
-    order_id: String,
-    instrument: Instrument,
-    side: String,
-    quantity: Money,
-    price: Money,
+#[derive(Debug)]
+pub struct SimFill {
+    pub fill_id: String,
+    pub order_id: String,
+    pub instrument: Instrument,
+    pub side: Side,
+    pub quantity: Money,
+    pub price: Money,
 }
 
 fn fills_of(doc: &Json, key: &str) -> R<Vec<SimFill>> {
@@ -186,8 +270,8 @@ fn fills_of(doc: &Json, key: &str) -> R<Vec<SimFill>> {
         out.push(SimFill {
             fill_id: req_str(f, "fill_id")?.to_string(),
             order_id: req_str(f, "order_id")?.to_string(),
-            instrument: instrument(req(f, "instrument")?)?,
-            side: req_str(f, "side")?.to_string(),
+            instrument: linstr(req(f, "instrument")?)?,
+            side: side_of(req_str(f, "side")?)?,
             quantity: req_dec(f, "quantity")?,
             price: req_dec(f, "price")?,
         });
@@ -233,7 +317,7 @@ fn vwap(fills: &[&SimFill]) -> R<(Money, Money)> {
 struct Pair {
     order_id: String,
     instrument: String,
-    side: String,
+    side: Side,
     quantity: Money,
     sim_price: Money,
     venue_price: Money,
@@ -241,12 +325,12 @@ struct Pair {
     bps: Option<Money>,
 }
 
-fn distinct_instruments(sims: &[&SimFill], venues: &[&SimFill]) -> R<usize> {
+fn distinct_instruments(sims: &[&SimFill], venues: &[&SimFill]) -> usize {
     let mut seen: Vec<&Instrument> = Vec::new();
     for f in sims.iter().chain(venues) {
         let mut known = false;
         for s in &seen {
-            if s.same(&f.instrument)? {
+            if s.same(&f.instrument) {
                 known = true;
                 break;
             }
@@ -255,17 +339,44 @@ fn distinct_instruments(sims: &[&SimFill], venues: &[&SimFill]) -> R<usize> {
             seen.push(&f.instrument);
         }
     }
-    Ok(seen.len())
+    seen.len()
+}
+
+/// One strategy order's sim fill and the venue fill that mirrors it.
+#[derive(Debug)]
+pub struct PairOut {
+    pub order_id: String,
+    pub instrument: String,
+    pub side: Side,
+    pub quantity: Money,
+    pub sim_price: Money,
+    pub venue_price: Money,
+    pub slippage_points: Money,
+    pub slippage_bps: Option<Money>,
+}
+
+/// One venue's sim-vs-venue report over a session or batch.
+#[derive(Debug)]
+pub struct Report {
+    pub venue: String,
+    pub as_of: String,
+    pub pairs: Vec<PairOut>,
+    pub unmatched_sim: Vec<String>,
+    pub unmatched_venue: Vec<String>,
+    pub refused: Vec<(String, String)>,
+    pub mean_slippage_bps: Option<Money>,
 }
 
 /// `slippage_report`: pair sim and venue fills per strategy order; refuse per order,
-/// never per report. `{"venue", "as_of", "sim_fills", "venue_fills"}` -> the report.
-pub fn slippage_report(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let sim_fills = fills_of(doc, "sim_fills")?;
-    let venue_fills = fills_of(doc, "venue_fills")?;
-    let (sim_by, sim_bad) = group(&sim_fills);
-    let (venue_by, venue_bad) = group(&venue_fills);
+/// never per report.
+pub fn slippage_report_raw(
+    venue: &str,
+    as_of: &str,
+    sim_fills: &[SimFill],
+    venue_fills: &[SimFill],
+) -> R<Report> {
+    let (sim_by, sim_bad) = group(sim_fills);
+    let (venue_by, venue_bad) = group(venue_fills);
     let bad_of = |bad: &Vec<(&str, String)>, id: &str| bad.iter().find(|(o, _)| *o == id).map(|(_, m)| m.clone());
     let mut pairs: Vec<Pair> = Vec::new();
     let mut unmatched_sim: Vec<String> = Vec::new();
@@ -284,7 +395,7 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
             refused.push((order_id.to_string(), format!("venue: {message}")));
             continue;
         }
-        let mut sides: Vec<&str> = sims.iter().chain(venues).map(|f| f.side.as_str()).collect();
+        let mut sides: Vec<&str> = sims.iter().chain(venues).map(|f| f.side.value()).collect();
         sides.sort();
         sides.dedup();
         if sides.len() > 1 {
@@ -292,7 +403,7 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
             refused.push((order_id.to_string(), format!("side mismatch [{listed}]; not paired")));
             continue;
         }
-        if distinct_instruments(sims, venues)? > 1 {
+        if distinct_instruments(sims, venues) > 1 {
             refused.push((
                 order_id.to_string(),
                 "instrument mismatch between sim and venue fills; not paired (I6)".to_string(),
@@ -312,9 +423,9 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
             ));
             continue;
         }
-        let side = sims[0].side.clone();
+        let side = sims[0].side;
         // Adverse-only convention: positive always costs money.
-        let points = if side == "BUY" { sub(&venue_price, &sim_price)? } else { sub(&sim_price, &venue_price)? };
+        let points = if side == Side::Buy { sub(&venue_price, &sim_price)? } else { sub(&sim_price, &venue_price)? };
         let bps = if gt(&sim_price, &zero())? {
             Some(to_bps_places(&mul(&div(&points, &sim_price)?, &Money::int(10000))?)?)
         } else {
@@ -353,36 +464,67 @@ pub fn slippage_report(doc: &Json) -> R<Json> {
     unmatched_sim.sort();
     unmatched_venue.sort();
     refused.sort();
+    Ok(Report {
+        venue: venue.to_string(),
+        as_of: as_of.to_string(),
+        pairs: pairs
+            .into_iter()
+            .map(|p| PairOut {
+                order_id: p.order_id,
+                instrument: p.instrument,
+                side: p.side,
+                quantity: p.quantity,
+                sim_price: p.sim_price,
+                venue_price: p.venue_price,
+                slippage_points: p.points,
+                slippage_bps: p.bps,
+            })
+            .collect(),
+        unmatched_sim,
+        unmatched_venue,
+        refused,
+        mean_slippage_bps: mean,
+    })
+}
+
+/// `slippage_report`: pair sim and venue fills per strategy order; refuse per order,
+/// never per report. `{"venue", "as_of", "sim_fills", "venue_fills"}` -> the report.
+pub fn slippage_report(doc: &Json) -> R<Json> {
+    let venue = req_str(doc, "venue")?;
+    let as_of = req_str(doc, "as_of")?;
+    let sim_fills = fills_of(doc, "sim_fills")?;
+    let venue_fills = fills_of(doc, "venue_fills")?;
+    let r = slippage_report_raw(venue, as_of, &sim_fills, &venue_fills)?;
     Ok(obj(vec![
-        ("venue", jstr(venue)),
-        ("as_of", req(doc, "as_of")?.clone()),
+        ("venue", jstr(r.venue)),
+        ("as_of", jstr(r.as_of)),
         (
             "pairs",
             Json::Arr(
-                pairs
+                r.pairs
                     .iter()
                     .map(|p| {
                         obj(vec![
                             ("order_id", jstr(p.order_id.clone())),
                             ("instrument", jstr(p.instrument.clone())),
-                            ("side", jstr(p.side.clone())),
+                            ("side", jstr(p.side.value())),
                             ("quantity", jstr(p.quantity.canon())),
                             ("sim_price", jstr(p.sim_price.canon())),
                             ("venue_price", jstr(p.venue_price.canon())),
-                            ("slippage_points", jstr(p.points.canon())),
-                            ("slippage_bps", jopt_dec(&p.bps)),
+                            ("slippage_points", jstr(p.slippage_points.canon())),
+                            ("slippage_bps", jopt_dec(&p.slippage_bps)),
                         ])
                     })
                     .collect(),
             ),
         ),
-        ("unmatched_sim", Json::Arr(unmatched_sim.into_iter().map(Json::Str).collect())),
-        ("unmatched_venue", Json::Arr(unmatched_venue.into_iter().map(Json::Str).collect())),
+        ("unmatched_sim", Json::Arr(r.unmatched_sim.into_iter().map(Json::Str).collect())),
+        ("unmatched_venue", Json::Arr(r.unmatched_venue.into_iter().map(Json::Str).collect())),
         (
             "refused",
-            Json::Arr(refused.into_iter().map(|(a, b)| Json::Arr(vec![Json::Str(a), Json::Str(b)])).collect()),
+            Json::Arr(r.refused.into_iter().map(|(a, b)| Json::Arr(vec![Json::Str(a), Json::Str(b)])).collect()),
         ),
-        ("mean_slippage_bps", jopt_dec(&mean)),
+        ("mean_slippage_bps", jopt_dec(&r.mean_slippage_bps)),
     ]))
 }
 
@@ -461,5 +603,59 @@ mod tests {
         assert!(text.contains(r#""slippage_points":"0.1""#) && text.contains(r#""slippage_bps":"500""#), "{text}");
         assert!(text.contains(r#""unmatched_sim":["C"]"#));
         assert!(text.contains("sim filled 1 but the venue filled 2; mirror drifted (I5)"));
+    }
+
+    // -- the typed fns --------------------------------------------------------------------
+
+    #[test]
+    fn the_typed_allocator_agrees_with_the_door() {
+        let fill = VenueFill {
+            venue_fill_id: "F1".into(),
+            venue_order_id: "V1".into(),
+            instrument: linstr(&parse(INST).unwrap()).unwrap(),
+            side: Side::Sell,
+            quantity: Money::parse("3").unwrap(),
+            price: Money::parse("2.10").unwrap(),
+            filled_at: "2026-09-24T20:00:00+00:00".into(),
+            fee: Money::parse("1.00").unwrap(),
+        };
+        let ticket = VenueTicket {
+            venue_order_id: "V1".into(),
+            instrument: linstr(&parse(INST).unwrap()).unwrap(),
+            side: Side::Sell,
+            quantity: Money::parse("3").unwrap(),
+            allocations: vec![
+                ("A".into(), "x".into(), Money::parse("1").unwrap()),
+                ("B".into(), "x".into(), Money::parse("2").unwrap()),
+            ],
+        };
+        let out = allocate_venue_fill_raw(&fill, &ticket, &[]).unwrap();
+        assert_eq!(out.iter().map(|f| f.quantity.canon()).collect::<Vec<_>>(), ["1", "2"]);
+        assert_eq!(out.iter().map(|f| f.fee.canon()).collect::<Vec<_>>(), ["0.34", "0.66"]);
+        let over = VenueFill { quantity: Money::parse("4").unwrap(), ..fill };
+        assert!(allocate_venue_fill_raw(&over, &ticket, &[]).unwrap_err().msg.contains("overfill"));
+    }
+
+    #[test]
+    fn the_typed_report_agrees_with_the_door() {
+        let fill = |id: &str, order: &str, side: Side, q: &str, p: &str| SimFill {
+            fill_id: id.into(),
+            order_id: order.into(),
+            instrument: linstr(&parse(INST).unwrap()).unwrap(),
+            side,
+            quantity: Money::parse(q).unwrap(),
+            price: Money::parse(p).unwrap(),
+        };
+        let r = slippage_report_raw(
+            "tos",
+            "T",
+            &[fill("s1", "A", Side::Sell, "2", "2.00"), fill("s2", "B", Side::Buy, "1", "1.00")],
+            &[fill("v1", "A", Side::Sell, "2", "1.90"), fill("v2", "B", Side::Buy, "2", "1.10")],
+        )
+        .unwrap();
+        assert_eq!(r.pairs.len(), 1);
+        assert_eq!(r.pairs[0].slippage_points.canon(), "0.1");
+        assert!(r.refused.iter().any(|(_, m)| m.contains("mirror drifted")), "{:?}", r.refused);
+        assert_eq!(slippage_report_raw("", "T", &[], &[]).unwrap_err().msg, "venue must be non-empty");
     }
 }

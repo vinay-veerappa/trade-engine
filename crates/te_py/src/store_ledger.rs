@@ -286,6 +286,17 @@ pub(crate) fn closes(value: &Bound<'_, PyAny>) -> PyResult<OMap<Instrument, Mone
     Ok(out)
 }
 
+/// A Python `MirrorState` carrier as the te_core mirror state, through its canonical tree
+/// (`codec.canon` then `lb::uncanon_mirror`).
+pub(crate) fn mirror_of(value: &Bound<'_, PyAny>) -> PyResult<MirrorState> {
+    let py = value.py();
+    let codec = py.import("trade_engine.ledger.codec")?;
+    let tree = codec.call_method1("canon", (value,))?;
+    let text: String = codec.call_method1("text", (tree,))?.extract()?;
+    let json = py_result(lb::json_from_text(&text))?;
+    py_result(lb::uncanon_mirror(&json))
+}
+
 /// A te_core JSON tree as the Python object the codec builds from it (`codec.build_text`).
 fn to_py<'py>(py: Python<'py>, json: &Json) -> PyResult<Bound<'py, PyAny>> {
     py.import("trade_engine.ledger.codec")?.call_method1("build_text", (dumps(json),))

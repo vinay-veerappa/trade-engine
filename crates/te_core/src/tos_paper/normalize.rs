@@ -8,12 +8,18 @@
 //! The raw rows are JSON values as `json.loads` built them (`repr` of one is what the
 //! refusals quote). An acknowledgement crosses as `{"status", "message"}`: the host adds
 //! the order id and the instant it already holds (no clock here, I7).
+//!
+//! Each `*_raw` typed fn is the decision over a raw row (or a classified exception),
+//! returning plain Rust values; the `*`/`*_op` door fns are thin JSON wrappers over them
+//! so the dispatcher keeps working.
+
+use chrono::NaiveDate;
 
 use super::pytext::{repr, repr_str, str_isdigit, strip_upper, to_str, truthy};
-use super::wire::{jopt_dec, jstr, obj};
+use super::wire::{jopt_dec, jstr, linstr_json, obj};
 use super::NORMALIZE;
 use crate::ledger::json::Json;
-use crate::ledger::model::{derr, err, R};
+use crate::ledger::model::{derr, err, Instrument, OrderState, OrderType, Side, R};
 use crate::money::Money;
 use crate::options::{equity_symbol, parse_occ};
 
@@ -21,8 +27,44 @@ fn normalize<T>(msg: impl Into<String>) -> R<T> {
     err(NORMALIZE, msg)
 }
 
+/// A raw venue row's normalisation result: `(status, message)`.
+pub type Ack = (String, String);
+
+/// A working order (an Order Book row) as the carrier reads it.
+#[derive(Debug)]
+pub struct WorkingOrder {
+    pub instrument: Instrument,
+    pub side: Side,
+    pub quantity: Money,
+    pub filled: Money,
+    pub order_type: OrderType,
+    pub limit_price: Option<Money>,
+    pub state: OrderState,
+}
+
+/// One order's cumulative fill, read back by its venue Order ID.
+#[derive(Debug)]
+pub struct OrderFill {
+    pub order_id: String,
+    pub filled: Money,
+    pub avg_price: Option<Money>,
+    pub state: OrderState,
+}
+
+/// One Position row (signed quantity).
+#[derive(Debug)]
+pub struct Position {
+    pub instrument: Instrument,
+    pub quantity: Money,
+    pub avg_price: Money,
+}
+
 fn ack(status: &str, message: String) -> Json {
     obj(vec![("status", jstr(status)), ("message", jstr(message))])
+}
+
+fn ack_of((status, message): Ack) -> Json {
+    ack(&status, message)
 }
 
 fn raw_of(doc: &Json) -> R<&Json> {
@@ -43,23 +85,27 @@ fn is_mapping(raw: &Json) -> bool {
     matches!(raw, Json::Obj(_))
 }
 
-/// `normalize_place_result`: `{"raw"}` -> an ack. Never ACCEPTED (I5).
-pub fn place_result(doc: &Json) -> R<Json> {
-    let raw = raw_of(doc)?;
+/// `normalize_place_result`: a raw transport result -> an ack. Never ACCEPTED (I5).
+pub fn place_result_raw(raw: &Json) -> R<Ack> {
     if !is_mapping(raw) {
-        return Ok(ack("PENDING", format!("unreadable transport result {}; awaiting reconcile", repr(raw))));
+        return Ok(("PENDING".to_string(), format!("unreadable transport result {}; awaiting reconcile", repr(raw))));
     }
     let status = status_of(raw, "status");
     Ok(match status.as_str() {
-        "SENT" => ack("PENDING", "sent; awaiting read-back".into()),
-        "DRY_RUN" => ack("PENDING", "dry run: nothing sent; awaiting reconcile".into()),
+        "SENT" => ("PENDING".to_string(), "sent; awaiting read-back".to_string()),
+        "DRY_RUN" => ("PENDING".to_string(), "dry run: nothing sent; awaiting reconcile".to_string()),
         "REFUSED" | "REJECTED" | "INELIGIBLE" | "MISMATCH" => {
             let reason = get(raw, "reason");
             let reason = if truthy(reason) { to_str(reason) } else { status };
-            ack("REJECTED", format!("venue refused: {reason}"))
+            ("REJECTED".to_string(), format!("venue refused: {reason}"))
         }
-        _ => ack("PENDING", format!("unknown transport status {}; awaiting reconcile", repr_str(&status))),
+        _ => ("PENDING".to_string(), format!("unknown transport status {}; awaiting reconcile", repr_str(&status))),
     })
+}
+
+/// `normalize_place_result`: `{"raw"}` -> an ack. Never ACCEPTED (I5).
+pub fn place_result(doc: &Json) -> R<Json> {
+    Ok(ack_of(place_result_raw(raw_of(doc)?)?))
 }
 
 /// The exception a transport call raised, as the host classifies it:
@@ -74,18 +120,22 @@ fn exception(doc: &Json) -> R<(String, String, String)> {
 }
 
 /// `normalize_place_exception`: REJECTED if provably nothing was sent, else PENDING.
-pub fn place_exception(doc: &Json) -> R<Json> {
-    let (class, name, text) = exception(doc)?;
-    Ok(match class.as_str() {
-        "refused" => ack("REJECTED", format!("transport refused before send: {text}")),
-        "replay" => ack("PENDING", format!("idempotency replay: {text}; confirming by reconcile (I3)")),
-        _ => ack("PENDING", format!("transport error {name}: {text}; uncertain whether sent, awaiting reconcile")),
+pub fn place_exception_raw(class: &str, name: &str, text: &str) -> R<Ack> {
+    Ok(match class {
+        "refused" => ("REJECTED".to_string(), format!("transport refused before send: {text}")),
+        "replay" => ("PENDING".to_string(), format!("idempotency replay: {text}; confirming by reconcile (I3)")),
+        _ => ("PENDING".to_string(), format!("transport error {name}: {text}; uncertain whether sent, awaiting reconcile")),
     })
 }
 
+/// `normalize_place_exception`: REJECTED if provably nothing was sent, else PENDING.
+pub fn place_exception(doc: &Json) -> R<Json> {
+    let (class, name, text) = exception(doc)?;
+    Ok(ack_of(place_exception_raw(&class, &name, &text)?))
+}
+
 /// `placed_order_id`: the venue Order ID a SENT result proves, or null; never a guess (I5).
-pub fn placed_order_id(doc: &Json) -> R<Json> {
-    let raw = raw_of(doc)?;
+pub fn placed_order_id_raw(raw: &Json) -> R<Option<String>> {
     let proved = || -> Option<String> {
         if !is_mapping(raw) || status_of(raw, "status") != "SENT" {
             return None;
@@ -96,18 +146,22 @@ pub fn placed_order_id(doc: &Json) -> R<Json> {
             _ => None,
         }
     };
-    Ok(obj(vec![("order_id", proved().map_or(Json::Null, jstr))]))
+    Ok(proved())
+}
+
+/// `placed_order_id`: the venue Order ID a SENT result proves, or null; never a guess (I5).
+pub fn placed_order_id(doc: &Json) -> R<Json> {
+    Ok(obj(vec![("order_id", placed_order_id_raw(raw_of(doc)?)?.map_or(Json::Null, jstr))]))
 }
 
 /// `normalize_cancel_result`: ACCEPTED only for a CANCELED Order Book row, else PENDING.
-pub fn cancel_result(doc: &Json) -> R<Json> {
-    let raw = raw_of(doc)?;
+pub fn cancel_result_raw(raw: &Json) -> R<Ack> {
     if !is_mapping(raw) {
-        return Ok(ack("PENDING", format!("unreadable cancel result {}; awaiting reconcile", repr(raw))));
+        return Ok(("PENDING".to_string(), format!("unreadable cancel result {}; awaiting reconcile", repr(raw))));
     }
     let status = status_of(raw, "status");
     if status == "CANCELED" {
-        return Ok(ack("ACCEPTED", format!("cancelled: order {} reads CANCELED", to_str(get(raw, "order_id")))));
+        return Ok(("ACCEPTED".to_string(), format!("cancelled: order {} reads CANCELED", to_str(get(raw, "order_id")))));
     }
     let note = get(raw, "note");
     let note = if truthy(note) {
@@ -117,17 +171,27 @@ pub fn cancel_result(doc: &Json) -> R<Json> {
     } else {
         "no status".to_string()
     };
-    Ok(ack("PENDING", format!("cancel not confirmed ({note}); awaiting reconcile")))
+    Ok(("PENDING".to_string(), format!("cancel not confirmed ({note}); awaiting reconcile")))
+}
+
+/// `normalize_cancel_result`: ACCEPTED only for a CANCELED Order Book row, else PENDING.
+pub fn cancel_result(doc: &Json) -> R<Json> {
+    Ok(ack_of(cancel_result_raw(raw_of(doc)?)?))
+}
+
+/// `normalize_cancel_exception`: REJECTED if provably nothing was clicked, else PENDING.
+pub fn cancel_exception_raw(class: &str, name: &str, text: &str) -> R<Ack> {
+    Ok(if class == "refused" {
+        ("REJECTED".to_string(), format!("transport refused the cancel: {text}"))
+    } else {
+        ("PENDING".to_string(), format!("cancel error {name}: {text}; uncertain whether cancelled, awaiting reconcile"))
+    })
 }
 
 /// `normalize_cancel_exception`: REJECTED if provably nothing was clicked, else PENDING.
 pub fn cancel_exception(doc: &Json) -> R<Json> {
     let (class, name, text) = exception(doc)?;
-    Ok(if class == "refused" {
-        ack("REJECTED", format!("transport refused the cancel: {text}"))
-    } else {
-        ack("PENDING", format!("cancel error {name}: {text}; uncertain whether cancelled, awaiting reconcile"))
-    })
+    Ok(ack_of(cancel_exception_raw(&class, &name, &text)?))
 }
 
 fn row_state(status: &str) -> &'static str {
@@ -144,13 +208,13 @@ fn row_state(status: &str) -> &'static str {
 }
 
 /// `book_state`: an Order Book status -> an order state; unrecognised is PENDING_UNKNOWN.
-fn book_state(raw_status: &Json) -> &'static str {
+pub fn book_state_of(raw_status: &Json) -> &'static str {
     let text = if truthy(raw_status) { to_str(raw_status) } else { String::new() };
     row_state(&strip_upper(&text))
 }
 
 pub fn book_state_op(doc: &Json) -> R<Json> {
-    Ok(obj(vec![("state", jstr(book_state(super::wire::req(doc, "status")?)))]))
+    Ok(obj(vec![("state", jstr(book_state_of(super::wire::req(doc, "status")?)))]))
 }
 
 /// `_decimal`: a finite Decimal from a string or an int; a float, a bool or `None` is refused.
@@ -167,43 +231,25 @@ fn decimal(value: &Json, name: &str) -> R<Money> {
     Ok(parsed)
 }
 
-enum RowInstrument {
-    Stock(String),
-    Option { root: String, expiry: String, strike: String, right: &'static str },
-}
-
-impl RowInstrument {
-    fn json(&self) -> Json {
-        match self {
-            RowInstrument::Stock(symbol) => obj(vec![("kind", jstr("equity")), ("symbol", jstr(symbol.clone()))]),
-            RowInstrument::Option { root, expiry, strike, right } => obj(vec![
-                ("kind", jstr("option")),
-                ("underlying", jstr(root.clone())),
-                ("expiry", jstr(expiry.clone())),
-                ("strike", jstr(strike.clone())),
-                ("right", jstr(*right)),
-                ("multiplier", Json::Int(100)),
-            ]),
-        }
-    }
-}
-
-fn contract(raw: &Json) -> R<RowInstrument> {
+/// The ledger-model option behind an OCC symbol row (a normalised row is always an option
+/// with multiplier 100 or a stock; a future or combo never appears here).
+fn contract_instrument(raw: &Json) -> R<Instrument> {
     let symbol = get(raw, "symbol");
     match parse_occ(Some(&to_str(symbol))) {
-        Ok(p) => Ok(RowInstrument::Option {
-            root: p.root,
-            expiry: format!("{:04}-{:02}-{:02}", p.year, p.month, p.day),
-            strike: p.strike_text,
-            right: p.right.code(),
-        }),
+        Ok(p) => Ok(Instrument::Option(crate::ledger::model::OptionContract {
+            underlying: p.root,
+            expiry: NaiveDate::from_ymd_opt(p.year, p.month, p.day).expect("parse_occ validated the date"),
+            strike: Money::parse(&p.strike_text).expect("parse_occ produced a decimal strike"),
+            right: p.right,
+            multiplier: 100,
+        })),
         Err(_) => normalize(format!("not a mirrored option symbol: {}", repr(symbol))),
     }
 }
 
-fn row_instrument(raw: &Json) -> R<RowInstrument> {
+fn row_instrument(raw: &Json) -> R<Instrument> {
     let Some(kind) = raw.get("kind") else {
-        return contract(raw);
+        return contract_instrument(raw);
     };
     match kind {
         Json::Str(k) if k == "stock" => {
@@ -213,11 +259,11 @@ fn row_instrument(raw: &Json) -> R<RowInstrument> {
                 _ => equity_symbol(None),
             };
             match parsed {
-                Ok(sym) => Ok(RowInstrument::Stock(sym)),
+                Ok(sym) => Ok(Instrument::Equity(sym)),
                 Err(_) => normalize(format!("not a mirrored stock symbol: {}", repr(symbol))),
             }
         }
-        Json::Str(k) if k == "option" => contract(raw),
+        Json::Str(k) if k == "option" => contract_instrument(raw),
         other => normalize(format!("row kind {} is neither 'stock' nor 'option'", repr(other))),
     }
 }
@@ -226,9 +272,8 @@ fn whole(d: &Money) -> R<bool> {
     d.is_integral().map_err(derr)
 }
 
-/// `normalize_working_order`: one Order Book row (`{"raw"}`). An unknown status is PENDING_UNKNOWN.
-pub fn working_order(doc: &Json) -> R<Json> {
-    let raw = raw_of(doc)?;
+/// `normalize_working_order`: one Order Book row. An unknown status is PENDING_UNKNOWN.
+pub fn working_order_raw(raw: &Json) -> R<WorkingOrder> {
     if !is_mapping(raw) {
         return super::wire::wire("a working order row is a mapping");
     }
@@ -253,7 +298,7 @@ pub fn working_order(doc: &Json) -> R<Json> {
         ));
     }
     let instrument = row_instrument(raw)?;
-    if matches!(instrument, RowInstrument::Stock(_)) {
+    if matches!(instrument, Instrument::Equity(_)) {
         if !whole(&quantity)? {
             return normalize(format!("stock quantity {} is not a whole number of shares", quantity.canon()));
         }
@@ -267,20 +312,33 @@ pub fn working_order(doc: &Json) -> R<Json> {
         other => Some(decimal(other, "limit_price")?),
     };
     let state = row_state(&status_of(raw, "status"));
+    Ok(WorkingOrder {
+        instrument,
+        side: Side::parse(&side).expect("side validated above"),
+        quantity,
+        filled,
+        order_type: OrderType::parse(order_type).expect("order type validated above"),
+        limit_price: limit,
+        state: OrderState::parse(state).expect("state is one of the enum's"),
+    })
+}
+
+/// `normalize_working_order`: one Order Book row (`{"raw"}`). An unknown status is PENDING_UNKNOWN.
+pub fn working_order(doc: &Json) -> R<Json> {
+    let w = working_order_raw(raw_of(doc)?)?;
     Ok(obj(vec![
-        ("instrument", instrument.json()),
-        ("side", jstr(side)),
-        ("quantity", jstr(quantity.canon())),
-        ("filled", jstr(filled.canon())),
-        ("order_type", jstr(order_type)),
-        ("limit_price", jopt_dec(&limit)),
-        ("state", jstr(state)),
+        ("instrument", linstr_json(&w.instrument)),
+        ("side", jstr(w.side.value())),
+        ("quantity", jstr(w.quantity.canon())),
+        ("filled", jstr(w.filled.canon())),
+        ("order_type", jstr(w.order_type.value())),
+        ("limit_price", jopt_dec(&w.limit_price)),
+        ("state", jstr(w.state.value())),
     ]))
 }
 
 /// `normalize_order_fill`: one `read_order_fills` row. Anything ambiguous raises (I5).
-pub fn order_fill(doc: &Json) -> R<Json> {
-    let raw = raw_of(doc)?;
+pub fn order_fill_raw(raw: &Json) -> R<OrderFill> {
     if !is_mapping(raw) {
         return super::wire::wire("an order fill row is a mapping");
     }
@@ -314,28 +372,38 @@ pub fn order_fill(doc: &Json) -> R<Json> {
             ));
         }
     }
-    let state = book_state(get(raw, "status"));
+    let state = book_state_of(get(raw, "status"));
     if state == "FILLED" && filled.eq_num(&zero).map_err(derr)? {
         return normalize(format!("order {oid} reads FILLED with nothing filled"));
     }
+    Ok(OrderFill {
+        order_id: oid,
+        filled,
+        avg_price: if positive { price } else { None },
+        state: OrderState::parse(state).expect("state is one of the enum's"),
+    })
+}
+
+/// `normalize_order_fill`: one `read_order_fills` row. Anything ambiguous raises (I5).
+pub fn order_fill(doc: &Json) -> R<Json> {
+    let f = order_fill_raw(raw_of(doc)?)?;
     Ok(obj(vec![
-        ("order_id", jstr(oid)),
-        ("filled", jstr(filled.canon())),
-        ("avg_price", if positive { jopt_dec(&price) } else { Json::Null }),
-        ("state", jstr(state)),
+        ("order_id", jstr(f.order_id)),
+        ("filled", jstr(f.filled.canon())),
+        ("avg_price", jopt_dec(&f.avg_price)),
+        ("state", jstr(f.state.value())),
     ]))
 }
 
 /// `normalize_position`: one Position row (signed quantity).
-pub fn position(doc: &Json) -> R<Json> {
-    let raw = raw_of(doc)?;
+pub fn position_raw(raw: &Json) -> R<Position> {
     if !is_mapping(raw) {
         return super::wire::wire("a position row is a mapping");
     }
     let instrument = row_instrument(raw)?;
     let quantity = decimal(get(raw, "quantity"), "quantity")?;
     let avg_price = decimal(get(raw, "avg_price"), "avg_price")?;
-    if matches!(instrument, RowInstrument::Stock(_)) {
+    if matches!(instrument, Instrument::Equity(_)) {
         if !whole(&quantity)? {
             return normalize(format!("stock quantity {} is not a whole number of shares", quantity.canon()));
         }
@@ -343,10 +411,16 @@ pub fn position(doc: &Json) -> R<Json> {
             return normalize(format!("stock avg_price must not be negative, got {}", avg_price.canon()));
         }
     }
+    Ok(Position { instrument, quantity, avg_price })
+}
+
+/// `normalize_position`: one Position row (signed quantity).
+pub fn position(doc: &Json) -> R<Json> {
+    let p = position_raw(raw_of(doc)?)?;
     Ok(obj(vec![
-        ("instrument", instrument.json()),
-        ("quantity", jstr(quantity.canon())),
-        ("avg_price", jstr(avg_price.canon())),
+        ("instrument", linstr_json(&p.instrument)),
+        ("quantity", jstr(p.quantity.canon())),
+        ("avg_price", jstr(p.avg_price.canon())),
     ]))
 }
 
@@ -415,5 +489,61 @@ mod tests {
         assert!(f(r#"{"order_id": "1", "filled": "0", "status": "FILLED"}"#).contains("reads FILLED with nothing filled"));
         assert!(f(r#"{"order_id": "1", "filled": "2", "avg_price": "0", "status": "WORKING"}"#).contains("no positive average price '0'"));
         assert!(f(r#"{"order_id": "1", "filled": "2", "avg_price": "1.05", "status": "PARTIAL"}"#).contains(r#""avg_price":"1.05""#));
+    }
+
+    // -- the typed fns --------------------------------------------------------------------
+
+    #[test]
+    fn a_typed_place_result_agrees_with_the_door() {
+        let raw = parse(r#"{"status": "SENT"}"#).unwrap();
+        assert_eq!(place_result_raw(&raw).unwrap(), ("PENDING".to_string(), "sent; awaiting read-back".to_string()));
+        let raw = parse("null").unwrap();
+        assert_eq!(place_result_raw(&raw).unwrap().1, "unreadable transport result None; awaiting reconcile");
+    }
+
+    #[test]
+    fn the_typed_exception_cancel_and_book_state_agree_with_the_door() {
+        assert_eq!(
+            place_exception_raw("refused", "T", "boom").unwrap(),
+            ("REJECTED".to_string(), "transport refused before send: boom".to_string())
+        );
+        assert_eq!(
+            cancel_exception_raw("other", "TimeoutError", "JAB hung").unwrap().1,
+            "cancel error TimeoutError: JAB hung; uncertain whether cancelled, awaiting reconcile"
+        );
+        let raw = parse(r#"{"status": "SENT", "order_id": "5403527317", "book_status": "WORKING"}"#).unwrap();
+        assert_eq!(placed_order_id_raw(&raw).unwrap().as_deref(), Some("5403527317"));
+        let none = parse(r#"{"status": "DRY_RUN", "order_id": "1", "book_status": "WORKING"}"#).unwrap();
+        assert_eq!(placed_order_id_raw(&none).unwrap(), None);
+        assert_eq!(cancel_result_raw(&parse(r#"{"status": "canceled", "order_id": "1"}"#).unwrap()).unwrap().0, "ACCEPTED");
+        assert_eq!(book_state_of(&parse("null").unwrap()), "PENDING_UNKNOWN");
+        assert_eq!(book_state_of(&parse(r#""working""#).unwrap()), "ACCEPTED");
+    }
+
+    #[test]
+    fn a_typed_working_order_reads_the_carrier_fields() {
+        let raw = parse(r#"{"symbol": "AAPL  261016P00200000", "side": "SELL", "quantity": "2", "filled": "0", "order_type": "LMT", "limit_price": "2.00", "status": "WORKING"}"#).unwrap();
+        let w = working_order_raw(&raw).unwrap();
+        assert_eq!(w.side, Side::Sell);
+        assert_eq!(w.quantity.canon(), "2");
+        assert_eq!(w.limit_price.as_ref().unwrap().canon(), "2");
+        assert_eq!(w.state, OrderState::Accepted);
+        let bad = parse(r#"{"symbol": "AAPL", "side": "SELL", "quantity": "1", "order_type": "LMT", "status": "WORKING"}"#).unwrap();
+        assert_eq!(working_order_raw(&bad).unwrap_err().msg, "not a mirrored option symbol: 'AAPL'");
+    }
+
+    #[test]
+    fn a_typed_order_fill_and_position_read_the_carrier_fields() {
+        let raw = parse(r#"{"order_id": "1", "filled": "2", "avg_price": "1.05", "status": "PARTIAL"}"#).unwrap();
+        let f = order_fill_raw(&raw).unwrap();
+        assert_eq!(f.order_id, "1");
+        assert_eq!(f.filled.canon(), "2");
+        assert_eq!(f.avg_price.as_ref().unwrap().canon(), "1.05");
+        let raw = parse(r#"{"symbol": "AAPL  261016P00200000", "quantity": "-1", "avg_price": "2.10"}"#).unwrap();
+        let p = position_raw(&raw).unwrap();
+        assert_eq!(p.quantity.canon(), "-1");
+        assert_eq!(p.avg_price.canon(), "2.1");
+        let bad = parse(r#"{"symbol": "AAPL  261016P00200000", "quantity": null, "avg_price": "2.10"}"#).unwrap();
+        assert_eq!(position_raw(&bad).unwrap_err().kind, NORMALIZE);
     }
 }

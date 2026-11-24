@@ -22,36 +22,28 @@ from decimal import Decimal
 
 from trade_engine.domain.instruments import Instrument, OptionContract
 from trade_engine.domain.orders import Order
-from trade_engine.ledger import codec
 from trade_engine.ledger.mirror import MirrorState
 from trade_engine.tos_paper import _rs
-
-
-def _cover_order(order: Order) -> dict:
-    return {"instrument": _rs.wire(order.instrument), "side": order.side.value, "quantity": str(order.quantity)}
 
 
 def covers(long: OptionContract, short: OptionContract) -> bool:
     """Whether one long call can cover one short call: same underlying, both calls, same multiplier,
     long expiry >= short expiry, long strike <= short strike (a debit diagonal; a credit one covers nothing)."""
-    return _rs.decide("covers", {"long": _rs.wire(long), "short": _rs.wire(short)})["result"]
+    return _rs.call(_rs.rs.tos_cover_covers, long, short)
 
 
 def uncovered(held: Mapping[Instrument, Decimal]) -> dict[str, Decimal]:
     """Per underlying: the short call contracts nothing in ``held`` covers (only entries above zero)."""
-    return {underlying: Decimal(count) for underlying, count in
-            _rs.decide("uncovered", {"held": _rs.pairs(held)})}
+    return _rs.call(_rs.rs.tos_cover_uncovered, held)
 
 
 def holdings(mirror: MirrorState) -> dict[Instrument, Decimal]:
     """What the mirror proves the venue holds, pessimistically: the book summed over accounts, less every
     open ticket's unfilled sell remainder (a resting buy is not credited until it fills)."""
-    return _rs.unpairs(_rs.decide("holdings", {"mirror": codec.canon(mirror)}))
+    return _rs.call(_rs.rs.tos_cover_holdings, mirror)
 
 
 def cover_reason(mirror: MirrorState, order: Order, accepted: Sequence[Order] = ()) -> str | None:
     """None when ``order`` may go now; else why it must wait. ``accepted`` are the orders of the same
     batch already let through: their sells count as resting."""
-    return _rs.decide("cover_reason", {
-        "mirror": codec.canon(mirror), "order": _cover_order(order),
-        "accepted": [_cover_order(o) for o in accepted]})["reason"]
+    return _rs.call(_rs.rs.tos_cover_cover_reason, mirror, order, list(accepted))
