@@ -14,6 +14,16 @@ pub(crate) fn py_strip(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
+/// String-door guard: refuse (kind "value", "<op> arity") a call that passes fewer inputs than
+/// the rule reads, instead of panicking on an out-of-range index. Extra inputs stay allowed.
+#[allow(dead_code)] // removed at the W6-B gate once both adapters use it
+pub(crate) fn need(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64], min: (usize, usize, usize, usize)) -> R<()> {
+    if s.len() < min.0 || n.len() < min.1 || b.len() < min.2 || f.len() < min.3 {
+        return err("value", format!("{op} arity"));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct Plan {
     pub text: Vec<String>,
