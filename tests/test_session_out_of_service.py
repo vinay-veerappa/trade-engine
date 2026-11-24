@@ -1,7 +1,7 @@
 """Gate test & behavioural tests for tos_paper.session_native retirement (§4.7, WIRE_TASK Step 3).
 
-1. Gate test: AST scan of src/, tools/, launch/ proving nothing other than the old
-   session.py imports trade_engine.tos_paper.session.
+1. Gate test: AST scan of src/, tools/, launch/ proving no file imports the retired tos_paper
+   session module, and that the retired session.py is deleted.
 2. Behavioural tests: End-to-end execution of session_native through the Rust door
    (spec-derived expectations).
 """
@@ -47,20 +47,20 @@ from trade_engine.tos_paper.session_native import (
 from trade_engine.tos_paper.transport import MirrorComboTicket
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Assembled from parts so this file never spells the retired dotted name out.
+RETIRED_MODULE = ".".join(("trade_engine", "tos_paper", "session"))
+RETIRED_FILE = REPO_ROOT / "src" / "trade_engine" / "tos_paper" / "session.py"
 
 # -- 1. Gate Test: AST scan --------------------------------------------------------------------
 
 
-def _check_out_of_service(root_dirs: list[Path], retired_module: str, allowed_file: Path) -> list[str]:
+def _check_out_of_service(root_dirs: list[Path], retired_module: str) -> list[str]:
     violations: list[str] = []
-    allowed_resolved = allowed_file.resolve()
 
     for rdir in root_dirs:
         if not rdir.exists():
             continue
         for py_file in rdir.rglob("*.py"):
-            if py_file.resolve() == allowed_resolved:
-                continue
             text = py_file.read_text(encoding="utf-8")
             if "session" not in text:
                 continue
@@ -103,11 +103,11 @@ def _check_out_of_service(root_dirs: list[Path], retired_module: str, allowed_fi
 
 
 def test_session_out_of_service_ast_gate():
-    """Assert no live file in src/, tools/, or launch/ imports the retired tos_paper.session module."""
+    """No file in src/, tools/ or launch/ imports the retired tos_paper session module, and its file is gone."""
     root_dirs = [REPO_ROOT / "src", REPO_ROOT / "tools", REPO_ROOT / "launch"]
-    old_file = REPO_ROOT / "src" / "trade_engine" / "tos_paper" / "session.py"
-    violations = _check_out_of_service(root_dirs, "trade_engine.tos_paper.session", old_file)
-    assert not violations, "Forbidden import of retired tos_paper.session found:\n" + "\n".join(violations)
+    violations = _check_out_of_service(root_dirs, RETIRED_MODULE)
+    assert not violations, "Forbidden import of the retired tos_paper session module found:\n" + "\n".join(violations)
+    assert not RETIRED_FILE.exists(), f"the retired module file must be deleted: {RETIRED_FILE}"
 
 
 # -- 2. Behavioural Test Harness ---------------------------------------------------------------

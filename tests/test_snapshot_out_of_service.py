@@ -1,8 +1,8 @@
 """Gate test and native end-to-end behavioural tests for metrics snapshot.
 
 Enforces:
-1. Out-of-service gate: an AST scan of src/ and live entry points proves that no
-   module other than the retired reference file (snapshot.py) imports snapshot.py.
+1. Out-of-service gate: an AST scan of src/, tools/ and launch/ proves that no file imports
+   the retired metrics snapshot module, and that its file (snapshot.py) is deleted.
 2. Behavioural tests: exercise snapshot_native end-to-end through the Rust door
    with spec-derived expectations.
 3. Bug fix pinning: protective stops must be on the reduce side (opposite side of position).
@@ -114,6 +114,12 @@ def events_two_days() -> list[Event]:
 # Out-of-service AST Gate
 # =========================================================================
 
+# The retired module, assembled from parts so this file never spells its dotted name out.
+RETIRED_PARENT = ".".join(("trade_engine", "metrics"))
+RETIRED_MODULE = f"{RETIRED_PARENT}.snapshot"
+RETIRED_FILE = SRC_DIR / "trade_engine" / "metrics" / "snapshot.py"
+
+
 def scan_file_for_old_snapshot_import(py_file: Path, text: str | None = None) -> list[str]:
     violations: list[str] = []
     if text is None:
@@ -122,11 +128,15 @@ def scan_file_for_old_snapshot_import(py_file: Path, text: str | None = None) ->
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "trade_engine.metrics.snapshot":
+                if alias.name == RETIRED_MODULE:
                     violations.append(f"{py_file}:{node.lineno} imports '{alias.name}'")
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
-            if mod == "trade_engine.metrics.snapshot" or (
+            # ``from x import y`` reaches the retired module when ``x.y`` is it.
+            absolute_hit = node.level == 0 and (
+                mod == RETIRED_MODULE or any(f"{mod}.{alias.name}" == RETIRED_MODULE for alias in node.names)
+            )
+            if absolute_hit or (
                 node.level > 0 and mod.endswith("snapshot") and not mod.endswith("snapshot_native")
             ):
                 violations.append(f"{py_file}:{node.lineno} imports from '{mod}'")
@@ -134,33 +144,33 @@ def scan_file_for_old_snapshot_import(py_file: Path, text: str | None = None) ->
 
 
 def test_old_snapshot_module_is_out_of_service() -> None:
-    """Gate: verify no file in src/ (outside snapshot.py itself) imports the retired snapshot module."""
+    """Gate: no file under src/, tools/ or launch/ imports the retired metrics snapshot module, and its file is gone."""
     violations: list[str] = []
-    old_file = (SRC_DIR / "trade_engine" / "metrics" / "snapshot.py").resolve()
 
     for py_file in SRC_DIR.rglob("*.py"):
-        if py_file.resolve() == old_file:
-            continue
         violations.extend(scan_file_for_old_snapshot_import(py_file))
 
-    # Also scan tools and launch entry points
     for search_dir in [REPO_ROOT / "tools", REPO_ROOT / "launch"]:
         if search_dir.exists():
             for py_file in search_dir.rglob("*.py"):
                 violations.extend(scan_file_for_old_snapshot_import(py_file))
 
     assert not violations, (
-        f"Out-of-service gate violated: retired module snapshot.py is imported:\n"
+        "Out-of-service gate violated: the retired metrics snapshot module is imported:\n"
         + "\n".join(violations)
     )
+    assert not RETIRED_FILE.exists(), f"the retired module file must be deleted: {RETIRED_FILE}"
 
 
 def test_gate_detects_mutation_on_old_import() -> None:
-    """Verify that the AST scanner correctly catches and rejects any import of the old module."""
-    mutant_code = "from trade_engine.metrics.snapshot import daily_snapshots\n"
-    violations = scan_file_for_old_snapshot_import(Path("mutant_test.py"), mutant_code)
-    assert violations, "Gate scanner failed to detect mutant import"
-    assert "trade_engine.metrics.snapshot" in violations[0]
+    """Verify that the AST scanner catches both import forms of the retired module."""
+    for mutant_code in (
+        f"from {RETIRED_MODULE} import daily_snapshots\n",
+        f"from {RETIRED_PARENT} import snapshot\n",
+    ):
+        violations = scan_file_for_old_snapshot_import(Path("mutant_test.py"), mutant_code)
+        assert violations, f"Gate scanner failed to detect mutant import: {mutant_code!r}"
+        assert RETIRED_MODULE in violations[0] or RETIRED_PARENT in violations[0]
 
 
 # =========================================================================

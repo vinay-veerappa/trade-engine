@@ -13,7 +13,7 @@ IDs their sends proved — so a cancel and the fill read-back work after a resta
 the reconcile expects exactly what the fold says the venue should hold.
 ``collect_fills`` reads the venue's cumulative fills per Order ID and returns the
 ``MirrorFill`` increments (and the Order Book closes) for the host to append. The
-session order and the ledger appends live in ``tos_paper.session``.
+session order and the ledger appends live in ``tos_paper.session_native``.
 
 The engine never imports tos-ui-mcp: the transport and balance reader are protocols
 (``transport``) the host wires. Nothing here places a real order or calls any Schwab
@@ -350,7 +350,7 @@ class TosPaperBroker(BrokerAdapter):
 
     def collect_fills(self, mirror: MirrorState) -> FillCollection:
         """Read the venue's cumulative fills per Order ID: the ``MirrorFill`` increments, and the
-        Order Book closes, for the host to append (see ``tos_paper.session``)."""
+        Order Book closes, for the host to append (see ``tos_paper.session_native``)."""
         out = json.loads(self._go(self._core.collect_fills, json.dumps(codec.canon(mirror))))
         return FillCollection(
             fills=tuple(MirrorFill(venue=f["venue"], ticket_key=f["ticket_key"], venue_order_id=f["venue_order_id"],

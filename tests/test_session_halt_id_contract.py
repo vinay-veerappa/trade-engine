@@ -1,6 +1,7 @@
 """The reconcile command id is contract: it is replayed against existing ledgers (I3).
 
-The Rust door must derive it byte-for-byte as the retired ``tos_paper.session._reconcile`` did:
+The Rust door must derive it byte-for-byte as the retired pre-port session module's ``_reconcile`` did
+(now ``tos_paper.session_native._reconcile``):
 sha256 over compact sorted-key JSON of the encoded payload, first 16 hex chars.
 """
 

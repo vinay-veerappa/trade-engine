@@ -39,7 +39,7 @@ from trade_engine.tos_paper import normalize as norm
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
 from trade_engine.tos_paper.netting import net_strategy_orders
 from trade_engine.tos_paper.reconcile import confirm_ticket, reconcile
-from trade_engine.tos_paper.session import mirror_of, run_mirror
+from trade_engine.tos_paper.session_native import mirror_of, run_mirror
 from trade_engine.tos_paper.transport import MirrorStockTicket, MirrorTicket, ticket_for
 
 T = datetime(2026, 9, 24, 20, 0, tzinfo=timezone.utc)

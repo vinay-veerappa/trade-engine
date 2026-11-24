@@ -13,12 +13,10 @@ five ways, each of which fails on its own mutant:
    of a retired module. Tests are scanned separately against the exception list below.
 5. The scanner itself is tested against mutants (an appended import must be flagged).
 
-NOT RETIRED, STOPPED (``STOPPED`` below). Two modules still hold Python engine logic that the client
-(``tvDownloadOHLC``, read-only here) imports by path, and neither has an old-vs-native parity gate. The native
-twins differ from the old Python on purpose (the ``_protective_stop`` side fix, the halt id pin, stricter
-verifiers), so the twins are covered by spec tests and hand mutants only. Rewiring the client to a twin would flip
-live behaviour with no oracle. P6 does not write a new oracle, so these two are listed, not marked, and the
-client importers are pinned so the day a client stops importing one, this test says to retire it.
+STOPPED (``STOPPED`` below) is the mechanism for a Python module that stays live on the client path with no parity
+gate: its client importers are pinned, and the day one stops importing it, this test says to retire it. It is empty
+now. The tos_paper session and metrics snapshot modules that used it are deleted (P0b): the client (``scan_engine``)
+imports their native twins, and no test or live file imports the old names.
 
 Exceptions (tests and oracle tools may still import them): ``TEST_IMPORT_EXCEPTIONS``. There are no oracle tools
 importing a retired or stopped module (the ``tools/`` scan proves it).
@@ -47,25 +45,14 @@ RETIRED: dict[str, str] = {
 }
 
 # Still in service on the client path. Module -> client modules that import it directly (pinned).
-STOPPED: dict[str, frozenset[str]] = {
-    "trade_engine.tos_paper.session": frozenset(
-        {"scan_engine.options.mirror_job", "scan_engine.options.mirror_follow"}
-    ),
-    "trade_engine.metrics.snapshot": frozenset({"scan_engine.day_note"}),
-}
+# Empty: the two modules that were here (tos_paper session, metrics snapshot) are deleted, and their client
+# importers now use the native twins. Add an entry here only when a client module must keep importing a
+# still-live Python module with no parity gate.
+STOPPED: dict[str, frozenset[str]] = {}
 
 # Tests that may import a retired or stopped module (oracle use: the old code is the behaviour the tests pin).
-TEST_IMPORT_EXCEPTIONS: dict[str, frozenset[str]] = {
-    "tests/test_eod_options.py": frozenset({"trade_engine.metrics.snapshot"}),
-    "tests/test_metrics_snapshot.py": frozenset({"trade_engine.metrics.snapshot"}),
-    "tests/test_tos_cover_session.py": frozenset({"trade_engine.tos_paper.session"}),
-    "tests/test_tos_follow.py": frozenset({"trade_engine.tos_paper.session"}),
-    "tests/test_tos_mirror.py": frozenset({"trade_engine.tos_paper.session"}),
-    "tests/test_tos_mirror_exits.py": frozenset({"trade_engine.tos_paper.session"}),
-    "tests/test_tos_mirror_halt.py": frozenset({"trade_engine.tos_paper.session"}),
-    "tests/test_tos_stock.py": frozenset({"trade_engine.tos_paper.session"}),
-    "tests/test_tos_unavailable.py": frozenset({"trade_engine.tos_paper.session"}),
-}
+# Empty: no test imports a retired or stopped module any more.
+TEST_IMPORT_EXCEPTIONS: dict[str, frozenset[str]] = {}
 
 # In-repo live entry points: importing any of these must not load a retired (or stopped) module.
 ENTRY_POINTS = (
@@ -422,15 +409,15 @@ def test_mutant_relative_imports_inside_the_package_are_flagged():
     assert scan_source("from .wrapper_native import X\n", sibling, ALL_GUARDED) == set()
 
 
-def test_mutant_import_of_a_stopped_module_is_flagged():
-    assert scan_source("from trade_engine.tos_paper.session import run_mirror\n", LIVE_FILE, ALL_GUARDED) == {
-        "trade_engine.tos_paper.session"
+def test_mutant_both_import_forms_of_a_guarded_module_are_flagged():
+    # ``from x.y import z`` and ``from x import y`` both resolve to the guarded module ``x.y``.
+    assert scan_source("from trade_engine.market_data.wrapper import StampingMarketDataWrapper\n", LIVE_FILE, ALL_GUARDED) == {
+        "trade_engine.market_data.wrapper"
     }
-    assert scan_source("from trade_engine.metrics import snapshot\n", LIVE_FILE, ALL_GUARDED) == {
-        "trade_engine.metrics.snapshot"
+    assert scan_source("from trade_engine.market_data import wrapper\n", LIVE_FILE, ALL_GUARDED) == {
+        "trade_engine.market_data.wrapper"
     }
-    assert scan_source("from trade_engine.metrics import snapshot_native\n", LIVE_FILE, ALL_GUARDED) == set()
-    assert scan_source("from trade_engine.tos_paper import session_native\n", LIVE_FILE, ALL_GUARDED) == set()
+    assert scan_source("from trade_engine.market_data import wrapper_native\n", LIVE_FILE, ALL_GUARDED) == set()
 
 
 def test_mutant_live_file_with_appended_import_would_fail_the_scan():
