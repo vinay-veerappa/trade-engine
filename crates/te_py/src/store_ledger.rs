@@ -20,11 +20,15 @@ use te_core::ledger::bridge as lb;
 use te_core::ledger::codec::{enc_instrument, enc_obj, jdec, jdt, jenum};
 use te_core::ledger::fold::AccountState;
 use te_core::ledger::json::{dumps, Json};
+use te_core::ledger::mirror::{book_hk, MirrorState, MirrorTicketState};
 use te_core::ledger::model::{
-    err, parse_datetime, DateTime, Event, Instrument, LErr, Obj, RiskVerdict, Side, Signal, R as LR,
+    err, parse_datetime, DateTime, Event, Instrument, LErr, MirrorAck, MirrorQueued, Obj, Order, OrderState,
+    RiskVerdict, Side, Signal, VenueReconcile, R as LR,
 };
 use te_core::ledger::ops::OMap;
 use te_core::money::Money;
+use te_core::tos_paper::netting::Ticket;
+use te_core::tos_paper::wire::{order_type_of, side_of, state_of, tif_of};
 use te_core::runtime::eod_glue::{Clock, Ledger};
 
 use crate::sim;
@@ -292,6 +296,142 @@ pub(crate) fn side_py<'py>(py: Python<'py>, value: Side) -> PyResult<Bound<'py, 
 /// A stored payload's Python object, from the codec's tree of it.
 pub(crate) fn obj_py<'py>(py: Python<'py>, value: &Obj) -> PyResult<Bound<'py, PyAny>> {
     to_py(py, &py_result(enc_obj(value))?)
+}
+
+/// A te_core refusal as the Python `ValueError((kind, msg))` the session doors raise (`_rs.call` maps it).
+pub(crate) fn door_err(e: LErr) -> PyErr {
+    PyValueError::new_err((e.kind, e.msg))
+}
+
+/// A Python `datetime` as a te_core instant, from its ISO text (`parse_datetime`).
+pub(crate) fn datetime_of(value: &Bound<'_, PyAny>) -> PyResult<DateTime> {
+    let text: String = value.call_method0("isoformat")?.extract()?;
+    parse_datetime(&text).map(|(now, _)| now).map_err(door_err)
+}
+
+/// A Python value's `.value` text (an enum member's stored text).
+fn enum_text(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    value.getattr("value")?.extract()
+}
+
+/// The `Obj` a Python carrier encodes, when it is one of `want` (`pick` returns the carrier, or the other `Obj`).
+fn carrier<T>(value: &Bound<'_, PyAny>, want: &str, pick: impl FnOnce(Obj) -> Result<T, Obj>) -> PyResult<T> {
+    pick(payload(value)?).map_err(|other| PyValueError::new_err(format!("expected a {want}, got {}", other.tag())))
+}
+
+pub(crate) fn order_of(value: &Bound<'_, PyAny>) -> PyResult<Order> {
+    carrier(value, "Order", |obj| match obj {
+        Obj::Order(order) => Ok(order),
+        other => Err(other),
+    })
+}
+
+pub(crate) fn mirror_queued_of(value: &Bound<'_, PyAny>) -> PyResult<MirrorQueued> {
+    carrier(value, "MirrorQueued", |obj| match obj {
+        Obj::MQueued(queued) => Ok(queued),
+        other => Err(other),
+    })
+}
+
+pub(crate) fn mirror_ack_of(value: &Bound<'_, PyAny>) -> PyResult<MirrorAck> {
+    carrier(value, "MirrorAck", |obj| match obj {
+        Obj::MAck(ack) => Ok(ack),
+        other => Err(other),
+    })
+}
+
+pub(crate) fn reconcile_of(value: &Bound<'_, PyAny>) -> PyResult<VenueReconcile> {
+    carrier(value, "VenueReconcile", |obj| match obj {
+        Obj::Reconcile(event) => Ok(event),
+        other => Err(other),
+    })
+}
+
+/// A Python `OrderState` member as the te_core state.
+pub(crate) fn order_state_of(value: &Bound<'_, PyAny>) -> PyResult<OrderState> {
+    state_of(&enum_text(value)?).map_err(door_err)
+}
+
+/// A Python mapping's items, in its own order (`codec.canon` keeps that order, so Rust does too).
+fn mapping_items<'py>(value: &Bound<'py, PyAny>) -> PyResult<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+    value.call_method0("items")?.try_iter()?.map(|item| item?.extract()).collect()
+}
+
+fn ticket_state_of(value: &Bound<'_, PyAny>) -> PyResult<MirrorTicketState> {
+    let mut allocated = OMap::new();
+    for (account, quantity) in mapping_items(&value.getattr("allocated")?)? {
+        let account: String = account.extract()?;
+        allocated.insert(account.clone(), account, money(&quantity)?);
+    }
+    Ok(MirrorTicketState {
+        queued: mirror_queued_of(&value.getattr("queued")?)?,
+        ack: opt(&value.getattr("ack")?, mirror_ack_of)?,
+        venue_order_id: opt(&value.getattr("venue_order_id")?, |v| Ok(v.extract::<String>()?))?,
+        book_status: opt(&value.getattr("book_status")?, order_state_of)?,
+        filled: money(&value.getattr("filled")?)?,
+        avg_price: opt(&value.getattr("avg_price")?, money)?,
+        closed: value.getattr("closed")?.extract()?,
+        allocated,
+    })
+}
+
+/// `Option` over a Python value: `None` is `None`, anything else goes through `convert`.
+pub(crate) fn opt<T>(value: &Bound<'_, PyAny>, convert: impl FnOnce(&Bound<'_, PyAny>) -> PyResult<T>) -> PyResult<Option<T>> {
+    if value.is_none() {
+        Ok(None)
+    } else {
+        convert(value).map(Some)
+    }
+}
+
+/// A folded venue mirror (`ledger.mirror.MirrorState`) as te_core's, field by field, in dict order.
+pub(crate) fn mirror_state_of(value: &Bound<'_, PyAny>) -> PyResult<MirrorState> {
+    let mut state = MirrorState { venue: opt(&value.getattr("venue")?, |v| Ok(v.extract::<String>()?))?, ..MirrorState::default() };
+    for (key, ticket) in mapping_items(&value.getattr("tickets")?)? {
+        let key: String = key.extract()?;
+        state.tickets.insert(key.clone(), key, ticket_state_of(&ticket)?);
+    }
+    for (key, quantity) in mapping_items(&value.getattr("book")?)? {
+        let (account, instrument): (String, Bound<'_, PyAny>) = key.extract()?;
+        let instrument = instrument_of(&instrument)?;
+        state.book.insert(book_hk(&account, &instrument), (account, instrument), money(&quantity)?);
+    }
+    for (name, target) in [
+        ("queued_orders", &mut state.queued_orders),
+        ("refused_orders", &mut state.refused_orders),
+        ("order_ids", &mut state.order_ids),
+    ] {
+        for (key, text) in mapping_items(&value.getattr(name)?)? {
+            let key: String = key.extract()?;
+            target.insert(key.clone(), key, text.extract()?);
+        }
+    }
+    Ok(state)
+}
+
+/// A venue order (`interfaces.broker.VenueOrder`) as the ticket `broker::ticket_of` reads: the
+/// same fields, with `submitted_at` as its ISO text and the decimals from their `str`.
+pub(crate) fn venue_order_ticket_of(value: &Bound<'_, PyAny>) -> PyResult<Ticket> {
+    let mut allocations = Vec::new();
+    for allocation in value.getattr("allocations")?.try_iter()? {
+        let allocation = allocation?;
+        allocations.push((
+            allocation.getattr("strategy_order_id")?.extract::<String>()?,
+            allocation.getattr("account_id")?.extract::<String>()?,
+            money(&allocation.getattr("quantity")?)?,
+        ));
+    }
+    Ok(Ticket {
+        venue_order_id: value.getattr("venue_order_id")?.extract()?,
+        instrument: instrument_of(&value.getattr("instrument")?)?,
+        order_type: order_type_of(&enum_text(&value.getattr("order_type")?)?).map_err(door_err)?,
+        side: side_of(&enum_text(&value.getattr("side")?)?).map_err(door_err)?,
+        quantity: money(&value.getattr("quantity")?)?,
+        submitted_at: value.getattr("submitted_at")?.call_method0("isoformat")?.extract()?,
+        tif: tif_of(&enum_text(&value.getattr("tif")?)?).map_err(door_err)?,
+        limit_price: opt(&value.getattr("limit_price")?, money)?,
+        allocations,
+    })
 }
 
 #[cfg(test)]

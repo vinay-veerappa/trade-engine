@@ -34,5 +34,5 @@ def test_reconcile_command_id_matches_the_retired_derivation(event, phase):
         json.dumps(codec.encode_payload(event), sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
     expected = f"mirror:{event.venue}:reconcile:{phase}:{event.as_of.isoformat()}:{digest}"
-    doc = {"venue": event.venue, "phase": phase, "as_of": event.as_of.isoformat(), "event": codec.encode_payload(event)}
-    assert _rs.session_decide("session_reconcile_command_id", doc)["command_id"] == expected
+    command = _rs.call(_rs.rs.session_reconcile_command_id, event.venue, phase, event.as_of, event)
+    assert command == expected

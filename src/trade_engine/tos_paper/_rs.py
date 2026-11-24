@@ -91,11 +91,6 @@ def decide(op: str, doc: Mapping[str, Any]) -> Any:
     return json.loads(call(rs.tos_paper_decide, op, json.dumps(doc, default=str)))
 
 
-def session_decide(op: str, doc: Mapping[str, Any]) -> Any:
-    """``op`` over ``doc`` through the tos_paper_session pyo3 door; the answer as parsed JSON."""
-    return json.loads(call(rs.tos_paper_session_decide, op, json.dumps(doc, default=str)))
-
-
 # -- the wire: domain objects <-> the core's JSON ------------------------------------------------
 
 
@@ -177,6 +172,6 @@ def ack(d: Mapping) -> VenueAck:
 
 
 __all__ = [
-    "ack", "call", "dec", "decide", "event", "holdings_doc", "order_doc", "pairs", "refusal", "rs", "session_decide", "text",
+    "ack", "call", "dec", "decide", "event", "holdings_doc", "order_doc", "pairs", "refusal", "rs", "text",
     "ticket_doc", "unpairs", "unwire", "venue_order", "venue_order_doc", "wire",
 ]
