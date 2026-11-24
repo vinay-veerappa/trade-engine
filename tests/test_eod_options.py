@@ -495,7 +495,7 @@ def test_an_option_fill_reaches_the_journal_as_an_option_with_its_multiplier(rig
 
 
 def test_the_daily_snapshot_margins_the_put_against_the_marked_underlying(rig) -> None:
-    from trade_engine.metrics.snapshot import daily_snapshots
+    from trade_engine.metrics.snapshot_native import daily_snapshots
 
     rig.strategy.entries[S1] = [csp()]
     rig.run(S1)

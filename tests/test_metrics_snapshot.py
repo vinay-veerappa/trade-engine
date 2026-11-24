@@ -13,7 +13,7 @@ from trade_engine.domain.portfolio import Fill
 from trade_engine.ledger import CashFlow, Event, EventKind, Mark
 from trade_engine.ledger.events import OrderStateChange
 from trade_engine.metrics import account_margin  # noqa: F401 - import surface check
-from trade_engine.metrics.snapshot import (
+from trade_engine.metrics.snapshot_native import (
     AccountSnapshot,
     SnapshotError,
     daily_snapshots,

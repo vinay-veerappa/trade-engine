@@ -32,7 +32,7 @@ from trade_engine.ledger.events import (
 from trade_engine.ledger.mirror import MirrorState
 from trade_engine.ledger.state import halted_venues
 from trade_engine.tos_paper import normalize as norm
-from trade_engine.tos_paper import session as mirror_session
+from trade_engine.tos_paper import session_native as mirror_session
 from trade_engine.tos_paper.broker import (
     MirrorBinding,
     TosPaperBroker,
@@ -41,7 +41,7 @@ from trade_engine.tos_paper.broker import (
     venue_order_of,
 )
 from trade_engine.tos_paper.reconcile import confirm_ticket, ticket_contracts
-from trade_engine.tos_paper.session import (
+from trade_engine.tos_paper.session_native import (
     MirrorSessionError,
     cancel_ticket,
     collect_only,
@@ -816,11 +816,11 @@ def test_collect_fills_before_connect_or_for_another_venue_refuses() -> None:
 
 def test_venue_order_of_rebuilds_the_queued_ticket(ledger) -> None:
     _submit(ledger, _order("sp-1", "OPT_PUT_SPREAD", qty="2", instrument=SPREAD, limit="1.05"))
+    orders = pending_orders(ledger, _binding(), date(2026, 9, 24), calendar=Calendar())
     broker, _ = _broker(clock=MORNING)
-    batch = broker.mirror_batch(pending_orders(ledger, _binding(), date(2026, 9, 24), calendar=Calendar()), holdings={})
-    (ticket,) = batch.venue_orders
-    queued = mirror_session._queued(PM_A, ticket)
-    assert venue_order_of(queued) == ticket
+    (ticket,) = broker.mirror_batch(orders, holdings={}).venue_orders  # the order the broker queues
+    run_mirror(ledger, _broker(clock=MORNING)[0], orders, clock=MORNING)  # the ledger's MIRROR_QUEUED record
+    assert venue_order_of(_queued_ticket(ledger)) == ticket
 
 
 def test_no_real_paper_money_account_number_appears_here() -> None:

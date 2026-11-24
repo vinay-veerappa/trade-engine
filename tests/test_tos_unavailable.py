@@ -22,7 +22,7 @@ from test_tos_mirror import MORNING, P190, Calendar, Clock, Venue, _binding, _br
 from trade_engine.domain.instruments import Side
 from trade_engine.tos_paper.broker import TosPaperBroker
 from trade_engine.tos_paper.exits import run_pass_mirror
-from trade_engine.tos_paper.session import collect_only, pending_orders, run_mirror
+from trade_engine.tos_paper.session_native import collect_only, pending_orders, run_mirror
 from trade_engine.tos_paper.transport import TransportRefused, TransportReplay, TransportUnavailable
 
 SESSION = date(2026, 9, 24)
