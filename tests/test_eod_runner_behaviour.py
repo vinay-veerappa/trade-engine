@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal as D
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -19,11 +18,8 @@ import pytest
 from test_eod_options import csp
 from test_intraday_service import SESSION, Rig, snap
 from trade_engine.calendar.sessions import ExchangeCalendar
-from trade_engine.domain.instruments import Equity
-from trade_engine.domain.portfolio import Position
 from trade_engine.eod.options_routing import OptionRouter, RoutingTally
 from trade_engine.eod.runner import (
-    EodRunner,
     EodRunnerConfig,
     EodRunnerError,
     ReplayDataError,
@@ -31,77 +27,12 @@ from trade_engine.eod.runner import (
 )
 from trade_engine.interfaces.market_data import StaleDataError
 from trade_engine.intraday.service import IntradayServiceError
-from trade_engine.ledger.state import AccountState
 
 AFTER = datetime(2026, 10, 16, 21, 45, tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
-AAA, BBB, CCC = Equity("AAA"), Equity("BBB"), Equity("CCC")
 
-
-# --- derived risk context (eod/runner.py 880-908) ----------------------------------------
-# Live in production: te_py's equity_flow.rs calls `_derive_risk_context` (about line 129), so it
-# is not dead code. It is called here directly, with `self` passed as None, because the derivation
-# is the behaviour the function promises.
-
-
-def _derive(state: AccountState, instrument: Equity):
-    return EodRunner._derive_risk_context(None, SimpleNamespace(instrument=instrument), state)
-
-
-def test_risk_context_for_a_held_long_marks_only_priced_positions() -> None:
-    state = AccountState(
-        "dense",
-        cash=D("100"),
-        positions={
-            AAA: Position("dense", AAA, D("5"), D("100")),
-            BBB: Position("dense", BBB, D("-2"), D("100")),
-        },
-        marks={AAA: D("10")},
-    )
-    ctx = _derive(state, AAA)
-    # Equity is cash 100 plus AAA marked at 5 x 10. BBB has no mark, so it adds nothing.
-    assert ctx.equity == D("150")
-    assert ctx.gross_exposure == D("50")
-    assert ctx.open_positions == 2
-    assert ctx.current_position_quantity == 5
-    assert ctx.current_price is None
-
-
-def test_risk_context_reports_the_signed_quantity_of_a_short() -> None:
-    state = AccountState(
-        "dense",
-        cash=D("100"),
-        positions={
-            AAA: Position("dense", AAA, D("5"), D("100")),
-            BBB: Position("dense", BBB, D("-2"), D("100")),
-        },
-        marks={AAA: D("10")},
-    )
-    ctx = _derive(state, BBB)
-    assert ctx.current_position_quantity == -2
-    assert ctx.equity == D("150")
-    assert ctx.open_positions == 2
-
-
-def test_risk_context_for_an_instrument_not_held_is_flat() -> None:
-    state = AccountState(
-        "dense",
-        cash=D("100"),
-        positions={AAA: Position("dense", AAA, D("5"), D("100"))},
-        marks={AAA: D("10")},
-    )
-    assert _derive(state, CCC).current_position_quantity == 0
-
-
-def test_risk_context_for_an_empty_account_reports_no_equity_when_cash_is_negative() -> None:
-    state = AccountState("dense", cash=D("-0.5"), positions={}, marks={})
-    ctx = _derive(state, AAA)
-    assert ctx.equity is None
-    assert ctx.gross_exposure == D("0")
-    assert ctx.open_positions == 0
-    assert ctx.current_position_quantity == 0
-
-
+# The derived risk context (`derive_risk_context`) moved to te_core; its values are pinned by
+# `derive_risk_context_values_only_marked_positions` in crates/te_core/src/runtime/eod_glue.rs.
 # --- EodRunnerConfig refusals (eod/runner.py 305 onward) ----------------------------------
 
 

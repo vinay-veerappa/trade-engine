@@ -22,14 +22,14 @@ fn terminal(order: &Value<'_>) -> PyResult<bool> {
     Ok(rules::terminal(&order.getattr("state")?.getattr("value")?.extract::<String>()?))
 }
 
-/// The fields `RiskContext` takes that the fold cannot supply: `None`, as `_derive_risk_context` sets them.
+/// The fields `RiskContext` takes that the fold cannot supply: `None`, as the risk context has always set them.
 const UNSOURCED: [&str; 12] = [
     "current_price", "portfolio_heat", "industry", "industry_positions", "average_dollar_volume_20d",
     "sessions_until_earnings", "regime", "macro_high_risk_day", "drawdown_from_peak_frac",
     "previous_session_pnl_frac", "venue_orders_today", "venue_daily_pnl",
 ];
 
-/// The fold's risk inputs as the Python `RiskContext` (`_derive_risk_context`'s return).
+/// The fold's risk inputs as the Python `RiskContext`.
 fn risk_context_py<'py>(py: Python<'py>, context: &RiskContext) -> PyResult<Value<'py>> {
     let kwargs = PyDict::new(py);
     let equity = match &context.equity {
@@ -85,8 +85,8 @@ struct Inputs<'py> {
     strategy: Option<Value<'py>>,
     risk: Option<Value<'py>>,
     manager: Option<Value<'py>>,
-    /// The plain ledger's store when the native gate holds; `None` keeps the Python callbacks.
-    native: Option<Bound<'py, LedgerStore>>,
+    /// The plain ledger's store, past the gate in `store_ledger::native_store`.
+    native: Bound<'py, LedgerStore>,
     pending: Pending,
 }
 
@@ -139,17 +139,9 @@ impl<'py> SignalHost for Inputs<'py> {
     }
     fn next_signal(&mut self) -> PyResult<Option<Self::Value>> { self.next() }
     fn record_signal(&self, signal: &Self::Value) -> PyResult<()> {
-        match &self.native {
-            Some(store) => {
-                let signal = sl::signal_of(signal)?;
-                let account = self.account.as_str();
-                sl::with_native(store, &self.clock()?, &self.pending, |l, c| glue::record_signal(l, c, account, signal))
-            }
-            None => {
-                self.runner.call_method1("_record_signal", (&self.account, signal))?;
-                Ok(())
-            }
-        }
+        let signal = sl::signal_of(signal)?;
+        let account = self.account.as_str();
+        sl::with_native(&self.native, &self.clock()?, &self.pending, |l, c| glue::record_signal(l, c, account, signal))
     }
     fn start_intents(&mut self) -> PyResult<()> {
         let context = self.context()?;
@@ -185,58 +177,37 @@ impl<'py> EquityEntryHost for Inputs<'py> {
         Ok(())
     }
     fn recorded(&self, intent: &Self::Value) -> PyResult<Option<Self::Value>> {
-        match &self.native {
-            Some(store) => {
-                let command: String = intent.getattr("command_id")?.extract()?;
-                let verdict = sl::with_native(store, &self.clock()?, &self.pending,
-                    |l, _| glue::recorded_verdict(&*l, &command))?;
-                match verdict {
-                    Some(verdict) => Ok(Some(sl::obj_py(self.runner.py(), &Obj::RiskVerdict(verdict))?)),
-                    None => Ok(None),
-                }
-            }
-            None => {
-                let verdict = self.runner.call_method1("recorded_verdict", (&self.account, intent))?;
-                Ok(if verdict.is_none() { None } else { Some(verdict) })
-            }
+        let command: String = intent.getattr("command_id")?.extract()?;
+        let verdict = sl::with_native(&self.native, &self.clock()?, &self.pending,
+            |l, _| glue::recorded_verdict(&*l, &command))?;
+        match verdict {
+            Some(verdict) => Ok(Some(sl::obj_py(self.runner.py(), &Obj::RiskVerdict(verdict))?)),
+            None => Ok(None),
         }
     }
     fn evaluate(&self, intent: &Self::Value) -> PyResult<Self::Value> {
         let py = self.runner.py();
         let builder = self.config()?.getattr("context_builder")?;
-        let context = match &self.native {
-            Some(store) if builder.is_none() => {
-                let instrument = sl::instrument_of(&intent.getattr("instrument")?)?;
-                let account = self.account.as_str();
-                let context = sl::with_native(store, &self.clock()?, &self.pending, |l, _| {
-                    let state = l.state(account)?;
-                    glue::derive_risk_context(&state, &instrument)
-                })?;
-                risk_context_py(py, &context)?
-            }
-            _ => {
-                let state = self.runner.getattr("_ledger")?.call_method1("state", (&self.account,))?;
-                if builder.is_none() {
-                    self.runner.call_method1("_derive_risk_context", (intent, state))?
-                } else { builder.call1((intent, state, &self.session))? }
-            }
+        let context = if builder.is_none() {
+            let instrument = sl::instrument_of(&intent.getattr("instrument")?)?;
+            let account = self.account.as_str();
+            let context = sl::with_native(&self.native, &self.clock()?, &self.pending, |l, _| {
+                let state = l.state(account)?;
+                glue::derive_risk_context(&state, &instrument)
+            })?;
+            risk_context_py(py, &context)?
+        } else {
+            let state = self.runner.getattr("_ledger")?.call_method1("state", (&self.account,))?;
+            builder.call1((intent, state, &self.session))?
         };
         self.risk.as_ref().expect("configured risk").call_method1("evaluate", (intent, context))
     }
     fn record(&self, intent: &Self::Value, verdict: &Self::Value) -> PyResult<()> {
-        match &self.native {
-            Some(store) => {
-                let command: String = intent.getattr("command_id")?.extract()?;
-                let verdict = sl::verdict_of(verdict)?;
-                let account = self.account.as_str();
-                sl::with_native(store, &self.clock()?, &self.pending,
-                    |l, c| glue::record_verdict(l, c, account, &command, verdict))
-            }
-            None => {
-                self.runner.call_method1("_record_verdict", (&self.account, intent, verdict))?;
-                Ok(())
-            }
-        }
+        let command: String = intent.getattr("command_id")?.extract()?;
+        let verdict = sl::verdict_of(verdict)?;
+        let account = self.account.as_str();
+        sl::with_native(&self.native, &self.clock()?, &self.pending,
+            |l, c| glue::record_verdict(l, c, account, &command, verdict))
     }
     fn approved(&self, verdict: &Self::Value) -> PyResult<bool> {
         let accepted = verdict.getattr("accepted")?.is_truthy()?;
@@ -264,30 +235,25 @@ struct Exits<'py> {
     closes: Value<'py>,
     manager: Option<Value<'py>>,
     by_entry: Option<Bound<'py, PyDict>>,
-    /// The plain ledger's store when the native gate holds; `None` keeps the Python callbacks.
-    native: Option<Bound<'py, LedgerStore>>,
+    /// The plain ledger's store, past the gate in `store_ledger::native_store`.
+    native: Bound<'py, LedgerStore>,
     pending: Pending,
 }
 
 impl<'py> Exits<'py> {
-    /// `_open_brackets(account, session, closes)`: the glue's brackets when native.
+    /// `_open_brackets(account, session, closes)`, from the glue's brackets.
     fn brackets(&self) -> PyResult<Value<'py>> {
         let py = self.runner.py();
-        match &self.native {
-            Some(store) => {
-                let closes = sl::closes(&self.closes)?;
-                let account = self.account.as_str();
-                let session = sl::date_of(&self.session)?;
-                let clock = self.runner.getattr("_clock")?;
-                let brackets = sl::with_native(store, &clock, &self.pending, |l, _| {
-                    let state = l.state(account)?;
-                    glue::open_brackets(&state, account, session, &closes)
-                })?;
-                let items = brackets.iter().map(|bracket| open_bracket_py(py, bracket)).collect::<PyResult<Vec<_>>>()?;
-                Ok(PyList::new(py, items)?.into_any())
-            }
-            None => self.runner.call_method1("_open_brackets", (&self.account, &self.session, &self.closes)),
-        }
+        let closes = sl::closes(&self.closes)?;
+        let account = self.account.as_str();
+        let session = sl::date_of(&self.session)?;
+        let clock = self.runner.getattr("_clock")?;
+        let brackets = sl::with_native(&self.native, &clock, &self.pending, |l, _| {
+            let state = l.state(account)?;
+            glue::open_brackets(&state, account, session, &closes)
+        })?;
+        let items = brackets.iter().map(|bracket| open_bracket_py(py, bracket)).collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, items)?.into_any())
     }
 }
 
