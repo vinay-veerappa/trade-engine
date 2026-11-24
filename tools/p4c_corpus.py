@@ -53,7 +53,7 @@ INVENTORY = (
 RELATED = {
     "E1": (("__main__.py", ("main",)),),
     "E9": (("clock\\wall.py", ("WallClock.now_utc", "WallClock.sleep")),),
-    "E11": (("sim\\broker.py", ("SimBroker.process_bar",)), ("metrics\\snapshot.py", ("daily_snapshots",))),
+    "E11": (("sim\\broker.py", ("SimBroker.process_bar",)), ("metrics\\snapshot_native.py", ("daily_snapshots",))),
 }
 HTTP_CONTRACT = {
     "routes": ["GET /health", "GET /snapshot", "GET /events", "OPTIONS"],
@@ -106,7 +106,7 @@ def _registry() -> tuple[dict[str, type], dict[str, type[Exception]]]:
 CARRIERS, ERRORS = _registry()
 
 
-# OA-3 fields that are absent from the frozen goldens; omitted from the encoding while None.
+# OA-3 fields that are absent from the recorded goldens; omitted from the encoding while None.
 _ADDITIVE_NONE = frozenset({"protective_stop_price", "protective_target_price", "riskguard_verdict"})
 
 
@@ -438,7 +438,7 @@ def load(path: Path) -> dict[str, Any]:
 
 def validate_manifest(value: Any) -> None:
     _keys(value, {"version", "provenance", "source_release", "plugin_sha256", "rules_sha256",
-                  "config_sha256", "oracles", "inventory", "http_contract", "fixtures"}, "manifest")
+                  "config_sha256", "inventory", "http_contract", "fixtures"}, "manifest")
     if type(value["version"]) is not int or value["version"] != VERSION:
         raise CorpusError(f"Unsupported corpus version {value['version']!r}")
     if value["provenance"] != "synthetic":
@@ -448,19 +448,10 @@ def validate_manifest(value: Any) -> None:
             raise CorpusError(f"Invalid {key}")
     if value["inventory"] != inventory() or value["http_contract"] != HTTP_CONTRACT:
         raise CorpusError("Manifest inventory/HTTP contract differs from the implementation")
-    oracles = json.loads((ROOT / "tests" / "frozen_p4c" / "t0_oracles.json").read_text(encoding="utf-8"))
-    if value["oracles"] != oracles:
-        raise CorpusError("Frozen oracle identity differs")
-    if value["source_release"] != oracles["source_release"]:
-        raise CorpusError("Corpus source release differs from its oracle checkpoint")
-    if value["rules_sha256"] != digest({"version": VERSION, "oracles": oracles, "http": HTTP_CONTRACT}):
+    if value["rules_sha256"] != digest({"version": VERSION, "http": HTTP_CONTRACT}):
         raise CorpusError("Corpus rule/configuration contract differs")
     if value["plugin_sha256"] != hashlib.sha256((ROOT / "tools" / "p4c_corpus_worlds.py").read_bytes()).hexdigest():
         raise CorpusError("Synthetic producer implementation differs")
-    for oracle in oracles["oracles"]:
-        file = ROOT.joinpath(*oracle["path"].split("/"))
-        if hashlib.sha256(file.read_bytes()).hexdigest() != oracle["sha256"]:
-            raise CorpusError(f"Frozen oracle bytes differ: {oracle['name']}")
     fixtures = value["fixtures"]
     if not isinstance(fixtures, list) or not fixtures:
         raise CorpusError("Corpus has no fixtures")
@@ -530,20 +521,14 @@ def write_new(value: dict[str, Any], path: Path, allowed_root: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    capture = sub.add_parser("capture", help="create a new synthetic adapter-probe manifest; never overwrite")
-    capture.add_argument("--output", type=Path, required=True)
-    validate = sub.add_parser("validate", help="rerun frozen producers and strict backend-free replay")
+    validate = sub.add_parser("validate", help="replay the recorded golden with production code (strict, backend-free)")
     validate.add_argument("manifest", type=Path)
     args = parser.parse_args(argv)
     try:
         require_artifacts(ROOT / "crates" / "target" / "release" / "te.exe")
         from tools import p4c_corpus_worlds as worlds
-        if args.command == "capture":
-            value = worlds.capture()
-            write_new(value, args.output, ROOT / "tests" / "fixtures" / "p4c")
-        else:
-            value = load(args.manifest)
-            worlds.verify(value)
+        value = load(args.manifest)
+        worlds.verify(value)
         print(canonical({"fixtures": len(value["fixtures"]), "observations": sum(len(f["tape"]) for f in value["fixtures"]),
                          "provenance": "synthetic", "recorded_sessions": 0, "completed_role_walks": 0,
                          "release_certified": False}))

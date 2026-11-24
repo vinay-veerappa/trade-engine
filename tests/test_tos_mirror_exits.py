@@ -28,7 +28,7 @@ from trade_engine.domain.portfolio import Fill
 from trade_engine.ledger import Ledger
 from trade_engine.ledger.events import Event, EventKind, OrdersCreated, OrderUpdated, VenueReconcile, mirror_account
 from trade_engine.tos_paper.exits import ExitPlanError, close_id, plan_exits, run_pass_mirror, target_id
-from trade_engine.tos_paper.session import run_mirror
+from trade_engine.tos_paper.session_native import run_mirror
 
 S = date(2026, 9, 28)
 S_NEXT = date(2026, 9, 29)
@@ -109,7 +109,7 @@ def _pass(ledger, venue, name="midday", price=None, clock=MIDDAY, entries=(), se
 
 
 def _collect(ledger, venue, clock=MIDDAY):
-    from trade_engine.tos_paper.session import collect_only
+    from trade_engine.tos_paper.session_native import collect_only
 
     return collect_only(ledger, _broker(venue, clock=clock)[0], clock=clock)
 

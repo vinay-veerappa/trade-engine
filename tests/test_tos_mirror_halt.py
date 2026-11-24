@@ -15,7 +15,7 @@ import pytest
 from trade_engine.ledger import Ledger
 from trade_engine.ledger.events import Event, EventKind, EventPayloadError, VenueHaltCleared, VenueReconcile
 from trade_engine.ledger.state import LedgerFoldError, halted_venues
-from trade_engine.tos_paper.session import (
+from trade_engine.tos_paper.session_native import (
     MirrorSessionError,
     clear_halt,
     collect_only,

@@ -19,7 +19,7 @@ from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.ledger.events import OrderUpdated, mirror_account
 from trade_engine.ledger.reader import LedgerReader, LedgerReadOnlyError
 from trade_engine.tos_paper.follow import SplitLedger, SplitLedgerError, follow_cycle, follow_entries, pass_name
-from trade_engine.tos_paper.session import mirror_of
+from trade_engine.tos_paper.session_native import mirror_of
 
 D = Decimal
 ACCOUNTS = ("OPT_CSP", "OPT_PUT_SPREAD")

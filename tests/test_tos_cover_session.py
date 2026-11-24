@@ -34,7 +34,7 @@ from trade_engine.ledger import Ledger
 from trade_engine.ledger.reader import LedgerReader
 from trade_engine.tos_paper.exits import close_id, plan_exits, run_pass_mirror
 from trade_engine.tos_paper.follow import SplitLedger, follow_cycle, follow_entries
-from trade_engine.tos_paper.session import collect_only, mirror_of, run_mirror
+from trade_engine.tos_paper.session_native import collect_only, mirror_of, run_mirror
 
 D = Decimal
 LEAPS = OptionContract(underlying="AAPL", expiry=date(2027, 11, 19), strike=D("180"), right="C")

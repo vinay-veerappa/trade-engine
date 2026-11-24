@@ -7,7 +7,7 @@ through the lifecycle pass; a settlement not known yet is reported, never raised
 
 The settle runs after this pass's fills are appended and before the reconcile, so a fill that
 was only collected in the after-close pass is settled in that same pass (F9). Every test runs
-against both mirror sessions: ``tos_paper.session`` and ``tos_paper.session_native``.
+against the mirror session: ``tos_paper.session_native``.
 """
 
 import importlib
@@ -50,7 +50,7 @@ EXPIRY = P200.expiry  # 2026-10-16, a Friday
 AFTER = Clock(CAL.session_close(EXPIRY) + timedelta(hours=2))
 
 
-@pytest.fixture(params=["session", "session_native"])
+@pytest.fixture(params=["session_native"])
 def api(request):
     """The mirror session under test: its collect_only, run_mirror and pending_orders."""
     mod = importlib.import_module(f"trade_engine.tos_paper.{request.param}")

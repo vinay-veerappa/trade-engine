@@ -28,9 +28,6 @@ fn truncate(value: &Money) -> R<String> {
 pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Plan> {
     let mut p = Plan::default();
     match op {
-        "pass_of" => if let Some(name) = ["morning","midday","late"].iter().find(|name| s[0].ends_with(&format!("-{name}"))) {
-            p.text.push((*name).into());
-        },
         "pass_job" => p.text.push(format!("{}-{}",s[0],s[1])),
         "command" => p.text.push(format!("{}:{}:{}:{}",s[0],s[1],s[2],s[3])),
         "config" => {

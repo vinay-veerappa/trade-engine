@@ -524,6 +524,8 @@ def clear_halt(ledger: Ledger, venue: str, *, reason: str, clock: Clock) -> tupl
     matched the venue (run ``collect_only`` first). ``reason`` is recorded (I11). Clearing
     again on the same clean reconcile writes nothing (I3).
     """
+    if not isinstance(reason, str) or not reason.strip():
+        raise MirrorSessionError("a halt is lifted only with the operator's reason (I11)")
     holders = sorted(account for account in ledger.accounts() if venue in ledger.state(account).halted_venues)
     reconciles = [
         [event.seq, codec.encode_payload(event.payload)]

@@ -7,8 +7,9 @@
 //! (a `Decimal` crosses as sign, digits, exponent and its own `str`, so every message
 //! can quote it the way Python did) and rebuild the answer. Behaviour is the pre-port
 //! Python's EXACTLY, defects included: refusal type (`kind`) and message are the
-//! contract, and `tests/test_option_rules_parity.py` checks both against the frozen
-//! pre-port modules. Where a defect is preserved, a comment says so.
+//! contract, and `tests/test_option_rules_behaviour.py` pins both with explicit values
+//! (the frozen pre-port modules were retired in P0a, 2026-11-24). Where a defect is
+//! preserved, a comment says so.
 //!
 //! The engine owns the calendar (D7): settlement uses `crate::calendar`.
 

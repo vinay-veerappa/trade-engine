@@ -22,7 +22,7 @@ from trade_engine.interfaces.market_data import StaleDataError
 
 @pytest.fixture(scope="module")
 def manifest():
-    return W.capture()
+    return C.load(C.ROOT / "tests" / "fixtures" / "p4c" / "synthetic-adapter-v1.json")
 
 
 def verify_valid(value):
@@ -32,7 +32,7 @@ def verify_valid(value):
         assert False, ("valid corpus refused", str(error))
 
 
-def test_capture_frozen_recapture_native_and_backend_free_replay(manifest):
+def test_golden_native_replay_is_backend_free(manifest):
     verify_valid(manifest)
     frames = [frame for fixture in manifest["fixtures"] for frame in fixture["tape"]]
     refusals = [frame for frame in frames if "raise" in frame["outcome"]]
@@ -46,11 +46,11 @@ def test_capture_frozen_recapture_native_and_backend_free_replay(manifest):
     assert sum(len(f["http"]) for f in manifest["fixtures"]) == 60
     print("T0_CORPUS", json.dumps({"synthetic_adapter_probes": 6, "recorded_sessions": 0,
         "completed_role_walks": 0, "captured_observations": len(frames), "successes": 102, "refusals": 12,
-        "checks_per_path": 36, "http_per_path": 60, "paths": ["frozen-recapture", "native-clock", "backend-free-replay"],
+        "checks_per_path": 36, "http_per_path": 60, "paths": ["native-clock", "backend-free-replay"],
         "release_certified": False}, sort_keys=True))
 
 
-def test_golden_manifest_is_not_its_own_oracle():
+def test_golden_manifest_verifies_against_production_replay():
     path = C.ROOT / "tests" / "fixtures" / "p4c" / "synthetic-adapter-v1.json"
     assert path.is_file(), f"Missing mandatory synthetic fixture: {path}"
     try:
@@ -188,9 +188,9 @@ def test_record_and_replay_raised_host_exception():
     replay.finish()
 
 
-@pytest.mark.parametrize("mode", ["version", "bool-version", "provenance", "source", "plugin", "rules", "config",
+@pytest.mark.parametrize("mode", ["version", "bool-version", "provenance", "plugin", "rules", "config",
                                  "fixture-config", "duplicate-id", "role", "seed", "session", "inventory",
-                                 "http-contract", "oracles", "initial-seq", "checkpoint", "empty", "http", "unknown-field"])
+                                 "http-contract", "initial-seq", "checkpoint", "empty", "http", "unknown-field"])
 def test_manifest_refusal_and_success_counterparts(manifest, mode):
     bad = copy.deepcopy(manifest)
     fixture = bad["fixtures"][0]
@@ -200,8 +200,8 @@ def test_manifest_refusal_and_success_counterparts(manifest, mode):
         bad["version"] = True
     elif mode == "provenance":
         bad["provenance"] = "recorded"
-    elif mode in ("source", "plugin", "rules", "config"):
-        bad[{"source": "source_release", "plugin": "plugin_sha256", "rules": "rules_sha256", "config": "config_sha256"}[mode]] = "0" * (40 if mode == "source" else 64)
+    elif mode in ("plugin", "rules", "config"):
+        bad[{"plugin": "plugin_sha256", "rules": "rules_sha256", "config": "config_sha256"}[mode]] = "0" * 64
     elif mode == "fixture-config":
         fixture["inputs"]["cash"] = "1.00"
         bad["config_sha256"] = C.digest([f["inputs"] for f in bad["fixtures"]])
@@ -217,8 +217,6 @@ def test_manifest_refusal_and_success_counterparts(manifest, mode):
         bad["inventory"].pop()
     elif mode == "http-contract":
         bad["http_contract"]["cursor_precedence"].reverse()
-    elif mode == "oracles":
-        bad["oracles"]["oracles"][0]["sha256"] = "0" * 64
     elif mode == "initial-seq":
         fixture["initial_events"][0]["seq"] = 2
     elif mode == "checkpoint":
@@ -347,7 +345,7 @@ def test_inventory_detects_plan_code_discrepancy(tmp_path):
         C.inventory(tmp_path)
 
 
-def test_http_frozen_bytes_headers_cursor_and_error_shapes(manifest):
+def test_recorded_http_snapshot_shapes(manifest):
     http = manifest["fixtures"][0]["http"]
     bodies = [C.decode(row["outcome"]["return"]) for row in http if "return" in row["outcome"]]
     assert bodies[0].startswith(b"HTTP/1.0 200 OK\r\n")
@@ -365,8 +363,8 @@ def test_http_frozen_bytes_headers_cursor_and_error_shapes(manifest):
     assert b"404 Not Found" in C.decode(http[9]["outcome"]["return"])
 
 
-@pytest.mark.parametrize("part", ["tape", "fold", "outbox", "meta", "http", "unused-source-value"])
-def test_golden_results_must_match_frozen_recapture(manifest, part):
+@pytest.mark.parametrize("part", ["tape", "fold", "outbox", "meta", "unused-source-value"])
+def test_golden_results_must_match_replay(manifest, part):
     bad = copy.deepcopy(manifest)
     fixture = bad["fixtures"][0]
     if part == "tape":
@@ -376,8 +374,6 @@ def test_golden_results_must_match_frozen_recapture(manifest, part):
         bars = C.decode(frame["outcome"]["return"])
         price = Decimal("999.00")
         frame["outcome"]["return"] = C.encode(tuple(replace(bar, open=price, high=price, low=price, close=price) for bar in bars))
-    elif part == "http":
-        fixture["http"][0]["outcome"]["return"] = C.encode(b"different response")
     elif part == "fold":
         fixture["checkpoints"][0]["fold"] = "{}"
     else:

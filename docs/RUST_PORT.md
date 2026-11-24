@@ -4,7 +4,19 @@ This is the canonical plan and status for moving this engine to Rust. The
 umbrella decision lives in `tvDownloadOHLC/docs/architecture/STRATEGY_WORKFLOW.md`
 §15.16 (R5 row), which points here.
 
-## What "retire Python" means (RULED 2026-10-17, user, said twice)
+## Superseded 2026-11-23: retire now means delete (user)
+
+The rule in the next section is replaced. The parity oracles had done their job, so the user decided on 2026-11-23 to delete them. Under `.worktrees/plans/RUST_PORT_PLAN_W5.md`:
+- **P0a (2026-11-24) deleted:**
+  - every `tests/frozen_*` oracle and every test that only compared against one;
+  - `tools/ledger_parity.py`, `tools/mutate_*.py` and `tools/time_p7.py`.
+  - Behaviour tests with explicit values, plus the seeded invariant walks (`tests/test_invariant_walks.py`), replace them.
+- **P0b deleted** `metrics/snapshot.py` and `tos_paper/session.py`.
+- **From P1 on**, each domain port deletes its Python module in the port commit.
+
+References further down to frozen oracles, parity tests or those tools are history.
+
+## What "retire Python" means (RULED 2026-10-17, user, said twice; superseded above)
 
 **Retire = keep the code as a reference to maintain, and take it out of service. Never delete it, never move it.**
 The Python stays in the tree at its current path. What goes is its runtime wiring: nothing imports it on a live path, a gate proves that, and the file remains readable as the record of what was done and why, so it can be replicated in Rust if needed. This is the rule wherever this document, or any other, says retire, retirement, "Python logic out" or "no second reader". There is no copy-then-remove step. Entries below that say "deleted" record what was done earlier under the old D3 wording; they are history, not the procedure.

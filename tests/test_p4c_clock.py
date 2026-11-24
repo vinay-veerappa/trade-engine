@@ -1,4 +1,9 @@
-"""T6 exact clock walks and new trusted-factory contract on synthetic books."""
+"""T6 clock contract with explicit expected values, and the trusted-factory contract.
+
+Every expectation is a literal (or an arithmetic model written in the test), not the
+output of a second implementation. Refusal texts and the rounding rules are the
+production contract as documented in ``trade_engine.clock`` and the factory loader.
+"""
 from __future__ import annotations
 
 from collections import Counter
@@ -15,36 +20,34 @@ from zoneinfo import ZoneInfo
 import pytest
 import trade_engine_rs
 
-from frozen_p4c.t6_replay import ReplayClock as FrozenReplay
-from frozen_p4c.t6_wall import WallClock as FrozenWall
 from trade_engine.clock import ReplayClock, WallClock
-from trade_engine.ledger.codec import canon, event_bytes
 from trade_engine.ledger.events import CashFlow, Event, EventKind
 from trade_engine.ledger.store import Ledger
-from trade_engine.runtime.plugins import FactoryResult, load_factory
+from trade_engine.runtime.plugins import load_factory
 from test_p4c_embed import package as native_package, run as native_run, PLUGIN as PACKAGING_PLUGIN
 from tools import ci_local
 
 AT = datetime(2026, 10, 2, 13, 45, 1, 987654, tzinfo=timezone.utc)
+AT_ISO = "2026-10-02T13:45:01.987654+00:00"
 ET = ZoneInfo("America/New_York")
+
+NEG_SLEEP = "sleep seconds cannot be negative or non-finite, got: "
+NOT_NUMERIC = "Expected timedelta, float or int, got "
+NEG_FLOAT = "Cannot advance clock by non-finite or negative duration: "
+NEG_TIMEDELTA = "Cannot advance clock by negative duration: "
+NAIVE_INITIAL = "initial_time must be a timezone-aware UTC datetime (I7)"
+NAIVE_TARGET = "target time must be a timezone-aware UTC datetime (I7)"
+FACTORY_OPEN = "Plugin factories cannot open an engine writer; use the injected owner view (I4)"
 
 
 def outcome(action):
     try:
         value = action()
         if isinstance(value, datetime):
-            value = (type(value).__name__, value.isoformat(), str(value.tzinfo), value.fold)
+            value = value.isoformat()
         return "ok", value
     except BaseException as error:
         return "refusal", type(error).__name__, str(error)
-
-
-def same(old, new, method, value):
-    a = outcome(lambda: getattr(old, method)(value))
-    b = outcome(lambda: getattr(new, method)(value))
-    assert a == b
-    assert outcome(old.now_utc) == outcome(new.now_utc)
-    return a
 
 
 class NoOffset(tzinfo):
@@ -56,45 +59,134 @@ BAD = [None, True, False, "1", Decimal("1"), [], -1, -0.000001,
        float("nan"), float("inf"), float("-inf"), 10**400]
 
 
-@pytest.mark.parametrize("initial", [
-    AT, AT.astimezone(ET), AT.replace(tzinfo=None),
-    AT.replace(tzinfo=NoOffset()), None, "bad", datetime.min.replace(tzinfo=timezone.utc),
-    datetime.max.replace(tzinfo=timezone.utc),
-    datetime(2026, 11, 1, 1, 30, fold=0, tzinfo=ET),
-    datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=ET),
-    datetime(2026, 3, 8, 1, 59, 59, tzinfo=ET),
-    datetime(2026, 3, 8, 3, 0, tzinfo=ET),
+CONSTRUCTOR_CASES = [
+    (AT, ("ok", AT_ISO)),
+    (AT.astimezone(ET), ("ok", AT_ISO)),
+    (AT.replace(tzinfo=None), ("refusal", "ValueError", NAIVE_INITIAL)),
+    (AT.replace(tzinfo=NoOffset()), ("refusal", "ValueError", NAIVE_INITIAL)),
+    (None, ("refusal", "AttributeError", "'NoneType' object has no attribute 'tzinfo'")),
+    ("bad", ("refusal", "AttributeError", "'str' object has no attribute 'tzinfo'")),
+    (datetime.min.replace(tzinfo=timezone.utc), ("ok", "0001-01-01T00:00:00+00:00")),
+    (datetime.max.replace(tzinfo=timezone.utc), ("ok", "9999-12-31T23:59:59.999999+00:00")),
+    (datetime(2026, 11, 1, 1, 30, fold=0, tzinfo=ET), ("ok", "2026-11-01T05:30:00+00:00")),
+    (datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=ET), ("ok", "2026-11-01T06:30:00+00:00")),
+    (datetime(2026, 3, 8, 1, 59, 59, tzinfo=ET), ("ok", "2026-03-08T06:59:59+00:00")),
+    (datetime(2026, 3, 8, 3, 0, tzinfo=ET), ("ok", "2026-03-08T07:00:00+00:00")),
+]
+
+
+@pytest.mark.parametrize("initial,expected", CONSTRUCTOR_CASES)
+def test_constructor_contract(initial, expected):
+    assert outcome(lambda: ReplayClock(initial).now_utc()) == expected
+
+
+# (duration, outcome, clock time afterwards). Refusals leave the clock where it was.
+SLEEP_CASES = [
+    (None, ("refusal", "ValueError", NEG_SLEEP + "None"), AT_ISO),
+    (True, ("refusal", "ValueError", NEG_SLEEP + "True"), AT_ISO),
+    (False, ("refusal", "ValueError", NEG_SLEEP + "False"), AT_ISO),
+    ("1", ("refusal", "ValueError", NEG_SLEEP + "'1'"), AT_ISO),
+    (Decimal("1"), ("refusal", "ValueError", NEG_SLEEP + "Decimal('1')"), AT_ISO),
+    ([], ("refusal", "ValueError", NEG_SLEEP + "[]"), AT_ISO),
+    (-1, ("refusal", "ValueError", NEG_SLEEP + "-1"), AT_ISO),
+    (-0.000001, ("refusal", "ValueError", NEG_SLEEP + "-1e-06"), AT_ISO),
+    (float("nan"), ("refusal", "ValueError", NEG_SLEEP + "nan"), AT_ISO),
+    (float("inf"), ("refusal", "ValueError", NEG_SLEEP + "inf"), AT_ISO),
+    (float("-inf"), ("refusal", "ValueError", NEG_SLEEP + "-inf"), AT_ISO),
+    (10**400, ("refusal", "OverflowError", "int too large to convert to float"), AT_ISO),
+    (0, ("ok", None), AT_ISO),
+    (-0.0, ("ok", None), AT_ISO),
+    (1, ("ok", None), "2026-10-02T13:45:02.987654+00:00"),
+    # Seconds are rounded to whole microseconds, ties to even.
+    (0.0000005, ("ok", None), AT_ISO),
+    (0.0000015, ("ok", None), "2026-10-02T13:45:01.987656+00:00"),
+    (0.9999995, ("ok", None), "2026-10-02T13:45:02.987654+00:00"),
+    (timedelta(0), ("refusal", "ValueError", NEG_SLEEP + "datetime.timedelta(0)"), AT_ISO),
+    (timedelta(microseconds=-1), ("refusal", "ValueError",
+                                  NEG_SLEEP + "datetime.timedelta(days=-1, seconds=86399, microseconds=999999)"),
+     AT_ISO),
+    (timedelta(days=-1, seconds=1), ("refusal", "ValueError",
+                                     NEG_SLEEP + "datetime.timedelta(days=-1, seconds=1)"), AT_ISO),
+    (timedelta(days=999999999), ("refusal", "ValueError",
+                                 NEG_SLEEP + "datetime.timedelta(days=999999999)"), AT_ISO),
+    (timedelta(microseconds=123456), ("refusal", "ValueError",
+                                      NEG_SLEEP + "datetime.timedelta(microseconds=123456)"), AT_ISO),
+]
+
+
+@pytest.mark.parametrize("duration,expected,now", SLEEP_CASES)
+def test_sleep_contract(duration, expected, now):
+    clock = ReplayClock(AT)
+    assert outcome(lambda: clock.sleep(duration)) == expected
+    assert clock.now_utc().isoformat() == now
+
+
+ADVANCE_BY_CASES = [
+    (None, ("refusal", "TypeError", NOT_NUMERIC + "NoneType"), AT_ISO),
+    (True, ("refusal", "TypeError", NOT_NUMERIC + "bool"), AT_ISO),
+    (False, ("refusal", "TypeError", NOT_NUMERIC + "bool"), AT_ISO),
+    ("1", ("refusal", "TypeError", NOT_NUMERIC + "str"), AT_ISO),
+    (Decimal("1"), ("refusal", "TypeError", NOT_NUMERIC + "Decimal"), AT_ISO),
+    ([], ("refusal", "TypeError", NOT_NUMERIC + "list"), AT_ISO),
+    (-1, ("refusal", "ValueError", NEG_FLOAT + "-1"), AT_ISO),
+    (-0.000001, ("refusal", "ValueError", NEG_FLOAT + "-1e-06"), AT_ISO),
+    (float("nan"), ("refusal", "ValueError", NEG_FLOAT + "nan"), AT_ISO),
+    (float("inf"), ("refusal", "ValueError", NEG_FLOAT + "inf"), AT_ISO),
+    (float("-inf"), ("refusal", "ValueError", NEG_FLOAT + "-inf"), AT_ISO),
+    (10**400, ("refusal", "OverflowError", "int too large to convert to float"), AT_ISO),
+    (0, ("ok", None), AT_ISO),
+    (-0.0, ("ok", None), AT_ISO),
+    (1, ("ok", None), "2026-10-02T13:45:02.987654+00:00"),
+    (0.0000005, ("ok", None), AT_ISO),
+    (0.0000015, ("ok", None), "2026-10-02T13:45:01.987656+00:00"),
+    (0.9999995, ("ok", None), "2026-10-02T13:45:02.987654+00:00"),
+    (timedelta(0), ("ok", None), AT_ISO),
+    (timedelta(days=-1, seconds=86399, microseconds=999999),
+     ("refusal", "ValueError", NEG_TIMEDELTA + "-1 day, 23:59:59.999999"), AT_ISO),
+    (timedelta(days=-1, seconds=1), ("refusal", "ValueError", NEG_TIMEDELTA + "-1 day, 0:00:01"), AT_ISO),
+    (timedelta(days=999999999), ("refusal", "OverflowError", "date value out of range"), AT_ISO),
+    (timedelta(microseconds=123456), ("ok", None), "2026-10-02T13:45:02.111110+00:00"),
+]
+
+
+@pytest.mark.parametrize("duration,expected,now", ADVANCE_BY_CASES)
+def test_advance_by_contract(duration, expected, now):
+    clock = ReplayClock(AT)
+    assert outcome(lambda: clock.advance_by(duration)) == expected
+    assert clock.now_utc().isoformat() == now
+
+
+TARGET_CASES = [
+    (AT, ("ok", None), AT_ISO),
+    (AT.astimezone(ET), ("ok", None), AT_ISO),
+    (AT - timedelta(microseconds=1),
+     ("refusal", "ValueError", "Cannot advance clock backwards in time: target 2026-10-02T13:45:01.987653+00:00 "
+                               "< current 2026-10-02T13:45:01.987654+00:00 (I5)"), AT_ISO),
+    (AT + timedelta(microseconds=1), ("ok", None), "2026-10-02T13:45:01.987655+00:00"),
+    (AT.replace(tzinfo=None), ("refusal", "ValueError", NAIVE_TARGET), AT_ISO),
+    (AT.replace(tzinfo=NoOffset()), ("refusal", "ValueError", NAIVE_TARGET), AT_ISO),
+    (None, ("refusal", "AttributeError", "'NoneType' object has no attribute 'tzinfo'"), AT_ISO),
+    ("bad", ("refusal", "AttributeError", "'str' object has no attribute 'tzinfo'"), AT_ISO),
+]
+
+
+@pytest.mark.parametrize("target,expected,now", TARGET_CASES)
+def test_advance_to_contract(target, expected, now):
+    clock = ReplayClock(AT)
+    assert outcome(lambda: clock.advance_to(target)) == expected
+    assert clock.now_utc().isoformat() == now
+
+
+@pytest.mark.parametrize("at,seconds,expected,now", [
+    (datetime.max.replace(tzinfo=timezone.utc), 0.000001,
+     ("refusal", "OverflowError", "date value out of range"), "9999-12-31T23:59:59.999999+00:00"),
+    (datetime.min.replace(tzinfo=timezone.utc), -1,
+     ("refusal", "ValueError", NEG_FLOAT + "-1"), "0001-01-01T00:00:00+00:00"),
 ])
-def test_constructor_exact(initial):
-    assert outcome(lambda: FrozenReplay(initial).now_utc()) == outcome(
-        lambda: ReplayClock(initial).now_utc()
-    )
-
-
-@pytest.mark.parametrize("method", ["sleep", "advance_by"])
-@pytest.mark.parametrize("duration", BAD + [
-    0, -0.0, 1, 0.0000005, 0.0000015, 0.9999995,
-    timedelta(0), timedelta(microseconds=-1), timedelta(days=-1, seconds=1),
-    timedelta(days=999999999), timedelta(microseconds=123456),
-])
-def test_duration_exact(method, duration):
-    same(FrozenReplay(AT), ReplayClock(AT), method, duration)
-
-
-@pytest.mark.parametrize("target", [
-    AT, AT.astimezone(ET), AT - timedelta(microseconds=1), AT + timedelta(microseconds=1),
-    AT.replace(tzinfo=None), AT.replace(tzinfo=NoOffset()), None, "bad",
-])
-def test_target_exact(target):
-    same(FrozenReplay(AT), ReplayClock(AT), "advance_to", target)
-
-
-@pytest.mark.parametrize("at,seconds", [
-    (datetime.max.replace(tzinfo=timezone.utc), 0.000001),
-    (datetime.min.replace(tzinfo=timezone.utc), -1),
-])
-def test_overflow_preserves_current(at, seconds):
-    same(FrozenReplay(at), ReplayClock(at), "advance_by", seconds)
+def test_overflow_preserves_current(at, seconds, expected, now):
+    clock = ReplayClock(at)
+    assert outcome(lambda: clock.advance_by(seconds)) == expected
+    assert clock.now_utc().isoformat() == now
 
 
 def test_refusal_success_tally():
@@ -121,113 +213,147 @@ def test_refusal_success_tally():
 
 
 @pytest.mark.parametrize("seed", range(40))
-def test_seeded_clock_prefixes(seed):
+def test_seeded_clock_walk_invariants(seed):
+    """Seeded walks: refusals are exactly the backwards/negative steps; time never moves back."""
     rng = random.Random(seed)
     dates = [
         datetime(2026, 3, 6, 9, 45, tzinfo=ET), datetime(2026, 3, 9, 9, 45, tzinfo=ET),
         datetime(2026, 10, 30, 12, 30, tzinfo=ET), datetime(2026, 11, 2, 15, 45, tzinfo=ET),
         datetime(2026, 11, 27, 12, 30, tzinfo=ET), datetime(2026, 12, 24, 9, 45, tzinfo=ET),
     ]
-    old, new = FrozenReplay(dates[seed % len(dates)]), ReplayClock(dates[seed % len(dates)])
+    clock = ReplayClock(dates[seed % len(dates)])
     counts = Counter()
     for index in range(250):
+        before = clock.now_utc()
         method = rng.choice(["advance_to", "advance_by", "sleep"])
         if index % 11 == 0:
-            value = old.now_utc() - timedelta(microseconds=1) if method == "advance_to" else -1
+            value = before - timedelta(microseconds=1) if method == "advance_to" else -1
+            expected = "refusal"
         elif method == "advance_to":
-            value = (old.now_utc() + timedelta(seconds=rng.randrange(60))).astimezone(ET)
+            value = (before + timedelta(seconds=rng.randrange(60))).astimezone(ET)
+            expected = "ok"
         else:
             value = rng.choice([0, -0.0, 0.0000005, 0.0000015, 0.25, 59, 120.5])
-        counts[same(old, new, method, value)[0]] += 1
+            expected = "ok"
+        status = outcome(lambda: getattr(clock, method)(value))[0]
+        assert status == expected, (index, method, value)
+        after = clock.now_utc()
+        assert after >= before
+        if status == "refusal":
+            assert after == before
+        counts[status] += 1
     assert counts == Counter(ok=227, refusal=23)
     print("T6_CLOCK_PREFIXES", seed, sum(counts.values()), dict(counts))
 
 
-def test_reset_and_overridden_advance_by():
-    class Frozen(FrozenReplay):
-        def advance_by(self, duration):
-            self.seen = duration
-            super().advance_by(duration + 1)
-
+def test_sleep_routes_through_overridden_advance_by():
     class Native(ReplayClock):
         def advance_by(self, duration):
             self.seen = duration
             super().advance_by(duration + 1)
 
-    old, new = Frozen(AT), Native(AT)
-    old._current_time = new._current_time = AT - timedelta(days=1)
-    same(old, new, "sleep", 0.5)
-    assert old.seen == new.seen == 0.5
-    assert new.now_utc() == AT - timedelta(days=1) + timedelta(seconds=1.5)
+    clock = Native(AT)
+    clock._current_time = AT - timedelta(days=1)
+    assert outcome(lambda: clock.sleep(0.5)) == ("ok", None)
+    assert clock.seen == 0.5
+    assert clock.now_utc().isoformat() == "2026-10-01T13:45:03.487654+00:00"
 
 
 def test_datetime_subclass_inplace_add():
     class Custom(datetime):
         def __iadd__(self, value):
             return self + value + timedelta(seconds=1)
-    initial = Custom(2026, 10, 2, tzinfo=timezone.utc)
-    same(FrozenReplay(initial), ReplayClock(initial), "advance_by", 0.5)
+
+    clock = ReplayClock(Custom(2026, 10, 2, tzinfo=timezone.utc))
+    assert outcome(lambda: clock.advance_by(0.5)) == ("ok", None)
+    assert clock.now_utc().isoformat() == "2026-10-02T00:00:01.500000+00:00"
 
 
-@pytest.mark.parametrize("mode", ["add", "offset", "compare"])
-def test_reentrant_datetime_callbacks(mode):
+@pytest.mark.parametrize("mode,expected", [
+    # Re-entrant __iadd__ may move the clock, but the clock's own assignment wins.
+    ("add", (("ok", None), "2026-10-02T00:00:01+00:00", ["2026-10-02T00:00:00+00:00"])),
+    # utcoffset is consulted twice; the converted time is 13:45 at -04:00 = 17:45 UTC.
+    ("offset", (("ok", None), "2026-10-02T17:45:01.987654+00:00", [AT_ISO, AT_ISO])),
+    # A re-entrant __lt__ advances the clock a day, so the backwards target is refused.
+    ("compare", (("refusal", "ValueError",
+                  "Cannot advance clock backwards in time: target 2026-10-02T00:00:00+00:00 "
+                  "< current 2026-10-03T13:45:01.987654+00:00 (I5)"),
+                 "2026-10-03T13:45:01.987654+00:00", [AT_ISO])),
+])
+def test_reentrant_datetime_callbacks(mode, expected):
     holder, traces = [], []
+
     class Nested(datetime):
         def __iadd__(self, delta):
             traces.append(holder[0].now_utc().isoformat())
             holder[0]._current_time = AT + timedelta(days=1)
             return self + delta
+
         def __lt__(self, other):
             traces.append(holder[0].now_utc().isoformat())
             holder[0]._current_time = AT + timedelta(days=1)
             return True
+
     class Offset(tzinfo):
         def utcoffset(self, dt):
             traces.append(holder[0].now_utc().isoformat())
             return timedelta(hours=-4)
+
         def dst(self, dt):
             return timedelta(0)
-    results = []
-    for clock_type in (FrozenReplay, ReplayClock):
-        clock = clock_type(AT)
-        holder[:] = [clock]
-        traces.clear()
-        if mode == "add":
-            clock._current_time = Nested(2026, 10, 2, tzinfo=timezone.utc)
-            result = outcome(lambda: clock.advance_by(1))
-        elif mode == "offset":
-            result = outcome(lambda: clock.advance_to(AT.replace(tzinfo=Offset())))
-        else:
-            result = outcome(lambda: clock.advance_to(Nested(2026, 10, 2, tzinfo=timezone.utc)))
-        results.append((result, outcome(clock.now_utc), traces[:]))
-    assert results[0] == results[1]
+
+    clock = ReplayClock(AT)
+    holder[:] = [clock]
+    if mode == "add":
+        clock._current_time = Nested(2026, 10, 2, tzinfo=timezone.utc)
+        result = outcome(lambda: clock.advance_by(1))
+    elif mode == "offset":
+        result = outcome(lambda: clock.advance_to(AT.replace(tzinfo=Offset())))
+    else:
+        result = outcome(lambda: clock.advance_to(Nested(2026, 10, 2, tzinfo=timezone.utc)))
+    assert (result, clock.now_utc().isoformat(), traces[:]) == expected
 
 
 def test_wall_sleeper_resolved_at_effect_boundary(monkeypatch):
-    old, new = FrozenWall(), WallClock()
     calls = []
     monkeypatch.setattr(time, "sleep", lambda seconds: calls.append(seconds))
-    assert outcome(lambda: old.sleep(0.01)) == outcome(lambda: new.sleep(0.01))
-    assert calls == [0.01, 0.01]
+    assert outcome(lambda: WallClock().sleep(0.01)) == ("ok", None)
+    assert calls == [0.01]
 
 
-@pytest.mark.parametrize("seconds", BAD + [0, -0.0, 0.000001, 0.01, True])
-def test_wall_injected_sleep_exact(monkeypatch, seconds):
-    import frozen_p4c.t6_wall as frozen
-    calls = []
-    monkeypatch.setattr(frozen.time, "sleep", lambda value: calls.append(value))
-    old = outcome(lambda: FrozenWall().sleep(seconds))
-    expected = calls[:]
-    calls.clear()
-    native = trade_engine_rs.NativeWallClock(sleeper=lambda value: calls.append(value))
-    assert old == outcome(lambda: native.sleep(seconds))
-    assert expected == calls
+# (seconds, outcome, values the injected sleeper receives)
+WALL_SLEEP_CASES = [
+    (None, ("refusal", "ValueError", NEG_SLEEP + "None"), []),
+    (True, ("ok", None), [True]),
+    (False, ("ok", None), []),
+    ("1", ("refusal", "ValueError", NEG_SLEEP + "'1'"), []),
+    (Decimal("1"), ("refusal", "ValueError", NEG_SLEEP + "Decimal('1')"), []),
+    ([], ("refusal", "ValueError", NEG_SLEEP + "[]"), []),
+    (-1, ("refusal", "ValueError", NEG_SLEEP + "-1"), []),
+    (-0.000001, ("refusal", "ValueError", NEG_SLEEP + "-1e-06"), []),
+    (float("nan"), ("refusal", "ValueError", NEG_SLEEP + "nan"), []),
+    (float("inf"), ("refusal", "ValueError", NEG_SLEEP + "inf"), []),
+    (float("-inf"), ("refusal", "ValueError", NEG_SLEEP + "-inf"), []),
+    (10**400, ("refusal", "OverflowError", "int too large to convert to float"), []),
+    (0, ("ok", None), []),
+    (-0.0, ("ok", None), []),
+    (0.000001, ("ok", None), [0.000001]),
+    (0.01, ("ok", None), [0.01]),
+]
+
+
+@pytest.mark.parametrize("seconds,expected,received", WALL_SLEEP_CASES)
+def test_wall_injected_sleep_contract(seconds, expected, received):
+    seen = []
+    native = trade_engine_rs.NativeWallClock(sleeper=lambda value: seen.append(value))
+    assert outcome(lambda: native.sleep(seconds)) == expected
+    assert seen == received
 
 
 def test_wall_real_and_injected_observations():
-    before = FrozenWall().now_utc()
+    before = WallClock().now_utc()
     now = WallClock().now_utc()
-    after = FrozenWall().now_utc()
+    after = WallClock().now_utc()
     assert before <= now <= after
     assert now.tzinfo is timezone.utc
     started = time.perf_counter()
@@ -346,42 +472,45 @@ def load(plugin, ledger, clock, config):
     return load_factory(name, "build", [path], ledger=ledger, clock=clock, config=config)
 
 
-def test_factory_lockstep_nested_callbacks_and_state(plugin, tmp_path):
+def test_factory_callbacks_follow_appends_and_state(plugin, tmp_path):
     name, path = plugin
-    old_clock, new_clock = FrozenReplay(AT), ReplayClock(AT)
-    with Ledger(tmp_path / "old.db") as old, Ledger(tmp_path / "new.db") as new:
-        seed(old, old_clock)
-        seed(new, new_clock)
+    clock = ReplayClock(AT)
+    with Ledger(tmp_path / "new.db") as new:
+        seed(new, clock)
         before = sys.path
-        native = load(plugin, new, new_clock, {})
+        native = load(plugin, new, clock, {})
         assert sys.path is before
-        module = sys.modules[name]
-        reference = module.build(SimpleNamespace(ledger=old, clock=old_clock), {})
-        for key in ("observed", "count", "accounts", "imports"):
-            assert native.config[key] == reference.config[key]
+        assert native.config["observed"] == ("1.23", 2, "synthetic")
+        assert native.config["count"] == 1
+        assert native.config["accounts"] == ["A"]
+        assert native.config["imports"] == 1
         assert native.config["read_only"] is True
-        old.add_listener(lambda event: reference.adapters["observe"](event.account))
+        assert native.adapters["trace"] == [
+            ("clock", AT_ISO), ("state", "A", "1.23"), ("events", ("seed",)),
+        ]
         new.add_listener(lambda event: native.adapters["observe"](event.account))
         for index in range(100):
-            old_clock.advance_by(0.5)
-            new_clock.advance_by(0.5)
-            for ledger, clock in ((old, old_clock), (new, new_clock)):
-                ledger.append(Event(account="A", kind=EventKind.CASH_FLOW,
-                                    payload=CashFlow(Decimal("0.0100"), "deposit", clock.now_utc()),
-                                    ts_utc=clock.now_utc(), command_id=f"step-{index}"))
-            assert native.adapters["observe"]("A") == reference.adapters["observe"]("A")
-            assert native.adapters["trace"] == reference.adapters["trace"]
-            assert [event_bytes(ev) for ev in old.events()] == [event_bytes(ev) for ev in new.events()]
-            assert canon(old.fold()) == canon(new.fold())
+            clock.advance_by(0.5)
+            new.append(Event(account="A", kind=EventKind.CASH_FLOW,
+                             payload=CashFlow(Decimal("0.0100"), "deposit", clock.now_utc()),
+                             ts_utc=clock.now_utc(), command_id=f"step-{index}"))
+            cash, next_seq, meta = native.adapters["observe"]("A")
+            # Balance is 1.23 plus one 0.01 deposit per step; next_seq starts at 2 after the seed.
+            assert Decimal(cash) == Decimal("1.23") + Decimal("0.01") * (index + 1)
+            assert (next_seq, meta) == (index + 3, "synthetic")
+            # The listener and the explicit call each record three trace entries per step.
+            assert len(native.adapters["trace"]) == 3 + 6 * (index + 1)
         assert new._native.held
         assert new.count() == 101
+        assert [ev.command_id for ev in new.events()] == ["seed"] + [f"step-{i}" for i in range(100)]
+        assert str(new.state("A").cash) == "2.23"
+        assert clock.now_utc().isoformat() == "2026-10-02T13:45:51.987654+00:00"
         assert not (path / "other.db").exists()
-    print("T6_FACTORY_PREFIXES", 100, "callback/event/state exact")
 
 
 @pytest.mark.parametrize("mode,kind,message", [
-    ("open", "RuntimeError", "Plugin factories cannot open an engine writer; use the injected owner view (I4)"),
-    ("raw", "RuntimeError", "Plugin factories cannot open an engine writer; use the injected owner view (I4)"),
+    ("open", "RuntimeError", FACTORY_OPEN),
+    ("raw", "RuntimeError", FACTORY_OPEN),
     ("refuse", "ValueError", "fake factory refused"),
     ("exit", "SystemExit", "7"),
     ("bad", "TypeError", "plugin factory must return FactoryResult"),
@@ -412,8 +541,7 @@ def test_factory_import_side_effect_cannot_open_writer(plugin, tmp_path):
     )
     with Ledger(tmp_path / "owner.db") as owner:
         assert outcome(lambda: load(plugin, owner, ReplayClock(AT), {})) == (
-            "refusal", "RuntimeError",
-            "Plugin factories cannot open an engine writer; use the injected owner view (I4)",
+            "refusal", "RuntimeError", FACTORY_OPEN,
         )
         assert not other.exists()
 
@@ -422,9 +550,7 @@ def test_factory_cross_thread_writer_refused(plugin, tmp_path):
     other = tmp_path / "other.db"
     with Ledger(tmp_path / "owner.db") as owner:
         result = load(plugin, owner, ReplayClock(AT), {"mode": "thread", "other": str(other)})
-        assert result.config["errors"] == [(
-            "RuntimeError", "Plugin factories cannot open an engine writer; use the injected owner view (I4)"
-        )]
+        assert result.config["errors"] == [("RuntimeError", FACTORY_OPEN)]
         assert not other.exists()
 
 
@@ -502,8 +628,15 @@ def test_factory_uncached_source_refused_before_execution(plugin, tmp_path, monk
         assert load(plugin, owner, ReplayClock(AT), {}).config["read_only"] is True
 
 
-@pytest.mark.parametrize("kind", ["missing", "corrupt", "factory"])
-def test_factory_import_errors_exact(plugin, tmp_path, kind):
+IMPORT_ERROR_CASES = [
+    ("missing", ("refusal", "ModuleNotFoundError", "No module named 't6_fake_plugin'")),
+    ("corrupt", ("refusal", "SyntaxError", "invalid syntax (t6_fake_plugin.py, line 1)")),
+    ("factory", ("refusal", "AttributeError", "module 't6_fake_plugin' has no attribute 'absent'")),
+]
+
+
+@pytest.mark.parametrize("kind,expected", IMPORT_ERROR_CASES)
+def test_factory_import_errors_exact(plugin, tmp_path, kind, expected):
     name, path = plugin
     if kind == "missing":
         (path / (name + ".py")).unlink()
@@ -514,16 +647,7 @@ def test_factory_import_errors_exact(plugin, tmp_path, kind):
         native = outcome(lambda: load_factory(
             name, factory, [path], ledger=owner, clock=ReplayClock(AT), config={}
         ))
-        def reference():
-            previous = sys.path
-            sys.path = [str(path), *previous]
-            try:
-                module = __import__(name)
-                return getattr(module, factory)
-            finally:
-                sys.path = previous
-        assert native == outcome(reference)
-        assert native[0] == "refusal"
+        assert native == expected
         (path / (name + ".py")).write_text(PLUGIN, encoding="utf-8")
         importlib.invalidate_caches()
         sys.modules.pop(name, None)
