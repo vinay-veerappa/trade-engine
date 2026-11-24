@@ -1,38 +1,8 @@
 """The intraday service for 0DTE strategies (build plan I1, Architecture §4.9, P3).
 
-A *live* loop, unlike the EOD runner's replay: the future's snapshots do not exist
-yet, so the session cannot be re-derived. Instead it steps the clock tick by tick
-between the session open and the close, and at each tick:
-
-1. Pulls the underlying's chain snapshot now (injected source) and proves it is the
-   live market (I5): the snapshot was taken within ``max_quote_age_seconds``, the
-   *underlying's own quote time* is that recent too, and so is the quote of every leg
-   the account holds. A snapshot that does not say when the underlying was quoted
-   proves nothing and is refused — ``as_of`` is only when the answer arrived.
-2. **Stale quote ⇒ flat-and-refuse**: working entries are cancelled, every open
-   structure is closed at market, and entries are refused until fresh quotes return.
-   The strategy is not asked anything on a stale tick. The flatten order rests at the
-   venue and fills at the next fresh snapshot.
-3. On a fresh tick, only the quotes that are themselves fresh are handed on: the venue
-   matches working orders against them, the E4 rule reconciles at once, and the
-   strategy sees the same ``OptionContext`` the EOD run does — so no candidate leg is
-   ever priced from an old quote.
-4. The session's clock rules are the service's, early closes included: entries end at
-   ``min(entry_end, close − entry_before_close)`` and the sweep flattens at
-   ``min(flat_at, close − flat_before_close)``. Past the entry end, working entries are
-   cancelled and any entry the strategy returns is dropped.
-5. Every fresh tick records a position check against the venue (``VenueReconcile``,
-   I11), which is also the session's snapshot count; drift stops the service.
-6. Writes a **heartbeat** file (atomically) from start-up to exit: the supervisor
-   watches it, and a fresh one from this session refuses a second instance (C4); the
-   ledger's OS lock enforces it too (I4).
-
-Idempotency (I3): every derived command is claimed by id, so a restart mid-session
-folds the ledger, restores the venue book from the fold (``oms.restore``), resolves
-what the crash left half-done, and continues — a session replayed to the end after a
-restart yields the same ledger as an uninterrupted run. The after-close work (expiry,
-assignment, official-close marks) stays with the EOD job (O2, I9); its marker for the
-previous session gates this one, and its marker for this session ends it.
+A *live* loop, run through the native ``trade_engine_rs`` flow (``native.intraday_run``).
+The tick, stale-quote, heartbeat and idempotency rules are documented in
+``docs/design/INTRADAY_SERVICE.md``.
 """
 
 from __future__ import annotations
@@ -205,44 +175,9 @@ class IntradayService:
     def _tick(self, session: date, state: "_TickState") -> None:
         native.intraday_tick(self, session, state)
 
-    def _go_flat_and_refuse(self, session: date, state: "_TickState", why: str) -> None:
-        """Stale quote: cancel working entries, ask to be flat, refuse entries (I5).
-
-        The command ids stay free of the stale message — it varies between the first
-        process and a resumed one — while the human reason carries the detail (I3).
-        """
-        native.intraday_refuse(self, session, state, why)
-
     def _flatten(self, session: date, code: str, reason: str) -> int:
         """Close at market whatever is open and not already closing; returns how many."""
         return native.intraday_flatten(self, session, code, reason)
-
-    def _cancel_working_entries(self, session: date, code: str) -> None:
-        """Cancel every entry still working: past the entry end, at the sweep, when stale."""
-        native.intraday_cancel(self, session, code)
-
-    # -- restart -------------------------------------------------------------------
-
-    def _rehydrate(self, session: date, state: "_TickState") -> None:
-        """A new process starts with an empty venue; restore it from the fold (I2).
-
-        Then finish what a crash left half-done: a pending venue request is carried out
-        on the rebuilt venue and read back (``oms.restore``); an entry created but never
-        sent is cancelled (it was decided on quotes that are gone); a close created but
-        never sent is sent (the decision to be flat stands).
-        """
-        native.intraday_restore(self, session, state)
-
-    # -- unexpected errors -----------------------------------------------------------
-
-    def _emergency(self, session: date, state: "_TickState", err: Exception) -> None:
-        """An unexpected error: try to be flat on a fresh quote, alert loudly, exit (I5).
-
-        The flatten is only asked on a quote that proves the market is live; it rests in
-        the ledger, so the restarted service (restart-on-failure) fills it at its first
-        fresh snapshot. With no fresh quote nothing is sent and the alert says so.
-        """
-        native.intraday_emergency(self, session, state, err)
 
     # -- the close -----------------------------------------------------------------
 
@@ -250,23 +185,6 @@ class IntradayService:
         return native.intraday_close(self, session, state)
 
     # -- restart gate, heartbeat, plumbing ---------------------------------------
-
-    def _result(self, session: date, state: "_TickState", **extra: Any) -> dict[str, Any]:
-        result = {
-            "session": session,
-            "account_id": self._config.account_id,
-            "orders_submitted": state.tally.orders_submitted,
-            "exit_actions": state.tally.exit_actions,
-            "snapshots_processed": state.tally.snapshots_processed,
-            "entries_dropped": self._gate.dropped,
-        }
-        if "stopped_at" in extra:
-            extra["stopped_at"] = extra["stopped_at"].isoformat()
-        result.update(extra)
-        return result
-
-    def _refuse_other_live_instance(self, session: date) -> None:
-        native.intraday_live_guard(self, session)
 
     def _write_heartbeat(
         self,
@@ -282,13 +200,6 @@ class IntradayService:
 
     def _read_heartbeat(self) -> Heartbeat | None:
         return native.intraday_heartbeat_read(self)
-
-    def _advance(self, target: datetime) -> None:
-        native.intraday_advance(self, target)
-
-    def _wait_until(self, target: datetime, session: date, state: "_TickState") -> None:
-        """Nothing ticks before the open: a replay clock jumps, a wall clock waits."""
-        native.intraday_wait(self, target, session, state)
 
     def _pause(self) -> None:
         self._clock.sleep(self._config.tick_seconds)

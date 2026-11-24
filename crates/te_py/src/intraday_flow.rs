@@ -53,8 +53,7 @@ impl<'py> Host<'py> {
         tally.setattr("exit_actions", result)
     }
     fn advance(&self, target: &Value<'py>) -> PyResult<()> {
-        self.service.call_method1("_advance", (target,))?;
-        Ok(())
+        intraday_advance(self.service.clone(), target.clone())
     }
     fn error_text(&self, error: &PyErr) -> PyResult<(String, String)> {
         let value = error.value(self.service.py());
@@ -120,7 +119,7 @@ impl<'py> FlowHost for Host<'py> {
         self.native(|l, _| glue::settled(&*l, &eod_job, &account, session))
     }
     fn admit(&mut self) -> PyResult<()> {
-        self.service.call_method1("_refuse_other_live_instance", (&self.session,))?;
+        intraday_live_guard(self.service.clone(), self.session.clone())?;
         self.previous_guard()
     }
     fn beat(&mut self, note: &str, alert: bool, exited: bool) -> PyResult<()> {
@@ -130,7 +129,7 @@ impl<'py> FlowHost for Host<'py> {
     }
     fn connect_restore(&mut self) -> PyResult<()> {
         self.config()?.getattr("broker")?.call_method0("connect")?;
-        self.service.call_method1("_rehydrate", (&self.session, &self.state))?;
+        intraday_restore(self.service.clone(), self.session.clone(), self.state.clone())?;
         Ok(())
     }
     fn boundaries(&mut self) -> PyResult<()> {
@@ -166,16 +165,27 @@ impl<'py> FlowHost for Host<'py> {
         Ok(())
     }
     fn wait(&mut self) -> PyResult<()> {
-        self.service.call_method1("_wait_until", (self.open.as_ref().unwrap(), &self.session, &self.state))?;
-        Ok(())
+        intraday_wait(self.service.clone(), self.open.as_ref().unwrap().clone(),
+            self.session.clone(), self.state.clone())
     }
     fn before_close(&mut self) -> PyResult<bool> { self.now()?.lt(self.close.as_ref().unwrap()) }
     fn stopped(&mut self) -> PyResult<bool> { Ok(!self.stop.is_none() && self.now()?.ge(&self.stop)?) }
     fn result(&mut self, settled: bool, stopped: bool) -> PyResult<Value<'py>> {
-        let args = PyDict::new(self.service.py());
-        if settled { args.set_item("settled", true)?; }
-        if stopped { args.set_item("stopped_at", self.now()?)?; }
-        self.service.call_method("_result", (&self.session, &self.state), Some(&args))
+        let py = self.service.py();
+        let result = PyDict::new(py);
+        result.set_item("session", &self.session)?;
+        result.set_item("account_id", self.config()?.getattr("account_id")?)?;
+        let tally = self.state.getattr("tally")?;
+        result.set_item("orders_submitted", tally.getattr("orders_submitted")?)?;
+        result.set_item("exit_actions", tally.getattr("exit_actions")?)?;
+        result.set_item("snapshots_processed", tally.getattr("snapshots_processed")?)?;
+        result.set_item("entries_dropped", self.service.getattr("_gate")?.getattr("dropped")?)?;
+        if settled { result.set_item("settled", true)?; }
+        if stopped {
+            let now = self.now()?;
+            result.set_item("stopped_at", iso(&now)?)?;
+        }
+        Ok(result.into_any())
     }
     fn now(&mut self) -> PyResult<Value<'py>> { self.clock()?.call_method0("now_utc") }
     fn fetch(&mut self, now: &Value<'py>) -> PyResult<Value<'py>> {
@@ -191,7 +201,7 @@ impl<'py> FlowHost for Host<'py> {
     fn exception(&self, error: &PyErr) -> bool { error.is_instance_of::<PyException>(self.service.py()) }
     fn stale_refusal(&mut self, error: PyErr) -> PyResult<()> {
         let (_, message) = self.error_text(&error)?;
-        self.service.call_method1("_go_flat_and_refuse", (&self.session, &self.state, &message))?;
+        intraday_refuse(self.service.clone(), self.session.clone(), self.state.clone(), &message)?;
         self.beat(&format!("stale quote: {message}"), false, false)
     }
     fn clear_refusal(&mut self) -> PyResult<()> { self.state.setattr("refusing", false) }
@@ -210,7 +220,7 @@ impl<'py> FlowHost for Host<'py> {
         Ok((flat_due, may_enter))
     }
     fn cancel(&mut self, code: &str) -> PyResult<()> {
-        self.service.call_method1("_cancel_working_entries", (&self.session, code))?;
+        intraday_cancel(self.service.clone(), self.session.clone(), code)?;
         Ok(())
     }
     fn flatten(&mut self, code: &str) -> PyResult<()> {
@@ -246,7 +256,8 @@ impl<'py> FlowHost for Host<'py> {
     }
     fn close(&mut self) -> PyResult<String> { self.service.call_method1("_close_mark", (&self.session, &self.state))?.extract() }
     fn emergency(&mut self, error: PyErr) -> PyResult<Value<'py>> {
-        self.service.call_method1("_emergency", (&self.session, &self.state, error.value(self.service.py())))
+        intraday_emergency(self.service.clone(), self.session.clone(), self.state.clone(),
+            error.value(self.service.py()).as_any().clone())
     }
 }
 
@@ -267,6 +278,7 @@ fn intraday_run<'py>(service: Value<'py>, session: Value<'py>, start: Value<'py>
 fn intraday_tick(service: Value<'_>, session: Value<'_>, state: Value<'_>) -> PyResult<()> {
     flow::tick(&mut host(service, session, state))
 }
+/// `_wait_until`: nothing ticks before the open — a replay clock jumps, a wall clock waits.
 #[pyfunction]
 fn intraday_wait(service: Value<'_>, target: Value<'_>, session: Value<'_>, state: Value<'_>) -> PyResult<()> {
     let mut host = host(service, session, state);
@@ -283,6 +295,9 @@ fn intraday_advance(service: Value<'_>, target: Value<'_>) -> PyResult<()> {
     }
     Ok(())
 }
+/// `_go_flat_and_refuse`: stale quote — cancel working entries, ask to be flat, refuse
+/// entries (I5). The command ids stay free of the stale message (it varies between the
+/// first process and a resumed one) while the human reason carries the detail (I3).
 #[pyfunction]
 fn intraday_refuse(service: Value<'_>, session: Value<'_>, state: Value<'_>, why: &str) -> PyResult<()> {
     let mut host = host(service, session, state);
@@ -321,6 +336,8 @@ fn sorted_orders<'py>(py: Python<'py>, folded: Value<'py>) -> PyResult<Vec<Value
     py.import("builtins")?.getattr("sorted")?.call((folded.getattr("orders")?.call_method0("values")?,), Some(&args))?
         .try_iter()?.collect()
 }
+/// `_cancel_working_entries`: cancel every entry still working — past the entry end, at the
+/// sweep, when stale.
 #[pyfunction]
 fn intraday_cancel(service: Value<'_>, session: Value<'_>, code: &str) -> PyResult<()> {
     let py = service.py();
@@ -345,6 +362,11 @@ fn intraday_cancel(service: Value<'_>, session: Value<'_>, code: &str) -> PyResu
     }
     Ok(())
 }
+/// `_rehydrate`: a new process starts with an empty venue; restore it from the fold (I2).
+/// Then finish what a crash left half-done: a pending venue request is carried out on the
+/// rebuilt venue and read back (``oms.restore``); an entry created but never sent is
+/// cancelled (it was decided on quotes that are gone); a close created but never sent is
+/// sent (the decision to be flat stands).
 #[pyfunction]
 fn intraday_restore(service: Value<'_>, session: Value<'_>, state: Value<'_>) -> PyResult<()> {
     let py = service.py();
@@ -641,6 +663,10 @@ fn flat_close_of<'py>(structure: &Value<'py>, session: &Value<'py>, code: &str, 
     kwargs.set_item("command_id", command)?;
     py.import("trade_engine.domain.option_orders")?.getattr("CloseStructure")?.call((), Some(&kwargs))
 }
+/// `_emergency`: an unexpected error — try to be flat on a fresh quote, alert loudly, exit
+/// (I5). The flatten is only asked on a quote that proves the market is live; it rests in
+/// the ledger, so the restarted service (restart-on-failure) fills it at its first fresh
+/// snapshot. With no fresh quote nothing is sent and the alert says so.
 #[pyfunction]
 fn intraday_emergency<'py>(service: Value<'py>, session: Value<'py>, state: Value<'py>, error: Value<'py>) -> PyResult<Value<'py>> {
     let mut host = host(service, session, state);
