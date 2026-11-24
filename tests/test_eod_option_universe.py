@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from trade_engine.calendar import get_calendar
 from trade_engine.clock.replay import ReplayClock
 from trade_engine.domain.instruments import Equity, OptionContract, OptionRight, Side
@@ -254,3 +256,11 @@ def test_a_strategy_whose_universe_is_none_sees_every_snapshot(tmp_path) -> None
     rig.snapshots[S1] = spx_and_qqq(S1)
     rig.run(S1)
     assert strategy.seen == ["QQQ", "SPX"]
+
+
+def test_a_universe_returned_as_a_bare_str_is_refused(tmp_path) -> None:
+    # "SPX" would iterate as "S", "P", "X" and silently drop every snapshot: refuse instead.
+    rig = Rig(tmp_path, Universe("SPX"))
+    rig.snapshots[S1] = spx_and_qqq(S1)
+    with pytest.raises(TypeError, match="returned a str"):
+        rig.run(S1)

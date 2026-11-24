@@ -344,6 +344,11 @@ impl<'py> Host<'py> {
             let result = universe.call1((&self.session,))?;
             if result.is_none() {
                 None
+            } else if result.is_instance_of::<pyo3::types::PyString>() {
+                // A bare str would iterate as its characters and silently drop every snapshot.
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "option_universe({}) for {account} returned a str, not a collection of underlyings",
+                    self.session)));
             } else {
                 let mut set = BTreeSet::new();
                 for item in result.try_iter()? {
