@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use te_core::ledger::model::{
     parse_datetime, CashFlow, DateTime, Event, EventKind, Fill, Instrument, Mark, Obj, Order,
-    OrderState, OrderType, Side, Tif,
+    OrderState, OrderStateChange, OrderType, Side, Tif,
 };
 use te_core::money::Money;
 use te_core::snapshot::{
@@ -155,6 +155,8 @@ fn events_two_days() -> Vec<Event> {
             schema_version: 1,
             seq: Some(4),
         },
+        // The venue accepts the protective stop (only an accepted stop counts as protection).
+        ack_event("o2", EventKind::OrderAccepted, 40, &d1),
         Event {
             account: "ACC".to_string(),
             kind: EventKind::Mark,
@@ -244,7 +246,7 @@ fn test_heat_from_working_protective_stop() {
 fn test_position_without_stop_is_listed_not_guessed() {
     let mut events = events_two_days();
     // Drop protective stop order (seq == 4)
-    events.retain(|e| e.seq != Some(4));
+    events.retain(|e| e.seq != Some(4) && e.seq != Some(40));
     let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
     assert_eq!(snaps[0].heat, dec("0"));
     assert_eq!(snaps[0].heat_unknown_positions, vec!["AAPL".to_string()]);
@@ -341,7 +343,7 @@ fn test_protective_stop_side_enforcement() {
 #[test]
 fn test_direct_protective_stop_and_working_stop_risk() {
     let events = events_two_days();
-    let state = te_core::ledger::fold::fold_account(&events[..5], "ACC").expect("fold ok");
+    let state = te_core::ledger::fold::fold_account(&events[..6], "ACC").expect("fold ok");
 
     // Direct protective_stop call: Long AAPL, sell stop at 95 exists
     let stop = protective_stop(&state, &aapl());
@@ -568,7 +570,7 @@ fn test_day_note_line_matches_hand_computed() {
 #[test]
 fn test_day_note_lists_stopless_positions() {
     let mut events = events_two_days();
-    events.retain(|e| e.seq != Some(4));
+    events.retain(|e| e.seq != Some(4) && e.seq != Some(40));
     let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
     let line = day_note_line(&snaps[0], "ACC");
     assert!(line.contains("(no stop: AAPL)"));
@@ -587,6 +589,7 @@ fn test_day_note_line_zero_equity() {
         margin_peak: dec("0"),
         heat: dec("0"),
         heat_unknown_positions: vec![],
+        stale_mark_positions: vec![],
         drawdown_from_peak: dec("0"),
         drawdown_duration_sessions: 0,
     };
@@ -602,7 +605,7 @@ fn test_snapshot_never_writes_to_ledger() {
     let first = daily_snapshots(&events, "ACC").expect("first ok");
     let second = daily_snapshots(&events, "ACC").expect("second ok");
     assert_eq!(first, second);
-    assert_eq!(events.len(), 6);
+    assert_eq!(events.len(), 7);
 }
 
 #[test]
@@ -694,6 +697,7 @@ proptest! {
                 margin_peak: running_peak,
                 heat: Decimal::ZERO,
                 heat_unknown_positions: vec![],
+                stale_mark_positions: vec![],
                 drawdown_from_peak: Decimal::ZERO,
                 drawdown_duration_sessions: 0,
             });
@@ -744,6 +748,7 @@ proptest! {
                 margin_peak: Decimal::from(1000),
                 heat: Decimal::ZERO,
                 heat_unknown_positions: vec![],
+                stale_mark_positions: vec![],
                 drawdown_from_peak: dd,
                 drawdown_duration_sessions: dur,
             });
@@ -823,6 +828,7 @@ proptest! {
                 schema_version: 1,
                 seq: Some(4),
             },
+            ack_event("o_stop", EventKind::OrderAccepted, 40, &d1),
             Event {
                 account: "ACC".to_string(),
                 kind: EventKind::Mark,
@@ -920,6 +926,8 @@ fn nq_long_events(qty: &str, stop: Option<&str>, close_qty: Option<&str>) -> Vec
     if let Some(sp) = stop {
         events.push(nq_order_event("nq-stop", Side::Sell, qty, OrderType::Stop, Some(sp), &d1, seq));
         seq += 1;
+        events.push(ack_event("nq-stop", EventKind::OrderAccepted, seq, &d1));
+        seq += 1;
     }
     if let Some(cq) = close_qty {
         events.push(nq_order_event("nq-close", Side::Sell, cq, OrderType::Market, None, &d1, seq));
@@ -1000,4 +1008,228 @@ fn futures_heat_uses_point_value() {
     let (heat, unknown) = working_stop_risk(&state).expect("working_stop_risk ok");
     assert_eq!(heat, dec("4000"));
     assert!(unknown.is_empty());
+}
+
+// --- protective stop acknowledgement and conservatism; stale marks ----------------------
+
+/// An acknowledgement (OrderAccepted / OrderPending) for an order already submitted.
+fn ack_event(order_id: &str, kind: EventKind, seq: i128, at: &DateTime) -> Event {
+    Event {
+        account: "ACC".to_string(),
+        kind,
+        payload: Obj::StateChange(OrderStateChange {
+            order_id: order_id.to_string(),
+            reason: None,
+            venue_order_id: None,
+        }),
+        ts_utc: at.clone(),
+        command_id: Some(format!("cmd-ack-{order_id}")),
+        schema_version: 1,
+        seq: Some(seq),
+    }
+}
+
+/// One AAPL position opened on day 1 by a market order on `entry_side`, a session-close
+/// mark at `mark`, and one STOP per `stops` entry (id, side, stop price, optional ack kind).
+fn stop_scenario(
+    entry_side: Side,
+    qty: &str,
+    price: &str,
+    mark: &str,
+    stops: &[(&str, Side, &str, Option<EventKind>)],
+) -> Vec<Event> {
+    let d1 = dt("2026-09-22T21:00:00+00:00");
+    let mut events = vec![Event {
+        account: "ACC".to_string(),
+        kind: EventKind::CashFlow,
+        payload: Obj::CashFlow(CashFlow {
+            amount: money("100000"),
+            kind: "deposit".to_string(),
+            as_of: d1.clone(),
+            note: None,
+        }),
+        ts_utc: d1.clone(),
+        command_id: Some("cmd-cf-stop".to_string()),
+        schema_version: 1,
+        seq: Some(1),
+    }];
+    events.push(Event {
+        account: "ACC".to_string(),
+        kind: EventKind::OrderSubmitted,
+        payload: Obj::Order(an_order("entry", aapl(), entry_side, qty, OrderType::Market, None, d1.clone())),
+        ts_utc: d1.clone(),
+        command_id: Some("cmd-entry".to_string()),
+        schema_version: 1,
+        seq: Some(2),
+    });
+    events.push(Event {
+        account: "ACC".to_string(),
+        kind: EventKind::Fill,
+        payload: Obj::Fill(Fill {
+            fill_id: "entry-f1".to_string(),
+            order_id: "entry".to_string(),
+            account_id: "ACC".to_string(),
+            instrument: aapl(),
+            quantity: money(qty),
+            price: money(price),
+            side: entry_side,
+            filled_at: d1.clone(),
+            fee: Money::ZERO,
+            venue_env: "sim".to_string(),
+            leg_id: None,
+            venue_order_id: None,
+            venue_execution_id: None,
+        }),
+        ts_utc: d1.clone(),
+        command_id: Some("cmd-entry-f1".to_string()),
+        schema_version: 1,
+        seq: Some(3),
+    });
+    let mut seq = 4;
+    for &(id, side, stop, ack) in stops {
+        events.push(Event {
+            account: "ACC".to_string(),
+            kind: EventKind::OrderSubmitted,
+            payload: Obj::Order(an_order(id, aapl(), side, qty, OrderType::Stop, Some(stop), d1.clone())),
+            ts_utc: d1.clone(),
+            command_id: Some(format!("cmd-{id}")),
+            schema_version: 1,
+            seq: Some(seq),
+        });
+        seq += 1;
+        if let Some(kind) = ack {
+            events.push(ack_event(id, kind, seq, &d1));
+            seq += 1;
+        }
+    }
+    events.push(Event {
+        account: "ACC".to_string(),
+        kind: EventKind::Mark,
+        payload: Obj::Mark(Mark {
+            instrument: aapl(),
+            price: money(mark),
+            as_of: d1.clone(),
+            source: Some("eod".to_string()),
+        }),
+        ts_utc: d1,
+        command_id: Some("cmd-stop-m1".to_string()),
+        schema_version: 1,
+        seq: Some(seq),
+    });
+    events
+}
+
+#[test]
+fn submitted_stop_is_not_protection() {
+    // The venue has not confirmed a SUBMITTED stop: the position is unprotected, so it is
+    // listed as unknown heat and contributes nothing (I5).
+    let events = stop_scenario(Side::Buy, "100", "100", "100", &[("stop", Side::Sell, "95", None)]);
+    let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
+    assert_eq!(snaps[0].heat, dec("0"));
+    assert_eq!(snaps[0].heat_unknown_positions, vec!["AAPL".to_string()]);
+}
+
+#[test]
+fn pending_unknown_stop_is_not_protection() {
+    let events = stop_scenario(
+        Side::Buy,
+        "100",
+        "100",
+        "100",
+        &[("stop", Side::Sell, "95", Some(EventKind::OrderPending))],
+    );
+    let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
+    assert_eq!(snaps[0].heat, dec("0"));
+    assert_eq!(snaps[0].heat_unknown_positions, vec!["AAPL".to_string()]);
+}
+
+#[test]
+fn accepted_stop_is_protection() {
+    let events = stop_scenario(
+        Side::Buy,
+        "100",
+        "100",
+        "100",
+        &[("stop", Side::Sell, "95", Some(EventKind::OrderAccepted))],
+    );
+    let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
+    assert_eq!(snaps[0].heat, dec("500"));
+    assert!(snaps[0].heat_unknown_positions.is_empty());
+}
+
+#[test]
+fn long_uses_lowest_accepted_stop() {
+    // Two accepted sell stops, 98 inserted last. The most conservative long stop is the
+    // LOWEST one (95): risk (100 - 95) * 100 = 500, not (100 - 98) * 100 = 200.
+    let events = stop_scenario(
+        Side::Buy,
+        "100",
+        "100",
+        "100",
+        &[
+            ("a-95", Side::Sell, "95", Some(EventKind::OrderAccepted)),
+            ("b-98", Side::Sell, "98", Some(EventKind::OrderAccepted)),
+        ],
+    );
+    let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
+    assert_eq!(snaps[0].heat, dec("500"));
+}
+
+#[test]
+fn short_uses_highest_accepted_stop() {
+    // Short 100 @ 100 with two accepted buy stops, 105 inserted last. The most conservative
+    // short stop is the HIGHEST one (110): risk (110 - 100) * 100 = 1000, not 500.
+    let events = stop_scenario(
+        Side::Sell,
+        "100",
+        "100",
+        "100",
+        &[
+            ("a-110", Side::Buy, "110", Some(EventKind::OrderAccepted)),
+            ("b-105", Side::Buy, "105", Some(EventKind::OrderAccepted)),
+        ],
+    );
+    let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
+    assert_eq!(snaps[0].heat, dec("1000"));
+    assert!(snaps[0].heat_unknown_positions.is_empty());
+}
+
+#[test]
+fn stale_mark_flagged_when_position_not_remarked() {
+    // Day 1 marks AAPL; day 2 closes with a mark for MSFT only. AAPL is still valued at its
+    // day-1 mark, so its day-2 close is stale and must be flagged (numbers unchanged).
+    let mut events = stop_scenario(
+        Side::Buy,
+        "100",
+        "100",
+        "100",
+        &[("stop", Side::Sell, "95", Some(EventKind::OrderAccepted))],
+    );
+    let d2 = dt("2026-09-23T21:00:00+00:00");
+    events.push(Event {
+        account: "ACC".to_string(),
+        kind: EventKind::Mark,
+        payload: Obj::Mark(Mark {
+            instrument: msft(),
+            price: money("50"),
+            as_of: d2.clone(),
+            source: Some("eod".to_string()),
+        }),
+        ts_utc: d2,
+        command_id: Some("cmd-msft-m2".to_string()),
+        schema_version: 1,
+        seq: Some(100),
+    });
+    let snaps = daily_snapshots(&events, "ACC").expect("daily_snapshots ok");
+    assert_eq!(snaps.len(), 2);
+    assert!(snaps[0].stale_mark_positions.is_empty(), "day-1 mark is fresh");
+    assert_eq!(snaps[1].stale_mark_positions, vec!["AAPL".to_string()]);
+    assert_eq!(snaps[1].heat, dec("500"), "stale flag does not change the numbers");
+}
+
+#[test]
+fn remarked_position_is_not_stale() {
+    let snaps = daily_snapshots(&events_two_days(), "ACC").expect("daily_snapshots ok");
+    assert!(snaps[0].stale_mark_positions.is_empty());
+    assert!(snaps[1].stale_mark_positions.is_empty());
 }

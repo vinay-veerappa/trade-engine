@@ -285,46 +285,99 @@ fn book(intent: &Intent, price: &Option<Money>, ctx: &Context<'_>) -> R<Book> {
     let Some(price) = price else {
         return Ok(Book { equity: Some(equity), after: None, error: Some("the entry has no price".into()), before: None });
     };
-    let mut positions = st.positions.clone();
-    let legs = legs_of(&intent.instrument, intent.side);
-    let mut cash = st.cash.clone();
-    for leg in &legs {
-        let contracts = mul_i(&intent.quantity, leg.ratio)?;
-        let signed = if leg.side == Side::Buy { contracts } else { neg(&contracts)? };
-        let Some(lp) = leg_price(leg, price, &legs, ctx.snapshot)? else {
-            let error = format!("no price for {}", leg.contract.symbol()?);
-            return Ok(Book { equity: Some(equity), after: None, error: Some(error), before: None });
-        };
-        let hk = leg.contract.hk();
-        let held = positions.get(&hk).map(|p| p.quantity.clone()).unwrap_or_else(zero);
-        let quantity = add(&held, &signed)?;
-        let position = make_position(&st.account_id, leg.contract.clone(), quantity, lp.clone(), zero(), Vec::new())?;
-        positions.insert(hk.clone(), leg.contract.clone(), position);
-        if !marks.contains(&hk) {
-            marks.insert(hk, leg.contract.clone(), Some(lp.clone()));
-        }
-        cash = sub(&cash, &mul(&mul(&signed, &lp)?, &multiplier(&leg.contract)?)?)?;
-        if is_option(&leg.contract) {
-            let key = make_equity(&underlying_of(&leg.contract)?)?;
-            let up = underlying_price(&leg.contract, st, ctx.snapshot)?;
-            if !marks.contains(&key.hk()) {
-                marks.insert(key.hk(), key, up);
-            }
-        }
-    }
     let mut kept: OMap<Instrument, Money> = OMap::default();
     for (k, v) in marks.iter() {
         if let Some(v) = v {
             kept.insert(k.hk(), k.clone(), v.clone());
         }
     }
-    let mut after = st.clone();
-    after.positions = positions;
-    after.marks = kept.clone();
-    after.cash = cash;
-    let mut before = st.clone();
-    before.marks = kept;
-    Ok(Book { equity: Some(equity), after: Some(after), error: None, before: Some(before) })
+    // The book as it stands: held positions plus every working opening order, each taken as
+    // if filled at its limit price (F15). Closing orders are not applied, so they free no margin.
+    let mut work = st.clone();
+    work.marks = kept;
+    for order in st.orders.values() {
+        if terminal(order.state) || order.parent_order_id.is_some() || order.account_id != st.account_id {
+            continue;
+        }
+        let legs = legs_of(&order.instrument, order.side);
+        if !opens_exposure(&work, &legs, &order.quantity)? {
+            continue;
+        }
+        let working_error = |order_id: &str| Book {
+            equity: Some(equity.clone()),
+            after: None,
+            error: Some(format!("no price for working order {order_id}")),
+            before: None,
+        };
+        let Some(limit) = order.limit_price.clone() else {
+            return Ok(working_error(&order.order_id));
+        };
+        if apply_legs(&mut work, st, &legs, &order.quantity, &limit, ctx)?.is_some() {
+            return Ok(working_error(&order.order_id));
+        }
+    }
+    let mut before = work.clone();
+    let legs = legs_of(&intent.instrument, intent.side);
+    if let Some(symbol) = apply_legs(&mut work, st, &legs, &intent.quantity, price, ctx)? {
+        let error = format!("no price for {symbol}");
+        return Ok(Book { equity: Some(equity), after: None, error: Some(error), before: None });
+    }
+    before.marks = work.marks.clone();
+    Ok(Book { equity: Some(equity), after: Some(work), error: None, before: Some(before) })
+}
+
+/// Signed contract count one leg adds for `quantity` units of the structure.
+fn signed_contracts(leg: &ComboLeg, quantity: &Money) -> R<Money> {
+    let contracts = mul_i(quantity, leg.ratio)?;
+    Ok(if leg.side == Side::Buy { contracts } else { neg(&contracts)? })
+}
+
+/// True when no leg of the order reduces a position already held (every leg opens or adds).
+fn opens_exposure(work: &AccountState, legs: &[ComboLeg], quantity: &Money) -> R<bool> {
+    for leg in legs {
+        let signed = signed_contracts(leg, quantity)?;
+        let held = work.positions.get(&leg.contract.hk()).map(|p| p.quantity.clone()).unwrap_or_else(zero);
+        if lt(&mul(&held, &signed)?, &zero())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Apply `quantity` units of `legs` at `price` onto `work`. Returns the symbol of the first leg
+/// with no usable price (the caller refuses the book), otherwise None.
+fn apply_legs(
+    work: &mut AccountState,
+    st: &AccountState,
+    legs: &[ComboLeg],
+    quantity: &Money,
+    price: &Money,
+    ctx: &Context<'_>,
+) -> R<Option<String>> {
+    for leg in legs {
+        let signed = signed_contracts(leg, quantity)?;
+        let Some(lp) = leg_price(leg, price, legs, ctx.snapshot)? else {
+            return Ok(Some(leg.contract.symbol()?));
+        };
+        let hk = leg.contract.hk();
+        let held = work.positions.get(&hk).map(|p| p.quantity.clone()).unwrap_or_else(zero);
+        let total = add(&held, &signed)?;
+        let position = make_position(&st.account_id, leg.contract.clone(), total, lp.clone(), zero(), Vec::new())?;
+        work.positions.insert(hk.clone(), leg.contract.clone(), position);
+        if !work.marks.contains(&hk) {
+            work.marks.insert(hk, leg.contract.clone(), lp.clone());
+        }
+        work.cash = sub(&work.cash, &mul(&mul(&signed, &lp)?, &multiplier(&leg.contract)?)?)?;
+        if is_option(&leg.contract) {
+            let key = make_equity(&underlying_of(&leg.contract)?)?;
+            if !work.marks.contains(&key.hk()) {
+                if let Some(up) = underlying_price(&leg.contract, st, ctx.snapshot)? {
+                    work.marks.insert(key.hk(), key, up);
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 // -- margin (was `metrics.margin.account_margin`) -------------------------------------

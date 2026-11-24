@@ -20,9 +20,13 @@ use te_core::risk::{
     drawdown_decision, evaluate as risk_evaluate, Context, Intent as RiskIntent, Rails,
     Rules as RiskRules, Side as RiskSide, State as RiskState, RULE_COUNT,
 };
+use te_core::ledger::fold::make_position;
+use te_core::ledger::model::{
+    parse_datetime, ComboLeg, DateTime, Order, OrderState, OrderType, Tif,
+};
 use te_core::risk_options::{
-    evaluate as opt_evaluate, Context as OptContext, Intent as OptIntent,
-    Rules as OptRules,
+    evaluate as opt_evaluate, Context as OptContext, Intent as OptIntent, Quote, RuleResult,
+    Rules as OptRules, Snapshot, Val,
 };
 
 fn dec(i: i64, scale: u32) -> Decimal {
@@ -569,4 +573,204 @@ fn risk_options_determinism_for_equal_input() {
         assert_eq!(r1.passed, r2.passed);
         assert_eq!(r1.reason, r2.reason);
     }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Working opening orders count against option margin (F15)
+// -------------------------------------------------------------------------------------------------
+
+fn spy_put(strike: &str) -> Instrument {
+    Instrument::Option(OptionContract {
+        underlying: "SPY".to_string(),
+        expiry: chrono::NaiveDate::from_ymd_opt(2026, 1, 16).unwrap(),
+        strike: Money::parse(strike).unwrap(),
+        right: Right::Put,
+        multiplier: 100,
+    })
+}
+
+/// Short 100 put, long 95 put: a $5-wide put credit spread.
+fn put_spread() -> Instrument {
+    Instrument::Combo(vec![
+        ComboLeg { contract: spy_put("100.00"), ratio: 1, side: LedgerSide::Sell },
+        ComboLeg { contract: spy_put("95.00"), ratio: 1, side: LedgerSide::Buy },
+    ])
+}
+
+/// The reverse of `put_spread`: buy the 100 put back, sell the 95 put.
+fn put_spread_close() -> Instrument {
+    Instrument::Combo(vec![
+        ComboLeg { contract: spy_put("100.00"), ratio: 1, side: LedgerSide::Buy },
+        ComboLeg { contract: spy_put("95.00"), ratio: 1, side: LedgerSide::Sell },
+    ])
+}
+
+fn quote_for(contract: &Instrument, bid: &str, ask: &str) -> Quote {
+    let occ = match contract {
+        Instrument::Option(c) => c.occ().unwrap(),
+        _ => unreachable!("quotes are for option legs"),
+    };
+    Quote {
+        occ,
+        bid: Money::parse(bid).unwrap(),
+        ask: Money::parse(ask).unwrap(),
+        implied_vol: None,
+        delta: None,
+        open_interest: None,
+    }
+}
+
+/// SPY at 100 with quotes for both put legs (leg mids 2.50 and 1.50: a 1.00 credit).
+fn spread_snapshot() -> Snapshot {
+    Snapshot {
+        underlying: "SPY".to_string(),
+        underlying_price: Money::parse("100.00").unwrap(),
+        quotes: vec![
+            quote_for(&spy_put("100.00"), "2.40", "2.60"),
+            quote_for(&spy_put("95.00"), "1.40", "1.60"),
+        ],
+    }
+}
+
+fn spread_rules() -> OptRules {
+    OptRules {
+        max_margin_frac: Money::parse("0.50").unwrap(),
+        allowed_regimes: vec!["BULL_CHOPIER".into()],
+        no_earnings_before_expiry: false,
+        max_name_margin_frac: None,
+        max_name_collateral_frac: None,
+        put_notional_frac_by_regime: None,
+        max_loss_per_structure_frac: None,
+        max_debit_per_structure_frac: None,
+        max_total_debit_frac: None,
+        max_share_notional_frac: None,
+        entry_quote: None,
+    }
+}
+
+/// Open the put credit spread at the given limit (a credit when positive).
+fn spread_entry(limit: Option<&str>) -> OptIntent {
+    OptIntent {
+        instrument: put_spread(),
+        side: LedgerSide::Sell,
+        quantity: Money::from_i128(1).unwrap(),
+        limit_price: limit.map(|p| Money::parse(p).unwrap()),
+    }
+}
+
+/// Account with `cash`, SPY marked at 100.
+fn account_with(cash: &str) -> AccountState {
+    let mut st = AccountState::new("ACC_OPT");
+    st.cash = Money::parse(cash).unwrap();
+    let spy = te_core::ledger::model::make_equity("SPY").unwrap();
+    st.marks.insert(spy.hk(), spy, Money::parse("100.00").unwrap());
+    st
+}
+
+fn working_order(id: &str, instrument: Instrument, side: LedgerSide, qty: i128, limit: Option<&str>) -> Order {
+    let created: DateTime = parse_datetime("2026-01-15T15:00:00+00:00").unwrap().0;
+    Order {
+        order_id: id.to_string(),
+        account_id: "ACC_OPT".to_string(),
+        instrument,
+        order_type: OrderType::Limit,
+        side,
+        quantity: Money::from_i128(qty).unwrap(),
+        command_id: format!("cmd-{id}"),
+        created_at: created,
+        limit_price: limit.map(|p| Money::parse(p).unwrap()),
+        stop_price: None,
+        trail_amount: None,
+        tif: Tif::Day,
+        state: OrderState::Accepted,
+        parent_order_id: None,
+        oco_group: None,
+    }
+}
+
+fn run_options(rules: &OptRules, intent: &OptIntent, st: &AccountState, snap: &Snapshot) -> Vec<RuleResult> {
+    let mut reg = || Ok(Some("BULL_CHOPIER".to_string()));
+    let mut earn = || Ok(Some(None));
+    let ctx = OptContext { state: st, snapshot: Some(snap), live: false };
+    opt_evaluate(rules, intent, &ctx, &mut reg, &mut earn).expect("eval succeeds")
+}
+
+fn margin_row(results: &[RuleResult]) -> &RuleResult {
+    results.iter().find(|r| r.name == "margin").expect("margin rule exists")
+}
+
+fn measured_text(r: &RuleResult) -> String {
+    match &r.measured {
+        Val::D(m) => m.canon(),
+        Val::S(s) => s.clone(),
+    }
+}
+
+#[test]
+fn working_opening_spread_counts_against_margin() {
+    // Equity 1000, cap 50% = 500. One $5-wide spread needs about 400 of margin; two need about 800.
+    let rules = spread_rules();
+    let snap = spread_snapshot();
+    let st = account_with("1000.00");
+
+    let alone = run_options(&rules, &spread_entry(Some("1.00")), &st, &snap);
+    assert!(margin_row(&alone).passed, "one spread fits the cap: {:?}", margin_row(&alone));
+
+    // The first identical entry is already working (Accepted, opening): the second must be refused.
+    let mut working = st.clone();
+    working.orders.put("W1", working_order("W1", put_spread(), LedgerSide::Sell, 1, Some("1.00")));
+    let second = run_options(&rules, &spread_entry(Some("1.00")), &working, &snap);
+    assert!(
+        !margin_row(&second).passed,
+        "a second identical entry must be refused while the first is working: {:?}",
+        margin_row(&second)
+    );
+}
+
+#[test]
+fn working_closing_order_does_not_reduce_margin() {
+    // A held spread plus a working order that would only close it. The closing order must not
+    // free margin: the entry is measured exactly as it is without the closing order.
+    let rules = spread_rules();
+    let snap = spread_snapshot();
+    let mut held = account_with("1000.00");
+    for (contract, qty) in [(spy_put("100.00"), -1), (spy_put("95.00"), 1)] {
+        let pos = make_position(
+            "ACC_OPT",
+            contract.clone(),
+            Money::from_i128(qty).unwrap(),
+            Money::parse("1.00").unwrap(),
+            Money::zero(),
+            vec![],
+        )
+        .unwrap();
+        held.marks.insert(contract.hk(), contract.clone(), Money::parse("1.00").unwrap());
+        held.positions.insert(contract.hk(), contract, pos);
+    }
+
+    let without = run_options(&rules, &spread_entry(Some("1.00")), &held, &snap);
+    let mut with_close = held.clone();
+    with_close
+        .orders
+        .put("C1", working_order("C1", put_spread_close(), LedgerSide::Buy, 1, Some("1.00")));
+    let with = run_options(&rules, &spread_entry(Some("1.00")), &with_close, &snap);
+
+    assert_eq!(measured_text(margin_row(&with)), measured_text(margin_row(&without)));
+    assert_eq!(margin_row(&with).passed, margin_row(&without).passed);
+}
+
+#[test]
+fn working_opening_order_without_limit_price_refuses() {
+    // A working opening order with no limit price has no usable price: margin is UNKNOWN and
+    // the entry is refused, rather than guessing the working order's exposure.
+    let rules = spread_rules();
+    let snap = spread_snapshot();
+    let mut st = account_with("1000.00");
+    st.orders.put("W2", working_order("W2", put_spread(), LedgerSide::Sell, 1, None));
+
+    let results = run_options(&rules, &spread_entry(Some("1.00")), &st, &snap);
+    let row = margin_row(&results);
+    assert!(!row.passed, "unpriced working order must refuse: {:?}", row);
+    let text = measured_text(row);
+    assert!(text.contains("no price for working order W2"), "{text}");
 }

@@ -21,6 +21,7 @@ from trade_engine.domain.instruments import Equity, Side
 from trade_engine.domain.orders import Order, OrderType
 from trade_engine.domain.portfolio import Fill
 from trade_engine.ledger import CashFlow, Event, EventKind, Mark, fold_account
+from trade_engine.ledger.events import OrderStateChange
 from trade_engine.metrics.snapshot_native import (
     AccountSnapshot,
     SnapshotError,
@@ -96,6 +97,13 @@ def events_two_days() -> list[Event]:
             payload=an_order("o2", AAPL, Side.SELL, "100", OrderType.STOP, stop_price="95"),
             ts_utc=D1,
             seq=4,
+        ),
+        Event(
+            account="ACC",
+            kind=EventKind.ORDER_ACCEPTED,
+            payload=OrderStateChange("o2", venue_order_id="v2"),
+            ts_utc=D1,
+            seq=40,
         ),
         Event(account="ACC", kind=EventKind.MARK, payload=Mark(instrument=AAPL, price=Decimal("110"), as_of=D1), ts_utc=D1, seq=5),
         Event(account="ACC", kind=EventKind.MARK, payload=Mark(instrument=AAPL, price=Decimal("120"), as_of=D2), ts_utc=D2, seq=6),
@@ -197,7 +205,7 @@ def test_native_peak_margin_monotone() -> None:
 
 def test_native_position_without_stop_is_listed_not_guessed() -> None:
     events = events_two_days()
-    events = [e for e in events if e.seq != 4]  # Remove sell stop order
+    events = [e for e in events if e.seq not in (4, 40)]  # Remove sell stop order and its ack
     snaps = daily_snapshots(events, "ACC")
     assert snaps[0].heat == Decimal("0")
     assert snaps[0].heat_unknown_positions == ("AAPL",)
@@ -248,6 +256,17 @@ def test_native_protective_stop_side_enforcement() -> None:
             payload=an_order("o_sell_stop", AAPL, Side.SELL, "100", OrderType.STOP, stop_price="90"),
             ts_utc=D1,
             seq=6,
+        )
+    )
+    # Submitted is not yet protection; the stop counts once the venue accepts it.
+    assert _protective_stop(fold_account(events, "ACC"), AAPL) is None
+    events.append(
+        Event(
+            account="ACC",
+            kind=EventKind.ORDER_ACCEPTED,
+            payload=OrderStateChange("o_sell_stop", venue_order_id="v9"),
+            ts_utc=D1,
+            seq=7,
         )
     )
     st_with_stop = fold_account(events, "ACC")
@@ -316,10 +335,23 @@ def test_native_day_note_line() -> None:
 
 
 def test_native_day_note_lists_stopless_positions() -> None:
-    events = [e for e in events_two_days() if e.seq != 4]
+    events = [e for e in events_two_days() if e.seq not in (4, 40)]
     snaps = daily_snapshots(events, "ACC")
     line = day_note_line(snaps[0], "ACC")
     assert "(no stop: AAPL)" in line
+
+
+def test_native_stale_mark_is_listed_and_noted() -> None:
+    """A position not re-marked at the session close is flagged stale, not silently carried."""
+    events = [e for e in events_two_days() if e.seq != 6]  # AAPL not re-marked on D2
+    events.append(
+        Event(account="ACC", kind=EventKind.MARK, payload=Mark(instrument=MSFT, price=Decimal("50"), as_of=D2), ts_utc=D2, seq=7)
+    )
+    snaps = daily_snapshots(events, "ACC")
+    assert snaps[0].stale_mark_positions == ()
+    assert snaps[1].stale_mark_positions == ("AAPL",)
+    assert "(stale mark: AAPL)" in day_note_line(snaps[1], "ACC")
+    assert "(stale mark" not in day_note_line(snaps[0], "ACC")
 
 
 def test_native_empty_snapshots_refusal() -> None:
@@ -334,4 +366,4 @@ def test_native_snapshot_pure_no_mutation() -> None:
     first = daily_snapshots(events, "ACC")
     second = daily_snapshots(events, "ACC")
     assert first == second
-    assert len(events) == 6
+    assert len(events) == 7

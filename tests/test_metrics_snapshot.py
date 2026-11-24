@@ -11,6 +11,7 @@ from trade_engine.domain.instruments import Equity, Side
 from trade_engine.domain.orders import Order, OrderType
 from trade_engine.domain.portfolio import Fill
 from trade_engine.ledger import CashFlow, Event, EventKind, Mark
+from trade_engine.ledger.events import OrderStateChange
 from trade_engine.metrics import account_margin  # noqa: F401 - import surface check
 from trade_engine.metrics.snapshot import (
     AccountSnapshot,
@@ -72,6 +73,8 @@ def events_two_days() -> list[Event]:
         Event(account="ACC", kind=EventKind.ORDER_SUBMITTED, payload=an_order(
             "o2", AAPL, Side.SELL, "100", OrderType.STOP, stop_price="95"
         ), ts_utc=D1, seq=4),
+        # The venue accepts the stop: only an acknowledged stop is protection.
+        Event(account="ACC", kind=EventKind.ORDER_ACCEPTED, payload=OrderStateChange("o2", venue_order_id="v2"), ts_utc=D1, seq=40),
         Event(account="ACC", kind=EventKind.MARK, payload=Mark(instrument=AAPL, price=Decimal("110"), as_of=D1), ts_utc=D1, seq=5),
         Event(account="ACC", kind=EventKind.MARK, payload=Mark(instrument=AAPL, price=Decimal("120"), as_of=D2), ts_utc=D2, seq=6),
     ]
@@ -105,7 +108,7 @@ def test_position_without_stop_is_listed_not_guessed() -> None:
     events = events_two_days()
     # drop the protective stop order: o2 never exists
     events = [e for e in events if not (type(e.payload) is Order and e.payload.order_id == "o2")]
-    events = [e for e in events if e.seq != 4]
+    events = [e for e in events if e.seq not in (4, 40)]
     snaps = daily_snapshots(events, "ACC")
     assert snaps[0].heat == Decimal("0")
     assert snaps[0].heat_unknown_positions == ("AAPL",)
@@ -144,7 +147,7 @@ def test_day_note_line_matches_hand_computed() -> None:
 
 
 def test_day_note_lists_stopless_positions() -> None:
-    events = [e for e in events_two_days() if e.seq != 4]
+    events = [e for e in events_two_days() if e.seq not in (4, 40)]
     snaps = daily_snapshots(events, "ACC")
     line = day_note_line(snaps[0], "ACC")
     assert "(no stop: AAPL)" in line
@@ -156,4 +159,4 @@ def test_snapshot_never_writes_to_ledger() -> None:
     first = daily_snapshots(events, "ACC")
     second = daily_snapshots(events, "ACC")
     assert first == second
-    assert len(events) == 6
+    assert len(events) == 7

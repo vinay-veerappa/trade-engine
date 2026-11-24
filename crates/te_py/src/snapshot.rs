@@ -47,7 +47,7 @@ pub type RawSnapshot = (
     String,      // 6: margin_available
     String,      // 7: margin_peak
     String,      // 8: heat
-    Vec<String>, // 9: heat_unknown_positions
+    (Vec<String>, Vec<String>), // 9: (heat_unknown_positions, stale_mark_positions)
     String,      // 10: drawdown_from_peak
     usize,       // 11: drawdown_duration_sessions
 );
@@ -63,7 +63,7 @@ fn raw_from_snapshot(s: &AccountSnapshot) -> RawSnapshot {
         s.margin_available.to_string(),
         s.margin_peak.to_string(),
         s.heat.to_string(),
-        s.heat_unknown_positions.clone(),
+        (s.heat_unknown_positions.clone(), s.stale_mark_positions.clone()),
         s.drawdown_from_peak.to_string(),
         s.drawdown_duration_sessions,
     )
@@ -80,7 +80,8 @@ fn snapshot_from_raw(r: &RawSnapshot) -> Result<AccountSnapshot, SnapshotError> 
     let margin_available = Decimal::from_str(&r.6).map_err(|e| SnapshotError::Value(e.to_string()))?;
     let margin_peak = Decimal::from_str(&r.7).map_err(|e| SnapshotError::Value(e.to_string()))?;
     let heat = Decimal::from_str(&r.8).map_err(|e| SnapshotError::Value(e.to_string()))?;
-    let heat_unknown_positions = r.9.clone();
+    let heat_unknown_positions = r.9 .0.clone();
+    let stale_mark_positions = r.9 .1.clone();
     let drawdown_from_peak = Decimal::from_str(&r.10).map_err(|e| SnapshotError::Value(e.to_string()))?;
     let drawdown_duration_sessions = r.11;
 
@@ -97,6 +98,7 @@ fn snapshot_from_raw(r: &RawSnapshot) -> Result<AccountSnapshot, SnapshotError> 
         heat_unknown_positions,
         drawdown_from_peak,
         drawdown_duration_sessions,
+        stale_mark_positions,
     })
 }
 

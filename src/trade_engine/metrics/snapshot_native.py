@@ -50,6 +50,7 @@ class AccountSnapshot:
     heat_unknown_positions: tuple[str, ...]
     drawdown_from_peak: Decimal
     drawdown_duration_sessions: int
+    stale_mark_positions: tuple[str, ...] = ()
 
 
 def _refusal(kind: str, message: str) -> BaseException:
@@ -86,7 +87,7 @@ def _raw(s: AccountSnapshot) -> tuple:
         str(s.margin_available),
         str(s.margin_peak),
         str(s.heat),
-        list(s.heat_unknown_positions),
+        (list(s.heat_unknown_positions), list(s.stale_mark_positions)),
         str(s.drawdown_from_peak),
         s.drawdown_duration_sessions,
     )
@@ -103,9 +104,10 @@ def _from_raw(r: tuple) -> AccountSnapshot:
         margin_available=Decimal(r[6]),
         margin_peak=Decimal(r[7]),
         heat=Decimal(r[8]),
-        heat_unknown_positions=tuple(r[9]),
+        heat_unknown_positions=tuple(r[9][0]),
         drawdown_from_peak=Decimal(r[10]),
         drawdown_duration_sessions=r[11],
+        stale_mark_positions=tuple(r[9][1]),
     )
 
 

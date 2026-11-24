@@ -1182,6 +1182,17 @@ def test_open_structures_and_uncovered_calls_match_the_frozen_oracle():
     assert tally["unfoldable"] < BOOK_SEEDS // 4
 
 
+_TERMINAL_ORDER_STATES = (OrderState.FILLED, OrderState.CANCELLED, OrderState.EXPIRED, OrderState.REJECTED)
+
+
+def _has_working_order(state) -> bool:
+    """A non-terminal, parent-less order on this account (the F15 margin input)."""
+    return any(
+        o.state not in _TERMINAL_ORDER_STATES and o.parent_order_id is None and o.account_id == state.account_id
+        for o in state.orders.values()
+    )
+
+
 def test_option_risk_engine_matches_the_frozen_oracle(tmp_path):
     tally = Tally()
     ledger = Ledger(tmp_path / "ledger.db").open()
@@ -1190,6 +1201,12 @@ def test_option_risk_engine_matches_the_frozen_oracle(tmp_path):
         for seed in range(BOOK_SEEDS):
             state = random_book(seed)
             if state is None:
+                continue
+            if _has_working_order(state):
+                # F15 deliberately counts working opening orders against option margin, and the
+                # frozen oracle predates that rule. Those books are covered by the Rust spec
+                # (tests/risk_options_spec.rs), not by this oracle comparison.
+                tally["f15:book_with_working_orders"] += 1
                 continue
             r = random.Random(4 * 10**6 + seed)
             structures = PST.open_structures(state)
