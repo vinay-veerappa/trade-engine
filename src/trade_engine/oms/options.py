@@ -344,6 +344,7 @@ class OptionOrderManager:
 
     def _append(self, account_id: str, payload: OrdersCreated, command_id: str) -> Event:
         now = self._now()
+        # W6-E: native options OMS
         return self._ledger.append(
             Event(account=account_id, kind=EventKind.ORDERS_CREATED, payload=payload, ts_utc=now, command_id=command_id)
         )

@@ -1117,6 +1117,38 @@ mod tests {
         assert_eq!(l.events("A").expect("events").len(), before);
     }
 
+    /// A ledger whose writes the host refuses, as a failed store write does (kind `host`).
+    struct RefusingWrites(MemLedger);
+
+    impl Ledger for RefusingWrites {
+        fn accounts(&self) -> R<Vec<String>> {
+            self.0.accounts()
+        }
+        fn events(&self, account: &str) -> R<Vec<Event>> {
+            self.0.events(account)
+        }
+        fn state(&self, account: &str) -> R<AccountState> {
+            self.0.state(account)
+        }
+        fn event_by_command(&self, command_id: &str) -> R<Option<Event>> {
+            self.0.event_by_command(command_id)
+        }
+        fn append(&mut self, _events: Vec<Event>) -> R<Vec<Event>> {
+            err("host", "the store refused the write".to_string())
+        }
+    }
+
+    #[test]
+    fn write_off_order_refused_write_leaves_the_ledger_unchanged() {
+        let mut l = RefusingWrites(MemLedger::default());
+        entry_with_brackets(&mut l.0);
+        let before = l.0.events("A").expect("events").len();
+        let got = write_off_order(&mut l, &clock(), "A", "E", Some("stuck"), Some("vinay"), false).unwrap_err();
+        assert_eq!(got.kind, "host");
+        assert_eq!(l.0.events("A").expect("events").len(), before);
+        assert!(l.0.event_by_command("eod-writeoff:A:E").expect("read").is_none());
+    }
+
     #[test]
     fn write_off_order_refuses_unknown_order() {
         let mut l = MemLedger::default();

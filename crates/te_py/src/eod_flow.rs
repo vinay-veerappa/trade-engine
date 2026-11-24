@@ -5,7 +5,7 @@ use std::num::ParseIntError;
 use chrono::NaiveDate;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDate, PyDateTime, PyDict, PyList, PyTuple};
 use te_core::ledger::model::{err, parse_datetime, DateTime, Instrument, LErr, Obj, R as LR};
 use te_core::money::Money;
 use te_core::runtime::eod as rules;
@@ -35,6 +35,10 @@ fn sorted<'py>(value: &Value<'py>) -> PyResult<Vec<Value<'py>>> {
 }
 fn strings(value: &Value<'_>) -> PyResult<Vec<String>> {
     sorted(value)?.iter().map(|v| v.extract()).collect()
+}
+/// A Python `str` as its text. Any other value is `None`, which the typed rules refuse.
+fn text_of(value: &Value<'_>) -> Option<String> {
+    value.extract::<String>().ok()
 }
 
 /// A Python `datetime` as the te_core instant it stands for, from its ISO text.
@@ -93,7 +97,7 @@ fn settlement_fields(price: &Value<'_>) -> PyResult<(String, String, String, Dat
     Ok((underlying, session, settle_time, as_of, amount, source))
 }
 
-/// `_official_close(symbol, session)`: the PM settlement, checked against the close asked for
+/// The PM settlement for `symbol` on `session`, checked against the close asked for
 /// (I5), the clock (I7) and the session close (I9). `close` is the session close in micros.
 fn official_close(settlements: &Value<'_>, pm: &Value<'_>, stale: &Value<'_>, session_py: &Value<'_>,
     session: NaiveDate, pending: &Pending, clock: &sl::PyClock<'_, '_>, close: i64, symbol: &str) -> LR<(Money, String)> {
@@ -119,8 +123,8 @@ struct Host<'py> {
     through: Value<'py>,
     name: Value<'py>,
     closed: RefCell<Option<Value<'py>>>,
-    /// The plain ledger's store when the native gate holds; `None` keeps the Python callbacks.
-    native: Option<Bound<'py, LedgerStore>>,
+    /// The plain ledger's store, past the gate in `store_ledger::native_store`.
+    native: Bound<'py, LedgerStore>,
     /// A Python error held while the native glue unwinds (see `store_ledger::Pending`).
     pending: Pending,
 }
@@ -142,17 +146,18 @@ impl<'py> Host<'py> {
     fn passes(&self) -> PyResult<Vec<String>> {
         values(&self.module()?.getattr("PASSES")?)?.iter().map(|name| name.extract()).collect()
     }
-    /// The command id of the account's run, or of its pass named by `self.name`
-    /// (`_run_command` / `_pass_command`; the glue's builders when native).
+    /// The session's open, as te_core's XNYS calendar gives it (a UTC datetime).
+    fn session_open(&self) -> PyResult<Value<'py>> {
+        let session = sl::date_of(&self.session)?;
+        sl::datetime_py(self.runner.py(), &te_core::sim::session_open(session).map_err(super::flow_refusal)?.dt)
+    }
+    /// The session's close, as te_core's XNYS calendar gives it (a UTC datetime).
+    fn close(&self) -> PyResult<Value<'py>> {
+        let session = sl::date_of(&self.session)?;
+        sl::datetime_py(self.runner.py(), &te_core::sim::session_close(session).map_err(super::flow_refusal)?.dt)
+    }
+    /// The command id of the account's run, or of its pass named by `self.name`.
     fn command(&self, account: &str, pass: bool) -> PyResult<String> {
-        if self.native.is_none() {
-            let command = if pass {
-                self.runner.call_method1("_pass_command", (account, &self.session, &self.name))?
-            } else {
-                self.runner.call_method1("_run_command", (account, &self.session))?
-            };
-            return command.extract();
-        }
         let job = self.job()?;
         let session = sl::date_of(&self.session)?;
         if pass {
@@ -162,38 +167,23 @@ impl<'py> Host<'py> {
             glue::run_command(&job, account, session).map_err(super::flow_refusal)
         }
     }
-    /// Whether the ledger holds an event for this command (`event_by_command` is not None).
+    /// Whether the ledger holds an event for this command.
     fn has_marker(&self, command: &str) -> PyResult<bool> {
-        match &self.native {
-            Some(store) => with_native(store, &self.clock()?, &self.pending, |l, _| l.event_by_command(command))
-                .map(|event| event.is_some()),
-            None => Ok(!self.runner.getattr("_ledger")?.call_method1("event_by_command", (command,))?.is_none()),
-        }
+        with_native(&self.native, &self.clock()?, &self.pending, |l, _| l.event_by_command(command))
+            .map(|event| event.is_some())
     }
-    /// `_fill_count(account)`.
+    /// The account's fill count (`fill_count`).
     fn fill_count(&self, account: &str) -> PyResult<i64> {
-        match &self.native {
-            Some(store) => with_native(store, &self.clock()?, &self.pending, |l, _| glue::fill_count(&*l, account)),
-            None => self.runner.call_method1("_fill_count", (account,))?.extract(),
-        }
+        with_native(&self.native, &self.clock()?, &self.pending, |l, _| glue::fill_count(&*l, account))
     }
-    /// `_marks_appended(account, session)`.
+    /// The account's marks appended this session (`marks_appended`).
     fn marks_appended(&self, account: &str) -> PyResult<i64> {
-        match &self.native {
-            Some(store) => {
-                let session = sl::date_of(&self.session)?;
-                with_native(store, &self.clock()?, &self.pending, |l, _| glue::marks_appended(&*l, account, session))
-            }
-            None => self.runner.call_method1("_marks_appended", (account, &self.session))?.extract(),
-        }
+        let session = sl::date_of(&self.session)?;
+        with_native(&self.native, &self.clock()?, &self.pending, |l, _| glue::marks_appended(&*l, account, session))
     }
-    fn close(&self) -> PyResult<Value<'py>> {
-        self.calendar()?.call_method1("session_close", (&self.session,))
-    }
-    /// `_session_snapshots`, native: the wiring, each snapshot's place in the session, and the
+    /// The session snapshots: the wiring, each snapshot's place in the session, and the
     /// coverage of each options account (I5, I7). The chain fetch and its sort stay Python.
-    fn session_snapshots_native(&self, store: &Bound<'py, LedgerStore>, options: &[String],
-        covered: bool) -> PyResult<Vec<Value<'py>>> {
+    fn session_snapshots(&self, options: &[String], covered: bool) -> PyResult<Vec<Value<'py>>> {
         let py = self.runner.py();
         if options.is_empty() {
             return Ok(Vec::new());
@@ -230,7 +220,7 @@ impl<'py> Host<'py> {
                 have.insert(item.getattr("underlying")?.extract::<String>()?);
             }
             for account in options {
-                let missing = with_native(store, &self.clock()?, &self.pending, |l, _| {
+                let missing = with_native(&self.native, &self.clock()?, &self.pending, |l, _| {
                     let state = l.state(account)?;
                     let needed = glue::option_underlyings(&state)?;
                     Ok(needed.difference(&have).cloned().collect::<Vec<_>>().join(", "))
@@ -241,8 +231,8 @@ impl<'py> Host<'py> {
         Ok(items)
     }
 
-    /// `_credit_dividends`, native: the ex-dividends on the shares held at the open (O2, I5, I7).
-    fn credit_dividends_native(&self, store: &Bound<'py, LedgerStore>, account: &str) -> PyResult<()> {
+    /// The ex-dividends on the shares the account held at the open (O2, I5, I7).
+    fn credit_dividends(&self, account: &str) -> PyResult<()> {
         let py = self.runner.py();
         let source = self.config()?.getattr("dividends")?;
         let has_source = !source.is_none();
@@ -250,7 +240,7 @@ impl<'py> Host<'py> {
         let open = sl::micros(&te_core::sim::session_open(session).map_err(super::flow_refusal)?.dt);
         let stale = py.import("trade_engine.interfaces.market_data")?.getattr("StaleDataError")?;
         let pending = &self.pending;
-        with_native(store, &self.clock()?, pending, |l, c| {
+        with_native(&self.native, &self.clock()?, pending, |l, c| {
             glue::credit_dividends(l, c, account, session, open, has_source, |symbol| {
                 dividend_records(&source, symbol, &self.session).map_err(|e| {
                     host_error(pending, e, &stale, |text| LErr {
@@ -262,9 +252,9 @@ impl<'py> Host<'py> {
         })
     }
 
-    /// `_mark_options_account`, native: options at the newest snapshot's mid, shares and
+    /// The options account's marks: options at the newest snapshot's mid, shares and
     /// underlyings at the official close (O3, I5, I6, I9).
-    fn mark_options_native(&self, store: &Bound<'py, LedgerStore>, account: &str, tally: &Value<'py>) -> PyResult<()> {
+    fn mark_options(&self, account: &str, tally: &Value<'py>) -> PyResult<()> {
         let py = self.runner.py();
         let config = self.config()?;
         let snapshots = tally.getattr("snapshots")?;
@@ -275,7 +265,7 @@ impl<'py> Host<'py> {
         let pm = py.import("trade_engine.domain.option_roots")?.getattr("SettleTime")?.getattr("PM")?;
         let stale = py.import("trade_engine.interfaces.market_data")?.getattr("StaleDataError")?;
         let pending = &self.pending;
-        with_native(store, &self.clock()?, pending, |l, c| {
+        with_native(&self.native, &self.clock()?, pending, |l, c| {
             glue::mark_options_account(l, c, account, session,
                 |instrument| option_quote(&snapshots, instrument).map_err(|e| pending.hold(e)),
                 |symbol| official_close(&settlements, &pm, &stale, &self.session, session, pending, c, close, symbol),
@@ -313,21 +303,17 @@ impl<'py> EodHost for Host<'py> {
                 && !self.through.getattr("tzinfo")?.is_none()
                 && !self.through.call_method0("utcoffset")?.is_none();
             rules::through(&repr(&self.through)?, valid).map_err(super::flow_refusal)?;
-            let open = calendar.call_method1("session_open", (&self.session,))?;
+            let open = self.session_open()?;
             let close = self.close()?;
             rules::pass_boundary(&self.name.extract::<String>()?, &iso(&self.session)?, &iso(&open)?, &iso(&close)?,
                 &iso(&self.through)?, micros(&open)?, micros(&self.through)?, micros(&close)?).map_err(super::flow_refusal)?;
         }
-        if let Some(store) = &self.native {
-            let job = self.job()?;
-            let accounts = self.accounts()?;
-            let session = sl::date_of(&self.session)?;
-            with_native(store, &self.clock()?, &self.pending, |l, _| {
-                glue::require_previous_session_complete(&*l, &job, &accounts, session)
-            })?;
-        } else {
-            self.runner.call_method1("_require_previous_session_complete", (&self.session,))?;
-        }
+        let job = self.job()?;
+        let accounts = self.accounts()?;
+        let session = sl::date_of(&self.session)?;
+        with_native(&self.native, &self.clock()?, &self.pending, |l, _| {
+            glue::require_previous_session_complete(&*l, &job, &accounts, session)
+        })?;
         Ok(())
     }
     fn accounts(&self) -> PyResult<Vec<String>> { strings(&self.config()?.getattr("brokers")?) }
@@ -347,16 +333,7 @@ impl<'py> EodHost for Host<'py> {
         self.module()?.getattr("_Tally")?.call((), Some(&kwargs))
     }
     fn snapshots(&self, options: &[String], mode: Mode) -> PyResult<Vec<Self::Value>> {
-        let snapshots = match &self.native {
-            Some(store) => self.session_snapshots_native(store, options, mode != Mode::Pass)?,
-            None => {
-                let kwargs = PyDict::new(self.runner.py());
-                if mode == Mode::Pass { kwargs.set_item("covered", false)?; }
-                let python = self.runner.call_method("_session_snapshots",
-                    (&self.session, options.to_vec()), Some(&kwargs))?;
-                values(&python)?
-            }
-        };
+        let snapshots = self.session_snapshots(options, mode != Mode::Pass)?;
         let mut out = Vec::new();
         for snapshot in snapshots {
             if mode == Mode::Close || self.covered(&snapshot, &self.through)? {
@@ -366,15 +343,11 @@ impl<'py> EodHost for Host<'py> {
         Ok(out)
     }
     fn pass_end(&self, account: &str) -> PyResult<Option<Self::Value>> {
-        let Some(store) = &self.native else {
-            let end = self.runner.call_method1("_passes_through", (account, &self.session))?;
-            return Ok(if end.is_none() { None } else { Some(end) });
-        };
-        // `_passes_through`: the at_close of each pass that ran, and the latest of them.
+        // The at_close of each pass that ran, and the latest of them.
         let job = self.job()?;
         let session = sl::date_of(&self.session)?;
         let names = self.passes()?;
-        let ends = with_native(store, &self.clock()?, &self.pending, |l, _| {
+        let ends = with_native(&self.native, &self.clock()?, &self.pending, |l, _| {
             let mut ends = Vec::new();
             for name in &names {
                 let command = rules::command("eod", &rules::pass_job(&job, name), account, &session.to_string());
@@ -417,7 +390,7 @@ impl<'py> EodHost for Host<'py> {
             }
         }
         if holders.is_empty() && snapshots.is_empty() { return Ok(Vec::new()); }
-        let open = self.calendar()?.call_method1("session_open", (&self.session,))?;
+        let open = self.session_open()?;
         let close = self.close()?;
         let read = self.clock()?.call_method0("now_utc")?;
         if rules::after(micros(&read)?, micros(&open)?) {
@@ -480,10 +453,6 @@ impl<'py> EodHost for Host<'py> {
         account.tally.getattr("snapshots")?.set_item(snapshot.getattr("underlying")?, snapshot)
     }
     fn snapshot(&self, account: &Account<Self::Value>, snapshot: &Self::Value) -> PyResult<()> {
-        if self.native.is_none() {
-            self.runner.call_method1("_options_at_snapshot", (&account.id, &self.session, snapshot, &account.tally))?;
-            return Ok(());
-        }
         // `manage_at_snapshot` stays Python until W6-E; the tally merge and the command are native.
         let tally = &account.tally;
         let router = self.runner.call_method1("_router", (&account.id,))?;
@@ -534,11 +503,7 @@ impl<'py> EodHost for Host<'py> {
         self.advance(&at)
     }
     fn settle(&self, accounts: &[String]) -> PyResult<()> {
-        let Some(store) = &self.native else {
-            self.runner.call_method1("_settle_options", (&self.session, accounts.to_vec()))?;
-            return Ok(());
-        };
-        let holding = with_native(store, &self.clock()?, &self.pending, |l, _| glue::options_holders(&*l, accounts))?;
+        let holding = with_native(&self.native, &self.clock()?, &self.pending, |l, _| glue::options_holders(&*l, accounts))?;
         if holding.is_empty() {
             return Ok(());
         }
@@ -565,25 +530,17 @@ impl<'py> EodHost for Host<'py> {
                 self.runner.call_method1("_option_manager", (id,))?.call_method1("sync",
                     (id, format!("eod:{}:{id}:{}:settled", self.config()?.getattr("job_name")?.extract::<String>()?, iso(&self.session)?)))?;
             }
-            Finish::Dividends => match &self.native {
-                Some(store) => self.credit_dividends_native(store, id)?,
-                None => { self.runner.call_method1("_credit_dividends", (id, &self.session))?; }
-            },
+            Finish::Dividends => self.credit_dividends(id)?,
             Finish::Marks => {
                 if account.options {
-                    match &self.native {
-                        Some(store) => self.mark_options_native(store, id, tally)?,
-                        None => { self.runner.call_method1("_mark_options_account", (id, &self.session, tally))?; }
-                    }
-                } else if let Some(store) = &self.native {
+                    self.mark_options(id, tally)?;
+                } else {
                     let job = self.job()?;
                     let closes = sl::closes(&tally.getattr("last_regular_closes")?)?;
                     let session = sl::date_of(&self.session)?;
-                    with_native(store, &self.clock()?, &self.pending, |l, c| {
+                    with_native(&self.native, &self.clock()?, &self.pending, |l, c| {
                         glue::mark_positions(l, c, &job, id, &closes, session)
                     })?;
-                } else {
-                    self.runner.call_method1("_mark_positions", (id, tally.getattr("last_regular_closes")?, &self.session))?;
                 }
             }
             Finish::Manage => {
@@ -618,29 +575,18 @@ impl<'py> EodHost for Host<'py> {
                 if account.options { self.runner.call_method1("_submit_new_option_entries", (id, &self.session, tally))?; }
                 else { return self.runner.call_method1("_submit_new_orders", (id, &self.session))?.extract(); }
             }
-            Finish::Marker => match &self.native {
-                Some(store) => {
-                    let job = self.job()?;
-                    let session = sl::date_of(&self.session)?;
-                    let (job, command, bars) = if self.name.is_none() {
-                        (job, None, tally.getattr("bars_processed")?.extract::<i64>()?)
-                    } else {
-                        (rules::pass_job(&job, &self.name.extract::<String>()?), Some(self.command(id, true)?), 0)
-                    };
-                    with_native(store, &self.clock()?, &self.pending, |l, c| {
-                        glue::append_run_marker(l, c, &job, id, session, i128::from(bars), command.as_deref())
-                    })?;
-                }
-                None => {
-                    let kwargs = PyDict::new(self.runner.py());
-                    let bars = if self.name.is_none() { tally.getattr("bars_processed")? } else {
-                        kwargs.set_item("job", self.runner.call_method1("_pass_job", (&self.name,))?)?;
-                        kwargs.set_item("command_id", self.command(id, true)?)?;
-                        0_i64.into_pyobject(self.runner.py())?.into_any()
-                    };
-                    self.runner.call_method("_append_run_marker", (id, &self.session, bars), Some(&kwargs))?;
-                }
-            },
+            Finish::Marker => {
+                let job = self.job()?;
+                let session = sl::date_of(&self.session)?;
+                let (job, command, bars) = if self.name.is_none() {
+                    (job, None, tally.getattr("bars_processed")?.extract::<i64>()?)
+                } else {
+                    (rules::pass_job(&job, &self.name.extract::<String>()?), Some(self.command(id, true)?), 0)
+                };
+                with_native(&self.native, &self.clock()?, &self.pending, |l, c| {
+                    glue::append_run_marker(l, c, &job, id, session, i128::from(bars), command.as_deref())
+                })?;
+            }
         }
         Ok(0)
     }
@@ -734,10 +680,50 @@ fn eod_replay<'py>(runner: Value<'py>, session: Value<'py>, replays: Value<'py>,
     flow::replay(&host, &accounts, &values(&snapshots)?, &options, &ends)
 }
 
+/// The construction gate: a plain `Ledger` on the XNYS `ExchangeCalendar`, or `EodRunnerError`.
+#[pyfunction]
+fn eod_require_native<'py>(ledger: Value<'py>, calendar: Value<'py>) -> PyResult<()> {
+    sl::require_native(&ledger, &calendar).map(|_| ())
+}
+
+/// `void_session`: the owner's void of `session` for each account, native.
+#[pyfunction]
+fn eod_void_session<'py>(ledger: Value<'py>, clock: Value<'py>, calendar: Value<'py>, job: String,
+    session: Value<'py>, accounts: Value<'py>, reason: Value<'py>, owner: Value<'py>) -> PyResult<Vec<String>> {
+    let store = sl::require_native(&ledger, &calendar)?;
+    // A datetime passes `isinstance(date)` but is not a session: refuse it with the core's text.
+    if !session.is_instance_of::<PyDate>() || session.is_instance_of::<PyDateTime>() {
+        let msg = format!("void session must be a date, got {}", repr(&session)?);
+        return Err(sl::refuse(session.py(), &msg));
+    }
+    let session = sl::date_of(&session)?;
+    let accounts = values(&accounts)?.iter().map(|account| account.extract::<String>()).collect::<PyResult<Vec<_>>>()?;
+    let (reason, owner) = (text_of(&reason), text_of(&owner));
+    let pending = Pending::default();
+    with_native(&store, &clock, &pending, |l, c| {
+        glue::void_session(l, c, &job, session, &accounts, reason.as_deref(), owner.as_deref())
+    })
+}
+
+/// `write_off_order`: the owner's write-off of one stuck working order, native. Takes no calendar.
+#[pyfunction]
+fn eod_write_off<'py>(ledger: Value<'py>, clock: Value<'py>, account: String, order_id: String,
+    reason: Value<'py>, owner: Value<'py>, venue_cancel_confirmed: bool) -> PyResult<Vec<String>> {
+    let store = sl::ledger_store(&ledger)?;
+    let (reason, owner) = (text_of(&reason), text_of(&owner));
+    let pending = Pending::default();
+    with_native(&store, &clock, &pending, |l, c| {
+        glue::write_off_order(l, c, &account, &order_id, reason.as_deref(), owner.as_deref(), venue_cancel_confirmed)
+    })
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eod_run, m)?)?;
     m.add_function(wrap_pyfunction!(eod_pass, m)?)?;
     m.add_function(wrap_pyfunction!(eod_finish, m)?)?;
     m.add_function(wrap_pyfunction!(eod_replay, m)?)?;
+    m.add_function(wrap_pyfunction!(eod_require_native, m)?)?;
+    m.add_function(wrap_pyfunction!(eod_void_session, m)?)?;
+    m.add_function(wrap_pyfunction!(eod_write_off, m)?)?;
     Ok(())
 }
