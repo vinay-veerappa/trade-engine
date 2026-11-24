@@ -322,6 +322,47 @@ impl<'py> Host<'py> {
         }
         Ok(bars)
     }
+
+    /// The underlyings one options account wants snapshots for: `None` when the account
+    /// wants every snapshot (its strategy has no `option_universe` hook, or the hook
+    /// returned `None`); otherwise the strategy's universe plus the account's held option
+    /// and share underlyings. The hook is read the way `manage_options` is (~`Finish::Manage`):
+    /// a missing `option_universe` attribute is `None`, and a non-iterable result, or an
+    /// item that is not a `str`, surfaces as the Python error that refuses the run.
+    fn wanted_underlyings(&self, account: &str) -> PyResult<Option<BTreeSet<String>>> {
+        let strategy = self.config()?.getattr("strategies")?.call_method1("get", (account,))?;
+        let universe = strategy.getattr("option_universe").or_else(|e| {
+            if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(self.runner.py()) {
+                Ok(self.runner.py().None().into_bound(self.runner.py()))
+            } else {
+                Err(e)
+            }
+        })?;
+        let mut wanted = if universe.is_none() {
+            None
+        } else {
+            let result = universe.call1((&self.session,))?;
+            if result.is_none() {
+                None
+            } else {
+                let mut set = BTreeSet::new();
+                for item in result.try_iter()? {
+                    set.insert(item?.extract::<String>()?);
+                }
+                Some(set)
+            }
+        };
+        with_native(&self.native, &self.clock()?, &self.pending, |l, _| {
+            let state = l.state(account)?;
+            let mut held = glue::option_underlyings(&state)?;
+            held.extend(glue::share_underlyings(&state)?);
+            if let Some(set) = &mut wanted {
+                set.extend(held);
+            }
+            Ok(())
+        })?;
+        Ok(wanted)
+    }
 }
 
 impl<'py> EodHost for Host<'py> {
@@ -478,13 +519,30 @@ impl<'py> EodHost for Host<'py> {
         }
         kwargs.set_item("key", operator.call_method1("itemgetter", (0, 1, 2))?)?;
         timeline.call_method("sort", (), Some(&kwargs))?;
+        // One wanted set per options account, computed once before the row loop. `None`
+        // means the account wants every snapshot.
+        let mut wanted: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
+        for account in options {
+            wanted.insert(account.clone(), self.wanted_underlyings(account)?);
+        }
         let mut rows = Vec::new();
         for row in timeline.iter() {
             let item = row.get_item(3)?;
             let snapshot = row.get_item(1)?.extract::<i64>()? == 0;
-            let ids = if snapshot { options.to_vec() }
-                else { strings(&holders.get_item(item.getattr("instrument")?)?.ok_or_else(
-                    || pyo3::exceptions::PyKeyError::new_err("missing bar holders"))?)? };
+            let ids = if snapshot {
+                // The options accounts, in `options` order, whose wanted set is "all" or
+                // contains this snapshot's underlying (an exact string compare). An empty
+                // `ids` still keeps the row: replay advances the clock on every row.
+                let underlying: String = item.getattr("underlying")?.extract()?;
+                options.iter().filter(|account| match wanted.get(*account) {
+                    Some(None) => true,
+                    Some(Some(set)) => set.contains(&underlying),
+                    None => false,
+                }).cloned().collect()
+            } else {
+                strings(&holders.get_item(item.getattr("instrument")?)?.ok_or_else(
+                    || pyo3::exceptions::PyKeyError::new_err("missing bar holders"))?)?
+            };
             rows.push(Observation { at: row.get_item(0)?, item, accounts: ids, snapshot,
                 regular: row.get_item(4)?.extract()? });
         }

@@ -447,6 +447,19 @@ pub fn option_underlyings(state: &AccountState) -> R<BTreeSet<String>> {
     Ok(needed)
 }
 
+/// The share (equity) underlyings the account needs snapshots for: every nonzero equity
+/// position, by its symbol (the string a snapshot's `underlying` carries). Covered calls
+/// and the wheel write on shares, and an assigned position must keep its snapshots.
+pub fn share_underlyings(state: &AccountState) -> R<BTreeSet<String>> {
+    let mut needed = BTreeSet::new();
+    for position in state.positions.values() {
+        if matches!(position.instrument, Instrument::Equity(_)) && eod::nonzero(&text(&position.quantity))? {
+            needed.insert(position.instrument.symbol()?);
+        }
+    }
+    Ok(needed)
+}
+
 /// Write one EOD mark per open position, from the last regular-session closes. One append
 /// per mark, as in Python; a mark already written for this session is skipped.
 pub fn mark_positions<L: Ledger, C: Clock>(
@@ -1302,6 +1315,12 @@ pub(crate) mod tests {
         Instrument::Option(contract.expect("option"))
     }
 
+    /// A QQQ option the share-underlying test holds alongside the equity book.
+    fn qqq_call() -> Instrument {
+        let contract = make_option("QQQ", day("2026-12-18"), Val::Dec(money("100")), 100, Val::Right(Right::Call));
+        Instrument::Option(contract.expect("option"))
+    }
+
     /// One option buy, booked as an order then its fill (as `positions_book` books equities).
     fn option_book(l: &mut MemLedger, instrument: &Instrument, qty: &str, price: &str) {
         let contract = Order {
@@ -1364,6 +1383,17 @@ pub(crate) mod tests {
         assert_eq!(holding, vec!["A".to_string()]);
         let none = options_holders(&l, &["B".into()]).expect("holders");
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn share_underlyings_reports_nonzero_equity_symbols_and_skips_options_and_flat() {
+        let mut l = MemLedger::default();
+        positions_book(&mut l); // SPY 2 open; QQQ flat
+        option_book(&mut l, &qqq_call(), "1", "2.5"); // a QQQ option is not a share
+        let state = l.state("A").expect("state");
+        let shares = share_underlyings(&state).expect("shares");
+        // Only the open SPY share position; the flat QQQ shares and the QQQ option are out.
+        assert_eq!(shares, ["SPY".to_string()].into_iter().collect::<BTreeSet<_>>());
     }
 
     #[test]

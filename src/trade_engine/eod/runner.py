@@ -35,7 +35,9 @@ Options accounts (O4) are those whose venue matches chain snapshots
 
 - each of the session's chain snapshots (``chain_snapshots``) is matched at its own
   ``as_of`` inside the same timeline, and the strategy's ``manage_options`` runs right
-  after it (``eod.options``);
+  after it (``eod.options``); a strategy may narrow which snapshots its account sees by
+  exposing ``option_universe(session)``, and the account's held option and share
+  underlyings always keep their snapshots;
 - after the close the clock moves on by ``settle_delay``, to when the official close is
   known (daily bars settle at 17:00 ET). The O2 lifecycle pass then settles expiries and
   assignments, dividends going ex next session are credited on the shares held at the
@@ -369,7 +371,9 @@ class EodRunner:
         after a 15:00 exit in the first, stamped 15:59 (I7). Each bar goes to every
         account holding its instrument, and each account reconciles immediately. A chain
         snapshot takes its place at its own ``as_of``, ahead of the bar that opens at the
-        same instant, and goes to every options account. A snapshot an account's morning
+        same instant, and goes to every options account (a strategy may narrow this with
+        ``option_universe(session)``; the account's held option and share underlyings
+        always get their snapshots). A snapshot an account's morning
         pass already matched (``mornings``: when that pass stopped) is not matched again:
         it only stands as the newest quote of its underlying.
         """
