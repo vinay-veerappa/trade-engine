@@ -15,7 +15,7 @@ use chrono::NaiveDate;
 use std::collections::HashMap;
 
 use crate::ledger::fold::{make_position, AccountState};
-use crate::ledger::model::{derr, err, make_equity, ComboLeg, Instrument, LErr, OrderState, Side, R};
+use crate::ledger::model::{derr, err, make_equity, ComboLeg, Instrument, LErr, Side, R};
 use crate::ledger::ops::{abs, add, div, eq, ge, gt, le, lt, mul, mul_i, neg, sub, zero, OMap};
 use crate::money::Money;
 use crate::margin::option::{self as mo, Contract, Style};

@@ -7,7 +7,7 @@
 //! and the latest-expiry-first sort is stable.
 
 use crate::ledger::fold::AccountState;
-use crate::ledger::model::{dec_eq, derr, err, ComboLeg, Instrument, LErr, Order, OrderState, Side, R};
+use crate::ledger::model::{dec_eq, derr, err, ComboLeg, Instrument, LErr, Order, Side, R};
 use crate::ledger::ops::{add, div, eq, mul, mul_i, neg, sub, zero};
 use crate::sim::{dmax, dmin};
 use crate::money::Money;
