@@ -1,8 +1,8 @@
 //! The two pieces of CPython text behaviour the pre-port Python rules leaned on and
 //! that Rust's `str` does not share: `str.strip()` / `\s` (the `str.isspace` set) and
 //! `\d` (every Unicode decimal digit, category Nd). Both are pinned here, from
-//! CPython 3.13's `unicodedata` (Unicode 15.1), and tested against it by
-//! `tests/test_option_rules_parity.py`.
+//! CPython 3.13's `unicodedata` (Unicode 15.1). The interpreter re-check was retired in
+//! P0a (2026-11-24); these tables are now authoritative.
 
 /// `str.isspace()` for one character. Rust's `char::is_whitespace` differs only in
 /// U+001C..U+001F, which Python counts as whitespace.

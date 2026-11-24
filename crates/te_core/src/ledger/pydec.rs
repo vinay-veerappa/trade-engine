@@ -8,8 +8,8 @@
 //! default context: precision 28, `ROUND_HALF_EVEN`, `Emax` 999999, `Emin` -999999, with
 //! `Overflow`, `InvalidOperation` and `DivisionByZero` trapped and every other signal
 //! quiet. Each operation here is a port of the CPython `_pydecimal` algorithm the C
-//! `decimal` module is specified to agree with, and `tests/test_ledger_fold_parity.py`
-//! holds the two together.
+//! `decimal` module is specified to agree with. The fold-parity test that held the two
+//! together was retired in P0a (2026-11-24); `tests/test_fold_behaviour.py` pins results.
 //!
 //! What is deliberately not reproduced (a result in the subnormal range, arithmetic on
 //! `Infinity` beyond ordering and sign) raises `DecErr::Unsupported`, never a guess.

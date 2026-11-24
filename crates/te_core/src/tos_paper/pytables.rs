@@ -1,7 +1,7 @@
 //! Unicode facts CPython's `str` methods use and Rust's `char` does not carry,
 //! generated from CPython 3.13.15 (`unicodedata` 15.1.0) by iterating every code point.
-//! `tests/test_p5_parity.py::test_p5_text_tables_are_pythons` re-checks them against the
-//! running interpreter. Lone surrogates (U+D800..U+DFFF) are excluded: a Rust `str` cannot hold one.
+//! The re-check against the running interpreter was retired in P0a (2026-11-24); these
+//! tables are now authoritative. Lone surrogates (U+D800..U+DFFF) are excluded: a Rust `str` cannot hold one.
 
 /// Inclusive ranges where `str.isprintable()` is false (the ASCII space is printable).
 pub const NOT_PRINTABLE: [(u32, u32); 714] = [

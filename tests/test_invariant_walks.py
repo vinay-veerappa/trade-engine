@@ -15,9 +15,10 @@ Five invariants, each its own test, over every seed:
 5. every money field is a ``Decimal`` (never float), and quantities / prices the rules
    forbid from going negative stay non-negative.
 
-Production only: this file imports ``trade_engine.*`` and no oracle package. It does not import
-the shared generator module either, because that module pulls an oracle package in at load time;
-the stream builder below is a self-contained port of its ``random_stream``.
+Production only: this file imports ``trade_engine.*`` and no oracle package. The stream builder
+below is its own variant of ``tests/ledger_gen.py``'s ``random_stream``, kept separate on purpose:
+it writes command ids on every seed, so the duplicate-command invariant runs for all 50 (the shared
+generator leaves 17 seeds with none, and that test would skip them).
 
 A seed that finds a real violation is kept and marked ``xfail(strict=True)`` with the reason.
 """
