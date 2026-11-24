@@ -189,8 +189,14 @@ pub fn working_stop_risk(
         } else {
             stop.checked_sub(mark).ok_or(SnapshotError::Overflow)?
         };
+        // Risk per unit is in price points; a future or option is worth `multiplier` per point.
+        let unit = crate::ledger::fold::multiplier(instrument)
+            .map_err(|e| SnapshotError::Ledger(e.msg))?
+            .to_decimal();
         let pos_risk = risk
             .checked_mul(qty.abs())
+            .ok_or(SnapshotError::Overflow)?
+            .checked_mul(unit)
             .ok_or(SnapshotError::Overflow)?;
         heat = heat
             .checked_add(pos_risk)
@@ -219,6 +225,10 @@ pub fn compute_account_margin(
         let symbol = instrument.symbol().map_err(|e| SnapshotError::Value(e.msg))?;
         let mark = state.marks.get(&instrument.hk()).map(|m| m.to_decimal());
         let flat = position.quantity.is_zero();
+        // A flat future carries no exposure, so a past round trip does not block the snapshot.
+        if flat && matches!(instrument, Instrument::Future(_)) {
+            continue;
+        }
         let (kind, mult, contract, avg_cost) = match instrument {
             Instrument::Combo(_) => (MarginKind::Combo, 1, None, None),
             Instrument::Option(c) => {
@@ -240,7 +250,12 @@ pub fn compute_account_margin(
                 )
             }
             Instrument::Equity(_) => (MarginKind::Equity, 1, None, None),
-            Instrument::Future(_) => (MarginKind::Equity, 1, None, None),
+            // Reg-T margin does not apply to futures; refuse rather than value them as equity.
+            Instrument::Future(_) => {
+                return Err(SnapshotError::Value(format!(
+                    "futures not supported in margin calculation: {symbol}"
+                )))
+            }
         };
         wpos.push(MarginPosition {
             symbol,
