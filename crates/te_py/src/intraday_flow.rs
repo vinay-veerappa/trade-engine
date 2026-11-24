@@ -1,8 +1,18 @@
+use chrono::{NaiveDate, NaiveTime};
 use pyo3::exceptions::{PyException, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
+use te_core::ledger::model::{parse_datetime, DateTime, Instrument, R as LR};
+use te_core::money::Money;
+use te_core::runtime::eod_glue::Ledger;
 use te_core::runtime::intraday as typed;
 use te_core::runtime::intraday_flow::{self as flow, Host as FlowHost};
+use te_core::runtime::intraday_glue as glue;
+
+use crate::store_ledger::{
+    date_of, instrument_of, instrument_py, micros, money, require_native_intraday, with_native, Pending, PyClock,
+    StoreLedger,
+};
 
 type Value<'py> = Bound<'py, PyAny>;
 
@@ -23,7 +33,7 @@ struct Host<'py> {
     stop: Value<'py>,
     open: Option<Value<'py>>,
     close: Option<Value<'py>>,
-    flat: Option<Value<'py>>,
+    flat: Option<i64>,
 }
 
 impl<'py> Host<'py> {
@@ -50,6 +60,44 @@ impl<'py> Host<'py> {
         let value = error.value(self.service.py());
         Ok((value.get_type().getattr("__name__")?.extract()?, text(value.as_any())?))
     }
+    fn native<T>(&self, f: impl FnOnce(&mut StoreLedger<'_>, &PyClock<'_, '_>) -> LR<T>) -> PyResult<T> {
+        native_on(&self.service, f)
+    }
+    fn account_text(&self) -> PyResult<String> { self.account()?.extract() }
+    fn underlying(&self) -> PyResult<String> { self.config()?.getattr("underlying")?.extract() }
+    fn job(&self) -> PyResult<String> { self.config()?.getattr("job_name")?.extract() }
+    fn eod_job(&self) -> PyResult<String> { self.config()?.getattr("eod_job_name")?.extract() }
+    fn cause_text(&self) -> PyResult<String> {
+        glue::cause(&self.job()?, &self.account_text()?, date_of(&self.session)?).map_err(super::flow_refusal)
+    }
+    fn venue_name(&self) -> PyResult<String> {
+        let broker = self.config()?.getattr("broker")?;
+        if broker.hasattr("name")? { broker.getattr("name")?.extract() } else { broker.get_type().getattr("__name__")?.extract() }
+    }
+    fn venue_positions(&self) -> PyResult<Vec<(String, Money)>> {
+        let broker = self.config()?.getattr("broker")?;
+        let mut positions = Vec::new();
+        for position in broker.call_method0("positions")?.try_iter()? {
+            let position = position?;
+            let symbol: String = position.getattr("instrument")?.getattr("symbol")?.extract()?;
+            positions.push((symbol, money(&position.getattr("quantity")?)?));
+        }
+        Ok(positions)
+    }
+    /// `_require_previous_eod_complete`, natively: own marker, the previous session's marker, then `typed::previous`.
+    fn previous_guard(&mut self) -> PyResult<()> {
+        let cause = self.cause_text()?;
+        if self.native(|l, _| glue::present(&*l, &cause))? { return Ok(()); }
+        let previous = self.calendar()?.call_method1("previous_session", (&self.session,))?;
+        let previous_day = date_of(&previous)?;
+        let account = self.account_text()?;
+        let eod_job = self.eod_job()?;
+        let marker = glue::eod_marker(&eod_job, &account, previous_day).map_err(super::flow_refusal)?;
+        if self.native(|l, _| glue::present(&*l, &marker))? { return Ok(()); }
+        let has_history = self.native(|l, _| glue::has_history(&*l, &account))?;
+        typed::previous(has_history, &iso(&self.session)?, &account, &iso(&previous)?, &eod_job, &marker)
+            .map_err(super::flow_refusal)
+    }
 }
 
 impl<'py> FlowHost for Host<'py> {
@@ -68,13 +116,12 @@ impl<'py> FlowHost for Host<'py> {
         Ok(())
     }
     fn settled(&mut self) -> PyResult<bool> {
-        let marker = self.service.call_method1("_eod_marker", (&self.session,))?;
-        Ok(!self.ledger()?.call_method1("event_by_command", (marker,))?.is_none())
+        let (eod_job, account, session) = (self.eod_job()?, self.account_text()?, date_of(&self.session)?);
+        self.native(|l, _| glue::settled(&*l, &eod_job, &account, session))
     }
     fn admit(&mut self) -> PyResult<()> {
         self.service.call_method1("_refuse_other_live_instance", (&self.session,))?;
-        self.service.call_method1("_require_previous_eod_complete", (&self.session,))?;
-        Ok(())
+        self.previous_guard()
     }
     fn beat(&mut self, note: &str, alert: bool, exited: bool) -> PyResult<()> {
         self.service.call_method("_write_heartbeat", (&self.session, &self.state, note),
@@ -135,7 +182,7 @@ impl<'py> FlowHost for Host<'py> {
         self.config()?.getattr("snapshot_source")?.call1((self.config()?.getattr("underlying")?, now))
     }
     fn fresh(&mut self, snapshot: Value<'py>, now: &Value<'py>) -> PyResult<Value<'py>> {
-        self.service.call_method1("_fresh_view", (snapshot, now))
+        fresh_view_of(&self.service, snapshot, now)
     }
     fn stale(&self, error: &PyErr) -> PyResult<bool> {
         Ok(error.is_instance_of::<PyValueError>(self.service.py()) ||
@@ -149,14 +196,16 @@ impl<'py> FlowHost for Host<'py> {
     }
     fn clear_refusal(&mut self) -> PyResult<()> { self.state.setattr("refusing", false) }
     fn deadlines(&mut self, now: &Value<'py>) -> PyResult<(bool, bool)> {
-        let deadlines = self.service.call_method1("_deadlines", (&self.session,))?;
-        let entry = deadlines.get_item(0)?;
-        let flat = deadlines.get_item(1)?;
-        let module = self.service.py().import("trade_engine.eod._runtime")?;
-        let micros = |v: &Value<'py>| -> PyResult<i64> { module.call_method1("micros", (v,))?.extract() };
-        let (now_us, entry_us, flat_us) = (micros(now)?, micros(&entry)?, micros(&flat)?);
+        let config = self.config()?;
+        let flat_at = clock_time(&config.getattr("flat_at")?)?;
+        let entry_end = clock_time(&config.getattr("entry_end")?)?;
+        let flat_before = micros_of(&config.getattr("flat_before_close")?)?;
+        let entry_before = micros_of(&config.getattr("entry_before_close")?)?;
+        let (entry, flat) = glue::deadlines(date_of(&self.session)?, flat_at, entry_end, flat_before, entry_before)
+            .map_err(super::flow_refusal)?;
+        let now_us = micros(&dt_of(now)?);
         let barred = !self.state.getattr("barred")?.is_none();
-        let (flat_due, may_enter) = typed::tick(now_us, entry_us, flat_us, barred).map_err(super::flow_refusal)?;
+        let (flat_due, may_enter) = typed::tick(now_us, entry, flat, barred).map_err(super::flow_refusal)?;
         self.flat = Some(flat);
         Ok((flat_due, may_enter))
     }
@@ -165,22 +214,30 @@ impl<'py> FlowHost for Host<'py> {
         Ok(())
     }
     fn flatten(&mut self, code: &str) -> PyResult<()> {
-        let at = self.flat.as_ref().unwrap().call_method1("astimezone", (self.module()?.getattr("NEW_YORK")?,))?;
-        let reason = format!("flat by {} ET", at.call_method1("strftime", ("%H:%M",))?.extract::<String>()?);
+        let flat = self.flat.expect("the deadlines are read before a flatten");
+        let reason = format!("flat by {} ET", glue::flat_label(flat).map_err(super::flow_refusal)?);
         let count = self.service.call_method1("_flatten", (&self.session, code, reason))?;
         self.increment(&count)
     }
     fn gate(&mut self, allow: bool) -> PyResult<()> { self.service.getattr("_gate")?.setattr("allow", allow) }
     fn manage(&mut self, snapshot: &Value<'py>) -> PyResult<()> {
+        let cause = self.cause_text()?;
         let added = self.service.getattr("_router")?.call_method1("manage_at_snapshot",
-            (self.account()?, &self.session, snapshot, self.state.getattr("snapshots")?,
-                self.service.call_method1("_cause", (&self.session,))?))?;
+            (self.account()?, &self.session, snapshot, self.state.getattr("snapshots")?, cause))?;
         let tally = self.service.py().import("operator")?.call_method1("iadd", (self.state.getattr("tally")?, added))?;
         self.state.setattr("tally", tally)
     }
+    /// `_record_tick`, natively: one position check per fresh snapshot, skipped if already written.
     fn record(&mut self, snapshot: &Value<'py>) -> PyResult<()> {
-        self.service.call_method1("_record_tick", (&self.session, snapshot))?;
-        Ok(())
+        let cause = self.cause_text()?;
+        let account = self.account_text()?;
+        let as_of = iso(&snapshot.getattr("as_of")?)?;
+        let underlying: String = snapshot.getattr("underlying")?.extract()?;
+        let command = format!("{cause}:tick:{as_of}");
+        if self.native(|l, _| glue::present(&*l, &command))? { return Ok(()); }
+        let venue = self.venue_name()?;
+        let positions = self.venue_positions()?;
+        self.native(|l, clock| glue::record_tick(l, clock, &account, &cause, &as_of, &underlying, &venue, &positions))
     }
     fn pause(&mut self) -> PyResult<()> { self.service.call_method0("_pause")?; Ok(()) }
     fn tick(&mut self) -> PyResult<()> {
@@ -252,7 +309,7 @@ fn intraday_flatten(service: Value<'_>, session: Value<'_>, code: &str, reason: 
         let mut ids: Vec<String> = vec![structure.getattr("entry_order_id")?.extract()?];
         for id in folded.getattr("orders")?.try_iter()? { ids.push(id?.extract()?); }
         let attempt = typed::attempt(&ids[0], &ids).map_err(super::flow_refusal)?;
-        let close = host.module()?.getattr("flat_close")?.call1((structure, &host.session, code, attempt, reason))?;
+        let close = flat_close_of(&structure, &host.session, code, attempt, reason)?;
         manager.call_method1("close", (host.account()?, close))?;
         closed += 1;
     }
@@ -357,56 +414,72 @@ fn intraday_restore(service: Value<'_>, session: Value<'_>, state: Value<'_>) ->
     }
     Ok(())
 }
+/// `_close_plan` and the ledger half of the close, natively: the marks at a fresh snapshot taken
+/// near the close (or none), then one MARK per priced symbol and the session's EOD_RUN.
 #[pyfunction]
 fn intraday_close<'py>(service: Value<'py>, session: Value<'py>, state: Value<'py>) -> PyResult<Value<'py>> {
     let py = service.py();
     let host = host(service, session, state);
-    let plan = host.service.call_method1("_close_plan", (&host.session, &host.state))?;
-    let now = plan.get_item(0)?;
-    let marks = plan.get_item(1)?;
-    let mut ordered = Vec::new();
-    for instrument in marks.try_iter()? {
-        let instrument = instrument?;
-        ordered.push((instrument.getattr("symbol")?.extract::<String>()?, instrument));
+    let session_day = date_of(&host.session)?;
+    let account = host.account_text()?;
+    let cause = host.cause_text()?;
+    let job = host.job()?;
+    let underlying = host.underlying()?;
+    let config = host.config()?;
+    let max_age: f64 = config.getattr("max_quote_age_seconds")?.extract()?;
+    let window: f64 = config.getattr("close_mark_window_seconds")?.extract()?;
+    let now = dt_of(&host.clock()?.call_method0("now_utc")?)?;
+    let close = glue::ts_micros(&te_core::sim::session_close(session_day).map_err(super::flow_refusal)?);
+    let held = native_on(&host.service, |l, _| {
+        let folded = l.state(&account)?;
+        glue::held_instruments(&folded)
+    })?;
+    let snapshot = host.state.getattr("snapshots")?.call_method1("get", (&underlying,))?;
+    let has_snapshot = !snapshot.is_none();
+    let snapshot_us = if has_snapshot { micros(&dt_of(&snapshot.getattr("as_of")?)?) } else { 0 };
+    let age = if has_snapshot { (close - snapshot_us) as f64 / 1_000_000.0 } else { 0.0 };
+    let usable = !held.is_empty() && typed::close_usable(has_snapshot, age, window).map_err(super::flow_refusal)?;
+    let option_class = py.import("trade_engine.domain.instruments")?.getattr("OptionContract")?;
+    let mut quotes: Vec<(Instrument, Value<'py>)> = Vec::new();
+    if usable {
+        for instrument in &held {
+            let contract = instrument_py(py, instrument)?;
+            if contract.is_instance(&option_class)? {
+                quotes.push((instrument.clone(), snapshot.call_method1("get", (&contract,))?));
+            }
+        }
     }
-    ordered.sort_by(|a, b| a.0.cmp(&b.0));
-    let ledger = host.ledger()?;
-    let module = py.import("trade_engine.ledger")?;
-    let kinds = module.getattr("EventKind")?;
-    let account = host.account()?;
-    for (symbol, instrument) in ordered {
-        let command = format!("intraday:mark:{}:{}:{symbol}", text(&account)?, iso(&host.session)?);
-        if !ledger.call_method1("event_by_command", (&command,))?.is_none() { continue; }
-        let mark = marks.get_item(&instrument)?;
-        let args = PyDict::new(py);
-        args.set_item("instrument", instrument)?;
-        args.set_item("price", mark.get_item(0)?)?;
-        args.set_item("as_of", &now)?;
-        args.set_item("source", mark.get_item(1)?)?;
-        let payload = module.getattr("Mark")?.call((), Some(&args))?;
-        let event = PyDict::new(py);
-        event.set_item("account", &account)?;
-        event.set_item("kind", kinds.getattr("MARK")?)?;
-        event.set_item("payload", payload)?;
-        event.set_item("ts_utc", &now)?;
-        event.set_item("command_id", command)?;
-        ledger.call_method1("append", (module.getattr("Event")?.call((), Some(&event))?,))?;
+    // A quote the snapshot carries but nobody re-quoted is no mark: each must be fresh too.
+    let mut mids: Vec<String> = Vec::with_capacity(quotes.len());
+    let mut ages: Vec<f64> = Vec::with_capacity(quotes.len());
+    for (_, quote) in &quotes {
+        if quote.is_none() {
+            mids.push("None".to_string());
+            ages.push(0.0);
+        } else {
+            mids.push(quote.getattr("mid")?.str()?.extract()?);
+            ages.push((snapshot_us - micros(&dt_of(&quote.getattr("as_of")?)?)) as f64 / 1_000_000.0);
+        }
     }
-    let args = PyDict::new(py);
-    args.set_item("session", &host.session)?;
-    args.set_item("job", format!("intraday:{}", text(&host.config()?.getattr("job_name")?)?))?;
-    args.set_item("account_id", &account)?;
-    args.set_item("bars_processed", host.service.call_method1("_session_snapshot_count", (&host.session,))?)?;
-    args.set_item("at_close", &now)?;
-    let payload = module.getattr("EodRun")?.call((), Some(&args))?;
-    let event = PyDict::new(py);
-    event.set_item("account", account)?;
-    event.set_item("kind", kinds.getattr("EOD_RUN")?)?;
-    event.set_item("payload", payload)?;
-    event.set_item("ts_utc", now)?;
-    event.set_item("command_id", host.service.call_method1("_own_marker", (&host.session,))?)?;
-    ledger.call_method1("append", (module.getattr("Event")?.call((), Some(&event))?,))?;
-    plan.get_item(2)
+    let quotes_ok = typed::close_quotes_ok(&mids, max_age, &ages).map_err(super::flow_refusal)?;
+    let plan = typed::close_plan(usable, quotes_ok, quotes.len() as i64, held.len() as i64).map_err(super::flow_refusal)?;
+    let mut marks: Vec<(Instrument, Money, String)> = Vec::new();
+    let note = if held.is_empty() {
+        "nothing held at the close".to_string()
+    } else if !plan {
+        "no fresh snapshot near the close; marks left to the after-close pass".to_string()
+    } else {
+        let source = format!("snapshot:{}", iso(&snapshot.getattr("as_of")?)?);
+        for (instrument, quote) in &quotes {
+            marks.push((instrument.clone(), money(&quote.getattr("mid")?)?, source.clone()));
+        }
+        let equity = py.import("trade_engine.domain.instruments")?.getattr("Equity")?.call1((&underlying,))?;
+        marks.push((instrument_of(&equity)?, money(&snapshot.getattr("underlying_price")?)?, source.clone()));
+        format!("marked at {source}")
+    };
+    let bars = host.native(|l, _| glue::snapshot_count(&*l, &account, &cause))?;
+    host.native(|l, _| glue::append_close(l, &now, &account, session_day, &marks, &job, &cause, i128::from(bars)))?;
+    Ok(PyString::new(py, &note).into_any())
 }
 #[pyfunction]
 fn intraday_live_guard(service: Value<'_>, session: Value<'_>) -> PyResult<()> {
@@ -429,25 +502,133 @@ fn intraday_live_guard(service: Value<'_>, session: Value<'_>) -> PyResult<()> {
     Ok(())
 }
 #[pyfunction]
-fn intraday_previous_guard(service: Value<'_>, session: Value<'_>) -> PyResult<()> {
+fn intraday_require_native(ledger: Value<'_>, calendar: Value<'_>) -> PyResult<()> {
+    require_native_intraday(&ledger, &calendar).map(|_| ())
+}
+/// `IntradayConfig.__post_init__`'s checks, in the order the rules run them.
+#[pyfunction]
+fn intraday_config_check(config: Value<'_>) -> PyResult<()> {
+    let truthy = |name: &str| -> PyResult<bool> { config.getattr(name)?.is_truthy() };
+    typed::config_identity(truthy("job_name")?, truthy("account_id")?, truthy("underlying")?, truthy("eod_job_name")?)
+        .map_err(super::flow_refusal)?;
+    let number = |name: &str| -> PyResult<f64> { config.getattr(name)?.extract() };
+    typed::config_rates(
+        number("max_quote_age_seconds")?,
+        number("tick_seconds")?,
+        number("heartbeat_ttl_seconds")?,
+        number("close_mark_window_seconds")?,
+    )
+    .map_err(super::flow_refusal)?;
+    let midnight = NaiveDate::from_ymd_opt(2000, 1, 1).expect("a valid date");
+    let entry_end = glue::wall_micros(midnight, clock_time(&config.getattr("entry_end")?)?);
+    let flat_at = glue::wall_micros(midnight, clock_time(&config.getattr("flat_at")?)?);
+    typed::config_wall(entry_end, flat_at).map_err(super::flow_refusal)?;
+    typed::config_early(
+        micros_of(&config.getattr("flat_before_close")?)?,
+        micros_of(&config.getattr("entry_before_close")?)?,
+    )
+    .map_err(super::flow_refusal)
+}
+/// `_EntryGate.manage_options`' gate: which actions pass, and the new dropped count.
+#[pyfunction]
+fn intraday_gate(allow: bool, intents: Vec<bool>, dropped: i64) -> PyResult<(Vec<bool>, i64)> {
+    let keep = typed::gate(allow, &intents).map_err(super::flow_refusal)?;
+    let removed = keep.iter().filter(|kept| !**kept).count() as i64;
+    Ok((keep, te_core::runtime::routing::increment(dropped, removed)))
+}
+#[pyfunction]
+fn intraday_fresh_view<'py>(service: Value<'py>, snapshot: Value<'py>, now: Value<'py>) -> PyResult<Value<'py>> {
+    fresh_view_of(&service, snapshot, &now)
+}
+
+/// Run `f` against the service's ledger and clock natively (`require_native_intraday` on its attributes).
+fn native_on<T>(service: &Value<'_>, f: impl FnOnce(&mut StoreLedger<'_>, &PyClock<'_, '_>) -> LR<T>) -> PyResult<T> {
+    let store = require_native_intraday(&service.getattr("_ledger")?, &service.getattr("_calendar")?)?;
+    let clock = service.getattr("_clock")?;
+    with_native(&store, &clock, &Pending::default(), f)
+}
+
+/// A Python `time` as a `NaiveTime`.
+fn clock_time(value: &Value<'_>) -> PyResult<NaiveTime> {
+    let hour: u32 = value.getattr("hour")?.extract()?;
+    let minute: u32 = value.getattr("minute")?.extract()?;
+    let second: u32 = value.getattr("second")?.extract()?;
+    let microsecond: u32 = value.getattr("microsecond")?.extract()?;
+    NaiveTime::from_hms_micro_opt(hour, minute, second, microsecond)
+        .ok_or_else(|| PyValueError::new_err("a clock time out of range"))
+}
+/// A Python `timedelta` as microseconds.
+fn micros_of(value: &Value<'_>) -> PyResult<i64> {
+    let days: i64 = value.getattr("days")?.extract()?;
+    let seconds: i64 = value.getattr("seconds")?.extract()?;
+    let microseconds: i64 = value.getattr("microseconds")?.extract()?;
+    Ok((days * 86_400 + seconds) * 1_000_000 + microseconds)
+}
+/// A Python aware datetime as a te_core instant.
+fn dt_of(value: &Value<'_>) -> PyResult<DateTime> {
+    parse_datetime(&iso(value)?).map(|(dt, _)| dt).map_err(super::flow_refusal)
+}
+
+/// `_fresh_view`: `snapshot` cut to its fresh quotes, if it proves a live market; else refuse (I5).
+fn fresh_view_of<'py>(service: &Value<'py>, snapshot: Value<'py>, now: &Value<'py>) -> PyResult<Value<'py>> {
     let py = service.py();
-    let host = host(service, session, py.None().into_bound(py));
-    let ledger = host.ledger()?;
-    if !ledger.call_method1("event_by_command", (host.service.call_method1("_own_marker", (&host.session,))?,))?.is_none() {
-        return Ok(());
+    let config = service.getattr("_config")?;
+    let configured: String = config.getattr("underlying")?.extract()?;
+    let limit_value = config.getattr("max_quote_age_seconds")?;
+    let limit: f64 = limit_value.extract()?;
+    let chain = py.import("trade_engine.market_data.chains")?.getattr("ChainSnapshot")?;
+    let is_chain = snapshot.is_instance(&chain)?;
+    let source: String = snapshot.get_type().getattr("__name__")?.extract()?;
+    let got: String = if is_chain { snapshot.getattr("underlying")?.extract()? } else { String::new() };
+    typed::snapshot_identity(is_chain, &source, &configured, &got).map_err(super::flow_refusal)?;
+    snapshot.call_method1("require_fresh", (now, &limit_value))?;
+    let now_us = micros(&dt_of(now)?);
+    let quoted = snapshot.getattr("underlying_as_of")?;
+    let as_of_text = iso(&snapshot.getattr("as_of")?)?;
+    typed::underlying_stamp(!quoted.is_none(), &got, &as_of_text).map_err(super::flow_refusal)?;
+    let quoted_text = iso(&quoted)?;
+    let age = (now_us - micros(&dt_of(&quoted)?)) as f64 / 1_000_000.0;
+    typed::underlying_age(age, limit, &got, &format!("{age:.0}"), &quoted_text, &format!("{limit:.0}"))
+        .map_err(super::flow_refusal)?;
+    let account: String = config.getattr("account_id")?.extract()?;
+    let held = native_on(service, |l, _| {
+        let folded = l.state(&account)?;
+        glue::held_contracts(&folded, &configured)
+    })?;
+    for instrument in &held {
+        let contract = instrument_py(py, instrument)?;
+        let quote = snapshot.call_method1("get", (&contract,))?;
+        let quoted_leg = !quote.is_none();
+        let leg_age = if quoted_leg { (now_us - micros(&dt_of(&quote.getattr("as_of")?)?)) as f64 / 1_000_000.0 } else { 0.0 };
+        let occ: String = contract.getattr("occ")?.call_method0("strip")?.extract()?;
+        typed::leg(quoted_leg, leg_age, limit, &occ, &got, &format!("{leg_age:.0}"), &format!("{limit:.0}"))
+            .map_err(super::flow_refusal)?;
     }
-    let previous = host.calendar()?.call_method1("previous_session", (&host.session,))?;
-    if !ledger.call_method1("event_by_command", (host.service.call_method1("_eod_marker", (&previous,))?,))?.is_none() {
-        return Ok(());
+    let quotes: Vec<Value<'py>> = snapshot.getattr("quotes")?.try_iter()?.collect::<PyResult<_>>()?;
+    let mut ages = Vec::with_capacity(quotes.len());
+    for quote in &quotes {
+        ages.push((now_us - micros(&dt_of(&quote.getattr("as_of")?)?)) as f64 / 1_000_000.0);
     }
-    let session_text = iso(&host.session)?;
-    let account: String = host.account()?.extract()?;
-    let previous_text = iso(&previous)?;
-    let eod_job: String = host.config()?.getattr("eod_job_name")?.extract()?;
-    let marker: String = host.service.call_method1("_eod_marker", (&previous,))?.extract()?;
-    let has_history = host.service.call_method1("_has_history", (host.account()?,))?.is_truthy()?;
-    typed::previous(has_history, &session_text, &account, &previous_text, &eod_job, &marker).map_err(super::flow_refusal)?;
-    Ok(())
+    let keep = typed::fresh(limit, &ages).map_err(super::flow_refusal)?;
+    if keep.iter().all(|kept| *kept) {
+        return Ok(snapshot);
+    }
+    let kept: Vec<Value<'py>> = quotes.into_iter().zip(keep).filter(|(_, kept)| *kept).map(|(quote, _)| quote).collect();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("quotes", PyTuple::new(py, kept)?)?;
+    py.import("dataclasses")?.call_method("replace", (snapshot,), Some(&kwargs))
+}
+
+/// `flat_close`: the market close that undoes whatever is still open of `structure`.
+fn flat_close_of<'py>(structure: &Value<'py>, session: &Value<'py>, code: &str, attempt: i64, reason: &str) -> PyResult<Value<'py>> {
+    let py = structure.py();
+    let entry_id: String = structure.getattr("entry_order_id")?.extract()?;
+    let (reason, command) = typed::flat_close(reason, code, &entry_id, &iso(session)?, attempt).map_err(super::flow_refusal)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("entry_order_id", structure.getattr("entry_order_id")?)?;
+    kwargs.set_item("reason", reason)?;
+    kwargs.set_item("command_id", command)?;
+    py.import("trade_engine.domain.option_orders")?.getattr("CloseStructure")?.call((), Some(&kwargs))
 }
 #[pyfunction]
 fn intraday_emergency<'py>(service: Value<'py>, session: Value<'py>, state: Value<'py>, error: Value<'py>) -> PyResult<Value<'py>> {
@@ -585,7 +766,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(intraday_restore, m)?)?;
     m.add_function(wrap_pyfunction!(intraday_close, m)?)?;
     m.add_function(wrap_pyfunction!(intraday_live_guard, m)?)?;
-    m.add_function(wrap_pyfunction!(intraday_previous_guard, m)?)?;
+    m.add_function(wrap_pyfunction!(intraday_require_native, m)?)?;
+    m.add_function(wrap_pyfunction!(intraday_config_check, m)?)?;
+    m.add_function(wrap_pyfunction!(intraday_gate, m)?)?;
+    m.add_function(wrap_pyfunction!(intraday_fresh_view, m)?)?;
     m.add_function(wrap_pyfunction!(intraday_emergency, m)?)?;
     m.add_function(wrap_pyfunction!(intraday_heartbeat_write, m)?)?;
     m.add_function(wrap_pyfunction!(intraday_heartbeat_read, m)?)?;
