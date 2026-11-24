@@ -123,6 +123,25 @@ def test_void_refuses_unknown_account_and_non_session(ledger: Ledger) -> None:
     assert _voids(ledger) == []
 
 
+def test_void_names_every_unknown_account_in_a_python_list_repr(ledger: Ledger) -> None:
+    with pytest.raises(EodRunnerError) as info:
+        _void(ledger, accounts=("no-such", "a'b"))
+    assert str(info.value) == "unknown account(s) ['no-such', \"a'b\"]: not in the ledger (I5)"
+    assert _voids(ledger) == []
+
+
+def test_void_refuses_a_datetime_session(ledger: Ledger) -> None:
+    with pytest.raises(EodRunnerError, match="void session must be a date"):
+        void_session(ledger, SettableClock(NOW), CALENDAR, "eod", datetime(2026, 9, 23, 21, 45, tzinfo=UTC),
+                     (B,), reason=REASON, owner="owner")
+    assert _voids(ledger) == []
+
+
+def test_a_duplicate_account_is_voided_once_and_returned_once(ledger: Ledger) -> None:
+    assert _void(ledger, accounts=(B, B)) == (B,)
+    assert len(_voids(ledger)) == 1
+
+
 def test_a_void_unblocks_the_previous_session_gate(ledger: Ledger) -> None:
     clock = SettableClock(datetime(2026, 9, 24, 13, 29, tzinfo=UTC))
     runner = _runner(ledger, clock)

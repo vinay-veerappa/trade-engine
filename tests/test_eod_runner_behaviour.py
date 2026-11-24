@@ -39,8 +39,9 @@ AAA, BBB, CCC = Equity("AAA"), Equity("BBB"), Equity("CCC")
 
 
 # --- derived risk context (eod/runner.py 880-908) ----------------------------------------
-# Dead in production: nothing in src/ calls `_derive_risk_context`. It is called here directly,
-# with `self` passed as None, because the derivation is the behaviour the function promises.
+# Live in production: te_py's equity_flow.rs calls `_derive_risk_context` (about line 129), so it
+# is not dead code. It is called here directly, with `self` passed as None, because the derivation
+# is the behaviour the function promises.
 
 
 def _derive(state: AccountState, instrument: Equity):

@@ -154,40 +154,45 @@ def void_session(
     account and session is an idempotent no-op (I3, the command id). Returns the
     accounts handled, in the order given with repeats dropped.
     """
-    if not isinstance(session, date) or isinstance(session, datetime):
-        raise EodRunnerError(f"void session must be a date, got {session!r}")
-    if not isinstance(reason, str) or not reason.strip():
-        raise EodRunnerError("a void needs a non-empty reason (I5)")
-    if not isinstance(owner, str) or not owner.strip():
-        raise EodRunnerError("a void needs a non-empty owner (I5)")
-    if not calendar.is_session(session):
-        raise EodRunnerError(f"{session} is not a trading session; nothing to void (I5)")
+    is_date = isinstance(session, date) and not isinstance(session, datetime)
     chosen = tuple(dict.fromkeys(accounts))
-    if not chosen or any(not isinstance(a, str) or not a.strip() for a in chosen):
-        raise EodRunnerError("a void needs at least one non-empty account (I5)")
     known = set(ledger.accounts())
-    unknown = [a for a in chosen if a not in known]
-    if unknown:
-        raise EodRunnerError(f"unknown account(s) {unknown}: not in the ledger (I5)")
+    account_fields: list[str] = []
+    account_flags: list[bool] = []
     for account_id in chosen:
-        run = decide("eod:command", ("eod", job, account_id, session.isoformat()))[0][0]
-        if ledger.event_by_command(run) is not None:
-            raise EodRunnerError(
-                f"{account_id} already ran {session}: a session that ran cannot be voided (I3)"
-            )
+        is_str = isinstance(account_id, str)
+        k = is_str and account_id in known
+        ran = k and is_date and ledger.event_by_command(
+            decide("eod:command", ("eod", job, account_id, session.isoformat()))[0][0]
+        ) is not None
+        account_fields.append(account_id if is_str else "")
+        account_flags.extend((is_str, k, ran))
+    text = decide(
+        "eod:void_check",
+        (
+            repr(session),
+            str(session) if is_date else "",
+            reason if isinstance(reason, str) else "",
+            owner if isinstance(owner, str) else "",
+            *account_fields,
+        ),
+        flags=(
+            is_date,
+            isinstance(reason, str),
+            isinstance(owner, str),
+            is_date and calendar.is_session(session),
+            *account_flags,
+        ),
+    )[0]
     for account_id in chosen:
         ledger.append(Event(
             account=account_id,
             kind=EventKind.EOD_VOID,
-            payload=EodVoid(session, account_id, reason.strip(), owner.strip(), job),
+            payload=EodVoid(session, account_id, text[0], text[1], job),
             ts_utc=clock.now_utc(),
             command_id=_void_command(job, account_id, session),
         ))
     return chosen
-
-
-_WORKING_STATES = frozenset({OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PENDING_UNKNOWN})
-_TERMINAL_STATES = frozenset({OrderState.FILLED, OrderState.CANCELLED, OrderState.EXPIRED, OrderState.REJECTED})
 
 
 def write_off_order(
@@ -222,68 +227,71 @@ def write_off_order(
 
     Returns the ids cancelled.
     """
-    if not isinstance(reason, str) or not reason.strip():
-        raise EodRunnerError("a write-off needs a non-empty reason (I5)")
-    if not isinstance(owner, str) or not owner.strip():
-        raise EodRunnerError("a write-off needs a non-empty owner (I5)")
-    if account_id not in set(ledger.accounts()):
-        raise EodRunnerError(f"unknown account {account_id!r}: not in the ledger (I5)")
+    known = account_id in set(ledger.accounts())
     command = f"eod-writeoff:{account_id}:{order_id}"
-    if ledger.event_by_command(command) is not None:
+    already = known and ledger.event_by_command(command) is not None
+    # The order fields are read only when the write-off could still happen (I3 repeats write nothing).
+    state = None
+    order = None
+    order_fields = ("", "0", "", "0", "")
+    children: list[str] = []
+    if known and not already:
+        state = ledger.state(account_id)
+        order = state.orders.get(order_id)
+        parent_id = "" if order is None or order.parent_order_id is None else order.parent_order_id
+        order_fields = (
+            "" if order is None else order.state.value,
+            str(state.filled_quantity.get(order_id, Decimal("0"))),
+            parent_id,
+            str(state.filled_quantity.get(parent_id, Decimal("0"))) if parent_id else "0",
+            state.venue_order_ids.get(order_id) or "",
+        )
+        for child_id, child in state.orders.items():
+            if child.parent_order_id == order_id:
+                children.extend((child_id, child.state.value, state.venue_order_ids.get(child_id) or ""))
+    text, _numbers, flags = decide(
+        "eod:writeoff_check",
+        (
+            reason if isinstance(reason, str) else "",
+            owner if isinstance(owner, str) else "",
+            account_id,
+            order_id,
+            *order_fields,
+            *children,
+        ),
+        flags=(
+            isinstance(reason, str),
+            isinstance(owner, str),
+            known,
+            already,
+            order is not None,
+            bool(venue_cancel_confirmed),
+        ),
+    )
+    if not flags[0]:
         return ()
-    state = ledger.state(account_id)
-    order = state.orders.get(order_id)
-    if order is None:
-        raise EodRunnerError(f"{account_id} has no order {order_id!r} (I5)")
-    if state.filled_quantity.get(order_id, Decimal("0")) != 0:
-        raise EodRunnerError(
-            f"order {order_id!r} has fills: a filled or partly filled order is a position, "
-            "not a write-off (I5)"
-        )
-    if order.parent_order_id is not None and state.filled_quantity.get(order.parent_order_id, Decimal("0")) != 0:
-        raise EodRunnerError(
-            f"order {order_id!r} protects {order.parent_order_id!r}, which has fills: writing it off "
-            "would leave a live position unprotected (I5)"
-        )
-    if order.state not in _WORKING_STATES:
-        raise EodRunnerError(
-            f"order {order_id!r} is {order.state.value}, not working; nothing to write off (I5)"
-        )
-    children = [
-        (child_id, child) for child_id, child in state.orders.items()
-        if child.parent_order_id == order_id and child.state not in _TERMINAL_STATES
-    ]
-    if not venue_cancel_confirmed:
-        for target_id in [order_id, *(child_id for child_id, _ in children)]:
-            venue_id = state.venue_order_ids.get(target_id)
-            if venue_id:
-                raise EodRunnerError(
-                    f"order {target_id!r} has venue order id {venue_id!r}: the venue may still hold it. "
-                    "Cancel it at the venue first, then pass --venue-cancel-confirmed (I5)"
-                )
-    text = f"Owner write-off: {reason.strip()} (owner: {owner.strip()})"
+    cancelled = text[1:]
+    entry_id, child_ids = cancelled[0], cancelled[1:]
     ts = clock.now_utc()
     events = [Event(
         account=account_id,
         kind=EventKind.ORDER_CANCELLED,
-        payload=OrderStateChange(order_id, reason=text, venue_order_id=state.venue_order_ids.get(order_id)),
+        payload=OrderStateChange(entry_id, reason=text[0], venue_order_id=state.venue_order_ids.get(entry_id)),
         ts_utc=ts,
         command_id=command,
     )]
-    cancelled = [order_id]
-    for child_id, _child in children:
+    for child_id in child_ids:
         events.append(Event(
             account=account_id,
             kind=EventKind.ORDER_CANCELLED,
             payload=OrderStateChange(
                 child_id,
-                reason=f"{text} (bracket child of {order_id})",
+                reason=f"{text[0]} (bracket child of {order_id})",
                 venue_order_id=state.venue_order_ids.get(child_id),
             ),
             ts_utc=ts,
             command_id=f"{command}:child:{child_id}",
         ))
-        cancelled.append(child_id)
     ledger.extend(events)
     return tuple(cancelled)
 register("runtime_incomplete", SessionIncompleteError)
@@ -1079,12 +1087,11 @@ class EodRunner:
                 quote = None if snapshot is None else snapshot.get(instrument)
                 decide("eod:option_mark", (str(quote.mid) if quote is not None else "0",
                     session.isoformat(), instrument.occ.strip(), account_id), flags=(quote is not None,))
-                source = f"snapshot:{snapshot.as_of.isoformat()}"
-                age = (snapshot.as_of - quote.as_of).total_seconds()
-                if age > self._config.mark_max_quote_age_seconds:
-                    # Still the mid (a refused mark would block every run for one illiquid
-                    # contract), but its provenance names the quote's real time.
-                    source = f"stale-quote:{quote.as_of.isoformat()} {source}"
+                # Still the mid (a refused mark would block every run for one illiquid
+                # contract), but its provenance names the quote's real time.
+                source = decide("eod:quote_source", (snapshot.as_of.isoformat(), quote.as_of.isoformat()),
+                                (micros(snapshot.as_of - quote.as_of),),
+                                floats=(self._config.mark_max_quote_age_seconds,))[0][0]
                 marks[instrument] = (quote.mid, source)
                 underlyings.add(underlying)
             elif isinstance(instrument, Equity):
