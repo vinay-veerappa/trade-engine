@@ -1,129 +1,6 @@
-use super::{need, Plan};
 use crate::ledger::model::{derr, err, LErr, R};
 use crate::ledger::ops::{gt, zero};
 use crate::money::Money;
-
-/// String-door adapter: each arm checks its input counts with `need`, then calls the typed rule
-/// of the same name and pushes its output into the plan.
-pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Plan> {
-    let mut p = Plan::default();
-    match op {
-        "config_identity" => {
-            need(op, s, n, b, f, (0, 0, 4, 0))?;
-            config_identity(b[0], b[1], b[2], b[3])?;
-        }
-        "config_rates" => {
-            need(op, s, n, b, f, (0, 0, 0, 4))?;
-            config_rates(f[0], f[1], f[2], f[3])?;
-        }
-        "config_wall" => {
-            need(op, s, n, b, f, (0, 2, 0, 0))?;
-            config_wall(n[0], n[1])?;
-        }
-        "config_early" => {
-            need(op, s, n, b, f, (0, 2, 0, 0))?;
-            config_early(n[0], n[1])?;
-        }
-        "session" => {
-            need(op, s, n, b, f, (2, 0, 1, 0))?;
-            session(b[0], &s[0], &s[1])?;
-        }
-        "gate" => {
-            need(op, s, n, b, f, (0, 0, 0, 0))?;
-            let (allow, intents) = b.split_first().map_or((false, &[][..]), |(first, rest)| (*first, rest));
-            p.flags = gate(allow, intents)?;
-        }
-        "tick" => {
-            need(op, s, n, b, f, (0, 3, 1, 0))?;
-            let (flat_due, may_enter) = tick(n[0], n[1], n[2], b[0])?;
-            p.flags = vec![flat_due, may_enter];
-        }
-        "snapshot_identity" => {
-            need(op, s, n, b, f, (3, 0, 1, 0))?;
-            snapshot_identity(b[0], &s[0], &s[1], &s[2])?;
-        }
-        "underlying_stamp" => {
-            need(op, s, n, b, f, (2, 0, 1, 0))?;
-            underlying_stamp(b[0], &s[0], &s[1])?;
-        }
-        "underlying_age" => {
-            need(op, s, n, b, f, (4, 0, 0, 2))?;
-            underlying_age(f[0], f[1], &s[0], &s[1], &s[2], &s[3])?;
-        }
-        "leg" => {
-            need(op, s, n, b, f, (4, 0, 1, 2))?;
-            leg(b[0], f[0], f[1], &s[0], &s[1], &s[2], &s[3])?;
-        }
-        "fresh" => {
-            need(op, s, n, b, f, (0, 0, 0, 1))?;
-            p.flags = fresh(f[0], &f[1..])?;
-        }
-        "held" => {
-            need(op, s, n, b, f, (2, 0, 2, 0))?;
-            p.flags.push(held(b[0], b[1], &s[0], &s[1])?);
-        }
-        "flatten" => {
-            need(op, s, n, b, f, (2, 0, 1, 0))?;
-            p.flags.push(flatten(&s[0], &s[1], b[0])?);
-        }
-        "attempt" => {
-            need(op, s, n, b, f, (1, 0, 0, 0))?;
-            p.numbers.push(attempt(&s[0], s)?);
-        }
-        "cancel" => {
-            need(op, s, n, b, f, (3, 0, 2, 0))?;
-            p.flags.push(cancel(b[0], b[1], &s[0], &s[1], &s[2])?);
-        }
-        "restart" => {
-            need(op, s, n, b, f, (3, 0, 2, 0))?;
-            p.text.push(restart(&s[0], b[0], b[1], &s[1], &s[2])?);
-        }
-        "drift" => {
-            need(op, s, n, b, f, (0, 0, 0, 0))?;
-            p.text = drift(s)?;
-        }
-        "drift_refuse" => {
-            need(op, s, n, b, f, (2, 0, 0, 0))?;
-            drift_refuse(&s[0], &s[1])?;
-        }
-        "deadlines" => {
-            need(op, s, n, b, f, (0, 5, 0, 0))?;
-            let (entry_index, flat_index) = deadlines(n[0], n[1], n[2], n[3], n[4])?;
-            p.numbers = vec![entry_index, flat_index];
-        }
-        "close_usable" => {
-            need(op, s, n, b, f, (0, 0, 1, 2))?;
-            p.flags.push(close_usable(b[0], f[0], f[1])?);
-        }
-        "close_plan" => {
-            need(op, s, n, b, f, (0, 2, 2, 0))?;
-            p.flags.push(close_plan(b[0], b[1], n[0], n[1])?);
-        }
-        "close_quotes_ok" => {
-            need(op, s, n, b, f, (0, 0, 0, 1))?;
-            p.flags.push(close_quotes_ok(s, f[0], &f[1..])?);
-        }
-        "heartbeat_account" => {
-            need(op, s, n, b, f, (3, 0, 0, 0))?;
-            heartbeat_account(&s[0], &s[1], &s[2])?;
-        }
-        "heartbeat" => {
-            need(op, s, n, b, f, (2, 0, 1, 2))?;
-            heartbeat(&s[0], &s[1], b[0], f[0], f[1])?;
-        }
-        "previous" => {
-            need(op, s, n, b, f, (5, 0, 1, 0))?;
-            previous(b[0], &s[0], &s[1], &s[2], &s[3], &s[4])?;
-        }
-        "flat_close" => {
-            need(op, s, n, b, f, (4, 1, 0, 0))?;
-            let (reason, command) = flat_close(&s[0], &s[1], &s[2], &s[3], n[0])?;
-            p.text = vec![reason, command];
-        }
-        _ => return err("value", format!("Unknown intraday decision {op}")),
-    }
-    Ok(p)
-}
 
 // Typed rules. Each keeps the string door's error kind and message byte-identical.
 
@@ -342,22 +219,22 @@ mod tests {
         for (index, message) in [(0, quote_pair), (1, quote_pair), (2, heartbeat_pair), (3, heartbeat_pair)] {
             let mut floats = [1.0_f64; 4];
             floats[index] = f64::NAN;
-            match decide("config_rates", &[], &[], &[], &floats) {
+            match config_rates(floats[0], floats[1], floats[2], floats[3]) {
                 Err(e) => assert_eq!((e.kind, e.msg.as_str()), ("runtime_intraday", message), "float {index}"),
                 Ok(_) => panic!("NaN float {index} must refuse"),
             }
         }
-        assert!(decide("config_rates", &[], &[], &[], &[1.0, 1.0, 1.0, 1.0]).is_ok());
+        assert!(config_rates(1.0, 1.0, 1.0, 1.0).is_ok());
     }
     #[test]
     fn early_close_and_entry_tie() {
-        assert_eq!(decide("deadlines",&[],&[1530,1200,1300,30,90],&[],&[]).unwrap().numbers,vec![0,1]);
-        assert_eq!(decide("tick",&[],&[12,12,13],&[false],&[]).unwrap().flags,vec![false,true]);
+        assert_eq!(deadlines(1530, 1200, 1300, 30, 90).unwrap(), (0, 1));
+        assert_eq!(tick(12, 12, 13, false).unwrap(), (false, true));
     }
 
     fn quotes_ok(mids: &[&str], floats: &[f64]) -> R<bool> {
         let s: Vec<String> = mids.iter().map(|m| m.to_string()).collect();
-        decide("close_quotes_ok",&s,&[],&[],floats).map(|p| p.flags[0])
+        close_quotes_ok(&s, floats[0], &floats[1..])
     }
 
     #[test]
@@ -408,61 +285,6 @@ mod tests {
 #[cfg(test)]
 mod typed_tests {
     use super::*;
-
-    /// Every arm name the string door dispatches to in this file.
-    const OPS: &[&str] = &[
-        "config_identity", "config_rates", "config_wall", "config_early", "session", "gate", "tick",
-        "snapshot_identity", "underlying_stamp", "underlying_age", "leg", "fresh", "held", "flatten",
-        "attempt", "cancel", "restart", "drift", "drift_refuse", "deadlines", "close_usable",
-        "close_plan", "close_quotes_ok", "heartbeat_account", "heartbeat", "previous", "flat_close",
-    ];
-
-    /// Each arm's minimum input counts (s, n, b, f), as its adapter's `need` call states them.
-    const MINIMA: &[(&str, (usize, usize, usize, usize))] = &[
-        ("config_identity", (0, 0, 4, 0)), ("config_rates", (0, 0, 0, 4)), ("config_wall", (0, 2, 0, 0)),
-        ("config_early", (0, 2, 0, 0)), ("session", (2, 0, 1, 0)), ("gate", (0, 0, 0, 0)),
-        ("tick", (0, 3, 1, 0)), ("snapshot_identity", (3, 0, 1, 0)), ("underlying_stamp", (2, 0, 1, 0)),
-        ("underlying_age", (4, 0, 0, 2)), ("leg", (4, 0, 1, 2)), ("fresh", (0, 0, 0, 1)),
-        ("held", (2, 0, 2, 0)), ("flatten", (2, 0, 1, 0)), ("attempt", (1, 0, 0, 0)),
-        ("cancel", (3, 0, 2, 0)), ("restart", (3, 0, 2, 0)), ("drift", (0, 0, 0, 0)),
-        ("drift_refuse", (2, 0, 0, 0)), ("deadlines", (0, 5, 0, 0)), ("close_usable", (0, 0, 1, 2)),
-        ("close_plan", (0, 2, 2, 0)), ("close_quotes_ok", (0, 0, 0, 1)), ("heartbeat_account", (3, 0, 0, 0)),
-        ("heartbeat", (2, 0, 1, 2)), ("previous", (5, 0, 1, 0)), ("flat_close", (4, 1, 0, 0)),
-    ];
-
-    #[test]
-    fn every_arm_is_listed_once_and_in_order() {
-        let names: Vec<&str> = MINIMA.iter().map(|(op, _)| *op).collect();
-        assert_eq!(names, OPS);
-    }
-
-    #[test]
-    fn no_arm_is_reported_as_unknown_on_empty_input() {
-        for op in OPS {
-            if let Err(e) = decide(op, &[], &[], &[], &[]) {
-                assert!(!e.msg.starts_with("Unknown"), "{op} is not an arm");
-            }
-        }
-    }
-
-    #[test]
-    fn an_arm_with_a_minimum_refuses_short_input_as_arity() {
-        for (op, min) in MINIMA {
-            if *min == (0, 0, 0, 0) { continue; }
-            let expected = format!("{op} arity");
-            match decide(op, &[], &[], &[], &[]) {
-                Err(e) => assert_eq!((e.kind, e.msg.as_str()), ("value", expected.as_str()), "{op}"),
-                Ok(_) => panic!("{op} must refuse input shorter than its minimum"),
-            }
-        }
-    }
-
-    #[test]
-    fn an_arm_runs_at_exactly_its_minimum_without_panicking() {
-        for (op, (s, n, b, f)) in MINIMA {
-            let _ = decide(op, &vec![String::new(); *s], &vec![0; *n], &vec![false; *b], &vec![0.0; *f]);
-        }
-    }
 
     #[test]
     fn config_identity_names_the_first_blank_field() {

@@ -1,4 +1,3 @@
-use super::{need, Plan};
 use crate::ledger::model::{err, R};
 use crate::ledger::model::{derr, LErr};
 use crate::money::Money;
@@ -80,59 +79,6 @@ pub fn rounds(strategy: &str, snapshot: &str, rounds: i64) -> R<()> {
     err("runtime_eod", format!("The strategy for '{strategy}' was still acting at the {snapshot} snapshot after {rounds} rounds; refusing to loop on it"))
 }
 
-pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool]) -> R<Plan> {
-    let mut p = Plan::default();
-    match op {
-        "phase" => {
-            need(op, s, n, b, &[], (1, 0, 1, 0))?;
-            p.text.push(phase(&s[0], b[0]));
-        }
-        "taken" => {
-            need(op, s, n, b, &[], (0, 0, 4, 0))?;
-            p.flags.push(taken(b[0], b[1], b[2], b[3]));
-        }
-        "risk_lookup" => {
-            need(op, s, n, b, &[], (0, 0, 2, 0))?;
-            p.flags.push(risk_lookup(b[0], b[1]));
-        }
-        "tally" => {
-            need(op, s, n, b, &[], (6, 0, 0, 0))?;
-            p.text = tally(s)?;
-        }
-        "underlying" => {
-            need(op, s, n, b, &[], (6, 0, 1, 0))?;
-            p.text.push(underlying(&s[0], &s[1], &s[2], &s[3], b[0], &s[4], &s[5])?);
-        }
-        "action" => {
-            need(op, s, n, b, &[], (5, 0, 2, 0))?;
-            action(&s[0], &s[1], &s[2], &s[3], &s[4], b[0], b[1])?;
-        }
-        "entry" => {
-            need(op, s, n, b, &[], (4, 0, 1, 0))?;
-            entry(&s[0], &s[1], &s[2], &s[3], b[0])?;
-        }
-        "engine" => {
-            need(op, s, n, b, &[], (2, 0, 1, 0))?;
-            engine(&s[0], &s[1], b[0])?;
-        }
-        "approved" => {
-            need(op, s, n, b, &[], (2, 0, 2, 0))?;
-            let (accepted, resize) = approved(b[0], b[1], &s[0], &s[1])?;
-            p.flags = vec![accepted, resize];
-        }
-        "increment" => {
-            need(op, s, n, b, &[], (0, 2, 0, 0))?;
-            p.numbers.push(increment(n[0], n[1]));
-        }
-        "rounds" => {
-            need(op, s, n, b, &[], (2, 1, 0, 0))?;
-            rounds(&s[0], &s[1], n[0])?;
-        }
-        _ => return err("value", format!("Unknown routing decision {op}")),
-    }
-    Ok(p)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,14 +87,13 @@ mod tests {
         #[test]
         fn tally_addition(a in 0i64..100000, b in 0i64..100000) {
             let values = [a,a,a,b,b,b].map(|v| v.to_string());
-            let p = decide("tally", &values, &[], &[]).unwrap();
-            prop_assert_eq!(p.text, vec![(a+b).to_string();3]);
+            prop_assert_eq!(tally(&values).unwrap(), vec![(a+b).to_string();3]);
         }
     }
     #[test]
     fn global_taken_and_entry_risk() {
-        assert!(decide("taken", &[], &[], &[true,false,true,true]).unwrap().flags[0]);
-        assert!(!decide("taken", &[], &[], &[true,false,false,true]).unwrap().flags[0]);
+        assert!(taken(true, false, true, true));
+        assert!(!taken(true, false, false, true));
     }
 }
 
@@ -156,42 +101,11 @@ mod tests {
 mod typed_tests {
     use super::*;
 
-    const OPS: [&str; 11] = ["phase", "taken", "risk_lookup", "tally", "underlying", "action",
-        "entry", "engine", "approved", "increment", "rounds"];
-
     fn refusal<T>(r: R<T>) -> (&'static str, String) {
         match r {
             Ok(_) => panic!("expected a refusal"),
             Err(e) => (e.kind, e.msg),
         }
-    }
-
-    #[test]
-    fn every_op_refuses_short_input_with_arity_and_never_panics() {
-        for op in OPS {
-            let (kind, msg) = refusal(decide(op, &[], &[], &[]));
-            assert_eq!((kind, msg.as_str()), ("value", format!("{op} arity").as_str()), "op {op}");
-        }
-        for ls in 0..=7 {
-            for ln in 0..=3 {
-                for lb in 0..=5 {
-                    for fill in ["1", "x", ""] {
-                        let s = vec![fill.to_string(); ls];
-                        let n = vec![1i64; ln];
-                        let b = vec![true; lb];
-                        for op in OPS.into_iter().chain(["bogus"]) {
-                            let _ = decide(op, &s, &n, &b);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unknown_op_is_refused_by_name() {
-        let (kind, msg) = refusal(decide("bogus", &[], &[], &[]));
-        assert_eq!((kind, msg.as_str()), ("value", "Unknown routing decision bogus"));
     }
 
     #[test]

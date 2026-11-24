@@ -1,4 +1,4 @@
-use super::{need, py_strip, Plan};
+use super::py_strip;
 use crate::ledger::codec::py_repr;
 use crate::ledger::model::{derr, err, LErr, R};
 use crate::ledger::ops::*;
@@ -464,359 +464,111 @@ pub fn quote_source(snapshot_as_of: &str, quote_as_of: &str, age_micros: i64, li
     if age > limit_seconds { format!("stale-quote:{quote_as_of} {source}") } else { source }
 }
 
-pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Plan> {
-    let mut p = Plan::default();
-    match op {
-        "pass_job" => {
-            need(op, s, n, b, f, (2, 0, 0, 0))?;
-            p.text.push(pass_job(&s[0], &s[1]));
-        }
-        "command" => {
-            need(op, s, n, b, f, (4, 0, 0, 0))?;
-            p.text.push(command(&s[0], &s[1], &s[2], &s[3]));
-        }
-        "config" => {
-            need(op, s, n, b, f, (0, 1, 4, 1))?;
-            config(b[0], b[1], b[2], f[0], b[3], n[0])?;
-        }
-        "session_type" => {
-            need(op, s, n, b, f, (1, 0, 1, 0))?;
-            session_type(&s[0], b[0])?;
-        }
-        "session" => {
-            need(op, s, n, b, f, (2, 0, 1, 0))?;
-            session(&s[0], &s[1], b[0])?;
-        }
-        "pass_name" => {
-            need(op, s, n, b, f, (2, 0, 0, 0))?;
-            pass_name(&s[0], &s[1])?;
-        }
-        "through" => {
-            need(op, s, n, b, f, (1, 0, 1, 0))?;
-            through(&s[0], b[0])?;
-        }
-        "pass_boundary" => {
-            need(op, s, n, b, f, (5, 3, 0, 0))?;
-            pass_boundary(&s[0], &s[1], &s[2], &s[3], &s[4], n[0], n[1], n[2])?;
-        }
-        "resume" => {
-            need(op, s, n, b, f, (5, 2, 0, 0))?;
-            resume(&s[0], &s[1], &s[2], &s[3], &s[4], n[0], n[1])?;
-        }
-        "cutoff" => {
-            need(op, s, n, b, f, (0, 2, 0, 0))?;
-            p.flags.push(cutoff(n[0], n[1]));
-        }
-        "latest" => {
-            need(op, s, n, b, f, (0, 0, 0, 0))?;
-            if let Some(i) = latest(n) { p.numbers.push(i as i64); }
-        }
-        "earliest" => {
-            need(op, s, n, b, f, (0, 0, 0, 0))?;
-            if let Some(i) = earliest(n) { p.numbers.push(i as i64); }
-        }
-        "count_events" => {
-            need(op, s, n, b, f, (2, 0, 0, 0))?;
-            p.numbers.push(count_events(&s[0], &s[1], &s[2..]));
-        }
-        "children" => {
-            need(op, s, n, b, f, (1, 0, 0, 0))?;
-            let c = children(&s[0], &s[1..]);
-            p.flags = c.owned;
-            p.numbers.push(c.stop.unwrap_or(-1));
-            p.numbers.extend(c.limits);
-        }
-        "terminal" => {
-            need(op, s, n, b, f, (1, 0, 0, 0))?;
-            p.flags.push(terminal(&s[0]));
-        }
-        "filled" => {
-            need(op, s, n, b, f, (0, 0, 0, 0))?;
-            p.numbers.push(filled(s));
-        }
-        "exit_action" => {
-            need(op, s, n, b, f, (4, 0, 2, 0))?;
-            exit_action(&s[0], &s[1], &s[2], &s[3], b[0], b[1])?;
-        }
-        "history" => {
-            need(op, s, n, b, f, (4, 0, 1, 0))?;
-            p.flags.push(history(b[0], &s[0], &s[1], &s[2], &s[3]));
-        }
-        "previous" => {
-            need(op, s, n, b, f, (4, 0, 2, 0))?;
-            previous(&s[0], &s[1], &s[2], &s[3], b[0], b[1], b.get(2).copied().unwrap_or(false))?;
-        }
-        "replay_clock" => {
-            need(op, s, n, b, f, (3, 2, 0, 0))?;
-            replay_clock(&s[0], &s[1], &s[2], n[0], n[1])?;
-        }
-        "nonzero" => {
-            need(op, s, n, b, f, (1, 0, 0, 0))?;
-            p.flags.push(nonzero(&s[0])?);
-        }
-        "working" => {
-            need(op, s, n, b, f, (1, 0, 0, 0))?;
-            p.flags.push(working(&s[0]));
-        }
-        "after" => {
-            need(op, s, n, b, f, (0, 2, 0, 0))?;
-            p.flags.push(after(n[0], n[1]));
-        }
-        "any_history" => {
-            need(op, s, n, b, f, (0, 0, 0, 0))?;
-            p.flags.push(any_history(s));
-        }
-        "difference" => {
-            need(op, s, n, b, f, (0, 2, 0, 0))?;
-            p.numbers.push(difference(n[0], n[1]));
-        }
-        "replay_instrument" => {
-            need(op, s, n, b, f, (1, 0, 1, 0))?;
-            replay_instrument(&s[0], b[0])?;
-        }
-        "rehydrate" => {
-            need(op, s, n, b, f, (5, 0, 1, 0))?;
-            rehydrate(&s[0], &s[1], &s[2], b[0], &s[3], &s[4])?;
-        }
-        "bars" => {
-            need(op, s, n, b, f, (5, 4, 1, 0))?;
-            bars(&s[0], b[0], [n[0], n[1], n[2], n[3]],
-                [s[1].as_str(), s[2].as_str(), s[3].as_str(), s[4].as_str()])?;
-        }
-        "regular" => {
-            need(op, s, n, b, f, (0, 3, 0, 0))?;
-            p.flags.push(regular(n[0], n[1], n[2]));
-        }
-        "mark" => {
-            need(op, s, n, b, f, (3, 0, 2, 0))?;
-            p.flags.push(mark(&s[0], b[0], b[1], &s[1], &s[2])?);
-        }
-        "risk" => {
-            need(op, s, n, b, f, (2, 0, 0, 0))?;
-            let r = risk(&s[0], &s[1], &s[2..], b)?;
-            p.flags.push(r.equity_positive);
-            p.text = vec![r.equity, r.gross, r.base];
-            p.numbers.push(r.open_positions);
-        }
-        "bracket" => {
-            need(op, s, n, b, f, (0, 2, 0, 0))?;
-            let (start, end) = (n[0], n[1]);
-            if start < 0 || end < start || end > s.len() as i64 { return err("value", "bracket arity"); }
-            let (start, end) = (start as usize, end as usize);
-            let r = bracket(&s[..start], &s[start..end], &s[end..])?;
-            p.flags.push(r.open);
-            p.text = r.text;
-        }
-        "subtract" => {
-            need(op, s, n, b, f, (2, 0, 0, 0))?;
-            p.text.push(subtract(&s[0], &s[1])?);
-        }
-        "intent" => {
-            need(op, s, n, b, f, (3, 0, 0, 0))?;
-            intent(&s[2], &s[0], &s[1])?;
-        }
-        "equity_approved" => {
-            need(op, s, n, b, f, (0, 0, 2, 0))?;
-            p.flags.push(equity_approved(b[0], b[1]));
-        }
-        "snapshots_wiring" => {
-            need(op, s, n, b, f, (1, 0, 2, 0))?;
-            snapshots_wiring(&s[0], b[0], b[1])?;
-        }
-        "snapshot" => {
-            need(op, s, n, b, f, (4, 3, 1, 0))?;
-            snapshot(&s[0], b[0], &s[1], &s[2], &s[3], n[0], n[1], n[2])?;
-        }
-        "coverage" => {
-            need(op, s, n, b, f, (3, 0, 0, 0))?;
-            coverage(&s[0], &s[1], &s[2])?;
-        }
-        "lifecycle" => {
-            need(op, s, n, b, f, (1, 0, 2, 0))?;
-            lifecycle(&s[0], b[0], b[1])?;
-        }
-        "preopen" => {
-            need(op, s, n, b, f, (0, 2, 0, 0))?;
-            p.flags.push(preopen(n[0], n[1]));
-        }
-        "dividend_source" => {
-            need(op, s, n, b, f, (1, 0, 1, 0))?;
-            dividend_source(&s[0], b[0])?;
-        }
-        "dividend_stamp" => {
-            need(op, s, n, b, f, (2, 2, 0, 0))?;
-            dividend_stamp(&s[0], &s[1], n[0], n[1])?;
-        }
-        "dividend" => {
-            need(op, s, n, b, f, (1, 0, 0, 0))?;
-            let d = dividend(&s[0], &s[1..])?;
-            p.flags.push(d.paid);
-            p.text = d.text;
-        }
-        "option_mark" => {
-            need(op, s, n, b, f, (4, 0, 1, 0))?;
-            option_mark(&s[0], b[0], &s[1], &s[2], &s[3])?;
-        }
-        "unmarkable" => {
-            need(op, s, n, b, f, (2, 0, 0, 0))?;
-            unmarkable(&s[0], &s[1])?;
-        }
-        "official_identity" => {
-            need(op, s, n, b, f, (5, 0, 0, 0))?;
-            official_identity(&s[0], &s[1], &s[2], &s[3], &s[4])?;
-        }
-        "official_future" => {
-            need(op, s, n, b, f, (3, 2, 0, 0))?;
-            official_future(&s[0], &s[1], n[0], n[1], &s[2])?;
-        }
-        "official_close" => {
-            need(op, s, n, b, f, (2, 2, 0, 0))?;
-            official_close(&s[0], &s[1], n[0], n[1])?;
-        }
-        "sink" => {
-            need(op, s, n, b, f, (1, 0, 1, 0))?;
-            sink(&s[0], b[0])?;
-        }
-        "void_check" => {
-            need(op, s, n, b, f, (4, 0, 4, 0))?;
-            if b.len() != 4 + 3 * (s.len() - 4) { return err("value", "void_check arity"); }
-            let accounts: Vec<VoidAccount> = s[4..].iter().enumerate().map(|(i, name)| VoidAccount {
-                name: name.as_str(), is_str: b[4 + 3 * i], known: b[5 + 3 * i], ran: b[6 + 3 * i],
-            }).collect();
-            p.text = void_check(&VoidRequest {
-                session_repr: s[0].as_str(), session: s[1].as_str(), is_date: b[0],
-                reason: s[2].as_str(), reason_is_str: b[1], owner: s[3].as_str(), owner_is_str: b[2],
-                is_session: b[3], accounts: &accounts,
-            })?;
-        }
-        "writeoff_check" => {
-            need(op, s, n, b, f, (9, 0, 6, 0))?;
-            if (s.len() - 9) % 3 != 0 || b.len() != 6 { return err("value", "writeoff_check arity"); }
-            let children: Vec<WriteOffChild> = (0..(s.len() - 9) / 3).map(|i| WriteOffChild {
-                id: s[9 + 3 * i].as_str(), state: s[10 + 3 * i].as_str(), venue: s[11 + 3 * i].as_str(),
-            }).collect();
-            match writeoff_check(&WriteOff {
-                reason: s[0].as_str(), reason_is_str: b[0], owner: s[1].as_str(), owner_is_str: b[1],
-                account: s[2].as_str(), account_known: b[2], already: b[3], order_exists: b[4],
-                order: s[3].as_str(), order_state: s[4].as_str(), order_filled: s[5].as_str(),
-                parent: s[6].as_str(), parent_filled: s[7].as_str(), order_venue: s[8].as_str(),
-                children: &children, venue_cancel_confirmed: b[5],
-            })? {
-                None => p.flags.push(false),
-                Some(text) => {
-                    p.flags.push(true);
-                    p.text = text;
-                }
-            }
-        }
-        "quote_source" => {
-            need(op, s, n, b, f, (2, 1, 0, 1))?;
-            if s.len() != 2 || n.len() != 1 || f.len() != 1 { return err("value", "quote_source arity"); }
-            p.text.push(quote_source(&s[0], &s[1], n[0], f[0]));
-        }
-        _ => return err("value", format!("Unknown EOD decision {op}")),
-    }
-    Ok(p)
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     #[test]
     fn previous_rule_treats_a_void_as_complete() {
-        let s: Vec<String> = ["eod", "ACC", "2026-10-16", "eod"].iter().map(|v| v.to_string()).collect();
         // history, previous never ran, not voided: refused (I3).
-        assert!(decide("previous", &s, &[], &[true, false, false], &[]).is_err());
-        // the legacy two-flag shape still refuses.
-        assert!(decide("previous", &s, &[], &[true, false], &[]).is_err());
+        assert!(previous("eod", "ACC", "2026-10-16", "eod", true, false, false).is_err());
         // history, previous never ran, but the owner voided it: complete.
-        assert!(decide("previous", &s, &[], &[true, false, true], &[]).is_ok());
+        assert!(previous("eod", "ACC", "2026-10-16", "eod", true, false, true).is_ok());
         // previous ran: complete, voided or not.
-        assert!(decide("previous", &s, &[], &[true, true, false], &[]).is_ok());
-        assert!(decide("previous", &s, &[], &[true, true, true], &[]).is_ok());
+        assert!(previous("eod", "ACC", "2026-10-16", "eod", true, true, false).is_ok());
+        assert!(previous("eod", "ACC", "2026-10-16", "eod", true, true, true).is_ok());
         // no history: nothing to demand.
-        assert!(decide("previous", &s, &[], &[false, false, false], &[]).is_ok());
+        assert!(previous("eod", "ACC", "2026-10-16", "eod", false, false, false).is_ok());
     }
     #[test]
     fn boundary_and_refusal() {
-        assert!(decide("cutoff",&[],&[5,5],&[],&[]).unwrap().flags[0]);
-        assert!(decide("preopen",&[],&[4,5],&[],&[]).unwrap().flags[0]);
-        assert!(!decide("preopen",&[],&[5,5],&[],&[]).unwrap().flags[0]);
-        assert!(decide("config",&[],&[0],&[false,true,true,true],&[1.0]).is_err());
+        assert!(cutoff(5, 5));
+        assert!(preopen(4, 5));
+        assert!(!preopen(5, 5));
+        assert!(config(false, true, true, 1.0, true, 0).is_err());
     }
     fn strs(v: &[&str]) -> Vec<String> { v.iter().map(|x| x.to_string()).collect() }
     /// (kind, message) of a refusal; panics on success.
-    fn refusal(r: R<Plan>) -> (&'static str, String) {
+    fn refusal<T>(r: R<T>) -> (&'static str, String) {
         match r { Err(e) => (e.kind, e.msg), Ok(_) => panic!("expected a refusal") }
     }
     const DATE_REPR: &str = "datetime.date(2026, 9, 23)";
     const SESSION: &str = "2026-09-23";
     /// void_check with the session a trading date unless `is_session` says otherwise.
-    fn void_check(is_session: bool, reason: &str, owner: &str, accounts: &[(&str, bool, bool)]) -> R<Plan> {
-        let mut s = strs(&[DATE_REPR, SESSION, reason, owner]);
-        let mut b = vec![true, true, true, is_session];
-        for (account, known, ran) in accounts {
-            s.push(account.to_string());
-            b.extend([true, *known, *ran]);
-        }
-        decide("void_check", &s, &[], &b, &[])
+    fn void_request(is_session: bool, reason: &str, owner: &str, accounts: &[(&str, bool, bool)]) -> R<Vec<String>> {
+        let accounts: Vec<VoidAccount> = accounts.iter().copied().map(|(name, known, ran)| VoidAccount {
+            name, is_str: true, known, ran,
+        }).collect();
+        void_check(&VoidRequest {
+            session_repr: DATE_REPR, session: SESSION, is_date: true,
+            reason, reason_is_str: true, owner, owner_is_str: true, is_session,
+            accounts: &accounts,
+        })
+    }
+    /// writeoff_check over the door's raw (s, b) shape, for tests that still state inputs that way.
+    fn writeoff(s: &[&str], b: &[bool]) -> R<Option<Vec<String>>> {
+        let children: Vec<WriteOffChild> = (0..(s.len() - 9) / 3).map(|i| WriteOffChild {
+            id: s[9 + 3 * i], state: s[10 + 3 * i], venue: s[11 + 3 * i],
+        }).collect();
+        writeoff_check(&WriteOff {
+            reason: s[0], reason_is_str: b[0], owner: s[1], owner_is_str: b[1],
+            account: s[2], account_known: b[2], already: b[3], order_exists: b[4],
+            order: s[3], order_state: s[4], order_filled: s[5],
+            parent: s[6], parent_filled: s[7], order_venue: s[8],
+            children: &children, venue_cancel_confirmed: b[5],
+        })
     }
     /// writeoff_check on an ACCEPTED order `o1` of `acct` with no fills, no parent, no venue id.
     /// `children` are (id, state, venue) triples in insertion order.
-    fn writeoff_check(children: &[(&str, &str, &str)]) -> Vec<String> {
-        let mut s = strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", ""]);
+    fn writeoff_request(children: &[(&str, &str, &str)]) -> Vec<String> {
+        let mut s = vec!["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", ""];
         for (id, state, venue) in children {
-            s.extend(strs(&[*id, *state, *venue]));
+            s.extend([*id, *state, *venue]);
         }
         let b = [true, true, true, false, true, false];
-        decide("writeoff_check", &s, &[], &b, &[]).map(|p| p.text).unwrap_or_else(|e| panic!("{}", e.msg))
+        writeoff(&s, &b).unwrap_or_else(|e| panic!("{}", e.msg)).unwrap_or_default()
     }
     #[test]
     fn void_check_refuses_each_rule_with_its_message() {
-        let (kind, msg) = refusal(decide("void_check", &strs(&[DATE_REPR, SESSION, "r", "o"]), &[], &[false, true, true, true], &[]));
+        let (kind, msg) = refusal(void_check(&VoidRequest {
+            session_repr: DATE_REPR, session: SESSION, is_date: false,
+            reason: "r", reason_is_str: true, owner: "o", owner_is_str: true, is_session: true,
+            accounts: &[],
+        }));
         assert_eq!((kind, msg.as_str()), ("runtime_eod", "void session must be a date, got datetime.date(2026, 9, 23)"));
-        assert_eq!(refusal(void_check(true, " ", "o", &[("A", true, false)])).1, "a void needs a non-empty reason (I5)");
-        assert_eq!(refusal(void_check(true, "r", "\t", &[("A", true, false)])).1, "a void needs a non-empty owner (I5)");
-        assert_eq!(refusal(void_check(false, "r", "o", &[("A", true, false)])).1, "2026-09-23 is not a trading session; nothing to void (I5)");
-        assert_eq!(refusal(void_check(true, "r", "o", &[])).1, "a void needs at least one non-empty account (I5)");
-        assert_eq!(refusal(void_check(true, "r", "o", &[("  ", true, false)])).1, "a void needs at least one non-empty account (I5)");
-        assert_eq!(refusal(void_check(true, "r", "o", &[("A", true, false), ("B", true, true)])).1,
+        assert_eq!(refusal(void_request(true, " ", "o", &[("A", true, false)])).1, "a void needs a non-empty reason (I5)");
+        assert_eq!(refusal(void_request(true, "r", "\t", &[("A", true, false)])).1, "a void needs a non-empty owner (I5)");
+        assert_eq!(refusal(void_request(false, "r", "o", &[("A", true, false)])).1, "2026-09-23 is not a trading session; nothing to void (I5)");
+        assert_eq!(refusal(void_request(true, "r", "o", &[])).1, "a void needs at least one non-empty account (I5)");
+        assert_eq!(refusal(void_request(true, "r", "o", &[("  ", true, false)])).1, "a void needs at least one non-empty account (I5)");
+        assert_eq!(refusal(void_request(true, "r", "o", &[("A", true, false), ("B", true, true)])).1,
             "B already ran 2026-09-23: a session that ran cannot be voided (I3)");
     }
     #[test]
     fn void_check_lists_unknown_accounts_in_python_repr() {
-        let (kind, msg) = refusal(void_check(true, "r", "o", &[("X", false, false), ("a'b", false, false)]));
+        let (kind, msg) = refusal(void_request(true, "r", "o", &[("X", false, false), ("a'b", false, false)]));
         assert_eq!(kind, "runtime_eod");
         assert_eq!(msg, "unknown account(s) ['X', \"a'b\"]: not in the ledger (I5)");
     }
     #[test]
     fn void_check_success_returns_stripped_reason_and_owner() {
-        let p = void_check(true, "  why\t", "\u{1c}me\u{1f}", &[("A", true, false), ("B", true, false)]).unwrap_or_else(|e| panic!("{}", e.msg));
-        assert_eq!(p.text, vec!["why".to_string(), "me".to_string()]);
+        let text = void_request(true, "  why\t", "\u{1c}me\u{1f}", &[("A", true, false), ("B", true, false)]).unwrap_or_else(|e| panic!("{}", e.msg));
+        assert_eq!(text, vec!["why".to_string(), "me".to_string()]);
     }
     #[test]
     fn void_check_counts_information_separators_as_blank() {
-        assert_eq!(refusal(void_check(true, "\u{1c}", "o", &[("A", true, false)])).1, "a void needs a non-empty reason (I5)");
-        assert_eq!(refusal(void_check(true, "r", "\u{1d}\u{1e}\u{1f}", &[("A", true, false)])).1, "a void needs a non-empty owner (I5)");
-    }
-    #[test]
-    fn void_check_arity_is_refused() {
-        assert_eq!(refusal(decide("void_check", &strs(&[DATE_REPR, SESSION, "r"]), &[], &[true, true, true], &[])).1, "void_check arity");
-        // one account needs three flags, not two
-        assert_eq!(refusal(decide("void_check", &strs(&[DATE_REPR, SESSION, "r", "o", "A"]), &[], &[true, true, true, true, true, true], &[])).1, "void_check arity");
+        assert_eq!(refusal(void_request(true, "\u{1c}", "o", &[("A", true, false)])).1, "a void needs a non-empty reason (I5)");
+        assert_eq!(refusal(void_request(true, "r", "\u{1d}\u{1e}\u{1f}", &[("A", true, false)])).1, "a void needs a non-empty owner (I5)");
     }
     #[test]
     fn writeoff_check_refuses_each_rule_with_its_message() {
-        let base = strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", ""]);
-        let run = |s: &[&str], b: &[bool]| refusal(decide("writeoff_check", &strs(s), &[], b, &[]));
+        let run = |s: &[&str], b: &[bool]| refusal(writeoff(s, b));
         let ok = [true, true, true, false, true, false];
         assert_eq!(run(&["", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", ""], &ok).1, "a write-off needs a non-empty reason (I5)");
         assert_eq!(run(&["reason", "\u{1c}", "acct", "o1", "ACCEPTED", "0", "", "0", ""], &ok).1, "a write-off needs a non-empty owner (I5)");
-        assert_eq!(decide("writeoff_check", &base, &[], &[true, true, false, false, true, false], &[]).err().map(|e| e.msg).as_deref(),
+        assert_eq!(writeoff(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", ""], &[true, true, false, false, true, false]).err().map(|e| e.msg).as_deref(),
             Some("unknown account 'acct': not in the ledger (I5)"));
-        assert_eq!(decide("writeoff_check", &strs(&["reason", "owner", "a'b", "o1", "", "0", "", "0", ""]), &[], &[true, true, false, false, true, false], &[])
+        assert_eq!(writeoff(&["reason", "owner", "a'b", "o1", "", "0", "", "0", ""], &[true, true, false, false, true, false])
             .err().map(|e| e.msg).as_deref(), Some("unknown account \"a'b\": not in the ledger (I5)"));
         assert_eq!(run(&["reason", "owner", "acct", "o1", "", "0", "", "0", ""], &[true, true, true, false, false, false]).1,
             "acct has no order 'o1' (I5)");
@@ -833,148 +585,84 @@ mod tests {
     }
     #[test]
     fn writeoff_check_already_is_an_idempotent_repeat_even_with_blank_order_fields() {
-        let s = strs(&["reason", "owner", "acct", "o1", "", "0", "", "0", ""]);
-        let p = decide("writeoff_check", &s, &[], &[true, true, true, true, false, false], &[]).unwrap_or_else(|e| panic!("{}", e.msg));
-        assert_eq!(p.flags, vec![false]);
-        assert!(p.text.is_empty());
+        let w = WriteOff {
+            reason: "reason", reason_is_str: true,
+            owner: "owner", owner_is_str: true,
+            account: "acct", account_known: true,
+            already: true, order_exists: false,
+            order: "o1", order_state: "", order_filled: "0",
+            parent: "", parent_filled: "0", order_venue: "",
+            children: &[], venue_cancel_confirmed: false,
+        };
+        assert_eq!(writeoff_check(&w).unwrap(), None);
     }
     #[test]
     fn writeoff_check_partially_filled_with_no_fills_is_not_working() {
-        let s = strs(&["reason", "owner", "acct", "o1", "PARTIALLY_FILLED", "0", "", "0", ""]);
-        let (kind, msg) = refusal(decide("writeoff_check", &s, &[], &[true, true, true, false, true, false], &[]));
+        let (kind, msg) = refusal(writeoff(&["reason", "owner", "acct", "o1", "PARTIALLY_FILLED", "0", "", "0", ""], &[true, true, true, false, true, false]));
         assert_eq!(kind, "runtime_eod");
         assert_eq!(msg, "order 'o1' is PARTIALLY_FILLED, not working; nothing to write off (I5)");
     }
     #[test]
     fn writeoff_check_keeps_non_terminal_children_in_insertion_order() {
-        let text = writeoff_check(&[("c1", "ACCEPTED", ""), ("c2", "FILLED", ""), ("c3", "PARTIALLY_FILLED", ""),
+        let text = writeoff_request(&[("c1", "ACCEPTED", ""), ("c2", "FILLED", ""), ("c3", "PARTIALLY_FILLED", ""),
             ("c4", "CANCELLED", ""), ("c5", "SUBMITTED", "")]);
         assert_eq!(text, strs(&["Owner write-off: reason (owner: owner)", "o1", "c1", "c3", "c5"]));
     }
     #[test]
     fn writeoff_check_refuses_a_venue_id_on_a_live_child_but_not_a_terminal_one() {
-        let (kind, msg) = refusal(decide("writeoff_check",
-            &strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", "", "c1", "ACCEPTED", "v9"]),
-            &[], &[true, true, true, false, true, false], &[]));
+        let (kind, msg) = refusal(writeoff(
+            &["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", "", "c1", "ACCEPTED", "v9"],
+            &[true, true, true, false, true, false]));
         assert_eq!(kind, "runtime_eod");
         assert_eq!(msg, "order 'c1' has venue order id 'v9': the venue may still hold it. Cancel it at the venue first, then pass --venue-cancel-confirmed (I5)");
-        let text = writeoff_check(&[("c2", "FILLED", "v8")]);
+        let text = writeoff_request(&[("c2", "FILLED", "v8")]);
         assert_eq!(text, strs(&["Owner write-off: reason (owner: owner)", "o1"]));
     }
     #[test]
     fn writeoff_check_venue_cancel_confirmed_skips_the_venue_checks() {
-        let s = strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", "v1", "c1", "ACCEPTED", "v9"]);
-        let p = decide("writeoff_check", &s, &[], &[true, true, true, false, true, true], &[]).unwrap_or_else(|e| panic!("{}", e.msg));
-        assert_eq!(p.flags, vec![true]);
-        assert_eq!(p.text, strs(&["Owner write-off: reason (owner: owner)", "o1", "c1"]));
+        let text = writeoff(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "0", "v1", "c1", "ACCEPTED", "v9"],
+            &[true, true, true, false, true, true]).unwrap().unwrap();
+        assert_eq!(text, strs(&["Owner write-off: reason (owner: owner)", "o1", "c1"]));
     }
     #[test]
     fn writeoff_check_an_empty_parent_skips_the_parent_check() {
-        let s = strs(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "5", ""]);
-        let p = decide("writeoff_check", &s, &[], &[true, true, true, false, true, false], &[]).unwrap_or_else(|e| panic!("{}", e.msg));
-        assert_eq!(p.flags, vec![true]);
-    }
-    #[test]
-    fn writeoff_check_arity_is_refused() {
-        let b = [true, true, true, false, true, false];
-        assert_eq!(refusal(decide("writeoff_check", &strs(&["r", "o", "a", "o1", "ACCEPTED", "0", "", "0"]), &[], &b, &[])).1, "writeoff_check arity");
-        // a child needs three fields: this one has two
-        assert_eq!(refusal(decide("writeoff_check", &strs(&["r", "o", "a", "o1", "ACCEPTED", "0", "", "0", "", "c1", "ACCEPTED"]), &[], &b, &[])).1, "writeoff_check arity");
-        assert_eq!(refusal(decide("writeoff_check", &strs(&["r", "o", "a", "o1", "ACCEPTED", "0", "", "0", ""]), &[], &b[..5], &[])).1, "writeoff_check arity");
+        let text = writeoff(&["reason", "owner", "acct", "o1", "ACCEPTED", "0", "", "5", ""],
+            &[true, true, true, false, true, false]).unwrap().unwrap();
+        assert_eq!(text, strs(&["Owner write-off: reason (owner: owner)", "o1"]));
     }
     #[test]
     fn quote_source_is_stale_only_strictly_over_the_limit() {
-        let run = |micros: i64| decide("quote_source", &strs(&["Q1", "Q0"]), &[micros], &[], &[900.0]).unwrap_or_else(|e| panic!("{}", e.msg)).text;
         // age equal to the limit is not stale
-        assert_eq!(run(900_000_000), strs(&["snapshot:Q1"]));
+        assert_eq!(quote_source("Q1", "Q0", 900_000_000, 900.0), "snapshot:Q1");
         // one microsecond over the limit is stale
-        assert_eq!(run(900_000_001), strs(&["stale-quote:Q0 snapshot:Q1"]));
+        assert_eq!(quote_source("Q1", "Q0", 900_000_001, 900.0), "stale-quote:Q0 snapshot:Q1");
         // a negative age is not stale
-        assert_eq!(run(-5_000_000), strs(&["snapshot:Q1"]));
-    }
-    #[test]
-    fn quote_source_short_input_refuses_as_value() {
-        // one string, no micros, no limit: the arity guard refuses instead of panicking
-        let (kind, msg) = refusal(decide("quote_source", &strs(&["Q1"]), &[], &[], &[]));
-        assert_eq!((kind, msg.as_str()), ("value", "quote_source arity"));
+        assert_eq!(quote_source("Q1", "Q0", -5_000_000, 900.0), "snapshot:Q1");
     }
     #[test]
     fn config_refuses_nan_bar_age() {
         // NaN compares false with everything, so `> 0.0` must be the accepted form
-        let (kind, msg) = refusal(decide("config", &[], &[0], &[true, true, true, true], &[f64::NAN]));
+        let (kind, msg) = refusal(config(true, true, true, f64::NAN, true, 0));
         assert_eq!((kind, msg.as_str()), ("runtime_eod", "bars_max_age_seconds must be positive"));
-        assert!(decide("config", &[], &[0], &[true, true, true, true], &[1.0]).is_ok());
+        assert!(config(true, true, true, 1.0, true, 0).is_ok());
     }
     proptest! {
         #[test]
         fn dividend_product(q in -10000i64..10000, a in 1i64..10000) {
-            let s = vec![q.to_string(),a.to_string()];
-            let p = decide("dividend",&s,&[],&[],&[]).unwrap();
-            prop_assert_eq!(&p.text[1], &(q*a).to_string());
+            let d = dividend(&q.to_string(), &[a.to_string()]).unwrap();
+            prop_assert_eq!(&d.text[1], &(q*a).to_string());
         }
     }
 }
-
 #[cfg(test)]
 mod typed_tests {
     use super::*;
-
-    const OPS: [&str; 52] = ["pass_job", "command", "config", "session_type", "session", "pass_name", "through",
-        "pass_boundary", "resume", "cutoff", "latest", "earliest", "count_events", "children", "terminal", "filled",
-        "exit_action", "history", "previous", "replay_clock", "nonzero", "working", "after", "any_history",
-        "difference", "replay_instrument", "rehydrate", "bars", "regular", "mark", "risk", "bracket", "subtract",
-        "intent", "equity_approved", "snapshots_wiring", "snapshot", "coverage", "lifecycle", "preopen",
-        "dividend_source", "dividend_stamp", "dividend", "option_mark", "unmarkable", "official_identity",
-        "official_future", "official_close", "sink", "void_check", "writeoff_check", "quote_source"];
-    /// Ops whose string adapter reads no inputs, so an empty call must not be refused for arity.
-    const NO_MINIMUM: [&str; 4] = ["latest", "earliest", "filled", "any_history"];
 
     fn refusal<T>(r: R<T>) -> (&'static str, String) {
         match r {
             Ok(_) => panic!("expected a refusal"),
             Err(e) => (e.kind, e.msg),
         }
-    }
-
-    #[test]
-    fn every_op_refuses_short_input_with_arity_unless_it_reads_nothing() {
-        assert_eq!(OPS.len(), 52);
-        for op in OPS {
-            let r = decide(op, &[], &[], &[], &[]);
-            if NO_MINIMUM.contains(&op) {
-                if let Err(e) = r { assert_ne!(e.msg, format!("{op} arity"), "op {op}"); }
-            } else {
-                assert_eq!(refusal(r), ("value", format!("{op} arity")), "op {op}");
-            }
-        }
-    }
-
-    #[test]
-    fn no_op_panics_on_any_input_shape() {
-        let fills = ["1", "x", ""];
-        for ls in 0..=10 {
-            for ln in 0..=3 {
-                for lb in 0..=7 {
-                    for lf in 0..=2 {
-                        for fill in fills {
-                            let s = vec![fill.to_string(); ls];
-                            let n = vec![1i64; ln];
-                            let b = vec![true; lb];
-                            let f = vec![1.0f64; lf];
-                            for op in OPS.into_iter().chain(["bogus"]) {
-                                let _ = decide(op, &s, &n, &b, &f);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn positive_is_gone() {
-        assert_eq!(refusal(decide("positive", &[], &[], &[], &[])),
-            ("value", "Unknown EOD decision positive".to_string()));
     }
 
     #[test]

@@ -1,7 +1,6 @@
 //! After-close decisions. Observations arrive in original host order, never from a clock.
 use std::collections::HashMap;
 
-use super::{need, Plan};
 use crate::ledger::model::{err, LErr, R};
 use crate::ledger::ops::*;
 use crate::money::Money;
@@ -30,154 +29,6 @@ fn intrinsic(c: &ContractWire, price: &str) -> R<Money> {
 /// A decimal that parses, is finite and is greater than zero. Text that does not parse is not positive.
 fn positive(text: &str) -> bool {
     dec(text).map(|v| v.is_finite() && gt(&v, &zero()).unwrap_or(false)).unwrap_or(false)
-}
-/// Three consecutive texts of the flat input, starting at `at`.
-fn triple(t: &[String], at: usize) -> [&str; 3] {
-    [t[at].as_str(), t[at + 1].as_str(), t[at + 2].as_str()]
-}
-
-/// String-door adapter: each arm checks its input counts with `need`, then calls the typed rule
-/// of the same name and pushes its output into the plan.
-pub fn decide(op: &str, t: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Plan> {
-    let mut p = Plan::default();
-    match op {
-        "session" => {
-            need(op, t, n, b, f, (1, 0, 1, 0))?;
-            session(b[0], &t[0])?;
-        }
-        "compact" => {
-            need(op, t, n, b, f, (1, 0, 0, 0))?;
-            p.text.push(compact(&t[0]));
-        }
-        "accounts" => {
-            need(op, t, n, b, f, (0, 0, 0, 0))?;
-            p.text = accounts(t);
-        }
-        "close" => {
-            need(op, t, n, b, f, (3, 1, 0, 0))?;
-            close(n[0] < 0, &t[0], &t[1], &t[2])?;
-        }
-        "held" => {
-            // One flag per (occ, quantity) row, so the row count is the minimum for `b`.
-            need(op, t, n, b, f, (0, 0, t.len() / 2, 0))?;
-            let rows: Vec<(&str, &str, bool)> = t.chunks_exact(2).enumerate()
-                .map(|(i, row)| (row[0].as_str(), row[1].as_str(), b[i])).collect();
-            p.numbers = held(&rows)?;
-        }
-        "position" => {
-            need(op, t, n, b, f, (1, 1, 0, 0))?;
-            let (long, due, past, quantity) = position(&t[0], n[0])?;
-            p.flags = vec![long, due, past];
-            p.text.push(quantity);
-        }
-        "overdue" => {
-            need(op, t, n, b, f, (3, 1, 0, 0))?;
-            overdue(n[0] < 0, &t[0], &t[1], &t[2])?;
-        }
-        "price_identity" => {
-            need(op, t, n, b, f, (6, 0, 0, 0))?;
-            price_identity(triple(t, 0), triple(t, 3))?;
-        }
-        "price_clock" => {
-            need(op, t, n, b, f, (8, 1, 0, 0))?;
-            price_clock(n[0] > 0, &t[1], &t[6], &t[7])?;
-        }
-        "price_known" => {
-            need(op, t, n, b, f, (9, 1, 0, 0))?;
-            price_known(n[0] < 0, &t[1], &t[6], &t[8])?;
-        }
-        "expiry" => {
-            need(op, t, n, b, f, (4, 3, 2, 0))?;
-            let (kind, reason) = expiry(&t[0], &t[1], &t[2], &t[3], n, b[0], b[1])?;
-            p.text = vec![kind, reason];
-        }
-        "eligible" => {
-            need(op, t, n, b, f, (0, 0, 3, 0))?;
-            p.flags.push(eligible(b[0], b[1], b[2]));
-        }
-        "dividend_source" => {
-            need(op, t, n, b, f, (2, 0, 1, 0))?;
-            dividend_source(b[0], &t[0], &t[1])?;
-        }
-        "dividend_time" => {
-            need(op, t, n, b, f, (1, 1, 0, 0))?;
-            dividend_time(n[0] > 0, &t[0])?;
-        }
-        "sum" => {
-            need(op, t, n, b, f, (0, 0, 0, 0))?;
-            let (total, any) = sum(t)?;
-            p.text.push(total);
-            p.flags.push(any);
-        }
-        "itm" => {
-            need(op, t, n, b, f, (3, 3, 1, 0))?;
-            p.flags.push(itm(&t[0], &t[1], &t[2], n, b[0])?);
-        }
-        "quote_source" => {
-            need(op, t, n, b, f, (3, 0, 1, 0))?;
-            quote_source(b[0], &t[0], &t[1], &t[2])?;
-        }
-        "quote_time" => {
-            need(op, t, n, b, f, (1, 1, 0, 0))?;
-            quote_time(n[0] > 0, &t[0])?;
-        }
-        "early" => {
-            need(op, t, n, b, f, (6, 3, 0, 0))?;
-            let (exercise, text) = early(&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], n)?;
-            p.flags.push(exercise);
-            p.text.push(text);
-        }
-        "event" => {
-            need(op, t, n, b, f, (6, 0, 1, 0))?;
-            let fields = [t[0].as_str(), t[1].as_str(), t[2].as_str(), t[3].as_str(), t[4].as_str(), t[5].as_str()];
-            let (text, early_flag) = event(fields, b[0]);
-            p.text = text;
-            p.flags.push(early_flag);
-        }
-        "aware" => {
-            need(op, t, n, b, f, (1, 0, 1, 0))?;
-            aware(b[0], &t[0])?;
-        }
-        "value" => {
-            need(op, t, n, b, f, (4, 0, 3, 0))?;
-            value(b[0], &t[0], b[1], &t[1], &t[2], &t[3], b[2])?;
-        }
-        "action_amount" => {
-            need(op, t, n, b, f, (4, 0, 1, 0))?;
-            action_amount(b[0], &t[0], &t[1], &t[2], &t[3])?;
-        }
-        "mirror_net" => {
-            need(op, t, n, b, f, (0, 0, 0, 0))?;
-            let rows: Vec<(&str, &str)> = t.chunks_exact(2).map(|row| (row[0].as_str(), row[1].as_str())).collect();
-            for (occ, net, first) in mirror_net(&rows)? {
-                p.text.push(occ);
-                p.text.push(net);
-                p.numbers.push(first);
-            }
-        }
-        "symbol_key" => {
-            need(op, t, n, b, f, (1, 0, 0, 0))?;
-            p.text.push(symbol_key(&t[0]));
-        }
-        "settlement_conflict" => {
-            need(op, t, n, b, f, (3, 0, 1, 0))?;
-            settlement_conflict(b[0], &t[0], &t[1], &t[2])?;
-        }
-        "settlement_missing" => {
-            need(op, t, n, b, f, (3, 0, 0, 0))?;
-            settlement_missing(&t[0], &t[1], &t[2])?;
-        }
-        "dividend_missing" => {
-            need(op, t, n, b, f, (1, 0, 0, 0))?;
-            dividend_missing(&t[0])?;
-        }
-        "quote_missing" => {
-            need(op, t, n, b, f, (3, 0, 0, 0))?;
-            quote_missing(&t[0], &t[1], &t[2])?;
-        }
-        _ => return err("value", format!("Unknown lifecycle decision {op}")),
-    }
-    Ok(p)
 }
 
 // Typed rules. Each keeps the string door's error kind and message byte-identical.
@@ -411,71 +262,61 @@ mod tests {
     use super::*;
     #[test]
     fn exact_threshold_and_scale() {
-        let p = decide("expiry",&["100".into(),"100.010".into(),"PM".into(),"AAPL".into()],&[2026,10,16],&[true,true],&[]).unwrap();
-        assert_eq!(p.text,["Exercise","exercised at expiry: 0.01 in the money at the PM settlement 100.010"]);
-        assert!(!decide("early",&["100".into(),"101".into(),"2".into(),"1".into(),"2026-10-19".into(),"AAPL".into()],&[2026,10,16],&[],&[]).unwrap().flags[0]);
-    }
-    fn texts(v: &[&str]) -> Vec<String> {
-        v.iter().map(|x| x.to_string()).collect()
-    }
-    fn refuse(op: &str, t: &[&str], n: &[i64], b: &[bool]) -> LErr {
-        decide(op, &texts(t), n, b, &[]).err().expect("the op refuses")
+        let (kind, reason) = expiry("100", "100.010", "PM", "AAPL", &[2026, 10, 16], true, true).unwrap();
+        assert_eq!((kind, reason), ("Exercise".to_string(), "exercised at expiry: 0.01 in the money at the PM settlement 100.010".to_string()));
+        assert!(!early("100", "101", "2", "1", "2026-10-19", "AAPL", &[2026, 10, 16]).unwrap().0);
     }
     #[test]
     fn mirror_net_sums_two_rows_of_one_contract() {
-        let p = decide("mirror_net", &texts(&["AAPL 1", "2", "AAPL 1", "3"]), &[], &[], &[]).unwrap();
-        assert_eq!(p.text, ["AAPL 1", "5"]);
-        assert_eq!(p.numbers, [0]);
+        assert_eq!(mirror_net(&[("AAPL 1", "2"), ("AAPL 1", "3")]).unwrap(),
+            vec![("AAPL 1".to_string(), "5".to_string(), 0)]);
     }
     #[test]
     fn mirror_net_drops_a_contract_that_nets_to_zero() {
-        let p = decide("mirror_net", &texts(&["A", "2", "B", "4", "A", "-2", "C", "1"]), &[], &[], &[]).unwrap();
-        assert_eq!(p.text, ["B", "4", "C", "1"]);
-        assert_eq!(p.numbers, [1, 3]);
+        assert_eq!(mirror_net(&[("A", "2"), ("B", "4"), ("A", "-2"), ("C", "1")]).unwrap(),
+            vec![("B".to_string(), "4".to_string(), 1), ("C".to_string(), "1".to_string(), 3)]);
     }
     #[test]
     fn mirror_net_keeps_first_appearance_order_and_indices() {
-        let p = decide("mirror_net", &texts(&["B", "1", "A", "2", "B", "3"]), &[], &[], &[]).unwrap();
-        assert_eq!(p.text, ["B", "4", "A", "2"]);
-        assert_eq!(p.numbers, [0, 1]);
+        assert_eq!(mirror_net(&[("B", "1"), ("A", "2"), ("B", "3")]).unwrap(),
+            vec![("B".to_string(), "4".to_string(), 0), ("A".to_string(), "2".to_string(), 1)]);
     }
     #[test]
     fn mirror_net_with_no_rows_is_empty() {
-        let p = decide("mirror_net", &[], &[], &[], &[]).unwrap();
-        assert!(p.text.is_empty() && p.numbers.is_empty());
+        assert!(mirror_net(&[]).unwrap().is_empty());
     }
     #[test]
     fn symbol_key_trims_and_uppercases() {
-        assert_eq!(decide("symbol_key", &texts(&[" aapl\t"]), &[], &[], &[]).unwrap().text, ["AAPL"]);
-        assert_eq!(decide("symbol_key", &texts(&["\u{a0}spx\u{3000}"]), &[], &[], &[]).unwrap().text, ["SPX"]);
+        assert_eq!(symbol_key(" aapl\t"), "AAPL");
+        assert_eq!(symbol_key("\u{a0}spx\u{3000}"), "SPX");
     }
     #[test]
     fn symbol_key_strips_information_separators_like_python() {
         // Python's str.strip() drops U+001C..U+001F; Rust's trim() does not.
-        assert_eq!(decide("symbol_key", &texts(&["\u{1c}spx\u{1f}"]), &[], &[], &[]).unwrap().text, ["SPX"]);
+        assert_eq!(symbol_key("\u{1c}spx\u{1f}"), "SPX");
     }
     #[test]
     fn settlement_conflict_passes_when_the_prices_agree() {
-        assert!(decide("settlement_conflict", &texts(&["PM", "AAPL", "2026-10-16"]), &[], &[false], &[]).is_ok());
+        assert!(settlement_conflict(false, "PM", "AAPL", "2026-10-16").is_ok());
     }
     #[test]
     fn settlement_conflict_refuses_as_value() {
-        let e = refuse("settlement_conflict", &["PM", "AAPL", "2026-10-16"], &[], &[true]);
+        let e = settlement_conflict(true, "PM", "AAPL", "2026-10-16").unwrap_err();
         assert_eq!((e.kind, e.msg.as_str()), ("value", "Two different PM settlements for AAPL on 2026-10-16 (I5)"));
     }
     #[test]
     fn missing_settlement_refuses_as_stale() {
-        let e = refuse("settlement_missing", &["AM", "SPX", "2026-10-16"], &[], &[]);
+        let e = settlement_missing("AM", "SPX", "2026-10-16").unwrap_err();
         assert_eq!((e.kind, e.msg.as_str()), ("stale", "No AM settlement for SPX on 2026-10-16 (I5)"));
     }
     #[test]
     fn missing_dividend_record_refuses_as_stale() {
-        let e = refuse("dividend_missing", &["AAPL"], &[], &[]);
+        let e = dividend_missing("AAPL").unwrap_err();
         assert_eq!((e.kind, e.msg.as_str()), ("stale", "No dividend record for AAPL (I5)"));
     }
     #[test]
     fn missing_quote_refuses_as_stale() {
-        let e = refuse("quote_missing", &["AAPL261016C00250000", "AAPL", "2026-10-15T20:00:00+00:00"], &[], &[]);
+        let e = quote_missing("AAPL261016C00250000", "AAPL", "2026-10-15T20:00:00+00:00").unwrap_err();
         assert_eq!((e.kind, e.msg.as_str()), ("stale",
             "AAPL261016C00250000 is not in the AAPL chain snapshot of 2026-10-15T20:00:00+00:00 (I5)"));
     }
@@ -484,65 +325,6 @@ mod tests {
 #[cfg(test)]
 mod typed_tests {
     use super::*;
-
-    /// Every arm name the string door dispatches to in this file, in match order.
-    const OPS: &[&str] = &[
-        "session", "compact", "accounts", "close", "held", "position", "overdue",
-        "price_identity", "price_clock", "price_known", "expiry", "eligible", "dividend_source",
-        "dividend_time", "sum", "itm", "quote_source", "quote_time", "early", "event", "aware",
-        "value", "action_amount", "mirror_net", "symbol_key", "settlement_conflict",
-        "settlement_missing", "dividend_missing", "quote_missing",
-    ];
-
-    /// Each arm's minimum input counts (s, n, b, f), as its adapter's `need` call states them.
-    /// `held` takes one flag per row, so its minimum is 0 for an empty input.
-    const MINIMA: &[(&str, (usize, usize, usize, usize))] = &[
-        ("session", (1, 0, 1, 0)), ("compact", (1, 0, 0, 0)), ("accounts", (0, 0, 0, 0)),
-        ("close", (3, 1, 0, 0)), ("held", (0, 0, 0, 0)), ("position", (1, 1, 0, 0)),
-        ("overdue", (3, 1, 0, 0)), ("price_identity", (6, 0, 0, 0)), ("price_clock", (8, 1, 0, 0)),
-        ("price_known", (9, 1, 0, 0)), ("expiry", (4, 3, 2, 0)), ("eligible", (0, 0, 3, 0)),
-        ("dividend_source", (2, 0, 1, 0)), ("dividend_time", (1, 1, 0, 0)), ("sum", (0, 0, 0, 0)),
-        ("itm", (3, 3, 1, 0)), ("quote_source", (3, 0, 1, 0)), ("quote_time", (1, 1, 0, 0)),
-        ("early", (6, 3, 0, 0)), ("event", (6, 0, 1, 0)), ("aware", (1, 0, 1, 0)),
-        ("value", (4, 0, 3, 0)), ("action_amount", (4, 0, 1, 0)), ("mirror_net", (0, 0, 0, 0)),
-        ("symbol_key", (1, 0, 0, 0)), ("settlement_conflict", (3, 0, 1, 0)),
-        ("settlement_missing", (3, 0, 0, 0)), ("dividend_missing", (1, 0, 0, 0)),
-        ("quote_missing", (3, 0, 0, 0)),
-    ];
-
-    #[test]
-    fn every_arm_is_listed_once_and_in_order() {
-        let names: Vec<&str> = MINIMA.iter().map(|(op, _)| *op).collect();
-        assert_eq!(names, OPS);
-    }
-
-    #[test]
-    fn no_arm_is_reported_as_unknown_on_empty_input() {
-        for op in OPS {
-            if let Err(e) = decide(op, &[], &[], &[], &[]) {
-                assert!(!e.msg.starts_with("Unknown"), "{op} is not an arm");
-            }
-        }
-    }
-
-    #[test]
-    fn an_arm_with_a_minimum_refuses_short_input_as_arity() {
-        for (op, min) in MINIMA {
-            if *min == (0, 0, 0, 0) { continue; }
-            let expected = format!("{op} arity");
-            match decide(op, &[], &[], &[], &[]) {
-                Err(e) => assert_eq!((e.kind, e.msg.as_str()), ("value", expected.as_str()), "{op}"),
-                Ok(_) => panic!("{op} must refuse input shorter than its minimum"),
-            }
-        }
-    }
-
-    #[test]
-    fn an_arm_runs_at_exactly_its_minimum_without_panicking() {
-        for (op, (s, n, b, f)) in MINIMA {
-            let _ = decide(op, &vec![String::new(); *s], &vec![0; *n], &vec![false; *b], &vec![0.0; *f]);
-        }
-    }
 
     #[test]
     fn session_refuses_a_non_session_with_its_text() {
