@@ -1,13 +1,11 @@
 use pyo3::exceptions::PyAttributeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyIterator};
+use te_core::runtime::eod as rules;
 use te_core::runtime::eod_flow::{self as flow, EquityEntryHost, ExitHost, ExitKind, SignalHost};
+use te_core::runtime::routing;
 
 type Value<'py> = Bound<'py, PyAny>;
-fn rule(op: &str, text: Vec<String>, flags: Vec<bool>) -> PyResult<te_core::runtime::Plan> {
-    te_core::runtime::decide(op, &text, &[], &flags, &[])
-        .map_err(super::flow_refusal)
-}
 fn optional<'py>(value: &Value<'py>, name: &str) -> PyResult<Value<'py>> {
     match value.getattr(name) {
         Ok(value) => Ok(value),
@@ -16,7 +14,7 @@ fn optional<'py>(value: &Value<'py>, name: &str) -> PyResult<Value<'py>> {
     }
 }
 fn terminal(order: &Value<'_>) -> PyResult<bool> {
-    Ok(rule("eod:terminal", vec![order.getattr("state")?.getattr("value")?.extract()?], vec![])?.flags[0])
+    Ok(rules::terminal(&order.getattr("state")?.getattr("value")?.extract::<String>()?))
 }
 
 struct Inputs<'py> {
@@ -102,9 +100,7 @@ impl<'py> SignalHost for Inputs<'py> {
     fn count(&self, submitted: i64) -> PyResult<()> {
         if self.options {
             let current = self.tally.getattr("orders_submitted")?;
-            let plan = te_core::runtime::routing::decide("increment", &[], &[current.extract()?, submitted], &[])
-                .map_err(super::flow_refusal)?;
-            self.tally.setattr("orders_submitted", plan.numbers[0])?;
+            self.tally.setattr("orders_submitted", routing::increment(current.extract()?, submitted))?;
         }
         Ok(())
     }
@@ -114,8 +110,8 @@ impl<'py> EquityEntryHost for Inputs<'py> {
     type Value = Value<'py>;
     type Error = PyErr;
     fn validate(&self, intent: &Self::Value) -> PyResult<()> {
-        rule("eod:intent", vec![intent.getattr("account_id")?.extract()?, self.account.clone(),
-            intent.getattr("intent_id")?.extract()?], vec![])?;
+        rules::intent(&intent.getattr("intent_id")?.extract::<String>()?, &intent.getattr("account_id")?.extract::<String>()?,
+            &self.account).map_err(super::flow_refusal)?;
         Ok(())
     }
     fn recorded(&self, intent: &Self::Value) -> PyResult<Option<Self::Value>> {
@@ -135,8 +131,8 @@ impl<'py> EquityEntryHost for Inputs<'py> {
         Ok(())
     }
     fn approved(&self, verdict: &Self::Value) -> PyResult<bool> {
-        Ok(rule("eod:equity_approved", vec![], vec![verdict.getattr("accepted")?.is_truthy()?,
-            !verdict.getattr("approved_quantity")?.is_none()])?.flags[0])
+        let accepted = verdict.getattr("accepted")?.is_truthy()?;
+        Ok(rules::equity_approved(accepted, !verdict.getattr("approved_quantity")?.is_none()))
     }
     fn bracket(&self, intent: &Self::Value, verdict: &Self::Value) -> PyResult<Self::Value> {
         self.manager.as_ref().expect("configured manager").call_method1("create_bracket",
@@ -191,9 +187,12 @@ impl<'py> ExitHost for Exits<'py> {
         let moved = action.is_instance(&classes.getattr("MoveStop")?)?;
         let closed = action.is_instance(&classes.getattr("ClosePosition")?)?;
         let reduced = action.is_instance(&classes.getattr("ReducePosition")?)?;
-        rule("eod:exit_action", vec![action.getattr("command_id")?.extract()?, action.getattr("entry_order_id")?.extract()?,
-            self.account.clone(), action.get_type().getattr("__name__")?.extract()?],
-            vec![self.by_entry.as_ref().expect("brackets inspected").contains(action.getattr("entry_order_id")?)?, moved || closed || reduced])?;
+        let command_id: String = action.getattr("command_id")?.extract()?;
+        let entry_order_id: String = action.getattr("entry_order_id")?.extract()?;
+        let kind: String = action.get_type().getattr("__name__")?.extract()?;
+        let open_bracket = self.by_entry.as_ref().expect("brackets inspected").contains(action.getattr("entry_order_id")?)?;
+        rules::exit_action(&command_id, &entry_order_id, &self.account, &kind, open_bracket, moved || closed || reduced)
+            .map_err(super::flow_refusal)?;
         Ok(if moved { ExitKind::Move } else if closed { ExitKind::Close } else { ExitKind::Reduce })
     }
     fn move_stop(&self, action: &Self::Value) -> PyResult<()> {
