@@ -358,8 +358,11 @@ class IntradayService:
                 floats=((close - snapshot.as_of).total_seconds() if snapshot is not None else 0,
                     self._config.close_mark_window_seconds))
             quotes = {i: snapshot.get(i) for i in held if isinstance(i, OptionContract)} if usable else {}
+            # A quote the snapshot carries but nobody re-quoted is no mark: each must be fresh too.
             if not flag("intraday:close_plan", flags=(usable,
-                all(q is not None and flag("eod:positive", (str(q.mid),)) for q in quotes.values())),
+                all(q is not None and flag("eod:positive", (str(q.mid),))
+                    and (snapshot.as_of - q.as_of).total_seconds() <= self._config.max_quote_age_seconds
+                    for q in quotes.values())),
                 numbers=(len(quotes), len(held))):
                 note = "no fresh snapshot near the close; marks left to the after-close pass"
             else:

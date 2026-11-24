@@ -190,6 +190,44 @@ def test_options_are_marked_at_the_snapshot_mid_and_the_underlying_at_the_offici
     assert marks[COHR] == (D("300"), "official close")  # not held, but its put's margin needs it
 
 
+def chain_quoting(session: date, quoted: dict, at: datetime | None = None) -> ChainSnapshot:
+    """A chain at ``at`` (default the 15:45 pull) with each contract in ``quoted`` stamped at its own time."""
+    at = snap_time(session) if at is None else at
+    rows = tuple(
+        OptionQuote(c, D(b), D(a), D(10), D(10), quoted.get(c, at))
+        for c, (b, a) in BASE.items() if c.underlying == "COHR"
+    )
+    return ChainSnapshot("COHR", at, D("300"), rows, None, None, "test")
+
+
+def test_an_option_quote_older_than_the_limit_is_marked_at_its_mid_and_flagged_stale(rig) -> None:
+    rig.strategy.entries[S1] = [csp()]
+    rig.run(S1)
+    # An earlier, fresh pull fills the entry; the newest pull re-quotes nothing, so its P270 is five days old.
+    early = chain_quoting(S2, {}, at=snap_time(S2) - timedelta(minutes=30))
+    stale_at = snap_time(S2) - timedelta(days=5)
+    rig.run(S2, chain_snapshots=lambda s: [early, chain_quoting(s, {P270: stale_at})])
+    price, source = rig.marks(S2)[P270]
+    assert price == D("10.35")  # the stale mid is still the mark: flagged, not refused
+    assert source.startswith(f"stale-quote:{stale_at.isoformat()} ")
+    assert f"snapshot:{snap_time(S2).isoformat()}" in source
+
+
+def test_an_option_quote_just_within_the_limit_keeps_the_plain_snapshot_source(rig) -> None:
+    rig.strategy.entries[S1] = [csp()]
+    rig.run(S1)
+    early = chain_quoting(S2, {}, at=snap_time(S2) - timedelta(minutes=30))
+    fresh_at = snap_time(S2) - timedelta(seconds=899)
+    rig.run(S2, chain_snapshots=lambda s: [early, chain_quoting(s, {P270: fresh_at})])
+    assert rig.marks(S2)[P270] == (D("10.35"), f"snapshot:{snap_time(S2).isoformat()}")
+
+
+@pytest.mark.parametrize("limit", [0, -5, True, float("nan"), float("inf")])
+def test_the_mark_quote_age_limit_must_be_a_positive_finite_number(rig, limit) -> None:
+    with pytest.raises(ValueError):
+        rig.config(mark_max_quote_age_seconds=limit)
+
+
 def test_the_options_run_happens_after_the_official_close_is_known(rig) -> None:
     rig.run(S1)
     [marker] = [e for e in rig.ledger.events(account=ACCOUNT) if e.kind is EventKind.EOD_RUN]
