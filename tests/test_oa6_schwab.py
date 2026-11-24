@@ -68,8 +68,11 @@ def listing(orders: list[dict]) -> tuple[int, str]:
     return 200, json.dumps({"status": 200, "order_id": None, "body": json.dumps(orders)})
 
 
-def listed(order_id: str, *, symbol="AAPL", instruction="BUY", qty=10, entered=CLOCK_NOW) -> dict:
+def listed(order_id: str, *, symbol="AAPL", instruction="BUY", qty=10, entered=CLOCK_NOW,
+           order_type="LIMIT", price="187.25") -> dict:
+    # Schwab lists orderType and price too; the defaults are venue_order()'s, what the tests send.
     return {"orderId": int(order_id), "enteredTime": entered.strftime("%Y-%m-%dT%H:%M:%S+0000"),
+            "orderType": order_type, "price": price,
             "orderLegCollection": [{"instruction": instruction, "quantity": qty,
                                     "instrument": {"symbol": symbol}}]}
 
@@ -386,7 +389,7 @@ def test_replace_timeout_unknown_stays_pending(caplog):
     assert "unresolved" in caplog.text
     hub.queue = [listing([])]
     assert venue.resolve_pending()[0].status == "PENDING"  # still unknown, still never guessed
-    assert len(hub.calls) == 3
+    assert [c[0] for c in hub.calls] == ["POST", "PUT", "GET", "GET"]  # nothing resent
 
 
 def test_cancel_and_replace_refuse_while_replace_unresolved():
@@ -409,7 +412,9 @@ def test_match_pending_uses_price_and_type():
     assert match_pending(orders, **kwargs, order_type="LIMIT",
                          price=Decimal("187.25")) == ("accepted", "2002")
     assert match_pending(orders, **kwargs, order_type="STOP", price=Decimal("187.25")) == ("not_at_venue", None)
-    assert match_pending([listed("2003")], **kwargs, price=Decimal("187.25")) == ("not_at_venue", None)
+    no_price = listed("2003")
+    del no_price["price"]  # a missing field, with a price asked for, does not match
+    assert match_pending([no_price], **kwargs, price=Decimal("187.25")) == ("not_at_venue", None)
 
     hub = FakeHub()
     venue = pending_adapter(hub)  # sent LIMIT at 187.25

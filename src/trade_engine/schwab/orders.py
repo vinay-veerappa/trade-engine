@@ -171,6 +171,15 @@ def _entered(text: Any) -> datetime | None:
             return None
 
 
+def _price_is(item: Mapping[str, Any], key: str, want: Decimal | None) -> bool:
+    if want is None:
+        return True
+    try:
+        return Decimal(str(item[key])) == want
+    except (KeyError, TypeError, ArithmeticError):
+        return False
+
+
 def match_pending(
     orders: Iterable[Mapping[str, Any]],
     *,
@@ -179,11 +188,17 @@ def match_pending(
     quantity: Decimal,
     window: tuple[datetime, datetime],
     exclude: Iterable[str] = (),
+    order_type: str | None = None,
+    price: Decimal | None = None,
+    stop_price: Decimal | None = None,
 ) -> MatchResult:
     """Match one pending order by symbol + instruction + quantity + enteredTime in ``window``.
 
     The account is already fixed: the list read is one account's. ``exclude`` holds Schwab order
     ids the adapter already owns, so a known order is never matched to a second pending one.
+    ``order_type``, ``price`` and ``stop_price`` are optional: each one given must equal the
+    listed order's field (a missing or unparseable field does not match). Left as None, it is
+    not compared, so older callers match as before.
     """
     start, end = window
     skip = set(exclude)
@@ -197,7 +212,9 @@ def match_pending(
         except (KeyError, IndexError, TypeError, ArithmeticError):
             continue
         entered = _entered(item.get("enteredTime"))
-        if same and entered is not None and start <= entered <= end and order_id not in skip:
+        typed = ((order_type is None or item.get("orderType") == order_type)
+                 and _price_is(item, "price", price) and _price_is(item, "stopPrice", stop_price))
+        if same and typed and entered is not None and start <= entered <= end and order_id not in skip:
             found.append(order_id)
     if len(found) == 1:
         return "accepted", found[0]
