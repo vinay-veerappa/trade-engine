@@ -27,6 +27,7 @@ use tower::ServiceExt;
 
 pub const AFTER_ERROR: &str = "Bad Request: 'after' parameter must be a non-negative integer";
 pub const HEADER_ERROR: &str = "Bad Request: 'Last-Event-ID' header must be a non-negative integer";
+pub const RANGE_ERROR: &str = "event cursor out of range";
 
 #[derive(Clone, Debug)]
 pub enum Cursor {
@@ -469,6 +470,23 @@ fn error(code: u16, message: String, explanation: &str, head: bool) -> Reply {
         stream: None,
     }
 }
+/// Resolves an `/events` cursor before a 200 stream is reserved. An out-of-range
+/// cursor is a JSON 400 here, not an error after the stream has started.
+fn event_cursor(parsed: Result<Cursor, &'static str>) -> Result<i64, Reply> {
+    match parsed {
+        Ok(Cursor::Sequence(after)) => Ok(after),
+        Ok(Cursor::Overflow) => Err(control_reply(
+            400,
+            &ControlError::new("RuntimeRequestError", RANGE_ERROR),
+        )),
+        Err(reason) => Err(error(
+            400,
+            reason.into(),
+            "Bad request syntax or unsupported method",
+            false,
+        )),
+    }
+}
 fn cors(api: &Api, raw: &Raw) -> Option<String> {
     raw.header("Origin")
         .map(|origin| origin.trim_matches(whitespace))
@@ -632,27 +650,20 @@ fn handle(api: &Api, raw: &Raw) -> Result<Reply, String> {
     };
     match path.as_str() {
         "/events" => {
-            let after = match cursor(
+            let after = match event_cursor(cursor(
                 api.text.as_ref(),
                 query.as_deref(),
                 raw.header("Last-Event-ID"),
-            )? {
+            )?) {
                 Ok(after) => after,
-                Err(reason) => {
-                    return Ok(error(
-                        400,
-                        reason.into(),
-                        "Bad request syntax or unsupported method",
-                        false,
-                    ))
-                }
+                Err(refusal) => return Ok(refusal),
             };
             reply.headers.extend([
                 ("Content-Type".into(), "text/event-stream".into()),
                 ("Cache-Control".into(), "no-cache".into()),
                 ("Connection".into(), "keep-alive".into()),
             ]);
-            reply.stream = Some(after);
+            reply.stream = Some(Cursor::Sequence(after));
         }
         "/health" => {
             let reader = crate::store::Store::reader(&api.path).map_err(|e| e.to_string())?;
@@ -996,13 +1007,9 @@ async fn connection(socket: TcpStream, router: Router, api: Arc<Api>) -> io::Res
     while *paused.borrow_and_update() {
         paused.changed().await.map_err(io::Error::other)?;
     }
-    let after = match cursor {
-        Cursor::Sequence(after) => after,
-        Cursor::Overflow => {
-            return Err(io::Error::other(
-                "OverflowError: Python int too large to convert to SQLite INTEGER",
-            ))
-        }
+    // handle() refuses Overflow with HTTP 400 before any stream is reserved.
+    let Cursor::Sequence(after) = cursor else {
+        return Ok(());
     };
     let mut max_sent = after as i128;
     for event in events(&api.path, Some(after)).map_err(io::Error::other)? {
@@ -1062,6 +1069,27 @@ mod tests {
             cursor(&DecimalText, Some("1"), Some("bad")),
             Ok(Err(HEADER_ERROR))
         ));
+    }
+    #[test]
+    fn overflowing_event_cursor_is_refused_with_json_400_before_any_stream() {
+        assert!(matches!(
+            event_cursor(Ok(Cursor::Sequence(7))),
+            Ok(7)
+        ));
+        let refusal = event_cursor(Ok(Cursor::Overflow)).unwrap_err();
+        assert_eq!(refusal.code, 400);
+        assert!(refusal.stream.is_none());
+        assert!(refusal
+            .headers
+            .contains(&("Content-Type".into(), "application/json".into())));
+        let body = String::from_utf8(refusal.body).unwrap();
+        assert_eq!(
+            body,
+            r#"{"error":{"message":"event cursor out of range","type":"RuntimeRequestError"}}"#
+        );
+        let refusal = event_cursor(Err(AFTER_ERROR)).unwrap_err();
+        assert_eq!(refusal.code, 400);
+        assert_eq!(refusal.reason, AFTER_ERROR);
     }
     #[test]
     fn reduced_projection_uses_the_canonical_decimal_spelling_and_no_internal_fields() {
