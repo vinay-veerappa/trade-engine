@@ -232,7 +232,7 @@ Rust owns (`te_core::oms::flow`, driven through `crates/te_py/src/flow.rs`):
 
 Python keeps: the clock, the ledger (append, reads, the fold handle), the broker
 (submit, cancel, replace, orders, fills, capabilities), and the error classes. The
-pure helpers (`_validate_quantity`, `_split_quantity`, fingerprints and the others)
+pure helpers (`_split_quantity`, fingerprints and the others)
 stay the P3b-2a shims; they are the only 10 decide ops left. The 71 decide arms the
 switched manager no longer calls were removed from `te_core::oms::manager`.
 
@@ -579,7 +579,7 @@ extension: **no ledger rewrite or decimal migration**.
 **P4C-T1 only**, based on `038045ac9f8e94c01fe9201e335f9404bff70ed7`.
 The standalone oracle commit is
 `4d8d505f63ea909c19ab1d217f0a6e062a4fca65`: only
-`tests/frozen_p4c/lock.py`, copied before production edits. Its Git blob
+its `lock.py`, copied before production edits; that frozen copy was retired in W5 P0 (fa13c38) with the parity tests. Its Git blob
 `47a9deb5c145210fc4e8e8b03fa30a5579bf397e` is identical to the base's production
 lock. The oracle remains immutable; no pre-existing test was edited.
 
@@ -968,8 +968,8 @@ recorded-session parity and all later P4c tickets remain unverified.
 Dependency: this worktree/branch `te/p4c-t4` was created from **unmerged**
 `te/p4c-t3` commit `dc1bed0581782b6cb2e82f6390007b025cfb4bec`, including T1
 `7f20078d`. The oracle-only commit, made before production edits, is
-`c27a4fdcc9b4203bdbb00af51d2f2348aca29d31`: current store/reader frozen under
-`tests/frozen_p4c`, with only frozen lock/mutual imports redirected. T1's
+`c27a4fdcc9b4203bdbb00af51d2f2348aca29d31`: current store/reader frozen under a
+P4C frozen tree (retired in W5 P0, fa13c38, with the parity tests), with only frozen lock/mutual imports redirected. T1's
 immutable lock blob remains `47a9deb5c145210fc4e8e8b03fa30a5579bf397e`.
 All frozen files remain unchanged; parent-owned plans were not edited.
 

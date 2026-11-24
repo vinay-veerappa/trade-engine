@@ -11,6 +11,7 @@ use crate::ledger::model::{dec_eq, derr, err, ComboLeg, Instrument, LErr, Order,
 use crate::ledger::ops::{add, div, eq, mul, mul_i, neg, sub, zero};
 use crate::sim::{dmax, dmin};
 use crate::money::Money;
+use crate::oms::manager::terminal;
 use crate::options::Right;
 use crate::sim::snapshot::underlying_of;
 
@@ -27,10 +28,6 @@ pub struct Open {
     pub opened_fill: usize,
     pub target_order_id: Option<String>,
     pub closing_order_id: Option<String>,
-}
-
-fn terminal(s: OrderState) -> bool {
-    matches!(s, OrderState::Filled | OrderState::Cancelled | OrderState::Rejected | OrderState::Expired)
 }
 
 fn working(o: &Order) -> bool {

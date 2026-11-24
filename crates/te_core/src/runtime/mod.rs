@@ -9,6 +9,11 @@ pub mod journal;
 
 use crate::ledger::model::{err, R};
 
+/// Python's `str.strip()` with no argument: Rust's Unicode whitespace plus U+001C..U+001F.
+pub(crate) fn py_strip(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
+
 #[derive(Default)]
 pub struct Plan {
     pub text: Vec<String>,

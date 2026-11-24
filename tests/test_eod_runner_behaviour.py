@@ -136,10 +136,6 @@ def test_config_keeps_a_valid_bar_age_and_settle_delay() -> None:
     assert cfg.settle_delay == timedelta(microseconds=5)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding: EodRunnerConfig accepts a NaN bars_max_age_seconds; the frozen oracle did too",
-)
 def test_config_refuses_a_nan_bar_age() -> None:
     with pytest.raises(EodRunnerError, match="bars_max_age_seconds must be positive"):
         _config(bars_max_age_seconds=float("nan"))
@@ -189,6 +185,7 @@ def test_snapshot_without_the_underlying_quote_time_is_stale(intraday: Rig) -> N
         ({"underlying": ""}, "underlying must be non-empty"),
         ({"eod_job_name": ""}, "eod_job_name must name the after-close job whose marker gates the next session"),
         ({"max_quote_age_seconds": 0}, "quote age and tick must be positive"),
+        ({"max_quote_age_seconds": float("nan")}, "quote age and tick must be positive"),
         ({"heartbeat_ttl_seconds": 0}, "heartbeat ttl and close-mark window must be positive"),
         ({"entry_end": time(16)}, "entry_end must not come after flat_at"),
         ({"flat_before_close": timedelta(0)}, "flat_before_close must be positive and no later than entry_before_close"),

@@ -414,10 +414,6 @@ class OrderManager:
     def _fingerprint_order(order: Order) -> str:
         return _plan("fingerprint", payload=encode_payload(order))
 
-    @staticmethod
-    def _validate_quantity(instrument: Instrument, quantity: Decimal) -> None:
-        _plan("quantity", equity=isinstance(instrument, Equity), quantity=quantity)
-
     @classmethod
     def _split_quantity(
         cls, quantity: Decimal, count: int, instrument: Instrument

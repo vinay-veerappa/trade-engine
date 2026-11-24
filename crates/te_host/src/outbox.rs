@@ -119,20 +119,20 @@ impl Store {
         rows.collect()
     }
 
-    pub fn deliver_outbox(&self, id: Value, timestamp: Value) -> sql::Result<()> {
+    /// Marks one row delivered and returns how many rows changed (0 for an unknown id).
+    pub fn deliver_outbox(&self, id: Value, timestamp: Value) -> sql::Result<usize> {
         self.execute(
             "UPDATE outbox SET status = 'DELIVERED', delivered_at = ? WHERE id = ?",
             &[timestamp, id],
-        )?;
-        Ok(())
+        )
     }
 
-    pub fn fail_outbox(&self, id: Value, error: Value) -> sql::Result<()> {
+    /// Marks one row failed and returns how many rows changed (0 for an unknown id).
+    pub fn fail_outbox(&self, id: Value, error: Value) -> sql::Result<usize> {
         self.execute(
             "UPDATE outbox SET status = 'FAILED', attempts = attempts + 1, last_error = ? WHERE id = ?",
             &[error, id],
-        )?;
-        Ok(())
+        )
     }
 
     pub fn set_meta(&self, key: Value, value: Value) -> sql::Result<()> {

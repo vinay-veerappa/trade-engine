@@ -143,16 +143,6 @@ def test_allocation_of_an_option_may_be_fractional() -> None:
     assert OrderManager._allocate_quantity(D("1"), (D("1"), D("1")), OPTION) == (D("0.5"), D("0.5"))
 
 
-def test_a_whole_equity_quantity_validates_and_a_fractional_one_is_refused() -> None:
-    assert OrderManager._validate_quantity(EQUITY, D("100")) is None
-    with pytest.raises(ValueError, match="whole number of shares, got 1.5"):
-        OrderManager._validate_quantity(EQUITY, D("1.5"))
-
-
-def test_an_option_quantity_validates_when_fractional() -> None:
-    assert OrderManager._validate_quantity(OPTION, D("0.5")) is None
-
-
 def _order(quantity: str) -> Order:
     return Order(
         order_id="o1", account_id=ACCOUNT, instrument=EQUITY, order_type=OrderType.MARKET,

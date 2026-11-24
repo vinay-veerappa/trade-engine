@@ -10,6 +10,7 @@ use crate::ledger::json::{self, dumps, Json};
 use crate::ledger::model::{err, Instrument, LErr, Order, OrderState, OrderType, Side, Tif, R};
 use crate::ledger::ops::{add, eq, gt, mul_i, ne, zero};
 use crate::money::Money;
+use crate::oms::manager::terminal;
 use crate::oms::structures::{is_structure, legs_of, open_structures, uncovered_calls, Open};
 use crate::options::pyrules::strip;
 use crate::options::Right;
@@ -170,10 +171,6 @@ pub fn close_target_conflict(command_id: &str, closed: Option<&str>, entry_order
 }
 
 // --- open ---------------------------------------------------------------------------------
-
-fn terminal(s: OrderState) -> bool {
-    matches!(s, OrderState::Filled | OrderState::Cancelled | OrderState::Rejected | OrderState::Expired)
-}
 
 fn option_err<T>(msg: impl Into<String>) -> R<T> {
     err("option", msg)
