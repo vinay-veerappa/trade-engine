@@ -26,8 +26,7 @@ from trade_engine.domain.instruments import OptionContract
 from trade_engine.domain.option_roots import SettleTime, option_style
 from trade_engine.interfaces.market_data import OptionQuote, StaleDataError
 from trade_engine.market_data.chains import ChainSnapshotStore
-from trade_engine._lifecycle_runtime import journal, register
-from trade_engine.sim._rs import rs
+from trade_engine.sim._rs import call, register, rs
 
 register("stale", StaleDataError)
 
@@ -48,7 +47,7 @@ class SettlementPrice:
     as_of: datetime
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "underlying", journal("symbol", self.underlying))
+        object.__setattr__(self, "underlying", call(rs.journal_symbol, self.underlying))
         rs.lifecycle_value(True, self.underlying and "_", isinstance(self.price, Decimal),
                            str(self.price) if isinstance(self.price, Decimal) else "",
                            "SettlementPrice", repr(self.price), bool(self.source))
@@ -94,7 +93,7 @@ class Dividend:
     as_of: datetime
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "symbol", journal("symbol", self.symbol))
+        object.__setattr__(self, "symbol", call(rs.journal_symbol, self.symbol))
         rs.lifecycle_value(False, self.symbol and "_", isinstance(self.amount, Decimal),
                            str(self.amount) if isinstance(self.amount, Decimal) else "",
                            "Dividend", repr(self.amount), bool(self.source))

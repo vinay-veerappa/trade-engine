@@ -2,7 +2,7 @@
 //! it preserves Python's accepted syntax, object conversion and exception spelling.
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString};
 use te_core::runtime::journal as rules;
 
 fn get<'py>(obj: &Bound<'py, PyAny>, key: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -162,58 +162,104 @@ fn matches(e: &Bound<'_,PyAny>, fill: &Bound<'_,PyAny>, body: &Bound<'_,PyAny>, 
     Ok(true)
 }
 #[pyfunction]
-fn runtime_journal(py: Python<'_>, op: &str, args: &Bound<'_,PyTuple>) -> PyResult<Py<PyAny>> {
-    let a=|i|args.get_item(i);
-    let out: Bound<'_,PyAny> = match op {
-        "stamp"=>stamp(&a(0)?,&a(1)?)?,
-        "parse"=>parse(&a(0)?)?,
-        "tags"=>tags(&a(0)?)?.into_any(),
-        "execution"=>execution(&a(0)?)?.into_any(),
-        "payload"=>payload(&a(0)?,&a(1)?,&a(2)?)?.into_any(),
-        "symbol"=>symbol(&a(0)?)?.into_bound(py),
-        "before"=>a(0)?.lt(a(1)?)?.into_pyobject(py)?.to_owned().into_any(),
-        "after"=>a(0)?.gt(a(1)?)?.into_pyobject(py)?.to_owned().into_any(),
-        "candidates"=>candidates(&a(0)?,&a(1)?,false)?,
-        "annotation_trade"=>candidates(&a(0)?,&a(1)?,true)?,
-        "patch"=>patch(&a(0)?,&a(1)?)?.into_any(),
-        "match"=>matches(&a(0)?,&a(1)?,&a(2)?,&a(3)?)?.into_pyobject(py)?.to_owned().into_any(),
-        "accepted"=> {
-            // HTTP status normally is int; rich comparisons also preserve lax fake clients.
-            let status=a(0)?;
-            rules::accepted_comparisons(status.lt(200)?,status.ge(300)?).into_pyobject(py)?.to_owned().into_any()
-        },
-        "account"=>rules::account_matches(a(0)?.eq(a(1)?)?).into_pyobject(py)?.to_owned().into_any(),
-        "derivative"=>rules::derivative(a(0)?.gt(1)?).into_pyobject(py)?.to_owned().into_any(),
-        "annotations"=>rules::annotation_present(!a(0)?.is_none(),!a(1)?.is_none(),a(2)?.is_truthy()?).into_pyobject(py)?.to_owned().into_any(),
-        "stored"=> {
-            // Python's int() is deliberately unbounded and supplies its exact refusals.
-            let int=py.import("builtins")?.getattr("int")?;
-            let body=a(0)?;
-            let mut values=Vec::new();
-            for k in ["inserted","duplicates","skipped"] {
-                values.push(int.call1((default(&body,k,0i64.into_pyobject(py)?.into_any())?,))?);
-            }
-            let total=values[0].call_method1("__add__",(&values[1],))?;
-            rules::stored_comparisons(total.ge(1)?,values[2].gt(0)?).into_pyobject(py)?.to_owned().into_any()
-        },
-        "multiplier"=> {
-            let existing=a(0)?; let sym=a(1)?; let multiplier=a(2)?;
-            let out=PyDict::new(py);
-            let action=rules::multiplier_action(!existing.is_none(),
-                !existing.is_none() && existing.call_method1("get",(&sym,))?.eq(&multiplier)?);
-            out.set_item("action",action)?;
-            if action == "patch" {
-                let merged=existing.call_method0("copy")?;
-                merged.set_item(sym,multiplier)?;
-                out.set_item("multipliers",merged)?;
-            }
-            out.into_any()
-        },
-        _=>return Err(PyValueError::new_err(format!("Unknown journal decision {op}"))),
-    };
-    Ok(out.unbind())
+fn journal_stamp(value: &Bound<'_,PyAny>, seq: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(stamp(value,seq)?.unbind())
+}
+#[pyfunction]
+fn journal_parse(value: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(parse(value)?.unbind())
+}
+#[pyfunction]
+fn journal_tags(trade: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(tags(trade)?.into_any().unbind())
+}
+#[pyfunction]
+fn journal_execution(d: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(execution(d)?.into_any().unbind())
+}
+#[pyfunction]
+fn journal_payload(account: &Bound<'_,PyAny>, seq: &Bound<'_,PyAny>, e: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(payload(account,seq,e)?.into_any().unbind())
+}
+#[pyfunction]
+fn journal_symbol(value: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    symbol(value)
+}
+#[pyfunction]
+fn journal_candidates(trades: &Bound<'_,PyAny>, sym: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(candidates(trades,sym,false)?.unbind())
+}
+#[pyfunction]
+fn journal_annotation_trade(trades: &Bound<'_,PyAny>, sym: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(candidates(trades,sym,true)?.unbind())
+}
+#[pyfunction]
+fn journal_patch(e: &Bound<'_,PyAny>, trade: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(patch(e,trade)?.into_any().unbind())
+}
+#[pyfunction]
+fn journal_match(e: &Bound<'_,PyAny>, fill: &Bound<'_,PyAny>, body: &Bound<'_,PyAny>, sent: &Bound<'_,PyAny>) -> PyResult<bool> {
+    matches(e,fill,body,sent)
+}
+#[pyfunction]
+fn journal_accepted(status: &Bound<'_,PyAny>) -> PyResult<bool> {
+    // HTTP status normally is int; rich comparisons also preserve lax fake clients.
+    Ok(rules::accepted_comparisons(status.lt(200)?,status.ge(300)?))
+}
+#[pyfunction]
+fn journal_account(a: &Bound<'_,PyAny>, b: &Bound<'_,PyAny>) -> PyResult<bool> {
+    Ok(rules::account_matches(a.eq(b)?))
+}
+#[pyfunction]
+fn journal_derivative(v: &Bound<'_,PyAny>) -> PyResult<bool> {
+    Ok(rules::derivative(v.gt(1)?))
+}
+#[pyfunction]
+fn journal_annotations(a: &Bound<'_,PyAny>, b: &Bound<'_,PyAny>, c: &Bound<'_,PyAny>) -> PyResult<bool> {
+    Ok(rules::annotation_present(!a.is_none(),!b.is_none(),c.is_truthy()?))
+}
+#[pyfunction]
+fn journal_stored(body: &Bound<'_,PyAny>) -> PyResult<bool> {
+    // Python's int() is deliberately unbounded and supplies its exact refusals.
+    let py=body.py();
+    let int=py.import("builtins")?.getattr("int")?;
+    let mut values=Vec::new();
+    for k in ["inserted","duplicates","skipped"] {
+        values.push(int.call1((default(body,k,0i64.into_pyobject(py)?.into_any())?,))?);
+    }
+    let total=values[0].call_method1("__add__",(&values[1],))?;
+    Ok(rules::stored_comparisons(total.ge(1)?,values[2].gt(0)?))
+}
+#[pyfunction]
+fn journal_multiplier(existing: &Bound<'_,PyAny>, sym: &Bound<'_,PyAny>, multiplier: &Bound<'_,PyAny>) -> PyResult<Py<PyAny>> {
+    let py=existing.py();
+    let out=PyDict::new(py);
+    let action=rules::multiplier_action(!existing.is_none(),
+        !existing.is_none() && existing.call_method1("get",(sym,))?.eq(multiplier)?);
+    out.set_item("action",action)?;
+    if action == "patch" {
+        let merged=existing.call_method0("copy")?;
+        merged.set_item(sym,multiplier)?;
+        out.set_item("multipliers",merged)?;
+    }
+    Ok(out.into_any().unbind())
 }
 pub fn register(m: &Bound<'_,PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(runtime_journal,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_stamp,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_parse,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_tags,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_execution,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_payload,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_symbol,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_candidates,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_annotation_trade,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_patch,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_match,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_accepted,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_account,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_derivative,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_annotations,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_stored,m)?)?;
+    m.add_function(wrap_pyfunction!(journal_multiplier,m)?)?;
     Ok(())
 }

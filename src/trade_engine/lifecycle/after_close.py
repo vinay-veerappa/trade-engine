@@ -29,7 +29,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 
-from trade_engine._lifecycle_runtime import register
+from trade_engine.sim._rs import register
 from trade_engine.interfaces.market_data import StaleDataError
 from trade_engine.ledger import Event, Ledger
 from trade_engine.lifecycle.sources import Dividends, OptionQuotes, Settlements
