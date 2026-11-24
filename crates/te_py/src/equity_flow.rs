@@ -118,6 +118,10 @@ impl<'py> EquityEntryHost for Inputs<'py> {
             intent.getattr("intent_id")?.extract()?], vec![])?;
         Ok(())
     }
+    fn recorded(&self, intent: &Self::Value) -> PyResult<Option<Self::Value>> {
+        let verdict = self.runner.call_method1("recorded_verdict", (&self.account, intent))?;
+        Ok(if verdict.is_none() { None } else { Some(verdict) })
+    }
     fn evaluate(&self, intent: &Self::Value) -> PyResult<Self::Value> {
         let state = self.runner.getattr("_ledger")?.call_method1("state", (&self.account,))?;
         let builder = self.config()?.getattr("context_builder")?;

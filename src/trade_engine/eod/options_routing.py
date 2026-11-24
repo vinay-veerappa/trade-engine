@@ -108,7 +108,11 @@ class OptionRouter:
         )
 
     def taken(self, action: Any) -> bool:
-        """Whether an action was already routed: ordered, or (an entry) judged by risk."""
+        """Whether an action was already routed: ordered, or (an entry) refused by risk.
+
+        An entry whose verdict was accepted but whose order never went out is not taken:
+        the interrupted entry resumes its open on the next pass (F3).
+        """
         command_id = getattr(action, "command_id", None)
         if not command_id:
             return False
@@ -116,7 +120,14 @@ class OptionRouter:
             return True
         if not flag("routing:risk_lookup", flags=(bool(command_id), isinstance(action, OptionIntent))):
             return False
-        return flag("routing:taken", flags=(True, False, True, self._ledger.has_command(f"risk:{command_id}")))
+        verdict = self.recorded_verdict(action.account_id, action)
+        refused = verdict is not None and not verdict.accepted
+        return flag("routing:taken", flags=(True, False, verdict is not None, refused))
+
+    def recorded_verdict(self, account_id: str, intent: OptionIntent) -> RiskVerdict | None:
+        """The verdict an earlier, interrupted run recorded for this intent, if any (F3)."""
+        event = self._ledger.event_by_command(f"risk:{intent.command_id}")
+        return None if event is None else event.payload
 
     # -- the snapshot pass -------------------------------------------------------
 
