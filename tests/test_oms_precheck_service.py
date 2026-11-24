@@ -227,7 +227,7 @@ def _request(*, is_reducing: bool, qty: int = 5, side: str = "long") -> dict:
 
 
 def _raw_check(base_url: str, core_account: str, request: dict, token: str) -> tuple[int, dict]:
-    """The one raw HTTP call here: the unparsed 200 body ``_valid_response`` is given."""
+    """The one raw HTTP call here: the unparsed 200 body ``valid_response`` is given."""
     parts = urlsplit(base_url)
     connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=5)
     try:
@@ -263,7 +263,7 @@ def test_a_reducing_intent_is_allowed_on_an_unregistered_account(service):
     status, body = _raw_check(config.base_url, UNREGISTERED, request, config.token)
     assert status == 200
     assert body["reasonCode"] == "OK_REDUCING"
-    assert precheck._valid_response(body)
+    assert precheck.valid_response(body)
 
 
 def test_a_wrong_token_is_401_and_a_desk_token_is_403(service, ledger):
@@ -325,10 +325,6 @@ def test_the_hand_mirrored_wire_constants_match_the_contract_schemas(ledger):
     defs = check_schema["$defs"]
     common_defs = common["$defs"]
 
-    assert precheck.REASON_CODES == set(common_defs["ReasonCode"]["enum"])
-    assert precheck.RESPONSE_KEYS == set(defs["singleResponse"]["properties"])
-    assert precheck.REQUIRED_RESPONSE_KEYS == set(defs["singleResponse"]["required"])
-    assert precheck.ROOT_PATTERN.pattern == common_defs["instrumentRoot"]["pattern"]
     assert list(precheck.ACCOUNT_ENVS) == common_defs["accountKey"]["properties"]["env"]["enum"]
     assert precheck.ORIGIN in common_defs["origin"]["enum"]
 

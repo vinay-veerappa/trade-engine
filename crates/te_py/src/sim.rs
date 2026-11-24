@@ -84,7 +84,7 @@ pub(crate) fn instrument(text: &str) -> LR<Instrument> {
     }
 }
 
-fn side(s: &str) -> LR<Side> {
+pub(crate) fn side(s: &str) -> LR<Side> {
     Side::parse(s).map_or_else(|| err("value", format!("bad side {s:?}")), Ok)
 }
 

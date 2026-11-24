@@ -32,7 +32,7 @@ from trade_engine.oms.precheck import (
     AccountBinding,
     PrecheckConfig,
     PrecheckConfigError,
-    _valid_response,
+    valid_response,
 )
 from trade_engine.tradovate.adapter import ORDER_ID_CAP, TradovateAdapter
 from trade_engine.tradovate.ntx_client import NtxClient, NtxError, NtxToken
@@ -549,9 +549,9 @@ def test_an_allowed_check_puts_the_verdict_on_the_order_handed_to_send(ledger, g
 
 
 def test_checked_at_is_optional_in_the_response(ledger, guard):
-    assert _valid_response({**ALLOWED, "checkedAt": "2026-11-17T15:00:01.000Z"})
-    assert _valid_response(ALLOWED)
-    assert not _valid_response({**ALLOWED, "checkedAt": 5})
+    assert valid_response({**ALLOWED, "checkedAt": "2026-11-17T15:00:01.000Z"})
+    assert valid_response(ALLOWED)
+    assert not valid_response({**ALLOWED, "checkedAt": 5})
     broker = FakeBroker()
     manager = OrderManager(broker, OmsClock(), ledger, precheck=guard_config(guard))
     manager.submit(oms_order("entry-3", Side.BUY, "1"))  # an old service answer still passes the check
