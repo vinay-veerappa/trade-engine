@@ -933,6 +933,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     mirror_loop::register(m)?;
     tos_paper::register(m)?;
     tos_paper_session::register(m)?;
+    tos_paper_rules::register(m)?;
     snapshot::register(m)?;
     market_data::register(m)?;
     Ok(())
@@ -942,5 +943,6 @@ mod market_data;
 mod runtime;
 mod tos_paper;
 mod tos_paper_session;
+mod tos_paper_rules;
 mod snapshot;
 
