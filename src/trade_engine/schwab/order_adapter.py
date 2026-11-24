@@ -35,6 +35,7 @@ from trade_engine.interfaces.broker import (
     VenueOrder,
 )
 from trade_engine.interfaces.clock import Clock
+from trade_engine.live_ack import REFUSAL_CODE
 from trade_engine.oms.precheck import OPEN_SUFFIX, Precheck
 from trade_engine.schwab.orders import (
     SUPPORTED_ORDER_TYPES,
@@ -50,6 +51,7 @@ log = logging.getLogger(__name__)
 
 ORDER_ID_CAP = 512
 DEFAULT_RESOLVE_WINDOW_S = 120
+_ENVS = ("sim", "paper", "live")
 
 # (account_id, instrument) -> the account's signed position (long > 0)
 PositionFn = Callable[[str, Instrument], Decimal]
@@ -82,13 +84,20 @@ class SchwabOrderAdapter:
         *,
         precheck: Precheck | None = None,
         resolve_window_s: int = DEFAULT_RESOLVE_WINDOW_S,
+        env: str = "paper",
+        live_ack: bool = False,
     ) -> None:
+        if env not in _ENVS:
+            raise ValueError(f"env must be one of {_ENVS}, not {env!r}")
         self._client = client
         self._hashes = dict(account_hashes)
         self._clock = clock
         self._position = position
         self._precheck = precheck
         self._window = timedelta(seconds=resolve_window_s)
+        # I10: a live adapter without the acknowledgement refuses to place or modify. Cancel stays.
+        self._env = env
+        self._live_ack = live_ack
         self._orders: OrderedDict[str, _Record] = OrderedDict()
         self.capabilities = Capabilities(
             supported_order_types=SUPPORTED_ORDER_TYPES,
@@ -104,6 +113,8 @@ class SchwabOrderAdapter:
         accounts = {a.account_id for a in order.allocations}
         if len(accounts) != 1:
             raise UnsupportedCapability("netted orders not supported on schwab")
+        if self._live_refused():
+            return self._refused(order.venue_order_id, "place", order.allocations[0].account_id, REFUSAL_CODE)
         if order.venue_order_id in self._orders:
             # D-5: a command id is sent once; a repeat gets the recorded state, never a resend.
             return self._ack(order.venue_order_id, self._orders[order.venue_order_id])
@@ -179,6 +190,8 @@ class SchwabOrderAdapter:
         return self._result_ack(venue_order_id, result)
 
     def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
+        if self._live_refused():
+            return self._refused(venue_order_id, "replace", None, REFUSAL_CODE)
         if self._precheck is not None:
             return self._precheck.replace(venue_order_id, changes, self._replace)
         return self._replace(venue_order_id, changes)
@@ -213,6 +226,9 @@ class SchwabOrderAdapter:
         return record.schwab_id if record else None
 
     # --- helpers ------------------------------------------------------------------------------
+
+    def _live_refused(self) -> bool:
+        return self._env == "live" and not self._live_ack
 
     def _remember(self, venue_order_id: str, record: _Record) -> None:
         self._orders[venue_order_id] = record

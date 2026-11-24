@@ -47,6 +47,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from trade_engine.clock.wall import WallClock, monotonic_seconds
+from trade_engine.live_ack import live_acknowledged
 from trade_engine.schwab.adapter import SchwabAccountsAdapter, SchwabAccountsConfig
 from trade_engine.schwab.hub_client import KINDS as HUB_FAILURE_KINDS
 from trade_engine.schwab.hub_client import HubAccountsClient, HubReadError, hub_base_url
@@ -490,6 +491,7 @@ class Feed:
             on_poll=sink.observe,
             trading_day=cme_trading_day if config.pnl_enabled else None,
             ledger=ledger,
+            live_ack=live_acknowledged(environ),  # I10: live orders need the explicit acknowledgement
         )
         schwab = SchwabFeed.build(
             environ,

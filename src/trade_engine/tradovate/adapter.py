@@ -74,6 +74,7 @@ from trade_engine.interfaces.broker import (
     VenuePosition,
 )
 from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
+from trade_engine.live_ack import REFUSAL_CODE
 from trade_engine.tradovate.ntx_client import (
     NtxClient,
     NtxError,
@@ -173,10 +174,13 @@ class TradovateAdapter:
         trading_day: Callable[[datetime], date] | None = None,
         on_poll=None,
         account_bindings: Mapping[str, Any] | None = None,
+        live_ack: bool = False,
     ) -> None:
         self._client = client
         # engine account id -> binding whose account_key["brokerAccountId"] is the ntx account
         self._bindings = dict(account_bindings or {})
+        # I10: a live account's place or modify is refused without the acknowledgement; cancel is not.
+        self._live_ack = live_ack
         self._orders: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # OA-5: reconcile verdicts for PENDING entries, read back by the OMS through `orders()`.
         self._resolved: OrderedDict[str, VenueOrderState] = OrderedDict()
@@ -670,6 +674,8 @@ class TradovateAdapter:
             raise UnsupportedCapability("netted orders not supported on tradovate")
         engine_account = next(iter(accounts))
         cl = order.venue_order_id
+        if self._live_refused(self._ntx_account(engine_account)):
+            return self._refused(cl, "place", engine_account, REFUSAL_CODE)
         # Local refusals: nothing reaches ntx unstopped, unchecked or unmapped.
         if order.protective_stop_price is None:
             return self._refused(cl, "place", engine_account, "no_stop")
@@ -721,6 +727,8 @@ class TradovateAdapter:
         if len(accounts) != 1:
             raise UnsupportedCapability("netted orders not supported on tradovate")
         ntx_account = self._ntx_account(next(iter(accounts)))
+        if self._live_refused(ntx_account):
+            return self._refused(cl, "adopt", ntx_account, REFUSAL_CODE)
         parent = self._orders.get(order.parent_order_id)
         if parent is None:
             return self._refused(cl, "adopt", ntx_account, "unknown_parent")
@@ -799,6 +807,8 @@ class TradovateAdapter:
         if known is None:
             return self._refused(venue_order_id, "modify", None, "unknown_order")
         account = known["account"]
+        if self._live_refused(account):
+            return self._refused(venue_order_id, "modify", account, REFUSAL_CODE)
         if changes.new_limit_price is not None and changes.new_stop_price is not None:
             return self._refused(venue_order_id, "modify", account, "one_change_only")
         qty = Decimal(known["qty"]) if changes.new_quantity is None else changes.new_quantity
@@ -841,6 +851,21 @@ class TradovateAdapter:
         return ack
 
     # -- order helpers -------------------------------------------------------------
+
+    def _live_refused(self, ntx_account: str | None) -> bool:
+        """I10: a live account's place or modify needs the acknowledgement.
+
+        The env is the account's identity env from the last snapshot. An account the adapter has
+        not read has no known env and is not treated as live here; connect() reads first.
+        """
+        if self._live_ack or ntx_account is None:
+            return False
+        account = self._kept.get(_accounts_rs.key(BROKER, ntx_account))
+        if account is None:
+            return False
+        identity = self._identities.get(account.identity)
+        env = identity.env if identity is not None else account.record.env
+        return env == "live"
 
     def _ntx_account(self, engine_account: str) -> str | None:
         binding = self._bindings.get(engine_account)
