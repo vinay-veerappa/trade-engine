@@ -16,7 +16,7 @@ from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.clock.replay import ReplayClock
 from trade_engine.clock.wall import WallClock
 from trade_engine.eod import EodRunner, EodRunnerConfig, PluginDiscoveryError, discover_plugins
-from trade_engine.eod.runner import EodRunnerError, _void_command, void_session, write_off_order
+from trade_engine.eod.runner import EodRunnerError, void_session, write_off_order
 from trade_engine.ledger import Ledger
 from trade_engine.ledger._rs import call as rs_call
 from trade_engine.sim import SimBroker
@@ -68,7 +68,7 @@ def run_void(args: argparse.Namespace) -> int:
         return 2
     session = args.session
     with Ledger(ledger_path) as ledger:
-        before = {a for a in accounts if ledger.event_by_command(_void_command("eod", a, session))}
+        before = {a for a in accounts if ledger.event_by_command(_rs.eod_void_command("eod", a, session))}
         try:
             done = void_session(
                 ledger, WallClock(), ExchangeCalendar(), "eod", session, accounts,

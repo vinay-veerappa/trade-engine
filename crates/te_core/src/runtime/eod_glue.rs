@@ -8,7 +8,7 @@
 //! Nothing here touches a plugin (broker, strategy, risk engine, market data, chain
 //! snapshots, lifecycle, dividends). Those belong to the W6-C2 EodHost.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone, Utc};
 
@@ -403,6 +403,32 @@ pub fn replay_instruments(state: &AccountState) -> R<Vec<Instrument>> {
         eod::replay_instrument(symbol, matches!(instrument, Instrument::Equity(_)))?;
     }
     Ok(ordered.into_iter().map(|(_, instrument)| instrument).collect())
+}
+
+/// The venue must hold every working order, filled at least as far as the ledger records
+/// (I5). `held` maps each venue order id to the venue's filled quantity as the venue spells
+/// it (Python `str(Decimal)`, so `"2.0"` stays `"2.0"` in the refusal text). Orders are
+/// checked in order_id order, so the first refusal is the same one the Python loop raised.
+pub fn check_venue(account: &str, state: &AccountState, held: &BTreeMap<String, String>) -> R<()> {
+    let mut orders: Vec<&Order> = state.orders.values().collect();
+    orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
+    for order in orders {
+        if !eod::working(order.state.value()) {
+            continue;
+        }
+        let venue_id = match state.venue_order_ids.get(&order.order_id) {
+            Some(id) => id.clone(),
+            None => order.order_id.clone(),
+        };
+        let found = held.get(&venue_id);
+        let venue_filled = found.map_or("0", String::as_str);
+        let recorded = match state.filled_quantity.get(&order.order_id) {
+            Some(filled) => text(filled),
+            None => "0".to_string(),
+        };
+        eod::rehydrate(account, &order.order_id, order.state.value(), found.is_some(), venue_filled, &recorded)?;
+    }
+    Ok(())
 }
 
 /// The underlyings the account needs snapshots for: open options and working orders.
@@ -1703,5 +1729,72 @@ mod tests {
         let symbols: Vec<String> = replay_instruments(&state).expect("replay").iter()
             .map(|i| i.symbol().expect("symbol")).collect();
         assert_eq!(symbols, vec!["AAPL".to_string(), "SPY".to_string()]);
+    }
+
+    fn cancel(l: &mut MemLedger, order_id: &str) {
+        let payload = Obj::StateChange(OrderStateChange { order_id: order_id.into(), reason: Some("test".into()), venue_order_id: None });
+        put(l, "A", EventKind::OrderCancelled, payload, &format!("cancel:{order_id}"));
+    }
+
+    fn venue(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(id, qty)| (id.to_string(), qty.to_string())).collect()
+    }
+
+    #[test]
+    fn check_venue_passes_when_every_working_order_is_held() {
+        let mut l = MemLedger::default();
+        created(&mut l, vec![order("W", "SPY", Side::Buy, OrderType::Limit, "3", None)]);
+        fill(&mut l, "F1", "W", "SPY", Side::Buy, "1", "100");
+        let state = l.state("A").expect("state");
+        check_venue("A", &state, &venue(&[("W", "1")])).expect("held and filled");
+        check_venue("A", &state, &venue(&[("W", "2")])).expect("venue ahead of the ledger");
+    }
+
+    #[test]
+    fn check_venue_refuses_a_working_order_the_venue_lacks() {
+        let mut l = MemLedger::default();
+        created(&mut l, vec![order("W", "SPY", Side::Buy, OrderType::Limit, "3", None)]);
+        let state = l.state("A").expect("state");
+        let refused = check_venue("A", &state, &venue(&[])).expect_err("not held");
+        assert_eq!(refused.kind, "runtime_eod");
+        let working = state.orders.get("W").expect("order").state.value();
+        assert_eq!(
+            refused.msg,
+            format!("Venue for 'A' does not hold working order 'W' ({working}); refusing to replay a session it could never fill in (I5)")
+        );
+    }
+
+    #[test]
+    fn check_venue_refuses_a_venue_filled_less_than_the_ledger() {
+        let mut l = MemLedger::default();
+        created(&mut l, vec![order("W", "SPY", Side::Buy, OrderType::Limit, "3", None)]);
+        fill(&mut l, "F1", "W", "SPY", Side::Buy, "1", "100");
+        let state = l.state("A").expect("state");
+        let refused = check_venue("A", &state, &venue(&[("W", "0.5")])).expect_err("under-filled");
+        assert_eq!(refused.kind, "runtime_eod");
+        assert_eq!(refused.msg, "Venue reports 0.5 filled for 'W' but the ledger records 1 (I5)");
+        // The venue's own spelling reaches the text: Python's str(Decimal("0.50")) is "0.50".
+        let refused = check_venue("A", &state, &venue(&[("W", "0.50")])).expect_err("under-filled");
+        assert_eq!(refused.msg, "Venue reports 0.50 filled for 'W' but the ledger records 1 (I5)");
+    }
+
+    #[test]
+    fn check_venue_ignores_a_terminal_order_the_venue_lacks() {
+        let mut l = MemLedger::default();
+        created(&mut l, vec![order("W", "SPY", Side::Buy, OrderType::Limit, "3", None)]);
+        cancel(&mut l, "W");
+        let state = l.state("A").expect("state");
+        check_venue("A", &state, &venue(&[])).expect("a cancelled order needs no venue");
+    }
+
+    /// `text` is `str(Decimal)` for canonical values. Money spells in canonical form, so a
+    /// trailing zero is dropped (`"2.0"` reads back as `"2"`); that is why `check_venue` takes
+    /// the venue's own text rather than a Money.
+    #[test]
+    fn decimal_text_matches_python_str_decimal() {
+        assert_eq!(text(&money("0")), "0");
+        assert_eq!(text(&money("2")), "2");
+        assert_eq!(text(&money("1.5")), "1.5");
+        assert_eq!(text(&money("2.0")), "2");
     }
 }
