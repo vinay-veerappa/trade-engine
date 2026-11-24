@@ -105,6 +105,7 @@ def run_write_off(args: argparse.Namespace) -> int:
             done = write_off_order(
                 ledger, WallClock(), accounts[0], args.order.strip(),
                 reason=args.reason, owner=args.owner,
+                venue_cancel_confirmed=args.venue_cancel_confirmed,
             )
         except EodRunnerError as err:
             print(f"eod: refused: {err}", file=sys.stderr)

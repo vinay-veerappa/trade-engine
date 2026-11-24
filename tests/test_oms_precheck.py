@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from trade_engine.domain.instruments import Equity, Side
+from trade_engine.domain.instruments import Equity, Future, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType
 from trade_engine.interfaces.broker import OrderChanges, RiskguardVerdict, VenueAck, VenueOrder, VenueOrderAllocation
 from trade_engine.ledger import Ledger
@@ -324,6 +324,41 @@ def test_buy_two_when_flat_is_sent_when_allowed_with_one_check(ledger, guard):
 
     assert [item.quantity for item in broker.submitted] == [Decimal("2")]
     assert len(guard.requests) == 1
+
+
+def test_a_future_mes_dec_2026_opening_order_sends_the_root_and_is_allowed(ledger, guard):
+    guard.body = ALLOWED
+    manager, broker = gated(ledger, config_for(guard))
+
+    result = manager.submit(order("mes-entry-2", Side.BUY, "2", instrument=Future("MES", 2026, 12)))
+
+    assert guard.requests[0]["body"]["instrument"] == "MES"
+    assert [item.quantity for item in broker.submitted] == [Decimal("2")]
+    assert result.state is not OrderState.REJECTED
+
+
+def test_a_future_nq_order_sends_the_root_not_the_dated_contract(ledger, guard):
+    guard.body = ALLOWED
+    manager, _broker = gated(ledger, config_for(guard))
+
+    manager.submit(order("nq-entry-1", Side.BUY, "1", instrument=Future("NQ", 2026, 12)))
+
+    assert len(guard.requests) == 1
+    assert guard.requests[0]["body"]["instrument"] == "NQ"
+
+
+def test_an_equity_order_still_sends_its_symbol_and_a_five_letter_one_is_refused(ledger, guard):
+    guard.body = ALLOWED
+    manager, broker = gated(ledger, config_for(guard))
+
+    manager.submit(order("aapl-entry-2", Side.BUY, "2"))
+    assert guard.requests[0]["body"]["instrument"] == "AAPL"
+    assert [item.quantity for item in broker.submitted] == [Decimal("2")]
+
+    refused = manager.submit(order("googl-entry-2", Side.BUY, "2", instrument=Equity("GOOGL")))
+    assert refused.state is OrderState.REJECTED
+    assert len(guard.requests) == 1
+    assert [item.venue_order_id for item in broker.submitted] == ["aapl-entry-2"]
 
 
 def test_sell_one_against_long_three_is_wholly_reducing_and_never_checked(ledger, guard):

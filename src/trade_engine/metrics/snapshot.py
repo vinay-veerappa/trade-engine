@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from trade_engine.domain.instruments import Instrument
+from trade_engine.domain.instruments import Instrument, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType
 from trade_engine.ledger.events import Event
 from trade_engine.ledger.state import AccountState, fold_account
@@ -85,19 +85,34 @@ def _working_stop_risk(state: AccountState, session: date) -> tuple[Decimal, tup
 
 
 def _protective_stop(state: AccountState, instrument: Instrument) -> Decimal | None:
-    """The stop price of a working order on the opposite side (reduce side) of a position."""
-    reduce_side = None
+    """The most conservative acknowledged stop on the reduce side of a position.
+
+    Only ACCEPTED or PARTIALLY_FILLED stops protect: a submitted stop the venue has not
+    acknowledged is not protection. Long positions reduce by selling (the lowest stop
+    is the most conservative); short positions reduce by buying (the highest).
+    """
+    position = state.positions.get(instrument)
+    if position is None or position.is_flat:
+        return None
+    reduce_side = Side.SELL if position.is_long else Side.BUY
+    best: Decimal | None = None
     for order in state.orders.values():
         if order.instrument != instrument or order.stop_price is None:
             continue
         if order.order_type not in (OrderType.STOP, OrderType.STOP_LIMIT):
             continue
-        if order.state not in (
-            OrderState.NEW, OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED,
-        ):
+        if order.state not in (OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED):
             continue
-        reduce_side = order  # last working stop on this instrument wins
-    return reduce_side.stop_price if reduce_side is not None else None
+        if order.side != reduce_side:
+            continue
+        stop = order.stop_price
+        if best is None:
+            best = stop
+        elif reduce_side == Side.SELL:
+            best = min(best, stop)
+        else:
+            best = max(best, stop)
+    return best
 
 
 def daily_snapshots(

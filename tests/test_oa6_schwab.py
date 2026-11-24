@@ -68,16 +68,20 @@ def listing(orders: list[dict]) -> tuple[int, str]:
     return 200, json.dumps({"status": 200, "order_id": None, "body": json.dumps(orders)})
 
 
-def listed(order_id: str, *, symbol="AAPL", instruction="BUY", qty=10, entered=CLOCK_NOW) -> dict:
+def listed(order_id: str, *, symbol="AAPL", instruction="BUY", qty=10, entered=CLOCK_NOW,
+           order_type="LIMIT", price="187.25") -> dict:
+    # Schwab lists orderType and price too; the defaults are venue_order()'s, what the tests send.
     return {"orderId": int(order_id), "enteredTime": entered.strftime("%Y-%m-%dT%H:%M:%S+0000"),
+            "orderType": order_type, "price": price,
             "orderLegCollection": [{"instruction": instruction, "quantity": qty,
                                     "instrument": {"symbol": symbol}}]}
 
 
-def adapter(hub: FakeHub, *, position=Decimal("0"), precheck=None, hashes=None) -> SchwabOrderAdapter:
+def adapter(hub: FakeHub, *, position=Decimal("0"), precheck=None, hashes=None, journal=None) -> SchwabOrderAdapter:
     client = HubOrdersClient(HUB, transport=hub)
+    extra = {} if journal is None else {"journal": journal}
     return SchwabOrderAdapter(client, hashes if hashes is not None else {ACCOUNT: HASH}, FakeClock(),
-                              lambda account, instrument: position, precheck=precheck)
+                              lambda account, instrument: position, precheck=precheck, **extra)
 
 
 # --- the pure builder ------------------------------------------------------------------------------
@@ -323,3 +327,140 @@ def test_submit_cost_per_order(capsys):
     with capsys.disabled():
         print(f"\nOA-6 perf: {per:.1f} us per submit (build + record + fake hub, cap {ORDER_ID_CAP})")
     assert per < 2000
+
+
+# --- F14 / OA-6 hardening: replace timeouts, narrower match, durable journal -----------------------
+
+def submitted_then_replace_timeout(hub: FakeHub) -> SchwabOrderAdapter:
+    venue = adapter(hub)
+    assert venue.submit(venue_order()).status == "ACCEPTED"  # Schwab id 1001
+    hub.queue = [TimeoutError()]
+    ack = venue.replace("cmd-1", OrderChanges(new_limit_price=Decimal("188")))
+    assert (ack.status, ack.message) == ("PENDING", "outcome_unknown")
+    return venue
+
+
+def test_replace_timeout_then_resolve_adopts_the_replacing_order():
+    hub = FakeHub()
+    venue = submitted_then_replace_timeout(hub)
+    assert venue.schwab_order_id("cmd-1") == "1001"
+    old = {**listed("1001"), "status": "REPLACED", "replacingOrderCollection": [{"orderId": 1002}]}
+    hub.queue = [listing([old])]
+    [ack] = venue.resolve_pending()
+    assert ack.status == "ACCEPTED"
+    assert venue.schwab_order_id("cmd-1") == "1002"
+    assert [c[0] for c in hub.calls].count("GET") == 1
+    hub.queue = [(200, json.dumps({"status": 200, "order_id": None, "body": ""}))]
+    assert venue.cancel("cmd-1").status == "ACCEPTED"
+    assert hub.calls[-1][:2] == ("DELETE", f"{HUB}/accounts/{HASH}/orders/1002")
+
+
+def test_replace_timeout_matches_the_replacing_order_when_no_link():
+    hub = FakeHub()
+    venue = submitted_then_replace_timeout(hub)
+    old = {**listed("1001"), "status": "REPLACED"}
+    new = {**listed("1002"), "orderType": "LIMIT", "price": "188"}
+    hub.queue = [listing([old, new])]
+    [ack] = venue.resolve_pending()
+    assert ack.status == "ACCEPTED"
+    assert venue.schwab_order_id("cmd-1") == "1002"
+
+
+def test_replace_timeout_old_still_working_rejects_the_replace():
+    hub = FakeHub()
+    venue = submitted_then_replace_timeout(hub)
+    hub.queue = [listing([{**listed("1001"), "status": "WORKING"}])]
+    [ack] = venue.resolve_pending()
+    assert (ack.status, ack.message) == ("REJECTED", "replace_not_at_venue")
+    assert venue.schwab_order_id("cmd-1") == "1001"
+    # the replace is cleared, so the old order is cancellable again
+    hub.queue = [(200, json.dumps({"status": 200, "order_id": None, "body": ""}))]
+    assert venue.cancel("cmd-1").status == "ACCEPTED"
+    assert hub.calls[-1][:2] == ("DELETE", f"{HUB}/accounts/{HASH}/orders/1001")
+
+
+def test_replace_timeout_unknown_stays_pending(caplog):
+    hub = FakeHub()
+    venue = submitted_then_replace_timeout(hub)
+    hub.queue = [listing([])]  # the old order is not in the list
+    [ack] = venue.resolve_pending()
+    assert ack.status == "PENDING"
+    assert venue.schwab_order_id("cmd-1") == "1001"
+    assert "unresolved" in caplog.text
+    hub.queue = [listing([])]
+    assert venue.resolve_pending()[0].status == "PENDING"  # still unknown, still never guessed
+    assert [c[0] for c in hub.calls] == ["POST", "PUT", "GET", "GET"]  # nothing resent
+
+
+def test_cancel_and_replace_refuse_while_replace_unresolved():
+    hub = FakeHub()
+    venue = submitted_then_replace_timeout(hub)
+    calls = len(hub.calls)
+    cancel = venue.cancel("cmd-1")
+    assert (cancel.status, cancel.message) == ("REJECTED", "unresolved_replace")
+    replace = venue.replace("cmd-1", OrderChanges(new_limit_price=Decimal("189")))
+    assert (replace.status, replace.message) == ("REJECTED", "unresolved_replace")
+    assert len(hub.calls) == calls
+
+
+def test_match_pending_uses_price_and_type():
+    window = (CLOCK_NOW - timedelta(seconds=5), CLOCK_NOW + timedelta(seconds=120))
+    kwargs = dict(symbol="AAPL", instruction="BUY", quantity=Decimal("10"), window=window)
+    orders = [{**listed("2001"), "orderType": "LIMIT", "price": "190"},
+              {**listed("2002"), "orderType": "LIMIT", "price": "187.25"}]
+    assert match_pending(orders, **kwargs) == ("ambiguous", None)  # same size: the old, loose match
+    assert match_pending(orders, **kwargs, order_type="LIMIT",
+                         price=Decimal("187.25")) == ("accepted", "2002")
+    assert match_pending(orders, **kwargs, order_type="STOP", price=Decimal("187.25")) == ("not_at_venue", None)
+    no_price = listed("2003")
+    del no_price["price"]  # a missing field, with a price asked for, does not match
+    assert match_pending([no_price], **kwargs, price=Decimal("187.25")) == ("not_at_venue", None)
+
+    hub = FakeHub()
+    venue = pending_adapter(hub)  # sent LIMIT at 187.25
+    hub.queue = [listing(orders)]
+    [ack] = venue.resolve_pending()
+    assert ack.status == "ACCEPTED" and venue.schwab_order_id("cmd-1") == "2002"
+
+
+def test_restart_with_sqlite_journal_never_resends(tmp_path):
+    from trade_engine.schwab.order_adapter import SqliteOrderJournal
+
+    path = tmp_path / "j.db"
+    first = FakeHub()
+    first.queue = [TimeoutError()]
+    before = adapter(first, journal=SqliteOrderJournal(path))
+    assert before.submit(venue_order()).status == "PENDING"
+    assert SqliteOrderJournal(path).load()["cmd-1"]["status"] == "PENDING"
+
+    second = FakeHub()  # the process restarted: a new adapter, a fresh hub
+    after = adapter(second, journal=SqliteOrderJournal(path))
+    again = after.submit(venue_order())
+    assert again.status == "PENDING"
+    assert second.calls == []
+
+    second.queue = [listing([listed("2001")])]
+    [ack] = after.resolve_pending()
+    assert ack.status == "ACCEPTED" and after.schwab_order_id("cmd-1") == "2001"
+    assert SqliteOrderJournal(path).load()["cmd-1"]["schwab_id"] == "2001"
+
+    # a restored record can be cancelled, but not replaced (no VenueOrder to rebuild from)
+    second.queue = [(200, json.dumps({"status": 200, "order_id": None, "body": ""}))]
+    assert after.cancel("cmd-1").status == "ACCEPTED"
+    assert after.replace("cmd-1", OrderChanges(new_limit_price=Decimal("188"))).message == "restored_order"
+    assert [c[0] for c in second.calls] == ["GET", "DELETE"]
+
+
+def test_cap_never_evicts_pending():
+    hub = FakeHub()
+    hub.queue = [TimeoutError()]
+    venue = adapter(hub)
+    venue.submit(venue_order("pending-1"))  # the oldest, and unsettled
+    for i in range(ORDER_ID_CAP + 10):
+        venue.submit(venue_order(f"c{i}"))
+    assert len(venue._orders) == ORDER_ID_CAP
+    assert "pending-1" in venue._orders
+    assert venue.schwab_order_id("c0") is None  # the oldest settled order went instead
+    calls = len(hub.calls)
+    assert venue.submit(venue_order("pending-1")).status == "PENDING"
+    assert len(hub.calls) == calls

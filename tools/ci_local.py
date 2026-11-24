@@ -140,6 +140,29 @@ def run_rust_tests() -> bool:
     return True
 
 
+WASM_TARGET = "wasm32-unknown-unknown"
+
+
+def check_te_wasm() -> bool:
+    """te_wasm must compile for the browser target. A machine without the target skips with a notice."""
+    try:
+        code, out = run_command(["rustup", "target", "list", "--installed"])
+    except OSError:
+        say("NOTICE: rustup not found; skipping the te_wasm check.")
+        return True
+    if code != 0 or WASM_TARGET not in out.split():
+        say(f"NOTICE: {WASM_TARGET} target not installed (rustup target add {WASM_TARGET}); skipping the te_wasm check.")
+        return True
+    code, out = run_command(["cargo", "check", "--manifest-path", str(RUST_WORKSPACE / "Cargo.toml"),
+                             "-p", "te_wasm", "--target", WASM_TARGET])
+    print(out.strip()[-2000:])
+    if code != 0:
+        say(f"FAIL: cargo check -p te_wasm --target {WASM_TARGET} returned exit code {code}")
+        return False
+    say("te_wasm wasm32 check passed.")
+    return True
+
+
 def build_runtime() -> bool:
     """Missing release binary or its private DLL is an error, never a test skip."""
     code, out = run_command([resolve_python(), "-B", str(REPO_ROOT / "tools" / "build_p4c_t3.py"),
@@ -233,6 +256,9 @@ def main() -> int:
         return 1
 
     if not run_rust_tests():
+        return 1
+
+    if not check_te_wasm():
         return 1
 
     if not build_runtime():

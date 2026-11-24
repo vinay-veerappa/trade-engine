@@ -43,11 +43,16 @@ DATES = (date(2026, 1, 2), date(2026, 3, 9), date(2026, 7, 2),
          date(2026, 9, 25), date(2026, 11, 27), date(2026, 12, 24))
 
 
+# Fields added after the oracle froze (F13 mark max-age): the oracle has no counterpart.
+ORACLE_ABSENT = frozenset({"mark_max_quote_age_seconds"})
+
+
 def norm(v):
     if isinstance(v, Decimal):
         return ("Decimal", by_value(v))
     if dataclasses.is_dataclass(v):
-        return tuple((f.name, norm(getattr(v, f.name))) for f in dataclasses.fields(v))
+        return tuple((f.name, norm(getattr(v, f.name))) for f in dataclasses.fields(v)
+                     if f.name not in ORACLE_ABSENT)
     if isinstance(v, Mapping):
         return sorted(((norm(k), norm(x)) for k, x in v.items()), key=repr)
     if isinstance(v, (tuple, list)):
@@ -174,7 +179,13 @@ def test_dense_runtime_campaign(tmp_path):
             is_entry = i % 2 == 0
             direct, risk = bool(i & 4), bool(i & 8)
             def taken(w):
-                ledger = SimpleNamespace(has_command=lambda key: direct if key == command else risk)
+                # F3: an accepted risk verdict no longer counts as taken (the entry resumes);
+                # the oracle predates that, so the recorded verdict here is a refusal, which
+                # both sides treat as taken. test_eod_options covers the accepted case.
+                refused = SimpleNamespace(payload=SimpleNamespace(accepted=False))
+                ledger = SimpleNamespace(
+                    has_command=lambda key: direct if key == command else risk,
+                    event_by_command=lambda key: refused if risk and key == f"risk:{command}" else None)
                 router = w.routing.OptionRouter(ledger, w.clock, brokers={}, strategies={}, option_risk_engines={})
                 action = dataclasses.replace(spread(command), account_id="dense") if is_entry else SimpleNamespace(command_id=command)
                 return router.taken(action)

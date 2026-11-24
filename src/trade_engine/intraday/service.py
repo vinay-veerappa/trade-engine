@@ -52,6 +52,7 @@ from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import StaleDataError
 from trade_engine.ledger import Event, EventKind, Ledger, VenueReconcile
 from trade_engine.market_data.chains import ChainSnapshot
+from trade_engine.oms.reconcile import resync_open_brackets
 from trade_engine.sim import underlying_of
 from trade_engine.sim._rs import register, rs as native
 from trade_engine.eod._runtime import decide, flag, micros
@@ -204,6 +205,8 @@ class IntradayService:
     ) -> dict[str, Any]:
         """Walk one session. ``stop_at`` simulates a crash: the loop stops there
         without a marker, exactly as a killed process would leave the ledger (I2)."""
+        account_id = self._config.account_id
+        resync_open_brackets(self._ledger, self._router.manager(account_id).orders, account_id)
         return native.intraday_run(self, session, start_at, stop_at)
 
     # -- the tick ----------------------------------------------------------------
@@ -355,8 +358,11 @@ class IntradayService:
                 floats=((close - snapshot.as_of).total_seconds() if snapshot is not None else 0,
                     self._config.close_mark_window_seconds))
             quotes = {i: snapshot.get(i) for i in held if isinstance(i, OptionContract)} if usable else {}
+            # A quote the snapshot carries but nobody re-quoted is no mark: each must be fresh too.
             if not flag("intraday:close_plan", flags=(usable,
-                all(q is not None and flag("eod:positive", (str(q.mid),)) for q in quotes.values())),
+                all(q is not None and flag("eod:positive", (str(q.mid),))
+                    and (snapshot.as_of - q.as_of).total_seconds() <= self._config.max_quote_age_seconds
+                    for q in quotes.values())),
                 numbers=(len(quotes), len(held))):
                 note = "no fresh snapshot near the close; marks left to the after-close pass"
             else:

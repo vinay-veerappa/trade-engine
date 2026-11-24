@@ -7,9 +7,11 @@ its bracket children with zero P&L, and the chain catches up.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -96,7 +98,7 @@ def test_entry_and_both_children_are_cancelled_with_zero_pnl(rig) -> None:
     ledger, clock, _b, _m, bracket = rig
     before = ledger.state(ACCOUNT)
     assert before.orders[bracket.entry.order_id].state is OrderState.ACCEPTED
-    done = _writeoff(ledger, clock, bracket.entry.order_id)
+    done = _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True)
     assert set(done) == set(_ids(bracket)) and done[0] == bracket.entry.order_id
     assert len(done) == 3
     after = ledger.state(ACCOUNT)
@@ -120,7 +122,7 @@ def test_the_session_no_longer_asks_for_the_instruments_bars(rig) -> None:
         ledger, clock, CALENDAR, data, EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker})
     )
     assert runner._replay_instruments(ledger.state(ACCOUNT)) == (INSTRUMENT,)
-    _writeoff(ledger, clock, bracket.entry.order_id)
+    _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True)
     assert runner._replay_instruments(ledger.state(ACCOUNT)) == ()
     runner.run(SESSION)
     assert data.calls == 0
@@ -128,9 +130,9 @@ def test_the_session_no_longer_asks_for_the_instruments_bars(rig) -> None:
 
 def test_a_second_call_writes_nothing(rig) -> None:
     ledger, clock, _b, _m, bracket = rig
-    assert _writeoff(ledger, clock, bracket.entry.order_id)
+    assert _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True)
     size = _count(ledger)
-    assert _writeoff(ledger, clock, bracket.entry.order_id) == ()
+    assert _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True) == ()
     assert _count(ledger) == size
 
 
@@ -192,7 +194,8 @@ def test_cli_write_off_happy_path_and_repeat(rig, capsys) -> None:
     ledger, *_rest, bracket = rig
     path = str(ledger.path)
     ledger.close()
-    argv = ["--accounts", ACCOUNT, "--order", bracket.entry.order_id, "--reason", REASON, "--owner", OWNER]
+    argv = ["--accounts", ACCOUNT, "--order", bracket.entry.order_id, "--reason", REASON, "--owner", OWNER,
+            "--venue-cancel-confirmed"]
     assert _cli(path, *argv) == 0
     out = capsys.readouterr().out
     for order_id in _ids(bracket):
@@ -222,3 +225,156 @@ def test_cli_refusals_exit_2_and_write_nothing(rig, extra, capsys) -> None:
     assert "eod:" in capsys.readouterr().err
     with Ledger(path) as led:
         assert _count(led) == size
+
+
+# --- F4: refuse live protection and venue-live orders; write atomically ----------------
+
+@pytest.fixture
+def ten_rig(tmp_path: Path):
+    """A 10-share bracket, submitted; the entry can then take a full 10-share fill."""
+    clock = SettableClock(PREV_EOD)
+    with Ledger(tmp_path / "writeoff10.db") as ledger:
+        broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+        broker.connect()
+        intent = OrderIntent(
+            intent_id="intent-wo-10",
+            account_id=ACCOUNT,
+            instrument=INSTRUMENT,
+            side=Side.BUY,
+            quantity_rule="fixed_10",
+            entry_price=Decimal("100"),
+            stop_loss=Decimal("95"),
+            profit_targets=(Decimal("110"),),
+            reason="write-off seed 10",
+            command_id="wo-10",
+        )
+        manager = OrderManager(broker, clock, ledger)
+        bracket = manager.create_bracket(intent, Decimal("10"))
+        manager.submit(bracket.entry)
+        yield ledger, clock, manager, bracket
+
+
+@pytest.mark.parametrize("flag", [False, True], ids=["no-flag", "flag"])
+def test_probe_122_a_protective_stop_of_a_filled_entry_refuses(ten_rig, flag) -> None:
+    ledger, clock, manager, bracket = ten_rig
+    entry_id, stop_id = bracket.entry.order_id, bracket.stop.order_id
+    manager.record_fill(_fill(entry_id, "10"))
+    state = ledger.state(ACCOUNT)
+    assert state.orders[stop_id].state is OrderState.ACCEPTED
+    assert state.filled_quantity[entry_id] == Decimal("10")
+    size = _count(ledger)
+    with pytest.raises(EodRunnerError, match=r"\(I5\)"):
+        _writeoff(ledger, clock, stop_id, venue_cancel_confirmed=flag)
+    assert _count(ledger) == size
+    after = ledger.state(ACCOUNT)
+    assert after.filled_quantity[entry_id] == Decimal("10")
+    assert after.orders[stop_id].state is OrderState.ACCEPTED
+
+
+def test_a_working_entry_with_a_venue_id_refuses_without_the_flag(rig) -> None:
+    ledger, clock, _b, _m, bracket = rig
+    entry_id = bracket.entry.order_id
+    venue_id = ledger.state(ACCOUNT).venue_order_ids[entry_id]
+    size = _count(ledger)
+    with pytest.raises(EodRunnerError, match="venue") as info:
+        _writeoff(ledger, clock, entry_id)
+    assert venue_id in str(info.value)
+    assert "--venue-cancel-confirmed" in str(info.value)
+    assert _count(ledger) == size
+    assert ledger.state(ACCOUNT).orders[entry_id].state is OrderState.ACCEPTED
+
+
+def test_a_working_entry_with_a_venue_id_succeeds_with_the_flag_and_carries_venue_ids(rig) -> None:
+    ledger, clock, _b, _m, bracket = rig
+    entry_id = bracket.entry.order_id
+    venue_ids = dict(ledger.state(ACCOUNT).venue_order_ids)
+    assert venue_ids.get(entry_id)
+    done = _writeoff(ledger, clock, entry_id, venue_cancel_confirmed=True)
+    assert set(done) == set(_ids(bracket))
+    cancels = {e.payload.order_id: e.payload.venue_order_id
+               for e in ledger.events_of_kind(EventKind.ORDER_CANCELLED)}
+    assert cancels[entry_id] == venue_ids[entry_id]
+    assert ledger.state(ACCOUNT).orders[entry_id].state is OrderState.CANCELLED
+
+
+def test_a_child_with_a_venue_id_refuses_without_the_flag(rig, monkeypatch) -> None:
+    ledger, clock, _b, _m, bracket = rig
+    entry_id, stop_id = bracket.entry.order_id, bracket.stop.order_id
+    real_state = ledger.state
+
+    def with_child_venue(account):
+        state = real_state(account)
+        venues = {k: v for k, v in state.venue_order_ids.items() if k != entry_id}
+        venues[stop_id] = "VENUE-STOP-7"
+        return replace(state, venue_order_ids=MappingProxyType(venues))
+
+    monkeypatch.setattr(ledger, "state", with_child_venue)
+    size = _count(ledger)
+    with pytest.raises(EodRunnerError, match="VENUE-STOP-7"):
+        _writeoff(ledger, clock, entry_id)
+    assert _count(ledger) == size
+
+
+def test_a_child_cancel_carries_the_child_venue_id(rig, monkeypatch) -> None:
+    ledger, clock, _b, _m, bracket = rig
+    entry_id, stop_id = bracket.entry.order_id, bracket.stop.order_id
+    real_state = ledger.state
+
+    def with_child_venue(account):
+        state = real_state(account)
+        venues = {k: v for k, v in state.venue_order_ids.items() if k != entry_id}
+        venues[stop_id] = "VENUE-STOP-7"
+        return replace(state, venue_order_ids=MappingProxyType(venues))
+
+    monkeypatch.setattr(ledger, "state", with_child_venue)
+    _writeoff(ledger, clock, entry_id, venue_cancel_confirmed=True)
+    monkeypatch.undo()
+    cancels = {e.payload.order_id: e.payload.venue_order_id
+               for e in ledger.events_of_kind(EventKind.ORDER_CANCELLED)}
+    assert cancels[stop_id] == "VENUE-STOP-7"
+
+
+def test_the_cancels_are_written_in_one_extend_call(rig, monkeypatch) -> None:
+    ledger, clock, _b, _m, bracket = rig
+    real_extend = ledger.extend
+    batches: list[list] = []
+
+    def spy(events):
+        batch = list(events)
+        batches.append(batch)
+        return real_extend(batch)
+
+    monkeypatch.setattr(ledger, "extend", spy)
+    _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True)
+    assert len(batches) == 1
+    assert len(batches[0]) == 3
+
+
+def test_a_failed_write_leaves_no_partial_cancel(rig, monkeypatch) -> None:
+    ledger, clock, _b, _m, bracket = rig
+    before = {o.order_id: o.state for o in ledger.state(ACCOUNT).orders.values()}
+
+    def boom(events):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(ledger, "extend", boom)
+    size = _count(ledger)
+    with pytest.raises(RuntimeError, match="write failed"):
+        _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True)
+    assert _count(ledger) == size
+    after = {o.order_id: o.state for o in ledger.state(ACCOUNT).orders.values()}
+    assert after == before
+
+
+def test_cli_venue_live_order_refuses_without_the_flag_and_passes_with_it(rig, capsys) -> None:
+    ledger, *_rest, bracket = rig
+    path = str(ledger.path)
+    size = _count(ledger)
+    ledger.close()
+    argv = ["--accounts", ACCOUNT, "--order", bracket.entry.order_id, "--reason", REASON, "--owner", OWNER]
+    assert _cli(path, *argv) == 2
+    assert "refused" in capsys.readouterr().err
+    with Ledger(path) as led:
+        assert _count(led) == size
+    assert _cli(path, *argv, "--venue-cancel-confirmed") == 0
+    assert "written off" in capsys.readouterr().out

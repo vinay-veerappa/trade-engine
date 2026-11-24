@@ -462,6 +462,7 @@ class TosPaperBroker(BrokerAdapter):
                 clock=self._clock,
                 ledger=self._account_ledger,
                 stale_after=self.stale_after,
+                broker="tos_paper",
             )
         return self._poller.account_events(since)
 

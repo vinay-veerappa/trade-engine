@@ -1836,3 +1836,64 @@ def test_a_bar_path_fill_for_an_unknown_order_refuses_as_the_runners_error(tmp_p
     with pytest.raises(EodRunnerError, match="references unknown order 'ghost'"):
         runner._reconcile_after_bar(ACCOUNT, Ghostly(), runner._manager_for(ACCOUNT, broker), None)
     ledger.close()
+
+
+# -- F3: an equity entry whose bracket crashed after its verdict is opened on rerun ------
+
+
+class _CountingRiskEngine(FixedRiskEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.evaluations = 0
+
+    def evaluate(self, intent: OrderIntent, context: RiskContext) -> RiskVerdict:
+        self.evaluations += 1
+        return super().evaluate(intent, context)
+
+
+def test_an_entry_whose_bracket_crashed_after_its_verdict_is_opened_on_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = SettableClock(EOD_CLOCK)
+    ledger = Ledger(tmp_path / "eod-ledger.db")
+    ledger.open()
+    broker = SimBroker(ACCOUNT, clock, Decimal("0"))
+    broker.connect()
+    risk = _CountingRiskEngine()
+    config = EodRunnerConfig(
+        job_name="eod",
+        brokers={ACCOUNT: broker},
+        risk_engines={ACCOUNT: risk},
+        signal_adapters={ACCOUNT: SessionSignalAdapter([_signal()])},
+        strategies={ACCOUNT: DeterministicStrategy(INSTRUMENT)},
+        context_builder=_fixed_context_builder(),
+    )
+    real_create_bracket = OrderManager.create_bracket
+    crashes = [RuntimeError("crashed after the verdict")]
+
+    def create_bracket_once(self, intent, quantity):
+        if crashes:
+            raise crashes.pop()
+        return real_create_bracket(self, intent, quantity)
+
+    monkeypatch.setattr(OrderManager, "create_bracket", create_bracket_once)
+    with pytest.raises(RuntimeError, match="crashed after the verdict"):
+        EodRunner(ledger, clock, CALENDAR, FakeMarketData(), config).run(SESSION)
+    assert risk.evaluations == 1
+
+    result = EodRunner(ledger, clock, CALENDAR, FakeMarketData(), config).run(SESSION)
+
+    assert result.accounts[0].orders_submitted == 1
+    entries = [
+        order
+        for order in ledger.state(ACCOUNT).orders.values()
+        if order.parent_order_id is None and order.command_id.startswith("d1:")
+    ]
+    assert len(entries) == 1
+    verdicts = [
+        e for e in ledger.events(account=ACCOUNT)
+        if e.kind is EventKind.RISK_VERDICT and e.command_id == "risk:d1:sig-1"
+    ]
+    assert len(verdicts) == 1
+    assert risk.evaluations == 1  # the rerun resumed the recorded verdict; it did not decide again
+    ledger.close()

@@ -471,7 +471,12 @@ class Flow:
 
     def reconcile(self, at: datetime) -> None:
         r = self.r
-        journal = r.choice([None, None, "JRN-1"])
+        pick = r.choice([None, None, "JRN-1"])
+        # A job's journal account is fixed for its life; switching it mid-flow would make
+        # F2's journal heal enqueue rows the oracle never heals. Keep the draw for the stream.
+        if not hasattr(self, "journal"):
+            self.journal = pick
+        journal = self.journal
         since = self.since if r.random() < 0.6 else MIN
         if r.random() < 0.25:
             since = at

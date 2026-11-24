@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from trade_engine.domain.instruments import Equity, Side
+from trade_engine.domain.orders import OrderType
 from trade_engine.domain.risk import RiskRuleResult, RiskVerdict
 from trade_engine.domain.signals import OrderIntent
 from trade_engine.interfaces.clock import Clock
@@ -821,3 +822,59 @@ def test_evaluate_reads_the_ledgers_cached_state_not_a_refold(tmp_path: Path, mo
         monkeypatch.setattr(ledger, "events", lambda *a, **k: pytest.fail("re-read the log"))
         verdict = evaluate(ledger)
     assert verdict.accepted
+
+
+@pytest.mark.parametrize(
+    ("side", "entry_limit", "stop_loss", "profit_target"),
+    [
+        # BUY: trigger 100, limit 101 is the worst fill, stop 98 -> 3.00/share of risk.
+        (Side.BUY, Decimal("101"), Decimal("98"), Decimal("110")),
+        # SELL: trigger 100, limit 99 is the worst fill, stop 102 -> 3.00/share of risk.
+        (Side.SELL, Decimal("99"), Decimal("102"), Decimal("90")),
+    ],
+)
+def test_stop_limit_entry_is_sized_on_its_worst_fill_not_its_trigger(
+    tmp_path: Path,
+    side: Side,
+    entry_limit: Decimal,
+    stop_loss: Decimal,
+    profit_target: Decimal,
+) -> None:
+    # 0.25% of 50,000 = 125 risk budget. At 3.00/share the size is 41; sizing on the
+    # trigger's 2.00/share would wrongly give 62.
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(
+            ledger,
+            order_intent=intent(
+                side=side,
+                quantity_rule="risk_0.25pct",
+                entry_type=OrderType.STOP_LIMIT,
+                entry_price=Decimal("100"),
+                entry_limit_price=entry_limit,
+                stop_loss=stop_loss,
+                profit_targets=(profit_target,),
+            ),
+        )
+
+    assert verdict.accepted
+    assert verdict.approved_quantity == Decimal("41")
+
+
+@pytest.mark.parametrize("entry_type", [OrderType.STOP, OrderType.LIMIT])
+def test_stop_and_limit_entries_are_still_sized_on_their_entry_price(
+    tmp_path: Path, entry_type: OrderType
+) -> None:
+    # Regression: only STOP_LIMIT uses the worst-fill price. 125 / 2.00 = 62.
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        verdict = evaluate(
+            ledger,
+            order_intent=intent(
+                quantity_rule="risk_0.25pct",
+                entry_type=entry_type,
+                entry_price=Decimal("100"),
+                stop_loss=Decimal("98"),
+            ),
+        )
+
+    assert verdict.accepted
+    assert verdict.approved_quantity == Decimal("62")

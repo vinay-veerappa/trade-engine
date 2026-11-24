@@ -12,19 +12,23 @@ The 17:45 ET job per account and session, in order:
    simulated, and the OMS raises; the runner never batches reconciliation to the end
    of the session, because the bars in between are gone.
 3. Close: the clock moves to the session close, so marks are dated at the close and a
-   D+1 DAY entry belongs to the next session instead of expiring at its open.
-   MTM: one Mark per open position at the last regular bar's close; a missing
+   D+1 DAY entry belongs to the next session instead of expiring at its open. Each
+   account then finishes in this order (``eod_flow.finish``): reconcile; for options
+   accounts, sync and dividends; Marks; Manage; Entries; Marker.
+   Dividends: options accounts are credited (or charged) today's ex-dividends.
+   Marks: MTM, one Mark per open position at the last regular bar's close; a missing
    regular bar refuses (I5).
-   Exits: a strategy with ``manage_positions`` sees its open brackets and may tighten
-   stops, close positions or reduce them at the next open (``domain.exits``); the OMS
-   applies them.
-4. Marker: one ``EodRun`` event per account, claimed by
-   ``eod:<job>:<account>:<session>``. A re-run replays deterministically and every
-   command id it derives is already claimed, so the second run appends nothing.
-5. Entries for D+1: discovered signals and strategies produce intents; the risk layer
+   Manage (exits): a strategy with ``manage_positions`` sees its open brackets and may
+   tighten stops, close positions or reduce them at the next open (``domain.exits``);
+   the OMS applies them.
+   Entries for D+1: discovered signals and strategies produce intents; the risk layer
    evaluates each; approved intents become brackets whose DAY entry works the next
-   session.
-6. Outbox: every configured destination drains in order (I12).
+   session. A verdict an interrupted run already recorded is resumed, not decided again.
+4. Marker: one ``EodRun`` event per account, claimed by
+   ``eod:<job>:<account>:<session>``, written after Entries. A re-run replays
+   deterministically and every command id it derives is already claimed, so the
+   second run appends nothing.
+5. Outbox: every configured destination drains in order (I12).
 
 Options accounts (O4) are those whose venue matches chain snapshots
 (``SnapshotVenue``). They replay no bars. Instead:
@@ -61,6 +65,7 @@ market data comes from injected providers (I5: no default source).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from collections.abc import Iterable
@@ -90,7 +95,7 @@ from trade_engine.ledger.state import AccountState, fold_account
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
 from trade_engine.oms.options import OptionOrderManager, open_structures
-from trade_engine.oms.reconcile import ReconcileError
+from trade_engine.oms.reconcile import ReconcileError, resync_open_brackets
 from trade_engine.oms.restore import RestoreError
 from trade_engine.risk import RiskContext, RiskEngine
 from trade_engine.sim import SimBroker, SnapshotVenue, underlying_of
@@ -200,6 +205,7 @@ def write_off_order(
     *,
     reason: str,
     owner: str,
+    venue_cancel_confirmed: bool = False,
 ) -> tuple[str, ...]:
     """Record the owner's write-off of one stuck working order (SCAN-WRITEOFF-1).
 
@@ -212,7 +218,16 @@ def write_off_order(
     Everything is validated before anything is written: a non-empty reason and owner, a
     known account, an order that exists, is still working and has no fills (a filled or
     partly filled order is a position, not a write-off). A repeat (the entry's command id
-    already in the ledger) is checked first and writes nothing. Returns the ids cancelled.
+    already in the ledger) is checked first and writes nothing.
+
+    F4 refusals (also before any write): a protective child (a bracket stop or target)
+    whose parent entry has fills protects a live position, so it is refused (I5). An
+    order, or a child it would cancel, with a venue order id may still be live at the
+    venue, so it is refused unless the owner passes ``venue_cancel_confirmed=True`` after
+    cancelling it at the venue. The entry and its children are written in one
+    ``Ledger.extend`` transaction, and each cancel keeps its venue order id.
+
+    Returns the ids cancelled.
     """
     if not isinstance(reason, str) or not reason.strip():
         raise EodRunnerError("a write-off needs a non-empty reason (I5)")
@@ -232,33 +247,51 @@ def write_off_order(
             f"order {order_id!r} has fills: a filled or partly filled order is a position, "
             "not a write-off (I5)"
         )
+    if order.parent_order_id is not None and state.filled_quantity.get(order.parent_order_id, Decimal("0")) != 0:
+        raise EodRunnerError(
+            f"order {order_id!r} protects {order.parent_order_id!r}, which has fills: writing it off "
+            "would leave a live position unprotected (I5)"
+        )
     if order.state not in _WORKING_STATES:
         raise EodRunnerError(
             f"order {order_id!r} is {order.state.value}, not working; nothing to write off (I5)"
         )
+    children = [
+        (child_id, child) for child_id, child in state.orders.items()
+        if child.parent_order_id == order_id and child.state not in _TERMINAL_STATES
+    ]
+    if not venue_cancel_confirmed:
+        for target_id in [order_id, *(child_id for child_id, _ in children)]:
+            venue_id = state.venue_order_ids.get(target_id)
+            if venue_id:
+                raise EodRunnerError(
+                    f"order {target_id!r} has venue order id {venue_id!r}: the venue may still hold it. "
+                    "Cancel it at the venue first, then pass --venue-cancel-confirmed (I5)"
+                )
     text = f"Owner write-off: {reason.strip()} (owner: {owner.strip()})"
     ts = clock.now_utc()
-    cancelled = [order_id]
-    ledger.append(Event(
+    events = [Event(
         account=account_id,
         kind=EventKind.ORDER_CANCELLED,
         payload=OrderStateChange(order_id, reason=text, venue_order_id=state.venue_order_ids.get(order_id)),
         ts_utc=ts,
         command_id=command,
-    ))
-    for child_id, child in state.orders.items():
-        if child.parent_order_id != order_id or child.state in _TERMINAL_STATES:
-            continue
-        ledger.append(Event(
+    )]
+    cancelled = [order_id]
+    for child_id, _child in children:
+        events.append(Event(
             account=account_id,
             kind=EventKind.ORDER_CANCELLED,
             payload=OrderStateChange(
-                child_id, reason=f"{text} (bracket child of {order_id})", venue_order_id=None
+                child_id,
+                reason=f"{text} (bracket child of {order_id})",
+                venue_order_id=state.venue_order_ids.get(child_id),
             ),
             ts_utc=ts,
             command_id=f"{command}:child:{child_id}",
         ))
         cancelled.append(child_id)
+    ledger.extend(events)
     return tuple(cancelled)
 register("runtime_incomplete", SessionIncompleteError)
 register("runtime_replay", ReplayDataError)
@@ -283,7 +316,9 @@ class EodRunnerConfig:
     ``settlements``, the official closes that mark shares and underlyings; and, for an
     account that enters, ``option_risk_engines``. ``lifecycle`` settles expiries and
     assignments, and ``dividends`` credits dividends on shares held. ``settle_delay`` is
-    how long after the close the after-close work runs.
+    how long after the close the after-close work runs. ``mark_max_quote_age_seconds``
+    is how old an option's own quote may be against its snapshot before the mark is
+    flagged ``stale-quote:`` (the mark is still the mid: flagged, never refused).
     """
 
     job_name: str
@@ -301,6 +336,7 @@ class EodRunnerConfig:
     dividends: Any | None = None
     option_risk_engines: Mapping[str, Any] | None = None
     settle_delay: timedelta = timedelta(minutes=105)
+    mark_max_quote_age_seconds: float = 900.0
 
     @property
     def normalized(self) -> "EodRunnerConfig":
@@ -315,6 +351,9 @@ class EodRunnerConfig:
         )
 
     def __post_init__(self) -> None:
+        limit = self.mark_max_quote_age_seconds
+        if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit <= 0:
+            raise ValueError(f"mark_max_quote_age_seconds must be a positive finite number, not {limit!r}")
         age_type = isinstance(self.bars_max_age_seconds, (int, float)) and not isinstance(self.bars_max_age_seconds, bool)
         delay_type = isinstance(self.settle_delay, timedelta)
         decide("eod:config", numbers=(micros(self.settle_delay) if delay_type else 0,),
@@ -386,11 +425,19 @@ class EodRunner:
     # -- entry -------------------------------------------------------------------
 
     def run(self, session: date) -> EodRunResult:
+        self._resync_brackets()
         return rs.eod_run(self, session)
 
     def run_morning(self, session: date, through: datetime) -> EodRunResult:
         """The morning pass of ``session`` (``run_pass`` with ``"morning"``)."""
         return self.run_pass(session, through, "morning")
+
+    def _resync_brackets(self) -> None:
+        """Re-sync open brackets before the first reconcile, healing any crash after a fill (F2)."""
+        for account_id in sorted(self._config.brokers):
+            resync_open_brackets(
+                self._ledger, self._manager_for(account_id, self._config.brokers[account_id]), account_id
+            )
 
     def run_pass(self, session: date, through: datetime, name: str) -> EodRunResult:
         """Run options accounts' snapshots of ``session`` up to ``through`` (see above).
@@ -402,6 +449,7 @@ class EodRunner:
         underlying with no snapshot yet is not refused: nothing is marked in a pass, and
         its orders work at a later one.
         """
+        self._resync_brackets()
         return rs.eod_pass(self, session, through, name)
 
     def void_session(self, session: date, accounts: Iterable[str], *, reason: str, owner: str) -> tuple[str, ...]:
@@ -528,12 +576,14 @@ class EodRunner:
     def _rehydrate_venue(
         self, account_id: str, broker: BrokerAdapter, state: AccountState
     ) -> None:
-        """Make sure the venue holds every order the ledger says is working.
+        """Make sure the venue holds what the ledger says it holds.
 
         A SimBroker lives in memory, so a new process starts with an empty book while
         the ledger still holds yesterday's D+1 entries and GTC stops. An empty
-        SimBroker is restored from the fold (I2). Any venue is then checked: a working
-        order it does not hold would silently never fill, so the run refuses (I5).
+        SimBroker is restored from the fold (I2), positions included: a held stock or
+        option with no working order is still held at the venue. Any venue is then
+        checked: a working order it does not hold would silently never fill, so the run
+        refuses (I5).
         """
         if (
             isinstance(broker, (SimBroker, SnapshotVenue))
@@ -541,8 +591,9 @@ class EodRunner:
             and not broker.fills(MIN_TIME)
         ):
             orders, fills = self._restorable(account_id, state)
-            if orders:
-                broker.restore(orders, fills, self._restorable_positions(state))
+            positions = self._restorable_positions(state)
+            if orders or positions:
+                broker.restore(orders, fills, positions)
         held = {item.venue_order_id: item for item in broker.orders(MIN_TIME)}
         for order in sorted(state.orders.values(), key=lambda value: value.order_id):
             if not flag("eod:working", (order.state.value,)):
@@ -809,6 +860,11 @@ class EodRunner:
             )
         )
 
+    def recorded_verdict(self, account_id: str, intent: OrderIntent) -> RiskVerdict | None:
+        """The verdict an earlier, interrupted run recorded for this intent, if any (F3)."""
+        event = self._ledger.event_by_command(f"risk:{intent.command_id}")
+        return None if event is None else event.payload
+
     def _record_verdict(self, account_id: str, intent: OrderIntent, verdict: RiskVerdict) -> None:
         now = self._clock.now_utc()
         self._ledger.append(
@@ -1030,7 +1086,13 @@ class EodRunner:
                 quote = None if snapshot is None else snapshot.get(instrument)
                 decide("eod:option_mark", (str(quote.mid) if quote is not None else "0",
                     session.isoformat(), instrument.occ.strip(), account_id), flags=(quote is not None,))
-                marks[instrument] = (quote.mid, f"snapshot:{snapshot.as_of.isoformat()}")
+                source = f"snapshot:{snapshot.as_of.isoformat()}"
+                age = (snapshot.as_of - quote.as_of).total_seconds()
+                if age > self._config.mark_max_quote_age_seconds:
+                    # Still the mid (a refused mark would block every run for one illiquid
+                    # contract), but its provenance names the quote's real time.
+                    source = f"stale-quote:{quote.as_of.isoformat()} {source}"
+                marks[instrument] = (quote.mid, source)
                 underlyings.add(underlying)
             elif isinstance(instrument, Equity):
                 marks[instrument] = self._official_close(instrument.symbol, session)
