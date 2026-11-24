@@ -44,14 +44,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-import json
 from datetime import date, datetime
 from decimal import Decimal
 
 from trade_engine.domain.instruments import Instrument, Side
-from trade_engine.domain.orders import Order, OrderType, TimeInForce
+from trade_engine.domain.orders import Order
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Ledger, codec
+from trade_engine.ledger import Ledger
 from trade_engine.ledger.events import MirrorRefused
 from trade_engine.tos_paper import _rs
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
@@ -89,21 +88,11 @@ class ExitPlan:
 
 
 def close_id(account: str, contract: Instrument, session: date, name: str) -> str:
-    return _rs.decide("exit_id", {"which": "close", "session": session.isoformat(), "account": account,
-                                  "instrument": _rs.wire(contract), "name": name, "order_id": ""})["id"]
+    return _rs.call(_rs.rs.tos_exits_close_id, account, contract, session.isoformat(), name)
 
 
 def target_id(target: Order, session: date) -> str:
-    return _rs.decide("exit_id", {"which": "target", "session": session.isoformat(), "account": target.account_id,
-                                  "instrument": _rs.wire(target.instrument), "name": "",
-                                  "order_id": target.order_id})["id"]
-
-
-def _order(d: dict) -> Order:
-    return Order(order_id=d["order_id"], account_id=d["account_id"], instrument=_rs.unwire(d["instrument"]),
-                 order_type=OrderType(d["order_type"]), side=Side(d["side"]), quantity=_rs.dec(d["quantity"]),
-                 command_id=d["command_id"], created_at=datetime.fromisoformat(d["created_at"]),
-                 limit_price=_rs.dec(d["limit_price"]), tif=TimeInForce(d["tif"]))
+    return _rs.call(_rs.rs.tos_exits_target_id, target.order_id, session.isoformat())
 
 
 def plan_exits(
@@ -121,23 +110,20 @@ def plan_exits(
     host's: the core names the (contract, side) it needs next, the host's ``price`` answers it
     once, and the plan is decided again with that answer, until it needs nothing more.
     """
-    mirror = codec.canon(mirror_of(ledger, binding.venue_account))
-    accounts = [[a, codec.canon(ledger.state(a))] for a in binding.mirrored_accounts]
-    known: dict[tuple[str, str], list] = {}  # (instrument as JSON, side) -> the prices-table row
-    while True:
-        out = _rs.decide("plan_exits", {
-            "mirror": mirror, "accounts": accounts, "mirrored": list(binding.mirrored_accounts),
-            "session": session.isoformat(), "name": name, "at": at.isoformat(), "prices": list(known.values())})
-        need = next(((w, side) for w, side in out["priced"] if (json.dumps(w, sort_keys=True), side) not in known),
-                    None)
-        if need is None:
-            break
-        w, side = need
-        quote = price(_rs.unwire(w), Side(side))
-        known[(json.dumps(w, sort_keys=True), side)] = [w, side, None if quote is None else str(quote)]
+    mirror = mirror_of(ledger, binding.venue_account)
+    accounts = [(a, ledger.state(a)) for a in binding.mirrored_accounts]
+    cancel, orders, refused, waits = _rs.call(
+        _rs.rs.tos_exits_plan,
+        mirror,
+        accounts,
+        list(binding.mirrored_accounts),
+        session,
+        name,
+        at,
+        price,
+    )
     return ExitPlan(
-        cancel=tuple(out["cancel"]), orders=tuple(_order(o) for o in out["orders"]),
-        refused=tuple(tuple(x) for x in out["refused"]), waits=tuple(tuple(x) for x in out["waits"]))
+        cancel=tuple(cancel), orders=tuple(orders), refused=tuple(refused), waits=tuple(waits))
 
 
 def run_pass_mirror(
