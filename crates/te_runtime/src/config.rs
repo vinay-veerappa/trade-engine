@@ -23,6 +23,11 @@ pub struct Config {
     pub owner: Option<OwnerConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeConfig>,
+    /// The W6 build/serve skew guard: refuse to run when te.exe's build sha
+    /// differs from `engine_source`'s HEAD. Off by default; absent leaves
+    /// existing configs and their generation digest unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skew_guard: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize)]

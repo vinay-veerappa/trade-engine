@@ -29,6 +29,11 @@ mod mirror_loop;
 mod plain;
 pub mod plugins;
 
+/// The git sha (with a `-dirty` suffix) this binary was built from. Python
+/// reads it as `trade_engine_rs.__git_sha__`; the runtime owner's report reads
+/// it here, where no interpreter has to be initialized first (W6 skew guard).
+pub const GIT_SHA: &str = env!("TE_GIT_SHA");
+
 /// The same module initializer is registered before custom CPython startup.
 #[cfg(feature = "embed")]
 pub fn register_embedded_module() -> Result<(), &'static str> {
@@ -879,6 +884,7 @@ fn register_futures(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pymodule]
 fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("__git_sha__", env!("TE_GIT_SHA"))?;
     lock::register(m)?;
     store::register(m)?;
     outbox::register(m)?;

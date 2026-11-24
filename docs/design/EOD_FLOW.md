@@ -109,6 +109,25 @@ The phases and their invariants are named in the Summary. Failure modes: a missi
 bar, a stale mark quote, or a refused exit all refuse the run (I5); a second run of the
 same session appends nothing because every derived command id is already claimed.
 
+### Build/source skew guard (W6)
+
+te.exe embeds `trade_engine_rs` (te_py) at the commit it was built from, and imports the
+`trade_engine` package from the configured `engine_source` checkout — in production a
+separate git worktree. When the two came from different commits, jobs failed only at run
+time with attribute errors (`trade_engine_rs has no attribute oms_brackets_to_resync`,
+production 2026-11-24). The guard refuses to serve instead:
+
+- te_py's `build.rs` stamps `TE_GIT_SHA` (`<40-hex>`, `-dirty` when tracked files changed,
+  `unknown` without git) into `trade_engine_rs.__git_sha__` (crates/te_py/build.rs:21-40,
+  crates/te_py/src/lib.rs:887).
+- Config key `skew_guard` (optional boolean, default false) turns the check on
+  (crates/te_runtime/src/config.rs:30). When true, `verify_engine_source` refuses unless the
+  built sha is clean and equal to `engine_source`'s clean git HEAD
+  (crates/te_runtime/src/plugins.rs:13 `skew_refusal`, :58 `verify_no_skew`); the refusal
+  text starts with `build skew: `.
+- The owner's startup `serving` status and report carry `"git_sha"` (the built sha)
+  (crates/te_runtime/src/main.rs:100, :188), so a logged report names the exact build.
+
 ## 7. Alternatives rejected
 
 None.

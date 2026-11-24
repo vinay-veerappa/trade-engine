@@ -95,6 +95,9 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
         "instance": facts.instance.clone(),
         "jobs": facts.jobs.clone(),
         "recovered": true,
+        // The build sha (W6): names the commit this te.exe was built from,
+        // which the skew guard holds equal to engine_source's HEAD.
+        "git_sha": trade_engine_rs::GIT_SHA,
     });
     match port {
         // Without a port, serve proves the composition once and exits. The
@@ -182,6 +185,7 @@ fn serve(path: &PathBuf) -> Result<Value, Value> {
                         "port": server.port,
                         "generation": facts.generation,
                         "role": facts.role,
+                        "git_sha": trade_engine_rs::GIT_SHA,
                     }))
                     .expect("report serialization cannot fail")
                 );
