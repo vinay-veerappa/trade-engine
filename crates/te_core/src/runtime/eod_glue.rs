@@ -13,10 +13,10 @@ use std::collections::{BTreeSet, HashSet};
 use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone, Utc};
 
 use crate::calendar::{self, utc_to_ny};
-use crate::ledger::fold::{AccountState, Position};
+use crate::ledger::fold::{fold_account, AccountState, Position};
 use crate::ledger::model::{
-    err, DateTime, EodRun, EodVoid, Event, EventKind, Fill, Instrument, LErr, Mark, Obj, Order,
-    OrderStateChange, RiskVerdict, Signal, R, SCHEMA_VERSION,
+    err, CashFlow, DateTime, EodRun, EodVoid, Event, EventKind, Fill, Instrument, LErr, Mark, Obj,
+    Order, OrderStateChange, RiskVerdict, Signal, R, SCHEMA_VERSION,
 };
 use crate::ledger::ops::{self, OMap};
 use crate::money::Money;
@@ -459,6 +459,167 @@ pub fn mark_positions<L: Ledger, C: Clock>(
             source: Some(format!("eod:{job}")),
         };
         l.append(vec![event(account, EventKind::Mark, Obj::Mark(mark), now, Some(mark_command))])?;
+    }
+    Ok(())
+}
+
+// --- options: settlement, dividends and marks ----------------------------------------------
+
+/// One option's chain quote, as `_mark_options_account` reads it: the mid, and the times the
+/// quote and the snapshot holding it were taken.
+#[derive(Debug, Clone)]
+pub struct OptionQuote {
+    pub mid: Money,
+    pub quote_as_of: DateTime,
+    pub snapshot_as_of: DateTime,
+}
+
+/// The accounts, in the given order, that hold a nonzero option position (`_settle_options`).
+pub fn options_holders<L: Ledger>(l: &L, accounts: &[String]) -> R<Vec<String>> {
+    let mut holding = Vec::new();
+    for account in accounts {
+        let state = l.state(account)?;
+        let mut holds = false;
+        for position in state.positions.values() {
+            if matches!(position.instrument, Instrument::Option(_)) && eod::nonzero(&text(&position.quantity))? {
+                holds = true;
+                break;
+            }
+        }
+        if holds {
+            holding.push(account.clone());
+        }
+    }
+    Ok(holding)
+}
+
+/// `_credit_dividends`: credit (or charge) today's ex-dividends on the shares held at the open.
+/// The holding is the account as it stood before the session opened. One append per holding,
+/// so a later refusal leaves the earlier credits written. `fetch` gives one symbol's dividend
+/// records, as `(as_of, amount)`, in the source's order.
+pub fn credit_dividends<L: Ledger, C: Clock>(
+    l: &mut L,
+    clock: &C,
+    account: &str,
+    session: NaiveDate,
+    session_open_micros: i64,
+    has_source: bool,
+    mut fetch: impl FnMut(&str) -> R<Vec<(DateTime, Money)>>,
+) -> R<()> {
+    let opened: Vec<Event> = l
+        .events(account)?
+        .into_iter()
+        .filter(|e| eod::preopen(micros(&e.ts_utc), session_open_micros))
+        .collect();
+    let before = fold_account(&opened, account)?;
+    let mut shares: Vec<(String, Money)> = Vec::new();
+    for position in before.positions.values() {
+        if matches!(position.instrument, Instrument::Equity(_)) && eod::nonzero(&text(&position.quantity))? {
+            shares.push((position.instrument.symbol()?, position.quantity.clone()));
+        }
+    }
+    shares.sort_by(|a, b| a.0.cmp(&b.0));
+    if shares.is_empty() {
+        return Ok(());
+    }
+    eod::dividend_source(account, has_source)?;
+    let now = clock.now_utc();
+    for (symbol, quantity) in shares {
+        let found = fetch(&symbol)?;
+        for (as_of, _) in &found {
+            eod::dividend_stamp(&symbol, &as_of.iso(), micros(as_of), micros(&now))?;
+        }
+        let amounts: Vec<String> = found.iter().map(|(_, amount)| text(amount)).collect();
+        let quantity_text = text(&quantity);
+        let dividend = eod::dividend(&quantity_text, &amounts)?;
+        if !dividend.paid {
+            continue;
+        }
+        let per_share = dec(&dividend.text[0])?;
+        let amount = dec(&dividend.text[1])?;
+        let note = format!(
+            "{symbol} ex-dividend {}: {} a share on {quantity_text} held at the open",
+            iso(session),
+            text(&per_share)
+        );
+        let flow = CashFlow { amount, kind: "dividend".into(), as_of: now.clone(), note: Some(note) };
+        let command = format!("dividend:{account}:{symbol}:{}", iso(session));
+        l.append(vec![event(account, EventKind::CashFlow, Obj::CashFlow(flow), now.clone(), Some(command))])?;
+    }
+    Ok(())
+}
+
+/// `_mark_options_account`: options at the newest snapshot's mid; shares and underlyings at the
+/// official close. The underlying of every option held is marked too, held or not (O3). Every
+/// refusal comes before the first append, so a refused run writes nothing. `quote` is `None`
+/// when the option has no quote; `official` gives a symbol's official close and its source.
+pub fn mark_options_account<L: Ledger, C: Clock>(
+    l: &mut L,
+    clock: &C,
+    account: &str,
+    session: NaiveDate,
+    mut quote: impl FnMut(&Instrument) -> R<Option<OptionQuote>>,
+    mut official: impl FnMut(&str) -> R<(Money, String)>,
+    max_quote_age_seconds: f64,
+) -> R<()> {
+    let state = l.state(account)?;
+    let mut rows: Vec<(String, &Position)> = Vec::with_capacity(state.positions.len());
+    for position in state.positions.values() {
+        rows.push((position.instrument.symbol()?, position));
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    // (instrument key, symbol, instrument, price, source), in Python's dict insertion order.
+    let mut marks: Vec<(String, String, Instrument, Money, String)> = Vec::new();
+    let mut underlyings: BTreeSet<String> = BTreeSet::new();
+    for (symbol, position) in rows {
+        if !eod::nonzero(&text(&position.quantity))? {
+            continue;
+        }
+        match &position.instrument {
+            Instrument::Option(contract) => {
+                let underlying = underlying_of(&position.instrument)?;
+                let occ = contract.occ()?.trim().to_string();
+                let found = quote(&position.instrument)?;
+                let Some(found) = found else {
+                    return eod::option_mark("0", false, &iso(session), &occ, account);
+                };
+                eod::option_mark(&text(&found.mid), true, &iso(session), &occ, account)?;
+                // Still the mid, but its provenance names the quote's real time.
+                let age = micros(&found.snapshot_as_of) - micros(&found.quote_as_of);
+                let source = eod::quote_source(
+                    &found.snapshot_as_of.iso(),
+                    &found.quote_as_of.iso(),
+                    age,
+                    max_quote_age_seconds,
+                );
+                marks.push((position.instrument.hk(), symbol, position.instrument.clone(), found.mid, source));
+                underlyings.insert(underlying);
+            }
+            Instrument::Equity(name) => {
+                let (price, source) = official(name)?;
+                marks.push((position.instrument.hk(), symbol, position.instrument.clone(), price, source));
+            }
+            _ => return eod::unmarkable(account, &symbol),
+        }
+    }
+    for underlying in &underlyings {
+        let shares = Instrument::Equity(underlying.clone());
+        let key = shares.hk();
+        if marks.iter().any(|m| m.0 == key) {
+            continue;
+        }
+        let (price, source) = official(underlying)?;
+        marks.push((key, underlying.clone(), shares, price, source));
+    }
+    let now = clock.now_utc();
+    marks.sort_by(|a, b| a.1.cmp(&b.1));
+    for (_, symbol, instrument, price, source) in marks {
+        let command = eod::command("eod:mark", account, &iso(session), &symbol);
+        if l.event_by_command(&command)?.is_some() {
+            continue;
+        }
+        let mark = Mark { instrument, price, as_of: now.clone(), source: Some(source) };
+        l.append(vec![event(account, EventKind::Mark, Obj::Mark(mark), now.clone(), Some(command))])?;
     }
     Ok(())
 }
@@ -1063,6 +1224,320 @@ mod tests {
         positions_book(&mut l);
         let got = mark_positions(&mut l, &clock(), "eod", "A", &OMap::new(), day("2026-11-24")).unwrap_err();
         assert_eq!(got.kind, "runtime_replay");
+    }
+
+    use crate::ledger::model::{make_future, make_option, Val};
+    use crate::options::Right;
+
+    /// The SPY 100 call of 2026-12-18 the options tests hold.
+    fn spy_call() -> Instrument {
+        let contract = make_option("SPY", day("2026-12-18"), Val::Dec(money("100")), 100, Val::Right(Right::Call));
+        Instrument::Option(contract.expect("option"))
+    }
+
+    /// One option buy, booked as an order then its fill (as `positions_book` books equities).
+    fn option_book(l: &mut MemLedger, instrument: &Instrument, qty: &str, price: &str) {
+        let contract = Order {
+            order_id: "OPT".into(),
+            account_id: "A".into(),
+            instrument: instrument.clone(),
+            order_type: OrderType::Limit,
+            side: Side::Buy,
+            quantity: money(qty),
+            command_id: "OPT-cmd".into(),
+            created_at: at("2026-11-23T15:00:00+00:00"),
+            limit_price: Some(money(price)),
+            stop_price: None,
+            trail_amount: None,
+            tif: Tif::Day,
+            state: OrderState::Submitted,
+            parent_order_id: None,
+            oco_group: None,
+        };
+        created(l, vec![contract]);
+        let f = Fill {
+            fill_id: "FOPT".into(),
+            order_id: "OPT".into(),
+            account_id: "A".into(),
+            instrument: instrument.clone(),
+            quantity: money(qty),
+            price: money(price),
+            venue_env: "sim".into(),
+            filled_at: at("2026-11-23T15:00:00+00:00"),
+            side: Side::Buy,
+            fee: money("0"),
+            leg_id: None,
+            venue_order_id: None,
+            venue_execution_id: None,
+        };
+        put(l, "A", EventKind::Fill, Obj::Fill(f), "fill:FOPT");
+    }
+
+    fn quote(mid: &str, quote_as_of: &str) -> Option<OptionQuote> {
+        Some(OptionQuote {
+            mid: money(mid),
+            quote_as_of: at(quote_as_of),
+            snapshot_as_of: at("2026-11-24T11:59:00-05:00"),
+        })
+    }
+
+    fn count_kind(l: &MemLedger, account: &str, kind: EventKind) -> usize {
+        l.events(account).expect("events").iter().filter(|e| e.kind == kind).count()
+    }
+
+    fn open_micros(s: &str) -> i64 {
+        micros(&at(s))
+    }
+
+    #[test]
+    fn options_holders_keeps_accounts_with_a_nonzero_option_in_the_given_order() {
+        let mut l = two_accounts();
+        option_book(&mut l, &spy_call(), "1", "2.5");
+        let holding = options_holders(&l, &["B".into(), "A".into()]).expect("holders");
+        assert_eq!(holding, vec!["A".to_string()]);
+        let none = options_holders(&l, &["B".into()]).expect("holders");
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn credit_dividends_books_the_dividend_on_shares_held_before_the_open() {
+        let mut l = MemLedger::default();
+        positions_book(&mut l); // SPY 2 filled at 12:00; QQQ flat
+        let open = open_micros("2026-11-24T12:30:00-05:00");
+        credit_dividends(&mut l, &clock(), "A", day("2026-11-24"), open, true, |symbol| {
+            assert_eq!(symbol, "SPY");
+            Ok(vec![(at("2026-11-24T08:00:00-05:00"), money("0.50"))])
+        })
+        .expect("credit");
+        let flow = l.event_by_command("dividend:A:SPY:2026-11-24").expect("read").expect("credited");
+        match flow.payload {
+            Obj::CashFlow(c) => {
+                assert!(ops::eq(&c.amount, &money("1.00")).expect("cmp"));
+                assert_eq!(c.kind, "dividend");
+                // The per-share text is the `eod::dividend` rule's own (`ops::s`), which Python reads back: "0.5".
+                assert_eq!(c.note.as_deref(), Some("SPY ex-dividend 2026-11-24: 0.5 a share on 2 held at the open"));
+            }
+            other => panic!("expected CashFlow, got {}", other.tag()),
+        }
+    }
+
+    #[test]
+    fn credit_dividends_with_nothing_held_at_the_open_needs_no_source_and_fetches_nothing() {
+        let mut l = MemLedger::default();
+        positions_book(&mut l);
+        // The fills at 12:00 come after a 09:30 open, so nothing was held when it opened.
+        let open = open_micros("2026-11-24T09:30:00-05:00");
+        credit_dividends(&mut l, &clock(), "A", day("2026-11-24"), open, false, |_| {
+            panic!("no shares, so no dividend lookup")
+        })
+        .expect("nothing to credit");
+        assert_eq!(count_kind(&l, "A", EventKind::CashFlow), 0);
+    }
+
+    #[test]
+    fn credit_dividends_refuses_shares_without_a_dividend_source() {
+        let mut l = MemLedger::default();
+        positions_book(&mut l);
+        let open = open_micros("2026-11-24T12:30:00-05:00");
+        let got = credit_dividends(&mut l, &clock(), "A", day("2026-11-24"), open, false, |_| Ok(vec![])).unwrap_err();
+        assert_eq!(got.kind, "runtime_eod");
+        assert!(got.msg.contains("no dividend source is configured"));
+        assert_eq!(count_kind(&l, "A", EventKind::CashFlow), 0);
+    }
+
+    #[test]
+    fn credit_dividends_skips_a_holding_with_no_dividend() {
+        let mut l = MemLedger::default();
+        positions_book(&mut l);
+        let open = open_micros("2026-11-24T12:30:00-05:00");
+        credit_dividends(&mut l, &clock(), "A", day("2026-11-24"), open, true, |_| Ok(vec![])).expect("no dividend");
+        assert_eq!(count_kind(&l, "A", EventKind::CashFlow), 0);
+    }
+
+    #[test]
+    fn credit_dividends_refuses_a_look_ahead_record_after_earlier_credits_are_written() {
+        let mut l = MemLedger::default();
+        positions_book(&mut l); // SPY 2
+        created(&mut l, vec![order("I", "IWM", Side::Buy, OrderType::Limit, "3", None)]);
+        fill(&mut l, "FI", "I", "IWM", Side::Buy, "3", "80");
+        let open = open_micros("2026-11-24T12:30:00-05:00");
+        // IWM sorts before SPY, so its credit lands before SPY's stale record refuses.
+        let got = credit_dividends(&mut l, &clock(), "A", day("2026-11-24"), open, true, |symbol| {
+            if symbol == "IWM" {
+                Ok(vec![(at("2026-11-24T08:00:00-05:00"), money("0.10"))])
+            } else {
+                Ok(vec![(at("2026-11-24T13:00:00-05:00"), money("0.50"))])
+            }
+        })
+        .unwrap_err();
+        assert_eq!(got.kind, "runtime_replay");
+        assert!(l.event_by_command("dividend:A:IWM:2026-11-24").expect("read").is_some(), "IWM credit written first");
+        assert!(l.event_by_command("dividend:A:SPY:2026-11-24").expect("read").is_none(), "SPY refused");
+        assert_eq!(count_kind(&l, "A", EventKind::CashFlow), 1);
+    }
+
+    #[test]
+    fn credit_dividends_second_run_hits_the_ledgers_duplicate_command() {
+        // Python does not skip an existing dividend command; the ledger's refusal surfaces.
+        let mut l = MemLedger::default();
+        positions_book(&mut l);
+        let open = open_micros("2026-11-24T12:30:00-05:00");
+        let credit = |l: &mut MemLedger| {
+            credit_dividends(l, &clock(), "A", day("2026-11-24"), open, true, |_| {
+                Ok(vec![(at("2026-11-24T08:00:00-05:00"), money("0.50"))])
+            })
+        };
+        credit(&mut l).expect("first run");
+        assert_eq!(credit(&mut l).unwrap_err().kind, "duplicate_command");
+        assert_eq!(count_kind(&l, "A", EventKind::CashFlow), 1);
+    }
+
+    #[test]
+    fn mark_options_account_marks_the_option_and_its_underlying_in_symbol_order() {
+        let mut l = MemLedger::default();
+        let call = spy_call();
+        option_book(&mut l, &call, "1", "2.5");
+        mark_options_account(
+            &mut l,
+            &clock(),
+            "A",
+            day("2026-11-24"),
+            |_| Ok(quote("2.50", "2026-11-24T11:58:00-05:00")),
+            |symbol| {
+                assert_eq!(symbol, "SPY");
+                Ok((money("100"), "official:SPY".into()))
+            },
+            300.0,
+        )
+        .expect("mark");
+        let occ = call.symbol().expect("occ");
+        let spy = l.event_by_command("eod:mark:A:2026-11-24:SPY").expect("read").expect("underlying marked");
+        let opt = l.event_by_command(&format!("eod:mark:A:2026-11-24:{occ}")).expect("read").expect("option marked");
+        // "SPY" sorts before the OCC symbol that extends it, so the underlying is appended first.
+        assert!(spy.seq.expect("seq") < opt.seq.expect("seq"));
+        match opt.payload {
+            Obj::Mark(m) => {
+                assert!(ops::eq(&m.price, &money("2.50")).expect("cmp"));
+                assert_eq!(m.source.as_deref(), Some(format!("snapshot:{}", at("2026-11-24T11:59:00-05:00").iso()).as_str()));
+            }
+            other => panic!("expected Mark, got {}", other.tag()),
+        }
+        match spy.payload {
+            Obj::Mark(m) => assert_eq!(m.source.as_deref(), Some("official:SPY")),
+            other => panic!("expected Mark, got {}", other.tag()),
+        }
+    }
+
+    #[test]
+    fn mark_options_account_labels_a_quote_older_than_the_limit_as_stale() {
+        let mut l = MemLedger::default();
+        option_book(&mut l, &spy_call(), "1", "2.5");
+        mark_options_account(
+            &mut l,
+            &clock(),
+            "A",
+            day("2026-11-24"),
+            |_| Ok(quote("2.50", "2026-11-24T11:50:00-05:00")), // 540 seconds before the snapshot
+            |_| Ok((money("100"), "official:SPY".into())),
+            300.0,
+        )
+        .expect("mark");
+        let occ = spy_call().symbol().expect("occ");
+        let opt = l.event_by_command(&format!("eod:mark:A:2026-11-24:{occ}")).expect("read").expect("marked");
+        match opt.payload {
+            Obj::Mark(m) => assert!(m.source.expect("source").starts_with("stale-quote:2026-11-24T11:50:00")),
+            other => panic!("expected Mark, got {}", other.tag()),
+        }
+    }
+
+    #[test]
+    fn mark_options_account_refuses_a_missing_or_zero_quote_and_writes_nothing() {
+        for (name, found) in [("missing", None), ("zero", quote("0", "2026-11-24T11:58:00-05:00"))] {
+            let mut l = MemLedger::default();
+            option_book(&mut l, &spy_call(), "1", "2.5");
+            let before = l.events("A").expect("events").len();
+            let got = mark_options_account(
+                &mut l,
+                &clock(),
+                "A",
+                day("2026-11-24"),
+                |_| Ok(found.clone()),
+                |_| Ok((money("100"), "official:SPY".into())),
+                300.0,
+            )
+            .unwrap_err();
+            assert_eq!(got.kind, "runtime_replay", "{name} quote");
+            assert_eq!(l.events("A").expect("events").len(), before, "{name} quote writes nothing");
+        }
+    }
+
+    #[test]
+    fn mark_options_account_refuses_a_stale_official_close_before_any_mark_is_written() {
+        let mut l = MemLedger::default();
+        option_book(&mut l, &spy_call(), "1", "2.5");
+        let got = mark_options_account(
+            &mut l,
+            &clock(),
+            "A",
+            day("2026-11-24"),
+            |_| Ok(quote("2.50", "2026-11-24T11:58:00-05:00")),
+            |_| Err(LErr { kind: "runtime_replay", msg: "no close".into() }),
+            300.0,
+        )
+        .unwrap_err();
+        assert_eq!(got.kind, "runtime_replay");
+        assert_eq!(count_kind(&l, "A", EventKind::Mark), 0);
+    }
+
+    #[test]
+    fn mark_options_account_refuses_a_holding_that_cannot_be_marked() {
+        let mut l = MemLedger::default();
+        let future = make_future("ES").expect("future");
+        option_book(&mut l, &future, "1", "5000");
+        let got = mark_options_account(
+            &mut l,
+            &clock(),
+            "A",
+            day("2026-11-24"),
+            |_| Ok(None),
+            |_| Ok((money("5000"), "official:ES".into())),
+            300.0,
+        )
+        .unwrap_err();
+        assert_eq!(got.kind, "runtime_eod");
+        assert!(got.msg.contains("cannot be marked"));
+        assert_eq!(count_kind(&l, "A", EventKind::Mark), 0);
+    }
+
+    #[test]
+    fn mark_options_account_skips_a_mark_already_written_for_the_session() {
+        let mut l = MemLedger::default();
+        let call = spy_call();
+        option_book(&mut l, &call, "1", "2.5");
+        let existing = Mark {
+            instrument: make_equity("SPY").expect("equity"),
+            price: money("99"),
+            as_of: at("2026-11-24T12:00:00-05:00"),
+            source: Some("old".into()),
+        };
+        put(&mut l, "A", EventKind::Mark, Obj::Mark(existing), "eod:mark:A:2026-11-24:SPY");
+        mark_options_account(
+            &mut l,
+            &clock(),
+            "A",
+            day("2026-11-24"),
+            |_| Ok(quote("2.50", "2026-11-24T11:58:00-05:00")),
+            |_| Ok((money("100"), "official:SPY".into())),
+            300.0,
+        )
+        .expect("mark");
+        // The SPY mark already exists, so only the option is appended.
+        assert_eq!(count_kind(&l, "A", EventKind::Mark), 2);
+        let spy = l.event_by_command("eod:mark:A:2026-11-24:SPY").expect("read").expect("kept");
+        match spy.payload {
+            Obj::Mark(m) => assert!(ops::eq(&m.price, &money("99")).expect("cmp")),
+            other => panic!("expected Mark, got {}", other.tag()),
+        }
     }
 
     #[test]

@@ -1,11 +1,16 @@
 use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::num::ParseIntError;
 
+use chrono::NaiveDate;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
-use te_core::ledger::model::{err, Obj};
+use te_core::ledger::model::{err, parse_datetime, DateTime, Instrument, LErr, Obj, R as LR};
+use te_core::money::Money;
 use te_core::runtime::eod as rules;
 use te_core::runtime::eod_flow::{self as flow, Account, Boundary, EodHost, Finish, Mode, Observation};
-use te_core::runtime::eod_glue::{self as glue, Ledger as _};
+use te_core::runtime::eod_glue::{self as glue, Clock as _, Ledger as _, OptionQuote};
 use te_core::runtime::routing;
 
 use crate::store::LedgerStore;
@@ -30,6 +35,82 @@ fn sorted<'py>(value: &Value<'py>) -> PyResult<Vec<Value<'py>>> {
 }
 fn strings(value: &Value<'_>) -> PyResult<Vec<String>> {
     sorted(value)?.iter().map(|v| v.extract()).collect()
+}
+
+/// A Python `datetime` as the te_core instant it stands for, from its ISO text.
+fn datetime_of(value: &Value<'_>) -> PyResult<DateTime> {
+    parse_datetime(&iso(value)?).map(|(instant, _)| instant).map_err(super::flow_refusal)
+}
+
+/// A Python error raised inside a glue callback. A `StaleDataError` becomes the refusal that
+/// `refusal` builds from its text; any other Python error is held (see `Pending`).
+fn host_error(pending: &Pending, e: PyErr, stale: &Value<'_>, refusal: impl FnOnce(String) -> LErr) -> LErr {
+    let py = stale.py();
+    if e.is_instance(py, stale) {
+        let text = e.value(py).as_any().str().and_then(|s| s.extract::<String>()).unwrap_or_default();
+        return refusal(text);
+    }
+    pending.hold(e)
+}
+
+/// `config.dividends.dividends(symbol, session)`, as `(as_of, amount)` in the source's order.
+fn dividend_records(source: &Value<'_>, symbol: &str, session: &Value<'_>) -> PyResult<Vec<(DateTime, Money)>> {
+    let mut records = Vec::new();
+    for item in values(&source.call_method1("dividends", (symbol, session))?)? {
+        records.push((datetime_of(&item.getattr("as_of")?)?, sl::money(&item.getattr("amount")?)?));
+    }
+    Ok(records)
+}
+
+/// One option's quote as `_mark_options_account` reads it: the snapshot for its underlying,
+/// then that snapshot's quote for the instrument. `None` when either is missing.
+fn option_quote(snapshots: &Value<'_>, instrument: &Instrument) -> PyResult<Option<OptionQuote>> {
+    let py = snapshots.py();
+    let underlying = te_core::sim::snapshot::underlying_of(instrument).map_err(super::flow_refusal)?;
+    let snapshot = snapshots.call_method1("get", (underlying,))?;
+    if snapshot.is_none() {
+        return Ok(None);
+    }
+    let quote = snapshot.call_method1("get", (sl::instrument_py(py, instrument)?,))?;
+    if quote.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(OptionQuote {
+        mid: sl::money(&quote.getattr("mid")?)?,
+        quote_as_of: datetime_of(&quote.getattr("as_of")?)?,
+        snapshot_as_of: datetime_of(&snapshot.getattr("as_of")?)?,
+    }))
+}
+
+/// A settlement's fields as te_core reads them: underlying, session, settle time, as-of, price, source.
+fn settlement_fields(price: &Value<'_>) -> PyResult<(String, String, String, DateTime, Money, String)> {
+    let underlying: String = price.getattr("underlying")?.extract()?;
+    let session = sl::date_of(&price.getattr("session")?)?.to_string();
+    let settle_time: String = price.getattr("settle_time")?.getattr("value")?.extract()?;
+    let as_of = datetime_of(&price.getattr("as_of")?)?;
+    let amount = sl::money(&price.getattr("price")?)?;
+    let source: String = price.getattr("source")?.extract()?;
+    Ok((underlying, session, settle_time, as_of, amount, source))
+}
+
+/// `_official_close(symbol, session)`: the PM settlement, checked against the close asked for
+/// (I5), the clock (I7) and the session close (I9). `close` is the session close in micros.
+fn official_close(settlements: &Value<'_>, pm: &Value<'_>, stale: &Value<'_>, session_py: &Value<'_>,
+    session: NaiveDate, pending: &Pending, clock: &sl::PyClock<'_, '_>, close: i64, symbol: &str) -> LR<(Money, String)> {
+    let asked_close = session.to_string();
+    let price = settlements.call_method1("settlement", (symbol, session_py, pm)).map_err(|e| {
+        host_error(pending, e, stale, |text| LErr {
+            kind: "runtime_replay",
+            msg: format!("No official {asked_close} close for {symbol}: {text}"),
+        })
+    })?;
+    let (underlying, price_session, settle_time, as_of, amount, source) =
+        settlement_fields(&price).map_err(|e| pending.hold(e))?;
+    rules::official_identity(symbol, &underlying, &asked_close, &price_session, &settle_time)?;
+    let now = clock.now_utc();
+    rules::official_future(symbol, &as_of.iso(), sl::micros(&as_of), sl::micros(&now), &now.iso())?;
+    rules::official_close(symbol, &as_of.iso(), sl::micros(&as_of), close)?;
+    Ok((amount, source))
 }
 
 struct Host<'py> {
@@ -109,6 +190,99 @@ impl<'py> Host<'py> {
     fn close(&self) -> PyResult<Value<'py>> {
         self.calendar()?.call_method1("session_close", (&self.session,))
     }
+    /// `_session_snapshots`, native: the wiring, each snapshot's place in the session, and the
+    /// coverage of each options account (I5, I7). The chain fetch and its sort stay Python.
+    fn session_snapshots_native(&self, store: &Bound<'py, LedgerStore>, options: &[String],
+        covered: bool) -> PyResult<Vec<Value<'py>>> {
+        let py = self.runner.py();
+        if options.is_empty() {
+            return Ok(Vec::new());
+        }
+        let config = self.config()?;
+        let accounts = repr(&PyList::new(py, options)?.into_any())?;
+        rules::snapshots_wiring(&accounts, !config.getattr("chain_snapshots")?.is_none(),
+            !config.getattr("settlements")?.is_none()).map_err(super::flow_refusal)?;
+        let session = sl::date_of(&self.session)?;
+        let session_iso = session.to_string();
+        let open = sl::micros(&te_core::sim::session_open(session).map_err(super::flow_refusal)?.dt);
+        let close = sl::micros(&te_core::sim::session_close(session).map_err(super::flow_refusal)?.dt);
+        let chain = config.call_method1("chain_snapshots", (&self.session,))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("key", py.import("operator")?.call_method1("attrgetter", ("as_of", "underlying"))?)?;
+        let items = values(&py.import("builtins")?.getattr("sorted")?.call((chain,), Some(&kwargs))?)?;
+        let chain_snapshot = py.import("trade_engine.market_data.chains")?.getattr("ChainSnapshot")?;
+        for item in &items {
+            let valid = item.is_instance(&chain_snapshot)?;
+            let type_name: String = item.get_type().getattr("__name__")?.extract()?;
+            let (underlying, as_of, at) = if valid {
+                // The native scale for all three instants: the open and close are te_core's.
+                (item.getattr("underlying")?.extract::<String>()?, iso(&item.getattr("as_of")?)?,
+                    sl::micros(&datetime_of(&item.getattr("as_of")?)?))
+            } else {
+                (String::new(), String::new(), 0)
+            };
+            rules::snapshot(&type_name, valid, &underlying, &as_of, &session_iso, open, at, close)
+                .map_err(super::flow_refusal)?;
+        }
+        if covered {
+            let mut have = BTreeSet::new();
+            for item in &items {
+                have.insert(item.getattr("underlying")?.extract::<String>()?);
+            }
+            for account in options {
+                let missing = with_native(store, &self.clock()?, &self.pending, |l, _| {
+                    let state = l.state(account)?;
+                    let needed = glue::option_underlyings(&state)?;
+                    Ok(needed.difference(&have).cloned().collect::<Vec<_>>().join(", "))
+                })?;
+                rules::coverage(&missing, &session_iso, account).map_err(super::flow_refusal)?;
+            }
+        }
+        Ok(items)
+    }
+
+    /// `_credit_dividends`, native: the ex-dividends on the shares held at the open (O2, I5, I7).
+    fn credit_dividends_native(&self, store: &Bound<'py, LedgerStore>, account: &str) -> PyResult<()> {
+        let py = self.runner.py();
+        let source = self.config()?.getattr("dividends")?;
+        let has_source = !source.is_none();
+        let session = sl::date_of(&self.session)?;
+        let open = sl::micros(&te_core::sim::session_open(session).map_err(super::flow_refusal)?.dt);
+        let stale = py.import("trade_engine.interfaces.market_data")?.getattr("StaleDataError")?;
+        let pending = &self.pending;
+        with_native(store, &self.clock()?, pending, |l, c| {
+            glue::credit_dividends(l, c, account, session, open, has_source, |symbol| {
+                dividend_records(&source, symbol, &self.session).map_err(|e| {
+                    host_error(pending, e, &stale, |text| LErr {
+                        kind: "runtime_replay",
+                        msg: format!("'{account}' holds {symbol}: {text}"),
+                    })
+                })
+            })
+        })
+    }
+
+    /// `_mark_options_account`, native: options at the newest snapshot's mid, shares and
+    /// underlyings at the official close (O3, I5, I6, I9).
+    fn mark_options_native(&self, store: &Bound<'py, LedgerStore>, account: &str, tally: &Value<'py>) -> PyResult<()> {
+        let py = self.runner.py();
+        let config = self.config()?;
+        let snapshots = tally.getattr("snapshots")?;
+        let settlements = config.getattr("settlements")?;
+        let max_age: f64 = config.getattr("mark_max_quote_age_seconds")?.extract()?;
+        let session = sl::date_of(&self.session)?;
+        let close = sl::micros(&te_core::sim::session_close(session).map_err(super::flow_refusal)?.dt);
+        let pm = py.import("trade_engine.domain.option_roots")?.getattr("SettleTime")?.getattr("PM")?;
+        let stale = py.import("trade_engine.interfaces.market_data")?.getattr("StaleDataError")?;
+        let pending = &self.pending;
+        with_native(store, &self.clock()?, pending, |l, c| {
+            glue::mark_options_account(l, c, account, session,
+                |instrument| option_quote(&snapshots, instrument).map_err(|e| pending.hold(e)),
+                |symbol| official_close(&settlements, &pm, &stale, &self.session, session, pending, c, close, symbol),
+                max_age)
+        })
+    }
+
     fn result_kwargs(&self, account: &str) -> PyResult<Bound<'py, PyDict>> {
         let kwargs = PyDict::new(self.runner.py());
         kwargs.set_item("account_id", account)?;
@@ -173,13 +347,18 @@ impl<'py> EodHost for Host<'py> {
         self.module()?.getattr("_Tally")?.call((), Some(&kwargs))
     }
     fn snapshots(&self, options: &[String], mode: Mode) -> PyResult<Vec<Self::Value>> {
-        let kwargs = PyDict::new(self.runner.py());
-        if mode == Mode::Pass { kwargs.set_item("covered", false)?; }
-        let snapshots = self.runner.call_method("_session_snapshots",
-            (&self.session, options.to_vec()), Some(&kwargs))?;
+        let snapshots = match &self.native {
+            Some(store) => self.session_snapshots_native(store, options, mode != Mode::Pass)?,
+            None => {
+                let kwargs = PyDict::new(self.runner.py());
+                if mode == Mode::Pass { kwargs.set_item("covered", false)?; }
+                let python = self.runner.call_method("_session_snapshots",
+                    (&self.session, options.to_vec()), Some(&kwargs))?;
+                values(&python)?
+            }
+        };
         let mut out = Vec::new();
-        for snapshot in snapshots.try_iter()? {
-            let snapshot = snapshot?;
+        for snapshot in snapshots {
             if mode == Mode::Close || self.covered(&snapshot, &self.through)? {
                 out.push(snapshot);
             }
@@ -301,7 +480,29 @@ impl<'py> EodHost for Host<'py> {
         account.tally.getattr("snapshots")?.set_item(snapshot.getattr("underlying")?, snapshot)
     }
     fn snapshot(&self, account: &Account<Self::Value>, snapshot: &Self::Value) -> PyResult<()> {
-        self.runner.call_method1("_options_at_snapshot", (&account.id, &self.session, snapshot, &account.tally))?;
+        if self.native.is_none() {
+            self.runner.call_method1("_options_at_snapshot", (&account.id, &self.session, snapshot, &account.tally))?;
+            return Ok(());
+        }
+        // `manage_at_snapshot` stays Python until W6-E; the tally merge and the command are native.
+        let tally = &account.tally;
+        let router = self.runner.call_method1("_router", (&account.id,))?;
+        let command = self.command(&account.id, false)?;
+        let tallied = router.call_method1("manage_at_snapshot",
+            (&account.id, &self.session, snapshot, tally.getattr("snapshots")?, command))?;
+        let fields = ["orders_submitted", "exit_actions", "snapshots_processed"];
+        let mut text = Vec::with_capacity(6);
+        for field in fields {
+            text.push(tally.getattr(field)?.str()?.extract::<String>()?);
+        }
+        for field in fields {
+            text.push(tallied.getattr(field)?.str()?.extract::<String>()?);
+        }
+        let merged = routing::tally(&text).map_err(super::flow_refusal)?;
+        for (field, value) in fields.iter().zip(&merged) {
+            let value = value.parse::<i64>().map_err(|e: ParseIntError| PyValueError::new_err(e.to_string()))?;
+            tally.setattr(*field, value)?;
+        }
         Ok(())
     }
     fn bar(&self, account: &Account<Self::Value>, row: &Observation<Self::Value>) -> PyResult<()> {
@@ -333,7 +534,18 @@ impl<'py> EodHost for Host<'py> {
         self.advance(&at)
     }
     fn settle(&self, accounts: &[String]) -> PyResult<()> {
-        self.runner.call_method1("_settle_options", (&self.session, accounts.to_vec()))?;
+        let Some(store) = &self.native else {
+            self.runner.call_method1("_settle_options", (&self.session, accounts.to_vec()))?;
+            return Ok(());
+        };
+        let holding = with_native(store, &self.clock()?, &self.pending, |l, _| glue::options_holders(&*l, accounts))?;
+        if holding.is_empty() {
+            return Ok(());
+        }
+        let lifecycle = self.config()?.getattr("lifecycle")?;
+        let text = repr(&PyList::new(self.runner.py(), &holding)?.into_any())?;
+        rules::lifecycle(&text, true, !lifecycle.is_none()).map_err(super::flow_refusal)?;
+        lifecycle.call_method1("run", (&self.session, holding))?;
         Ok(())
     }
     fn finish(&self, account: &Account<Self::Value>, effect: Finish) -> PyResult<i64> {
@@ -353,10 +565,16 @@ impl<'py> EodHost for Host<'py> {
                 self.runner.call_method1("_option_manager", (id,))?.call_method1("sync",
                     (id, format!("eod:{}:{id}:{}:settled", self.config()?.getattr("job_name")?.extract::<String>()?, iso(&self.session)?)))?;
             }
-            Finish::Dividends => { self.runner.call_method1("_credit_dividends", (id, &self.session))?; }
+            Finish::Dividends => match &self.native {
+                Some(store) => self.credit_dividends_native(store, id)?,
+                None => { self.runner.call_method1("_credit_dividends", (id, &self.session))?; }
+            },
             Finish::Marks => {
                 if account.options {
-                    self.runner.call_method1("_mark_options_account", (id, &self.session, tally))?;
+                    match &self.native {
+                        Some(store) => self.mark_options_native(store, id, tally)?,
+                        None => { self.runner.call_method1("_mark_options_account", (id, &self.session, tally))?; }
+                    }
                 } else if let Some(store) = &self.native {
                     let job = self.job()?;
                     let closes = sl::closes(&tally.getattr("last_regular_closes")?)?;

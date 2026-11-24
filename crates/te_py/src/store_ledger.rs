@@ -39,7 +39,7 @@ impl Pending {
     }
 
     /// Hold one Python error (the first one wins) and return the unwinding refusal.
-    fn hold(&self, e: PyErr) -> LErr {
+    pub(crate) fn hold(&self, e: PyErr) -> LErr {
         self.0.borrow_mut().get_or_insert(e);
         LErr { kind: "host", msg: String::new() }
     }
