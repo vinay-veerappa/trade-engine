@@ -74,7 +74,7 @@ fn tos_exits_plan(
     price: &Bound<'_, PyAny>,
 ) -> PyResult<(Vec<String>, Vec<Py<PyAny>>, Vec<(String, String, String)>, Vec<(String, String)>)> {
     let py = mirror.py();
-    let mirror = sl::mirror_state_of(mirror)?;
+    let mirror = sl::mirror_of(mirror)?;
     let mut amap: OMap<String, AccountState> = OMap::new();
     for (account, state) in &accounts {
         amap.insert(account.clone(), account.clone(), sl::account_of(state.bind(py))?);
@@ -162,7 +162,7 @@ fn tos_follow_entries(
     max_age_us: i128,
 ) -> PyResult<(Vec<(String, String)>, Vec<(String, String, String)>)> {
     let py = mirror.py();
-    let mirror = sl::mirror_state_of(mirror)?;
+    let mirror = sl::mirror_of(mirror)?;
     let mut amap: OMap<String, AccountState> = OMap::new();
     for (account, state) in &accounts {
         amap.insert(account.clone(), account.clone(), sl::account_of(state.bind(py))?);
