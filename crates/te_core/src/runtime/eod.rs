@@ -163,7 +163,7 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
         "official_future" => if n[0] > n[1] { return err("runtime_replay",format!("{} close is stamped {}, after the clock {}: look-ahead (I7)",s[0],s[1],s[2])); },
         "official_close" => if n[0] < n[1] { return err("runtime_replay",format!("{} close is stamped {}, before the session closed; it cannot be the official close (I9)",s[0],s[1])); },
         "sink" => if !b[0] { return err("runtime_eod",format!("Sink for '{}' does not declare a publish method (I5)",s[0])); },
-        // s: reason, owner, session repr, session text, then one account per entry.
+        // s: session repr, session text, reason, owner, then one account per entry.
         // b: is_date, reason is str, owner is str, is_session, then (is_str, known, ran) per account.
         "void_check" => {
             if s.len() < 4 || b.len() != 4 + 3 * (s.len() - 4) { return err("value", "void_check arity"); }
