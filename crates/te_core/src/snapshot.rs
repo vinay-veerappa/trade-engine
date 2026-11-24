@@ -81,6 +81,7 @@ pub struct AccountSnapshot {
     pub margin_peak: Decimal,
     pub heat: Decimal,
     pub heat_unknown_positions: Vec<String>,
+    pub stale_mark_positions: Vec<String>,
     pub drawdown_from_peak: Decimal,
     pub drawdown_duration_sessions: usize,
 }
@@ -121,35 +122,41 @@ pub fn protective_stop(state: &AccountState, instrument: &Instrument) -> Option<
 
 /// The stop price of a working order on `reduce_side` for `instrument`.
 ///
-/// Last working stop on this instrument wins.
+/// Only a stop the venue has confirmed protects: state `Accepted` or `PartiallyFilled`.
+/// A `New`, `Submitted` or `PendingUnknown` stop is not protection (the venue has not
+/// confirmed it), so its position is reported as unknown heat instead.
+///
+/// With several qualifying stops the most conservative one wins: the LOWEST for a long
+/// (reduce side SELL), the HIGHEST for a short (reduce side BUY).
 pub fn protective_stop_for_side(
     state: &AccountState,
     instrument: &Instrument,
     reduce_side: Side,
 ) -> Option<Decimal> {
-    let mut candidate: Option<&crate::ledger::model::Order> = None;
+    let mut best: Option<Decimal> = None;
     for order in state.orders.values() {
-        if !order.instrument.same(instrument) || order.stop_price.is_none() {
+        if !order.instrument.same(instrument) {
             continue;
         }
+        let Some(stop) = order.stop_price.as_ref().map(|sp| sp.to_decimal()) else {
+            continue;
+        };
         if !matches!(order.order_type, OrderType::Stop | OrderType::StopLimit) {
             continue;
         }
-        if !matches!(
-            order.state,
-            OrderState::New
-                | OrderState::Submitted
-                | OrderState::Accepted
-                | OrderState::PartiallyFilled
-        ) {
+        if !matches!(order.state, OrderState::Accepted | OrderState::PartiallyFilled) {
             continue;
         }
         if order.side != reduce_side {
             continue;
         }
-        candidate = Some(order);
+        best = Some(match best {
+            None => stop,
+            Some(b) if reduce_side == Side::Sell => b.min(stop),
+            Some(b) => b.max(stop),
+        });
     }
-    candidate.and_then(|o| o.stop_price.as_ref().map(|sp| sp.to_decimal()))
+    best
 }
 
 /// Sum (mark − stop) risk over open positions with a working protective stop.
@@ -189,8 +196,14 @@ pub fn working_stop_risk(
         } else {
             stop.checked_sub(mark).ok_or(SnapshotError::Overflow)?
         };
+        // Risk per unit is in price points; a future or option is worth `multiplier` per point.
+        let unit = crate::ledger::fold::multiplier(instrument)
+            .map_err(|e| SnapshotError::Ledger(e.msg))?
+            .to_decimal();
         let pos_risk = risk
             .checked_mul(qty.abs())
+            .ok_or(SnapshotError::Overflow)?
+            .checked_mul(unit)
             .ok_or(SnapshotError::Overflow)?;
         heat = heat
             .checked_add(pos_risk)
@@ -219,6 +232,10 @@ pub fn compute_account_margin(
         let symbol = instrument.symbol().map_err(|e| SnapshotError::Value(e.msg))?;
         let mark = state.marks.get(&instrument.hk()).map(|m| m.to_decimal());
         let flat = position.quantity.is_zero();
+        // A flat future carries no exposure, so a past round trip does not block the snapshot.
+        if flat && matches!(instrument, Instrument::Future(_)) {
+            continue;
+        }
         let (kind, mult, contract, avg_cost) = match instrument {
             Instrument::Combo(_) => (MarginKind::Combo, 1, None, None),
             Instrument::Option(c) => {
@@ -240,7 +257,12 @@ pub fn compute_account_margin(
                 )
             }
             Instrument::Equity(_) => (MarginKind::Equity, 1, None, None),
-            Instrument::Future(_) => (MarginKind::Equity, 1, None, None),
+            // Reg-T margin does not apply to futures; refuse rather than value them as equity.
+            Instrument::Future(_) => {
+                return Err(SnapshotError::Value(format!(
+                    "futures not supported in margin calculation: {symbol}"
+                )))
+            }
         };
         wpos.push(MarginPosition {
             symbol,
@@ -369,6 +391,8 @@ pub fn daily_snapshots_with_overrides(
             .then_with(|| a.seq.unwrap_or(0).cmp(&b.seq.unwrap_or(0)))
     });
 
+    // The latest Mark as_of date seen so far per instrument key (advanced as events are folded in).
+    let mut latest_mark_date: HashMap<String, NaiveDate> = HashMap::new();
     let mut upto = 0;
     for (index, &session) in closes.iter().enumerate() {
         let mut close_stamp: Option<&DateTime> = None;
@@ -392,6 +416,13 @@ pub fn daily_snapshots_with_overrides(
         while upto < ordered_events.len()
             && ordered_events[upto].ts_utc.instant() <= close_stamp.instant()
         {
+            if let Obj::Mark(ref mark) = ordered_events[upto].payload {
+                let date = mark.as_of.date;
+                latest_mark_date
+                    .entry(mark.instrument.hk())
+                    .and_modify(|d| *d = (*d).max(date))
+                    .or_insert(date);
+            }
             upto += 1;
         }
 
@@ -401,6 +432,22 @@ pub fn daily_snapshots_with_overrides(
         if state.marks.is_empty() {
             continue;
         }
+
+        // Open positions whose latest mark is from an earlier session than this close: their
+        // value is carried forward, not re-marked. A flag only; the numbers do not change.
+        let mut stale_mark_positions = Vec::new();
+        for (instrument, position) in state.positions.iter() {
+            if position.quantity.is_zero() {
+                continue;
+            }
+            let fresh = latest_mark_date
+                .get(&instrument.hk())
+                .is_some_and(|d| *d >= session);
+            if !fresh {
+                stale_mark_positions.push(instrument.symbol().map_err(|e| SnapshotError::Value(e.msg))?);
+            }
+        }
+        stale_mark_positions.sort();
 
         let margin = compute_account_margin(&state, overrides)?;
         let (margin_used, margin_available) = margin_summary(margin.equity, margin.margin_maintenance)
@@ -447,6 +494,7 @@ pub fn daily_snapshots_with_overrides(
             margin_peak: peak_margin.unwrap_or(Decimal::ZERO),
             heat,
             heat_unknown_positions: unknown,
+            stale_mark_positions,
             drawdown_from_peak: dd,
             drawdown_duration_sessions: dd_duration,
         });
@@ -509,11 +557,14 @@ pub fn day_note_line(snapshot: &AccountSnapshot, account: &str) -> String {
         "n/a".to_string()
     };
 
-    let unknown = if !snapshot.heat_unknown_positions.is_empty() {
+    let mut unknown = if !snapshot.heat_unknown_positions.is_empty() {
         format!(" (no stop: {})", snapshot.heat_unknown_positions.join(","))
     } else {
         String::new()
     };
+    if !snapshot.stale_mark_positions.is_empty() {
+        unknown.push_str(&format!(" (stale mark: {})", snapshot.stale_mark_positions.join(",")));
+    }
 
     let margin_used_str = snapshot
         .margin_used
