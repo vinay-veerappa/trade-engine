@@ -70,3 +70,7 @@ debug_tmp/
 # Rust build output
 crates/target/
 crates/te_wasm/pkg/
+
+# Runtime owner control capability: a secret, never committed (rotated 2026-11-23).
+staging/p4c/capability.txt
+**/capability.txt
