@@ -1,4 +1,5 @@
 //! Native store binding and SQLite compatibility surface, all over ONE connection.
+use crate::outbox::{insert_row, strip_python};
 use crate::{refuse_ledger, LedgerFold, Row};
 use pyo3::{
     exceptions::{PyIndexError, PyStopIteration, PyValueError},
@@ -8,6 +9,12 @@ use pyo3::{
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
+};
+use te_core::ledger::{
+    bridge,
+    codec::{enc_obj, event_from_bytes},
+    json::{self, Json},
+    model::Event,
 };
 use te_host::{
     lock::LockError,
@@ -713,6 +720,8 @@ pub(crate) struct LedgerStore {
     folded_at: Mutex<BTreeMap<String, i64>>,
     reader: bool,
     thread: u64,
+    /// The post-commit callback for native writes (`set_notifier`); never set on a reader.
+    notifier: Mutex<Option<Py<PyAny>>>,
 }
 impl LedgerStore {
     /// The shared owner connection for same-crate native composition; never
@@ -819,6 +828,7 @@ impl LedgerStore {
             revision: Arc::new(Mutex::new(BTreeMap::new())),
             folded_at: Mutex::new(BTreeMap::new()),
             reader: reader_uri.is_some(),
+            notifier: Mutex::new(None),
             thread: py
                 .import("threading")?
                 .call_method0("get_ident")?
@@ -1087,6 +1097,292 @@ impl LedgerStore {
         };
         self.store.write(&mut host).map_err(|e| e.0)?;
         Ok((host.written, host.new_events))
+    }
+    /// Register the post-commit callback for native writes (`None` clears it). It receives
+    /// one list of the new events' carriers per committed write.
+    #[pyo3(signature = (callback=None))]
+    fn set_notifier(&self, callback: Option<Py<PyAny>>) {
+        *self.notifier.lock().expect("notifier mutex poisoned") = callback;
+    }
+    /// Test door for the native write path: each entry is an encoded event (canonical
+    /// bytes) with its outbox items as `(destination, payload_json)` text. Returns the
+    /// number of new events.
+    fn write_encoded(
+        &self,
+        py: Python<'_>,
+        entries: Vec<(Py<PyBytes>, Vec<(String, String)>)>,
+    ) -> PyResult<usize> {
+        let entries = entries
+            .into_iter()
+            .map(|(bytes, items)| -> PyResult<(Event, Vec<(String, Json)>)> {
+                let event = event_from_bytes(bytes.bind(py).as_bytes()).map_err(refuse_ledger)?;
+                let items = items
+                    .into_iter()
+                    .map(|(destination, text)| -> PyResult<(String, Json)> {
+                        let payload =
+                            json::parse(&text).map_err(|e| PyValueError::new_err(e.message))?;
+                        Ok((destination, payload))
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                Ok((event, items))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(self.write_events(py, entries)?.len())
+    }
+}
+
+impl LedgerStore {
+    /// Append events on the native path: one transaction, with no Python codec, fold or
+    /// outbox callbacks. Refuses before the transaction opens; notifies once after COMMIT.
+    pub(crate) fn write_events(
+        &self,
+        py: Python<'_>,
+        entries: Vec<(Event, Vec<(String, Json)>)>,
+    ) -> PyResult<Vec<Event>> {
+        validate_native(&entries)?;
+        self.check(py)?;
+        let mut host = NativeWriteHost {
+            py,
+            store: &self.store,
+            entries,
+            fold: self.fold.clone_ref(py),
+            revision: self.revision.clone(),
+            new_events: Vec::new(),
+        };
+        self.store.write(&mut host).map_err(|e| e.0)?;
+        let new = host.new_events;
+        self.notify(py, &new);
+        Ok(new.into_iter().map(|(event, _)| event).collect())
+    }
+
+    /// The post-commit notifier: one call with every new event's carrier. The commit has
+    /// already stood, so a failing callback is logged and swallowed here.
+    fn notify(&self, py: Python<'_>, new: &[(Event, StoredRow)]) {
+        if new.is_empty() {
+            return;
+        }
+        let callback = match self
+            .notifier
+            .lock()
+            .expect("notifier mutex poisoned")
+            .as_ref()
+        {
+            Some(callback) => callback.clone_ref(py),
+            None => return,
+        };
+        let delivered = new
+            .iter()
+            .map(|(_, row)| event_carrier(py, row))
+            .collect::<PyResult<Vec<_>>>()
+            .and_then(|carriers| callback.bind(py).call1((carriers,)).map(drop));
+        if let Err(error) = delivered {
+            log_notifier_error(py, error);
+        }
+    }
+}
+
+fn log_notifier_error(py: Python<'_>, error: PyErr) {
+    let logged = (|| -> PyResult<()> {
+        let logger = py
+            .import("logging")?
+            .call_method1("getLogger", ("trade_engine.ledger",))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("exc_info", error.value(py))?;
+        logger.call_method("exception", ("ledger notifier failed",), Some(&kwargs))?;
+        Ok(())
+    })();
+    drop(logged);
+}
+
+/// The native checks `ledger_store_write` and `ledger_outbox_items` make before a write.
+fn validate_native(entries: &[(Event, Vec<(String, Json)>)]) -> PyResult<()> {
+    for (event, items) in entries {
+        if event.seq.is_some() {
+            return Err(PyValueError::new_err(
+                "Event.seq is assigned by the ledger; pass seq=None to append",
+            ));
+        }
+        for (destination, payload) in items {
+            if strip_python(destination).is_empty() {
+                return Err(PyValueError::new_err(
+                    "Outbox destination must be non-empty string",
+                ));
+            }
+            if !matches!(payload, Json::Obj(_)) {
+                return Err(PyValueError::new_err(format!(
+                    "Outbox payload for '{destination}' must be a dict"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A committed row as the envelope `Ledger` builds for it: text and integer columns only.
+fn stored_row(event: &StoredEvent) -> StoredRow {
+    StoredRow {
+        seq: Value::Integer(event.seq),
+        ts: Value::Text(event.ts.clone()),
+        account: Value::Text(event.account.clone()),
+        kind: Value::Text(event.kind.clone()),
+        command: event.command.clone().map_or(Value::Null, Value::Text),
+        payload: Value::Text(event.payload.clone()),
+        schema: Value::Integer(event.schema),
+    }
+}
+
+fn text_column(value: &Value, column: &str) -> PyResult<String> {
+    match value {
+        Value::Text(text) => Ok(text.clone()),
+        _ => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{column} must be str"
+        ))),
+    }
+}
+
+fn integer_column(value: &Value, column: &str) -> PyResult<i64> {
+    match value {
+        Value::Integer(number) => Ok(*number),
+        _ => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{column} must be int"
+        ))),
+    }
+}
+
+/// A stored row as the fold's `(kind, payload_json, ts_utc, command_id, schema_version, seq)`,
+/// with the types the binding's extraction requires.
+fn fold_row_of(row: &StoredRow) -> PyResult<Row> {
+    Ok((
+        text_column(&row.kind, "kind")?,
+        text_column(&row.payload, "payload_json")?,
+        text_column(&row.ts, "ts_utc")?,
+        match &row.command {
+            Value::Null => None,
+            value => Some(text_column(value, "command_id")?),
+        },
+        integer_column(&row.schema, "schema_version")?,
+        Some(integer_column(&row.seq, "seq")?),
+    ))
+}
+
+/// `Ledger._row_to_event` over a stored row: the envelope decodes exactly as on the read path.
+fn event_of_row(row: &StoredRow) -> PyResult<Event> {
+    let (kind, payload, ts, command, schema, seq) = fold_row_of(row)?;
+    let account = text_column(&row.account, "account")?;
+    bridge::event_from_row(
+        &account,
+        &kind,
+        &payload,
+        &ts,
+        command.as_deref(),
+        i128::from(schema),
+        seq.map(i128::from),
+    )
+    .map_err(refuse_ledger)
+}
+
+/// The native write host: the same transaction algorithm as `BindingHost`, with the codec,
+/// fold and outbox steps in Rust and no Python callbacks.
+struct NativeWriteHost<'a> {
+    py: Python<'a>,
+    store: &'a Store,
+    entries: Vec<(Event, Vec<(String, Json)>)>,
+    fold: Py<LedgerFold>,
+    revision: Arc<Mutex<BTreeMap<String, u64>>>,
+    new_events: Vec<(Event, StoredRow)>,
+}
+impl WriteHost for NativeWriteHost<'_> {
+    type Error = HostError;
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+    fn validate_sequences(&self) -> Result<(), HostError> {
+        // Checked by `write_events` before the transaction opens.
+        Ok(())
+    }
+    fn command(&self, index: usize) -> Result<Option<String>, HostError> {
+        Ok(self.entries[index].0.command_id.clone())
+    }
+    fn account(&self, index: usize) -> Result<String, HostError> {
+        Ok(self.entries[index].0.account.clone())
+    }
+    fn load(&mut self, store: &Store, account: &str) -> Result<(), HostError> {
+        if !self.fold.borrow(self.py).has(account) {
+            let rows = store.events(None, Some(account), None, None)?;
+            bump(&self.revision, account);
+            let rows = rows
+                .iter()
+                .map(fold_row_of)
+                .collect::<PyResult<Vec<_>>>()?;
+            self.fold.borrow_mut(self.py).load(account, rows)?;
+        }
+        Ok(())
+    }
+    fn encode(&self, index: usize) -> Result<StoredEvent, HostError> {
+        let event = &self.entries[index].0;
+        // `payload_text`: the canonical tree, checked, then the sorted compact ASCII bytes.
+        let tree = enc_obj(&event.payload).map_err(refuse_ledger)?;
+        let bytes = bridge::check_encoded(&json::dumps(&tree)).map_err(refuse_ledger)?;
+        let payload = String::from_utf8(bytes).expect("canonical JSON is ASCII");
+        Ok(StoredEvent {
+            seq: 0,
+            account: event.account.clone(),
+            kind: event.kind.value().to_string(),
+            command: event.command_id.clone(),
+            ts: event.ts_utc.iso(),
+            payload,
+            schema: i64::try_from(event.schema_version).map_err(|_| {
+                pyo3::exceptions::PyOverflowError::new_err("schema_version out of range")
+            })?,
+        })
+    }
+    fn replay(&mut self, event: StoredRow) -> Result<(), HostError> {
+        // Validated as the binding's carrier is; a replayed command appends nothing.
+        event_of_row(&event)?;
+        Ok(())
+    }
+    fn apply(&mut self, _index: usize, event: &StoredEvent) -> Result<(), HostError> {
+        bump(&self.revision, &event.account);
+        self.fold
+            .borrow_mut(self.py)
+            .apply_row(&event.account, &fold_row(event))
+            .map_err(refuse_ledger)?;
+        let row = stored_row(event);
+        let appended = event_of_row(&row)?;
+        self.new_events.push((appended, row));
+        Ok(())
+    }
+    fn outbox(&self, index: usize, seq: i64) -> Result<(), HostError> {
+        let (event, items) = &self.entries[index];
+        let created = event.ts_utc.iso();
+        for (destination, payload) in items {
+            insert_row(
+                self.py,
+                self.store,
+                Value::Integer(seq),
+                Value::Text(strip_python(destination).to_owned()),
+                Value::Text(json::dumps(payload)),
+                Value::Text(created.clone()),
+            )?;
+        }
+        Ok(())
+    }
+    fn commit(&self) -> Result<(), HostError> {
+        self.store.execute("COMMIT", &[])?;
+        Ok(())
+    }
+    fn rollback(&self) -> Result<(), HostError> {
+        self.store.execute("ROLLBACK", &[])?;
+        Ok(())
+    }
+    fn drop_account(&mut self, account: &str) {
+        LedgerFold::drop(&mut self.fold.borrow_mut(self.py), account);
+        bump(&self.revision, account);
+    }
+    fn is_exception(&self, error: &HostError) -> bool {
+        error
+            .0
+            .is_instance_of::<pyo3::exceptions::PyException>(self.py)
     }
 }
 
@@ -1359,6 +1655,7 @@ fn owner_ledger(py: Python<'_>) -> PyResult<Py<PyAny>> {
             revision: Arc::new(Mutex::new(BTreeMap::new())),
             folded_at: Mutex::new(BTreeMap::new()),
             reader: false,
+            notifier: Mutex::new(None),
             thread: py
                 .import("threading")?
                 .call_method0("get_ident")?
@@ -1393,4 +1690,41 @@ fn owner_ledger(py: Python<'_>) -> PyResult<Py<PyAny>> {
         .call1((ledger.clone(),))?;
     ledger.setattr("_lock", lock_view)?;
     Ok(ledger.into_any().unbind())
+}
+
+#[cfg(test)]
+mod native_write_tests {
+    use super::*;
+    use te_core::ledger::model::parse_datetime;
+
+    #[test]
+    fn ts_isoformat_without_micros_round_trips() {
+        let text = "2026-09-24T14:30:00+00:00";
+        assert_eq!(parse_datetime(text).unwrap().0.iso(), text);
+    }
+
+    #[test]
+    fn ts_isoformat_with_micros_round_trips() {
+        for text in [
+            "2026-09-24T14:30:00.123456+00:00",
+            "2026-09-24T14:30:00.000100+00:00",
+        ] {
+            assert_eq!(parse_datetime(text).unwrap().0.iso(), text);
+        }
+    }
+
+    #[test]
+    fn outbox_json_is_sorted_compact_ascii() {
+        let tree = json::parse(r#"{"b":1,"a":"é"}"#).unwrap();
+        assert_eq!(json::dumps(&tree), r#"{"a":"\u00e9","b":1}"#);
+    }
+
+    #[test]
+    fn strip_matches_python_str_strip() {
+        assert_eq!(strip_python("  x \t\n"), "x");
+        assert_eq!(strip_python("\u{1c}x\u{1f}"), "x");
+        assert_eq!(strip_python("\u{a0}x\u{85}"), "x");
+        assert_eq!(strip_python("\u{200b}"), "\u{200b}");
+        assert_eq!(strip_python(" \t "), "");
+    }
 }

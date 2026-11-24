@@ -100,11 +100,13 @@ class Ledger:
         sidecar = self.path.with_name(self.path.name + ".lock")
         self._native = _rs.rs.LedgerStore(str(self.path), str(sidecar), str(os.getpid()))
         self._conn = self._native.connection()
+        self._native.set_notifier(self._notify_listeners)
         self._carriers.clear()
         return self
 
     def close(self) -> None:
         if self._native is not None:
+            self._native.set_notifier(None)
             self._native.close()
             self._native = None
             self._conn = None
