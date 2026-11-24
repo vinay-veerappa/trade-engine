@@ -197,7 +197,7 @@ def test_a_replayed_older_fill_is_healed_without_journaling_it_again(tmp_path) -
 # -- keepers from the parity files: explicit literals, no oracle ---------------------------
 
 
-@pytest.mark.parametrize("name", ["oms_restorable", "oms_sync_plan", "oms_plan_close", "oms_journal_payload"])
+@pytest.mark.parametrize("name", ["oms_native_restorable", "oms_sync_plan", "oms_plan_close", "oms_native_journal_payload"])
 def test_the_rust_flow_entry_points_are_imported_not_skipped(name) -> None:
     assert getattr(trade_engine_rs, name)
 

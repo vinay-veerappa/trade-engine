@@ -1,7 +1,7 @@
 use chrono::{NaiveDate, NaiveTime};
 use pyo3::exceptions::{PyException, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 use te_core::ledger::model::{parse_datetime, DateTime, Instrument, R as LR};
 use te_core::money::Money;
 use te_core::runtime::eod_glue::Ledger;
@@ -349,40 +349,51 @@ fn intraday_cancel(service: Value<'_>, session: Value<'_>, code: &str) -> PyResu
 fn intraday_restore(service: Value<'_>, session: Value<'_>, state: Value<'_>) -> PyResult<()> {
     let py = service.py();
     let host = host(service, session, state);
-    let restore = py.import("trade_engine.oms.restore")?;
+    let reconcile = py.import("trade_engine.oms.reconcile")?;
     let broker = host.config()?.getattr("broker")?;
-    let min = restore.getattr("MIN_TIME")?;
+    let min = reconcile.getattr("MIN_TIME")?;
     if broker.call_method1("orders", (&min,))?.is_truthy()? || broker.call_method1("fills", (&min,))?.is_truthy()? {
         return Ok(());
     }
     let account = host.account()?;
+    let account_id: String = account.extract()?;
     let ledger = host.ledger()?;
     let folded = ledger.call_method1("state", (&account,))?;
-    let resolution = restore.getattr("PendingResolution")?.call0()?;
-    let args = PyDict::new(py);
-    args.set_item("pending", "resolve")?;
-    args.set_item("resolution", &resolution)?;
-    let restored = match restore.getattr("restorable")?.call((&ledger, &account, &folded), Some(&args)) {
-        Err(error) if error.matches(py, restore.getattr("RestoreError")?)? => {
-            let refused = PyErr::from_value(host.module()?.getattr("IntradayServiceError")?.call1((text(error.value(py).as_any())?,))?);
-            refused.set_cause(py, Some(error));
-            return Err(refused);
-        }
-        result => result?,
+    let calendar = host.calendar()?;
+    let store = require_native_intraday(&ledger, &calendar)?;
+    let guard = store.borrow();
+
+    let stash = crate::sim::Host::new();
+    let r = (|| -> LR<(crate::oms_native::RestoreOutcome, Vec<Py<PyAny>>)> {
+        let st = crate::oms_native::state_of(&folded, Some(account_id.as_str()), &stash)?;
+        let outcome =
+            crate::oms_native::restore_native(py, &*guard, account_id.as_str(), &st, "resolve", true, &[], &stash)?;
+        let positions = crate::oms_native::build_positions(py, &st, &stash)?;
+        Ok((outcome, positions))
+    })();
+    let (outcome, positions) = match r {
+        Ok(v) => v,
+        Err(e) => return Err(crate::oms_native::intraday_restore_refusal(py, e, &stash)),
     };
-    let orders = restored.get_item(0)?;
-    let fills = restored.get_item(1)?;
-    let positions = restore.call_method1("restorable_positions", (&folded,))?;
-    if orders.is_truthy()? || fills.is_truthy()? || positions.is_truthy()? {
+
+    let has_any = !outcome.orders.is_empty() || !outcome.fills.is_empty() || !positions.is_empty();
+    if has_any {
+        let orders = PyList::new(py, outcome.orders)?;
+        let fills = PyList::new(py, outcome.fills)?;
+        let positions = PyList::new(py, positions)?;
         broker.call_method1("restore", (orders, fills, positions))?;
     }
     let manager = host.manager()?;
-    for id in resolution.getattr("resolved")?.try_iter()? {
-        manager.getattr("orders")?.call_method1("reconcile_order", (id?,))?;
+    for id in &outcome.resolved {
+        manager.getattr("orders")?.call_method1("reconcile_order", (id,))?;
     }
-    let unresolved = resolution.getattr("unresolved")?;
-    if unresolved.is_truthy()? {
-        host.state.setattr("barred", "; ".into_pyobject(py)?.call_method1("join", (unresolved.call_method0("values")?,))?)?;
+    if !outcome.unresolved.is_empty() {
+        let dict = PyDict::new(py);
+        for (id, why) in &outcome.unresolved {
+            dict.set_item(id, why)?;
+        }
+        let joined = "; ".into_pyobject(py)?.call_method1("join", (dict.call_method0("values")?,))?;
+        host.state.setattr("barred", joined)?;
     }
     let domain = py.import("trade_engine.domain.option_orders")?;
     let terminals = py.import("trade_engine.domain.orders")?.getattr("OrderState")?;
