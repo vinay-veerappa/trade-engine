@@ -8,7 +8,6 @@ use te_host::jobs::{Failure, Record};
 
 /// A job request accepted by the owner. Built only from an admitted record.
 pub struct Job {
-    pub request_id: String,
     pub job: String,
     pub session: Option<String>,
     pub pass: Option<String>,
@@ -27,7 +26,6 @@ impl Job {
             })?
             .to_owned();
         Ok(Self {
-            request_id: record.request_id.clone(),
             job,
             session: payload["session"].as_str().map(str::to_owned),
             pass: payload["pass"].as_str().map(str::to_owned),

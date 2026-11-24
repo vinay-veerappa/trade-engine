@@ -20,7 +20,7 @@ fn owner_job_run(
     options_json: String,
     entry_module: String,
     entry: String,
-) -> PyResult<Py<PyAny>> {
+) -> PyResult<String> {
     let options: serde_json::Value = serde_json::from_str(&options_json)
         .map_err(|e| PyRuntimeError::new_err(format!("RuntimeRequestError: {e}")))?;
     for (label, name) in [("entry_module", &entry_module), ("entry", &entry)] {
@@ -89,7 +89,7 @@ fn owner_job_run(
         .getattr("dumps")?
         .call1((result,))?
         .extract::<String>()?;
-    Ok(text.into_py(py))
+    Ok(text)
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
