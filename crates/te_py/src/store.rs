@@ -1729,7 +1729,7 @@ fn owner_ledger(py: Python<'_>) -> PyResult<Py<PyAny>> {
     )?;
     ledger.setattr("_listeners", py.import("builtins")?.getattr("list")?.call0()?)?;
     // As `Ledger.open` does: committed native writes notify the owner's listeners.
-    ledger.getattr("_native")?.call_method1("set_notifier", (ledger.getattr("_notify_listeners")?,))?;
+    ledger.getattr("_native")?.call_method1("set_notifier", (ledger.call_method0("_notifier")?,))?;
     let lock_view = py
         .import("trade_engine.ledger.store")?
         .getattr("_LockView")?

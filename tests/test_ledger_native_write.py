@@ -246,3 +246,15 @@ def test_native_rewrite_of_the_eod_golden_ledgers_is_byte_identical(tmp_path: Pa
             assert dst.accounts() == accounts
             assert {account: dst.snapshot(account) for account in accounts} == snapshots
     assert {"Fill", "Mark", "EodRun", "EodVoid", "OrdersCreated", "OrderCancelled"} <= kinds, sorted(kinds)
+
+
+def test_an_unclosed_ledger_releases_its_lock_when_collected(tmp_path: Path) -> None:
+    # The native notifier must not keep the Ledger alive: a dropped, unclosed Ledger
+    # releases its I4 lock so the next owner can open the same file (tv opens the
+    # options ledger twice in one process when a build is abandoned).
+    import gc
+
+    path = tmp_path / "l.db"
+    Ledger(path).open()
+    gc.collect()
+    Ledger(path).open().close()
