@@ -88,6 +88,27 @@ def replay(events: Iterable[dict[str, str]]) -> dict[str, Any]:
     return json.loads(_call(rs.accounts_replay, json.dumps(list(events), separators=(",", ":"))))
 
 
+def membership(
+    rows: Iterable[dict[str, Any]], scope: Iterable[str]
+) -> tuple[dict[str, Any], int] | None:
+    """The membership replayed from the rows of the scope's brokers, and the largest kept seq.
+
+    None when the scope is empty or no row is in it.
+    """
+    found = _call(
+        rs.accounts_membership, json.dumps(list(rows), separators=(",", ":")), sorted(scope)
+    )
+    if found is None:
+        return None
+    snapshot, max_seq = found
+    return json.loads(snapshot), max_seq
+
+
+def scope(fixed: str | None, keys: Iterable[str]) -> frozenset[str]:
+    """A poller's broker scope: the fixed broker, or the brokers of the keys (`broker:accountId`)."""
+    return frozenset(_call(rs.accounts_scope, fixed, list(keys)))
+
+
 def event_ring():
     """The bounded ring (10,000 events or 24 h, oldest dropped and counted)."""
     return rs.AccountEventRing()
@@ -106,9 +127,11 @@ __all__ = [
     "key",
     "mask",
     "max_records",
+    "membership",
     "nt8_route",
     "nt8_routes_from_text",
     "replay",
     "rs",
+    "scope",
     "check_snapshot",
 ]

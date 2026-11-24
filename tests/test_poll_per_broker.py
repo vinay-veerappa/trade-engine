@@ -121,3 +121,39 @@ def test_empty_first_snapshot_with_broker_none_emits_no_removals(tmp_path) -> No
         events = restarted.poll()
         assert events == []
         assert not [e for e in events if e.kind == "removed"]
+
+
+BROKER_C = "ibkr"
+
+
+def test_restart_replays_only_the_first_snapshots_brokers_and_continues_their_seq(tmp_path) -> None:
+    """Three brokers share one ledger. A restarted poller whose first snapshot holds A and B
+    (scope derived from the keys) replays exactly A's and B's events, never C's, and its seq
+    continues from the highest in-scope seq (B's 3), not from C's 5."""
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        _seed_two_brokers(ledger)
+        c_venue = ScriptedBroker(snapshot(*(account(BROKER_C, f"ACCT-C-{i:03d}") for i in range(1, 6))))
+        assert len(_poller(ledger, c_venue, BROKER_C).poll()) == 5
+        venue = ScriptedBroker(
+            snapshot(
+                account(BROKER_A, "ACCT-A-001"),
+                account(BROKER_A, "ACCT-A-002"),
+                account(BROKER_B, "ACCT-B-001"),
+                account(BROKER_B, "ACCT-B-002"),
+                account(BROKER_B, "ACCT-B-003"),
+            )
+        )
+        restarted = _poller(ledger, venue, None)
+        # Nothing changed for A or B; C's five accounts would show as removed if replayed.
+        assert restarted.poll() == []
+        assert restarted.seq == 3
+        venue.snap = snapshot(
+            account(BROKER_A, "ACCT-A-001"),
+            account(BROKER_A, "ACCT-A-002"),
+            account(BROKER_B, "ACCT-B-001"),
+            account(BROKER_B, "ACCT-B-002", status="closed"),
+            account(BROKER_B, "ACCT-B-003"),
+        )
+        events = restarted.poll()
+        assert [(e.kind, e.key, e.seq) for e in events] == [("changed", "tradovate:ACCT-B-002", 4)]
+        assert restarted.seq == 4
