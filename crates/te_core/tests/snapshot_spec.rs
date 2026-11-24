@@ -23,8 +23,8 @@ use te_core::ledger::model::{
 };
 use te_core::money::Money;
 use te_core::snapshot::{
-    daily_snapshots, day_note_line, max_drawdown, payload_as_of, peak_margin, protective_stop,
-    protective_stop_for_side, session_of, working_stop_risk, AccountSnapshot, SnapshotError,
+    compute_account_margin, daily_snapshots, day_note_line, max_drawdown, payload_as_of, peak_margin,
+    protective_stop, protective_stop_for_side, session_of, working_stop_risk, AccountSnapshot, SnapshotError,
 };
 
 fn dt(s: &str) -> DateTime {
@@ -844,4 +844,160 @@ proptest! {
         prop_assert_eq!(snaps[0].heat, expected_heat);
         prop_assert!(snaps[0].heat_unknown_positions.is_empty());
     }
+}
+
+// --- futures: margin refuses, heat uses the point value ---------------------------------
+
+fn nq() -> Instrument {
+    te_core::ledger::model::make_future("NQZ26").expect("NQZ26 is a known future")
+}
+
+/// A submitted NQ order as an OrderSubmitted event.
+fn nq_order_event(
+    id: &str,
+    side: Side,
+    qty: &str,
+    order_type: OrderType,
+    stop: Option<&str>,
+    at: &DateTime,
+    seq: i128,
+) -> Event {
+    Event {
+        account: "ACC".to_string(),
+        kind: EventKind::OrderSubmitted,
+        payload: Obj::Order(an_order(id, nq(), side, qty, order_type, stop, at.clone())),
+        ts_utc: at.clone(),
+        command_id: Some(format!("cmd-{id}")),
+        schema_version: 1,
+        seq: Some(seq),
+    }
+}
+
+/// Deposit, buy `qty` NQ at 20000, optionally a working sell stop, and a session-close mark.
+fn nq_long_events(qty: &str, stop: Option<&str>, close_qty: Option<&str>) -> Vec<Event> {
+    let d1 = dt("2026-09-22T21:00:00+00:00");
+    let mut events = vec![Event {
+        account: "ACC".to_string(),
+        kind: EventKind::CashFlow,
+        payload: Obj::CashFlow(CashFlow {
+            amount: money("1000000"),
+            kind: "deposit".to_string(),
+            as_of: d1.clone(),
+            note: None,
+        }),
+        ts_utc: d1.clone(),
+        command_id: Some("cmd-cf-nq".to_string()),
+        schema_version: 1,
+        seq: Some(1),
+    }];
+    let mut seq = 2;
+    events.push(nq_order_event("nq-buy", Side::Buy, qty, OrderType::Market, None, &d1, seq));
+    seq += 1;
+    events.push(Event {
+        account: "ACC".to_string(),
+        kind: EventKind::Fill,
+        payload: Obj::Fill(Fill {
+            fill_id: "nq-f1".to_string(),
+            order_id: "nq-buy".to_string(),
+            account_id: "ACC".to_string(),
+            instrument: nq(),
+            quantity: money(qty),
+            price: money("20000"),
+            side: Side::Buy,
+            filled_at: d1.clone(),
+            fee: Money::ZERO,
+            venue_env: "sim".to_string(),
+            leg_id: None,
+            venue_order_id: None,
+            venue_execution_id: None,
+        }),
+        ts_utc: d1.clone(),
+        command_id: Some("cmd-nq-f1".to_string()),
+        schema_version: 1,
+        seq: Some(seq),
+    });
+    seq += 1;
+    if let Some(sp) = stop {
+        events.push(nq_order_event("nq-stop", Side::Sell, qty, OrderType::Stop, Some(sp), &d1, seq));
+        seq += 1;
+    }
+    if let Some(cq) = close_qty {
+        events.push(nq_order_event("nq-close", Side::Sell, cq, OrderType::Market, None, &d1, seq));
+        seq += 1;
+        events.push(Event {
+            account: "ACC".to_string(),
+            kind: EventKind::Fill,
+            payload: Obj::Fill(Fill {
+                fill_id: "nq-f2".to_string(),
+                order_id: "nq-close".to_string(),
+                account_id: "ACC".to_string(),
+                instrument: nq(),
+                quantity: money(cq),
+                price: money("20000"),
+                side: Side::Sell,
+                filled_at: d1.clone(),
+                fee: Money::ZERO,
+                venue_env: "sim".to_string(),
+                leg_id: None,
+                venue_order_id: None,
+                venue_execution_id: None,
+            }),
+            ts_utc: d1.clone(),
+            command_id: Some("cmd-nq-f2".to_string()),
+            schema_version: 1,
+            seq: Some(seq),
+        });
+        seq += 1;
+    }
+    events.push(Event {
+        account: "ACC".to_string(),
+        kind: EventKind::Mark,
+        payload: Obj::Mark(Mark {
+            instrument: nq(),
+            price: money("20000"),
+            as_of: d1.clone(),
+            source: Some("eod".to_string()),
+        }),
+        ts_utc: d1,
+        command_id: Some("cmd-nq-m1".to_string()),
+        schema_version: 1,
+        seq: Some(seq),
+    });
+    events
+}
+
+#[test]
+fn futures_margin_refuses_open_future_with_symbol() {
+    let events = nq_long_events("1", None, None);
+    let state = te_core::ledger::fold::fold_account(&events, "ACC").expect("fold ok");
+    let err = compute_account_margin(&state, None).expect_err("futures must refuse margin");
+    let msg = err.message();
+    assert!(msg.contains("futures not supported in margin calculation"), "{msg}");
+    assert!(msg.contains("NQZ26"), "{msg}");
+    assert!(matches!(err, SnapshotError::Value(_)), "{err:?}");
+
+    // The daily snapshot path (what te_py snapshot_daily calls) surfaces the same refusal.
+    let daily = daily_snapshots(&events, "ACC");
+    assert!(daily.is_err(), "daily_snapshots must refuse, got {daily:?}");
+}
+
+#[test]
+fn futures_margin_allows_flat_future_after_round_trip() {
+    // A flat future carries no exposure; a past round trip must not make the account unsnapshotable.
+    let events = nq_long_events("1", None, Some("1"));
+    let state = te_core::ledger::fold::fold_account(&events, "ACC").expect("fold ok");
+    compute_account_margin(&state, None).expect("flat future does not refuse");
+}
+
+#[test]
+fn futures_heat_uses_point_value() {
+    // Point value of NQ is 20: risk per contract = (20000 - 19900) * 20 = 2000; two contracts = 4000.
+    let Instrument::Future(c) = nq() else { panic!("NQZ26 must be a future") };
+    assert_eq!(c.point_value.to_decimal(), dec("20"));
+
+    let events = nq_long_events("2", Some("19900"), None);
+    let state = te_core::ledger::fold::fold_account(&events, "ACC").expect("fold ok");
+    let (heat, unknown) = working_stop_risk(&state).expect("working_stop_risk ok");
+    assert_eq!(heat, dec("4000"));
+    assert!(unknown.is_empty());
 }
