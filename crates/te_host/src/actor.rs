@@ -141,7 +141,7 @@ pub fn run_once(
 /// Dedicated-thread serialized owner. Client disconnects cannot cancel a job:
 /// admission is durable before any acknowledgment is returned.
 pub struct Actor {
-    store: Store,
+    store: Option<Store>,
     journal: Arc<Journal>,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
@@ -204,7 +204,7 @@ impl Actor {
             })
             .expect("actor thread spawn");
         Self {
-            store,
+            store: Some(store),
             journal,
             shared,
             thread: Some(thread),
@@ -266,7 +266,9 @@ impl Actor {
 
     /// Stop admission, signal the loop, let the active job finish within the
     /// configured bound, then close the store and release the guard last.
-    /// A hung host is reported as blocked, never as a successful stop.
+    /// A hung host is reported as blocked, never as a successful stop. The
+    /// thread handle is kept on timeout, so a later stop waits again and the
+    /// store stays open until the thread has really exited.
     pub fn stop(&mut self) -> Result<(), String> {
         self.shared.stopping.store(true, Ordering::SeqCst);
         self.shared.queue.signal.notify_all();
@@ -275,17 +277,25 @@ impl Actor {
                 Ok(_) => {
                     thread.join().map_err(|_| "actor thread panicked".to_owned())?;
                 }
-                Err(_) => {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
                     // The thread is still inside a job host; do not fabricate
-                    // success. Leave the guard to process teardown (a crash).
+                    // success and do not close the store under it.
+                    self.thread = Some(thread);
                     self.shared
                         .failure("actor stop timed out with a job still running");
                     return Err("owner stop blocked: job still running after timeout".into());
                 }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // The loop's signal sender is dropped only as the loop exits,
+                    // so the thread has finished; reap it before closing.
+                    thread.join().map_err(|_| "actor thread panicked".to_owned())?;
+                }
             }
         }
         // The connection closes before the guard; Store::close does both in order.
-        self.store.close();
+        if let Some(store) = self.store.take() {
+            store.close();
+        }
         Ok(())
     }
 }
@@ -294,6 +304,13 @@ impl Drop for Actor {
     fn drop(&mut self) {
         if let Err(error) = self.stop() {
             self.shared.failure(error);
+            // The job thread may still be inside a host and writing. Dropping the
+            // store would release the single-writer guard (I4) under it, so leak
+            // it on purpose: the guard then lives until process exit, where the
+            // OS releases it.
+            if let Some(store) = self.store.take() {
+                std::mem::forget(store);
+            }
         }
     }
 }
@@ -377,6 +394,18 @@ mod tests {
         }
         fn connection(&self) -> crate::store::SharedConnection {
             self.store.as_ref().expect("store present").connection.clone()
+        }
+        /// While the guard is held, a second writer on the same ledger is refused.
+        fn assert_second_writer_refused(&self) {
+            let db = self.path.join("synthetic.db");
+            let lock = self.path.join("synthetic.db.lock");
+            assert!(
+                matches!(
+                    Store::open(&db, &lock, "probe"),
+                    Err(crate::store::OpenError::Lock(crate::lock::LockError::Contended))
+                ),
+                "a second writer must be refused while the owner still holds the guard"
+            );
         }
         /// After stop, re-acquiring the sidecar must succeed: the guard was
         /// released last. (While a live owner holds it, acquire is Contended.)
@@ -620,6 +649,77 @@ mod tests {
         }
         actor.stop().unwrap();
         world.assert_guard_released();
+    }
+
+    #[test]
+    fn second_stop_after_timeout_keeps_the_guard() {
+        let mut world = World::new();
+        let started = Arc::new(AtomicUsize::new(0));
+        let (host, release) = Gated::new(
+            started.clone(),
+            Box::new(|| Outcome::Completed(json!({}))),
+        );
+        let mut actor = world.actor("first", 4, host, Duration::from_millis(150));
+        actor.submit(World::request("one")).unwrap();
+        while started.load(Ordering::SeqCst) == 0 {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(actor.stop().is_err());
+        // The job is still blocked: a second stop must wait again, not close the store.
+        assert_eq!(
+            actor.stop().unwrap_err(),
+            "owner stop blocked: job still running after timeout"
+        );
+        world.assert_second_writer_refused();
+        release.one();
+        while actor.get("one").unwrap().unwrap().state != State::Completed {
+            thread::sleep(Duration::from_millis(5));
+        }
+        actor.stop().unwrap();
+        world.assert_guard_released();
+    }
+
+    #[test]
+    fn drop_after_timeout_keeps_the_guard() {
+        let mut world = World::new();
+        // Test-only handles, used after the drop to stand in for process teardown.
+        let connection = world.connection();
+        let guard = world.store.as_ref().expect("store present").guard.clone();
+        let started = Arc::new(AtomicUsize::new(0));
+        let (host, release) = Gated::new(
+            started.clone(),
+            Box::new(|| Outcome::Completed(json!({}))),
+        );
+        let mut actor = world.actor("first", 4, host, Duration::from_millis(150));
+        actor.submit(World::request("one")).unwrap();
+        while started.load(Ordering::SeqCst) == 0 {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(actor.stop().is_err());
+        drop(actor);
+        // Drop must not close or release the store under the still-blocked job.
+        world.assert_second_writer_refused();
+        release.one();
+        let state = || {
+            let guard = connection.lock().unwrap();
+            let text: String = guard
+                .as_ref()
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM meta WHERE key=?",
+                    [format!("{}one", crate::jobs::PREFIX)],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str::<Record>(&text).unwrap().state
+        };
+        while state() != State::Completed {
+            thread::sleep(Duration::from_millis(5));
+        }
+        // The leaked store keeps the connection and guard open until process exit.
+        // Release them here so the synthetic directory can be removed on Windows.
+        connection.lock().unwrap().take();
+        guard.lock().unwrap().take();
     }
 
     #[test]
