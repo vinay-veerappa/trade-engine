@@ -13,6 +13,7 @@ use std::{
 use te_core::ledger::{
     bridge,
     codec::{enc_obj, event_from_bytes},
+    fold::AccountState,
     json::{self, Json},
     model::Event,
 };
@@ -783,6 +784,52 @@ impl LedgerStore {
         Ok(())
     }
 }
+/// The native (non-pymethod) reads the Python methods and the native OMS host share.
+impl LedgerStore {
+    /// Every account with events, in order of its first event (`Ledger.accounts`).
+    pub(crate) fn account_names(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        self.check(py)?;
+        self.store
+            .accounts()
+            .map_err(|e| sql_error(py, e))?
+            .iter()
+            .map(|v| text_column(v, "account"))
+            .collect()
+    }
+    /// The stored rows matching `filters`, in append order (`events`' query).
+    fn query_rows(&self, py: Python<'_>, filters: Vec<(&str, &str, Value)>) -> PyResult<Vec<StoredRow>> {
+        self.check(py)?;
+        self.store.query_events(filters).map_err(|e| sql_error(py, e))
+    }
+    /// Events of one kind in append order, filtered in SQL (`Ledger.events_of_kind`).
+    pub(crate) fn kind_events(&self, py: Python<'_>, kind: &str) -> PyResult<Vec<Event>> {
+        self.query_rows(py, vec![("kind", "=", Value::Text(kind.to_owned()))])?
+            .iter()
+            .map(event_of_row)
+            .collect()
+    }
+    /// The stored row of one command id, if any (`event_by_command`'s query).
+    fn command_row(&self, py: Python<'_>, command: &Value) -> PyResult<Option<StoredRow>> {
+        self.check(py)?;
+        self.store
+            .by_command_value(command)
+            .map_err(|e| sql_error(py, e))
+    }
+    /// The event of one command id, decoded natively (`Ledger.event_by_command`).
+    pub(crate) fn command_event(&self, py: Python<'_>, command: &str) -> PyResult<Option<Event>> {
+        self.command_row(py, &Value::Text(command.to_owned()))?
+            .as_ref()
+            .map(event_of_row)
+            .transpose()
+    }
+    /// The committed fold state of one account, loaded if absent: `fold_handle` then `state_of`.
+    /// `None` when the account has no state.
+    pub(crate) fn fold_state(&self, py: Python<'_>, account: &str) -> PyResult<Option<AccountState>> {
+        self.ensure(py, account, false)?;
+        let state = self.fold.borrow(py).state_of(account).cloned();
+        Ok(state)
+    }
+}
 fn bump(revisions: &Mutex<BTreeMap<String, u64>>, account: &str) {
     *revisions
         .lock()
@@ -901,14 +948,8 @@ impl LedgerStore {
         self.check(py)?;
         self.store.count().map_err(|e| sql_error(py, e))
     }
-    fn accounts(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        self.check(py)?;
-        self.store
-            .accounts()
-            .map_err(|e| sql_error(py, e))?
-            .iter()
-            .map(|v| value_to_python(py, v))
-            .collect()
+    fn accounts(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        self.account_names(py)
     }
     #[pyo3(signature=(after=None, account=None, kind=None))]
     fn events(
@@ -929,9 +970,7 @@ impl LedgerStore {
                 filters.push((column, op, value_from_python(value, filters.len() + 1)?));
             }
         }
-        self.store
-            .query_events(filters)
-            .map_err(|e| sql_error(py, e))?
+        self.query_rows(py, filters)?
             .iter()
             .map(|e| event_carrier(py, e))
             .collect()
@@ -957,9 +996,7 @@ impl LedgerStore {
         command: &Bound<'_, PyAny>,
     ) -> PyResult<Option<Py<PyAny>>> {
         self.check(py)?;
-        self.store
-            .by_command_value(&value_from_python(command, 1)?)
-            .map_err(|e| sql_error(py, e))?
+        self.command_row(py, &value_from_python(command, 1)?)?
             .as_ref()
             .map(|e| event_carrier(py, e))
             .transpose()

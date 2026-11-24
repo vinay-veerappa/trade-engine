@@ -128,7 +128,14 @@ def _changes(changes: OrderChanges):
 
 
 class _Host:
-    """The flow's effects, one call each."""
+    """The flow's effects, one call each.
+
+    The ledger methods (accounts, state, event_by_command, events_of_kind, append) serve only
+    a ledger that is not a plain ``Ledger``; a plain ``Ledger``'s are native (``_flow``).
+    """
+
+    after_append = None
+    """Test seam: a callable that receives the written event's bytes after the native append commits."""
 
     def __init__(self, manager: OrderManager, broker, clock, ledger, gate: Precheck | None = None) -> None:
         self._manager = manager
@@ -282,7 +289,16 @@ class OrderManager:
 
     def _flow(self, operation: str, **request):
         try:
-            out = _rs.rs.oms_flow(operation, self._host, codec.text(_wire(request)))
+            text = codec.text(_wire(request))
+            if type(self._ledger) is Ledger:
+                # The ledger's effects run natively against its store. The store's notifier
+                # must be the ledger's listeners: an owner-built Ledger has none set, so it is
+                # set here (idempotent).
+                store = self._ledger._store
+                store.set_notifier(self._ledger._notify_listeners)
+                out = _rs.rs.oms_flow_native(operation, store, self._host, text)
+            else:
+                out = _rs.rs.oms_flow(operation, self._host, text)
         except ValueError as err:
             if type(err) is ValueError and len(err.args) == 2 and all(isinstance(a, str) for a in err.args):
                 raise _rs.refusal(*err.args) from err.__cause__
