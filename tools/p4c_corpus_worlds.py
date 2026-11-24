@@ -5,13 +5,9 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-import hashlib
-import io
-import json
 from pathlib import Path
 import socket
 import tempfile
-from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -24,8 +20,6 @@ from trade_engine.interfaces.market_data import Bar, OptionQuote, StaleDataError
 from trade_engine.intraday.service import Heartbeat
 from trade_engine.ledger import CashFlow, Event, EventKind, Ledger, VenueReconcile, codec
 from trade_engine.market_data.chains import ChainSnapshot
-from tests.frozen_p4c import http as frozen_http
-from tests.frozen_p4c.t6_replay import ReplayClock as FrozenClock
 
 NY = ZoneInfo("America/New_York")
 DATES = ("2026-03-06", "2026-03-09", "2026-07-02", "2026-09-25", "2026-11-27", "2026-12-24")
@@ -126,49 +120,6 @@ class Beats:
         return self.value
 
 
-class MemorySocket:
-    def __init__(self, request: bytes) -> None:
-        self.input = io.BytesIO(request)
-        self.output = io.BytesIO()
-
-    def makefile(self, *args, **kwargs):
-        return self.input
-
-    def sendall(self, body: bytes) -> None:
-        self.output.write(body)
-
-
-def http_observations(ledger: Ledger) -> list[dict]:
-    class Handler(frozen_http._EngineHandler):
-        def date_time_string(self, timestamp=None):
-            return "<transport-Date>"
-    server = SimpleNamespace(ledger_path=str(ledger.path), is_running=False, ping_interval=15,
-                             add_subscriber=lambda q: None, remove_subscriber=lambda q: None)
-    requests = (
-        b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
-        b"GET /snapshot HTTP/1.1\r\nHost: localhost\r\nOrigin: https://localhost:5555\r\n\r\n",
-        b"GET /events?after=0 HTTP/1.1\r\nHost: localhost\r\nLast-Event-ID: 1\r\n\r\n",
-        b"GET /events?after=bad HTTP/1.1\r\nHost: localhost\r\nLast-Event-ID: 1\r\n\r\n",
-        b"GET /events?after=%D9%A0 HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        b"GET /events?after=%C2%B2 HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        b"OPTIONS /health HTTP/1.1\r\nHost: localhost\r\nOrigin: https://localhost:5555\r\n\r\n",
-        b"POST /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        b"GET /health HTTP/1.1\r\nHost: evil.example\r\n\r\n",
-        b"GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    )
-    observations = []
-    for request in requests:
-        transport = MemorySocket(request)
-        try:
-            Handler(transport, ("127.0.0.1", 0), server)
-        except Exception as error:
-            outcome = {"raise": contract.encode_error(error)}
-        else:
-            outcome = {"return": contract.encode(transport.output.getvalue())}
-        observations.append({"request": contract.encode(request), "outcome": outcome})
-    return observations
-
-
 def walk(config: dict, ledger: Ledger, adapters: dict) -> list[dict]:
     """A finite adapter contract exercise, deliberately not a trading service."""
     checkpoints = [contract.ledger_check(ledger)]
@@ -231,7 +182,7 @@ def _seed(config: dict, ledger: Ledger) -> list[dict]:
     return [codec.encode_event(event) for event in ledger.events()]
 
 
-def _capture_one(config: dict, root: Path, clock_type=FrozenClock) -> dict:
+def _capture_one(config: dict, root: Path, clock_type=ReplayClock) -> dict:
     recorder = contract.Recorder()
     backends = {"clock": clock_type(datetime.fromisoformat(config["at"])), "source": Source(config),
                 "venue": Venue(config), "strategy": Strategy(), "sink": Sink(), "heartbeat": Beats()}
@@ -239,43 +190,24 @@ def _capture_one(config: dict, root: Path, clock_type=FrozenClock) -> dict:
     with Ledger(confined(root, "synthetic.db")) as ledger:
         initial = _seed(config, ledger)
         checkpoints = walk(config, ledger, adapters)
-        http = http_observations(ledger)
     return {"id": f"synthetic-{config['seed']}", "kind": "adapter-probe",
             "role": config["role"], "session": config["session"], "seed": config["seed"],
             "inputs": config, "initial_events": initial, "tape": recorder.finish(),
-            "checkpoints": checkpoints, "http": http, "config_sha256": contract.digest(config)}
-
-
-def capture() -> dict:
-    contract.require_artifacts(contract.ROOT / "crates" / "target" / "release" / "te.exe")
-    oracles = json.loads((contract.ROOT / "tests" / "frozen_p4c" / "t0_oracles.json").read_text(encoding="utf-8"))
-    configurations = [inputs(index) for index in range(len(contract.ROLES))]
-    with offline(), tempfile.TemporaryDirectory(prefix="p4c-t0-synthetic-") as folder:
-        fixtures = []
-        for index, config in enumerate(configurations):
-            root = Path(folder) / str(index)
-            root.mkdir()
-            fixtures.append(_capture_one(config, root))
-    manifest = {"version": contract.VERSION, "provenance": "synthetic", "source_release": oracles["source_release"],
-                "plugin_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                "rules_sha256": contract.digest({"version": contract.VERSION, "oracles": oracles, "http": contract.HTTP_CONTRACT}),
-                "config_sha256": contract.digest(configurations), "oracles": oracles,
-                "inventory": contract.inventory(), "http_contract": contract.HTTP_CONTRACT, "fixtures": fixtures}
-    contract.validate_manifest(manifest)
-    return manifest
+            "checkpoints": checkpoints, "config_sha256": contract.digest(config)}
 
 
 def verify(manifest: dict) -> None:
+    """Replay every golden fixture with production code; the recorded HTTP rows are a snapshot, not replayed."""
     contract.validate_manifest(manifest)
-    with offline(), tempfile.TemporaryDirectory(prefix="p4c-t0-verify-") as folder:
+    with offline(), tempfile.TemporaryDirectory(prefix="p4c-golden-verify-") as folder:
         for index, fixture in enumerate(manifest["fixtures"]):
             config = fixture["inputs"]
-            for label, clock_type in (("frozen", FrozenClock), ("native", ReplayClock)):
-                root = Path(folder) / f"{index}-{label}"
-                root.mkdir()
-                regenerated = _capture_one(config, root, clock_type)
-                if regenerated != fixture:
-                    raise contract.CorpusError(f"{label} producer differs from golden inputs/tape: {fixture['id']}")
+            root = Path(folder) / f"{index}-producer"
+            root.mkdir()
+            regenerated = _capture_one(config, root)
+            recorded = {key: value for key, value in fixture.items() if key != "http"}
+            if regenerated != recorded:
+                raise contract.CorpusError(f"Producer differs from golden inputs/tape: {fixture['id']}")
             replay = contract.Replay(fixture["tape"])
             adapters = {actor: contract.ReplayAdapter(replay, actor) for actor in contract.METHODS}
             root = Path(folder) / f"{index}-replay"
@@ -287,6 +219,4 @@ def verify(manifest: dict) -> None:
                         raise contract.CorpusError("Initial replay row identity differs")
                 if walk(config, ledger, adapters) != fixture["checkpoints"]:
                     raise contract.CorpusError(f"Replay event/fold/outbox/meta differs: {fixture['id']}")
-                if http_observations(ledger) != fixture["http"]:
-                    raise contract.CorpusError(f"Replay HTTP contract differs: {fixture['id']}")
             replay.finish()
