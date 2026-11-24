@@ -20,6 +20,7 @@ use crate::ledger::ops::{abs, add, div, eq, ge, gt, le, lt, mul, mul_i, neg, sub
 use crate::money::Money;
 use crate::margin::option::{self as mo, Contract, Style};
 use crate::margin::{self as mg, AccountInput, Kind, MarginError};
+use crate::oms::manager::terminal;
 use crate::oms::structures::{is_structure, legs_of, multiplier, open_structures, uncovered_calls};
 use crate::options::{option_style, Right, Settlement};
 use crate::sim::snapshot::underlying_of;
@@ -597,10 +598,6 @@ fn max_loss(intent: &Intent, price: &Money) -> R<Option<Money>> {
         }
     }
     Ok(None)
-}
-
-fn terminal(s: OrderState) -> bool {
-    matches!(s, OrderState::Filled | OrderState::Cancelled | OrderState::Rejected | OrderState::Expired)
 }
 
 // -- the verdict ----------------------------------------------------------------------

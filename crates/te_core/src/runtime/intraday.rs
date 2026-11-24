@@ -12,8 +12,8 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
             }
         }
         "config_rates" => {
-            if f[0] <= 0.0 || f[1] <= 0.0 { return err("runtime_intraday","quote age and tick must be positive"); }
-            if f[2] <= 0.0 || f[3] <= 0.0 { return err("runtime_intraday","heartbeat ttl and close-mark window must be positive"); }
+            if !(f[0] > 0.0) || !(f[1] > 0.0) { return err("runtime_intraday","quote age and tick must be positive"); }
+            if !(f[2] > 0.0) || !(f[3] > 0.0) { return err("runtime_intraday","heartbeat ttl and close-mark window must be positive"); }
         }
         "config_wall" => {
             if n[0] > n[1] { return err("runtime_intraday","entry_end must not come after flat_at"); }
@@ -87,6 +87,21 @@ pub fn decide(op: &str, s: &[String], n: &[i64], b: &[bool], f: &[f64]) -> R<Pla
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn config_rates_refuses_nan_in_each_float() {
+        // Each of the four floats, alone set to NaN, must refuse with the message for its pair.
+        let quote_pair = "quote age and tick must be positive";
+        let heartbeat_pair = "heartbeat ttl and close-mark window must be positive";
+        for (index, message) in [(0, quote_pair), (1, quote_pair), (2, heartbeat_pair), (3, heartbeat_pair)] {
+            let mut floats = [1.0_f64; 4];
+            floats[index] = f64::NAN;
+            match decide("config_rates", &[], &[], &[], &floats) {
+                Err(e) => assert_eq!((e.kind, e.msg.as_str()), ("runtime_intraday", message), "float {index}"),
+                Ok(_) => panic!("NaN float {index} must refuse"),
+            }
+        }
+        assert!(decide("config_rates", &[], &[], &[], &[1.0, 1.0, 1.0, 1.0]).is_ok());
+    }
     #[test]
     fn early_close_and_entry_tie() {
         assert_eq!(decide("deadlines",&[],&[1530,1200,1300,30,90],&[],&[]).unwrap().numbers,vec![0,1]);

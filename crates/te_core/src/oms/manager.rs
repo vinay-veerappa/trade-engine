@@ -874,7 +874,6 @@ pub fn decide(op: &str, raw: &str) -> R<String> {
 
 fn decision(op: &str, j: &Json) -> R<Json> {
     match op {
-        "quantity" => { quantity(flag(j,"equity")?, &d(j,"quantity")?)?; Ok(Json::Null) }
         "allocate" | "split" | "fractions" => {
             let q=d(j,"quantity")?;
             let equity=flag(j,"equity")?;
