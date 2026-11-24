@@ -277,6 +277,7 @@ class TradovateAdapter:
                 stale_after=self.stale_after,
                 on_poll=self._on_poll,
                 pnl_source=self.pnl_rows if self._trading_day is not None else None,
+                broker=BROKER,
             )
         return self._poller
 

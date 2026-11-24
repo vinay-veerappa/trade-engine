@@ -173,6 +173,7 @@ class IbkrAccountsAdapter:
                 ledger=self._ledger,
                 stale_after=self.stale_after,
                 on_poll=self._on_poll,
+                broker="ibkr",
             )
         return self._poller
 
