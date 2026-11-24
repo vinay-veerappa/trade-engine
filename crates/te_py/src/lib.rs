@@ -13,6 +13,7 @@ mod accounts;
 mod registry_outbox;
 mod flow;
 mod oms;
+mod precheck;
 mod sim;
 mod lock;
 pub mod store;
@@ -882,6 +883,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     plugins::register(m)?;
     sim::register(m)?;
     oms::register(m)?;
+    precheck::register(m)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_holiday, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_early_close, m)?)?;

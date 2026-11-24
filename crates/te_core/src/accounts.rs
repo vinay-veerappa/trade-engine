@@ -557,6 +557,11 @@ pub fn replay(events_json: &str) -> R<String> {
         Json::Arr(items) => items,
         other => return bad_shape(format!("replay input must be a list, got {}", other.type_name())),
     };
+    replay_rows(&items.iter().collect::<Vec<&Json>>())
+}
+
+/// The replay over parsed ledger rows, in ledger order. Shared by [`replay`] and [`membership`].
+fn replay_rows(items: &[&Json]) -> R<String> {
     let mut records: BTreeMap<String, Record> = BTreeMap::new();
     for item in items {
         let kind = as_str(item.get("kind"), "event.kind")?;
@@ -601,6 +606,58 @@ pub fn replay(events_json: &str) -> R<String> {
     }
     let snapshot = Snapshot { records: records.into_values().collect(), confirmed_at: None };
     Ok(snapshot_to_json(&snapshot))
+}
+
+// --- the poller's scope and membership (W5 P3) ---------------------------------------------
+
+/// The broker prefix of an account key: the text before the first `:`, or the whole key when
+/// there is none (Python's `key.split(":", 1)[0]`).
+pub fn broker_of(key: &str) -> &str {
+    key.split_once(':').map_or(key, |(broker, _)| broker)
+}
+
+/// A poller's broker scope: the fixed broker alone, or else the sorted, de-duplicated broker
+/// prefixes of the keys. Sorted only so the output is deterministic; callers treat it as a set.
+pub fn scope(fixed: Option<&str>, keys: &[String]) -> Vec<String> {
+    match fixed {
+        Some(broker) => vec![broker.to_string()],
+        None => {
+            let brokers: BTreeSet<&str> = keys.iter().map(|key| broker_of(key)).collect();
+            brokers.into_iter().map(str::to_string).collect()
+        }
+    }
+}
+
+/// The membership a poller replays from the ledger (W5 P3). `events_json` is the account rows
+/// in ledger order, the input [`replay`] takes. Keeps the rows whose key's broker is in `scope`
+/// and returns their replayed snapshot JSON with the largest kept seq. `Ok(None)` when the scope
+/// is empty or no row is kept. A row without a string `key` or an integer `seq` is `bad_shape`.
+pub fn membership(events_json: &str, scope: &[String]) -> R<Option<(String, u64)>> {
+    if scope.is_empty() {
+        return Ok(None);
+    }
+    let node = json::parse(events_json).map_err(|e| LErr { kind: "bad_shape", msg: e.message })?;
+    let items = match &node {
+        Json::Arr(items) => items,
+        other => return bad_shape(format!("membership input must be a list, got {}", other.type_name())),
+    };
+    let mut kept: Vec<&Json> = Vec::new();
+    let mut max_seq = 0u64;
+    for item in items {
+        let account_key = as_str(item.get("key"), "event.key")?;
+        let seq = match item.get("seq") {
+            Some(Json::Int(n)) if (0..=u64::MAX as i128).contains(n) => *n as u64,
+            _ => return bad_shape("event.seq must be an integer"),
+        };
+        if scope.iter().any(|broker| broker.as_str() == broker_of(&account_key)) {
+            max_seq = max_seq.max(seq);
+            kept.push(item);
+        }
+    }
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((replay_rows(&kept)?, max_seq)))
 }
 
 pub(crate) fn apply_change(record: &mut Record, name: &str, new: &Json) -> R<()> {
@@ -955,5 +1012,119 @@ mod tests {
             (0..MAX_RECORDS + 1).map(|i| rec(&format!("tos_paper:A{i:04}"), "active", vec![])).collect();
         let text = snapshot_to_json(&snap(records));
         assert_eq!(snapshot_from_json(&text).unwrap_err().kind, "cap_exceeded");
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// An added ledger row for `key` at `seq`, carrying the record a real ledger row does.
+    fn added_row(key: &str, seq: u64) -> String {
+        let (_, id) = key.split_once(':').expect("key");
+        let shown = display(id);
+        format!(
+            r#"{{"kind":"added","key":"{key}","display":"{shown}","seq":{seq},"at":"2026-11-11T18:00:00Z","record":{{"key":"{key}","display":"{shown}","env":"paper","status":"active","class":null,"firm":null,"account_type":"margin","routes":[{{"platform":"tos","local_name":"{id}"}}],"source":"tos_paper","confirmed_at":"2026-11-11T18:00:00Z"}},"changes":[]}}"#
+        )
+    }
+
+    fn removed_row(key: &str, shown: &str, seq: u64) -> String {
+        format!(
+            r#"{{"kind":"removed","key":"{key}","display":"{shown}","seq":{seq},"at":"2026-11-11T18:01:00Z","record":null,"changes":[]}}"#
+        )
+    }
+
+    fn ledger_rows(rows: &[String]) -> String {
+        format!("[{}]", rows.join(","))
+    }
+
+    #[test]
+    fn broker_of_is_the_text_before_the_first_colon() {
+        assert_eq!(broker_of("tos_paper:ACCT-TEST-194"), "tos_paper");
+        assert_eq!(broker_of("a:b:c"), "a");
+        assert_eq!(broker_of("plain"), "plain");
+        assert_eq!(broker_of(""), "");
+    }
+
+    #[test]
+    fn a_fixed_scope_is_that_broker_alone() {
+        assert_eq!(scope(Some("tos_paper"), &strings(&["tradovate:B1"])), strings(&["tos_paper"]));
+        assert_eq!(scope(Some("tos_paper"), &[]), strings(&["tos_paper"]));
+    }
+
+    #[test]
+    fn a_derived_scope_is_the_sorted_unique_brokers_of_the_keys() {
+        let keys = strings(&["tradovate:B2", "tos_paper:A194", "tradovate:B1", "tos_paper:A196"]);
+        assert_eq!(scope(None, &keys), strings(&["tos_paper", "tradovate"]));
+        assert!(scope(None, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_scope_of_a_key_with_no_colon_is_the_whole_key() {
+        assert_eq!(scope(None, &strings(&["plain"])), strings(&["plain"]));
+    }
+
+    #[test]
+    fn membership_with_an_empty_scope_is_none() {
+        let rows = ledger_rows(&[added_row("tos_paper:A194", 1)]);
+        assert_eq!(membership(&rows, &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn membership_drops_an_out_of_scope_row_and_replays_the_rest() {
+        let rows = ledger_rows(&[added_row("tos_paper:A194", 1), added_row("tradovate:B1", 2)]);
+        let (snapshot, max_seq) = membership(&rows, &strings(&["tos_paper"])).unwrap().expect("a kept row");
+        let keys: Vec<String> = snapshot_from_json(&snapshot).unwrap().records.into_iter().map(|r| r.key).collect();
+        assert_eq!(keys, strings(&["tos_paper:A194"]));
+        assert_eq!(max_seq, 1);
+    }
+
+    #[test]
+    fn membership_is_none_when_every_row_is_out_of_scope() {
+        let rows = ledger_rows(&[added_row("tradovate:B1", 2)]);
+        assert_eq!(membership(&rows, &strings(&["tos_paper"])).unwrap(), None);
+    }
+
+    #[test]
+    fn max_seq_is_the_largest_over_the_kept_rows_only() {
+        // The out-of-scope seq 9 is the overall largest; the kept rows' largest is 5, which is
+        // not the last kept row (that one is 3).
+        let rows = ledger_rows(&[
+            added_row("tos_paper:A194", 5),
+            added_row("tradovate:B1", 9),
+            added_row("tos_paper:C196", 3),
+        ]);
+        let (_, max_seq) = membership(&rows, &strings(&["tos_paper"])).unwrap().expect("kept rows");
+        assert_eq!(max_seq, 5);
+    }
+
+    #[test]
+    fn an_added_then_removed_row_replays_to_an_empty_snapshot_not_none() {
+        let rows = ledger_rows(&[added_row("tos_paper:A194", 1), removed_row("tos_paper:A194", "*194", 2)]);
+        let (snapshot, max_seq) = membership(&rows, &strings(&["tos_paper"])).unwrap().expect("kept rows");
+        assert!(snapshot_from_json(&snapshot).unwrap().records.is_empty());
+        assert_eq!(max_seq, 2);
+    }
+
+    #[test]
+    fn a_key_with_no_colon_is_its_own_broker_and_out_of_scope_here() {
+        // "plain" is its own broker, so a scope of tos_paper drops its row before replay.
+        let rows = ledger_rows(&[added_row("tos_paper:A194", 1), removed_row("plain", "plain", 7)]);
+        let (snapshot, max_seq) = membership(&rows, &strings(&["tos_paper"])).unwrap().expect("kept row");
+        assert_eq!(snapshot_from_json(&snapshot).unwrap().records.len(), 1);
+        assert_eq!(max_seq, 1);
+    }
+
+    #[test]
+    fn a_row_without_a_string_key_or_an_integer_seq_is_bad_shape() {
+        let scope_tos = strings(&["tos_paper"]);
+        let no_key = format!("[{}]", r#"{"kind":"removed","display":"*194","seq":1,"changes":[]}"#);
+        let no_seq = format!("[{}]", r#"{"kind":"removed","key":"tos_paper:A194","display":"*194","changes":[]}"#);
+        let text_seq = format!(
+            "[{}]",
+            r#"{"kind":"removed","key":"tos_paper:A194","display":"*194","seq":"1","changes":[]}"#
+        );
+        assert_eq!(membership(&no_key, &scope_tos).unwrap_err().kind, "bad_shape");
+        assert_eq!(membership(&no_seq, &scope_tos).unwrap_err().kind, "bad_shape");
+        assert_eq!(membership(&text_seq, &scope_tos).unwrap_err().kind, "bad_shape");
     }
 }

@@ -94,6 +94,20 @@ fn accounts_replay(events: &str) -> PyResult<String> {
     ac::replay(events).map_err(refuse)
 }
 
+/// W5 P3: the poller's membership over one scope. The replayed snapshot JSON and the largest
+/// kept seq, or None when the scope is empty or no row is in it.
+#[pyfunction]
+fn accounts_membership(events: &str, scope: Vec<String>) -> PyResult<Option<(String, u64)>> {
+    ac::membership(events, &scope).map_err(refuse)
+}
+
+/// W5 P3: a poller's broker scope, the fixed broker or the sorted brokers of the keys.
+#[pyfunction]
+#[pyo3(signature = (fixed, keys))]
+fn accounts_scope(fixed: Option<&str>, keys: Vec<String>) -> Vec<String> {
+    ac::scope(fixed, &keys)
+}
+
 /// The bounded account-event ring (10,000 events or 24 h, oldest dropped and counted).
 #[pyclass]
 struct AccountEventRing {
@@ -247,6 +261,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(accounts_diff, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_is_stale, m)?)?;
     m.add_function(wrap_pyfunction!(accounts_replay, m)?)?;
+    m.add_function(wrap_pyfunction!(accounts_membership, m)?)?;
+    m.add_function(wrap_pyfunction!(accounts_scope, m)?)?;
     m.add_class::<AccountEventRing>()?;
     Ok(())
 }

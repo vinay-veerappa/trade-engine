@@ -77,15 +77,8 @@ def _internal_event(event: AccountEvent) -> dict[str, Any]:
     }
 
 
-def _broker_of(key: str) -> str:
-    """The broker prefix of an account key (`broker:accountId`)."""
-    return key.split(":", 1)[0]
-
-
-def _membership_events(
-    ledger: "Ledger", scope: frozenset[str]
-) -> tuple[list[dict[str, Any]], int]:
-    """The in-scope account events the ledger holds, in ledger order, and their highest seq."""
+def _membership_events(ledger: "Ledger") -> list[dict[str, Any]]:
+    """The account events the ledger holds, in ledger order, as the rows Rust replays (W5 P3)."""
     from trade_engine.ledger.events import EventKind
 
     kinds = {
@@ -94,13 +87,10 @@ def _membership_events(
         EventKind.ACCOUNT_CHANGED,
     }
     rows: list[dict[str, Any]] = []
-    max_seq = 0
     for event in ledger.events():
         if event.kind not in kinds:
             continue
         payload = event.payload
-        if _broker_of(payload.key) not in scope:
-            continue
         record = payload.record
         internal_kind = {
             "AccountAdded": "added",
@@ -120,8 +110,7 @@ def _membership_events(
                 ],
             }
         )
-        max_seq = max(max_seq, payload.seq)
-    return rows, max_seq
+    return rows
 
 
 class PollAndDiff:
@@ -151,7 +140,7 @@ class PollAndDiff:
         self._seq = 0
         # F11: the broker prefixes this poller owns. With `broker` given it is fixed; without
         # it, the first good read fixes it (I5: an empty set replays nothing, never guesses).
-        self._scope: frozenset[str] | None = None if broker is None else frozenset({broker})
+        self._scope: frozenset[str] | None = None if broker is None else _rs.scope(broker, [])
         self._ring = _rs.event_ring()
         # BP-4a: told after each good read, never allowed to fail it (see `_notify`).
         self._on_poll = on_poll
@@ -175,13 +164,14 @@ class PollAndDiff:
         return self._ring
 
     def _replayed_membership(self, scope: frozenset[str]) -> dict | None:
-        if self._ledger is None or not scope:
+        if self._ledger is None:
             return None
-        rows, max_seq = _membership_events(self._ledger, scope)
-        if not rows:
+        found = _rs.membership(_membership_events(self._ledger), scope)
+        if found is None:
             return None
+        snapshot, max_seq = found
         self._seq = max(self._seq, max_seq)
-        return _rs.replay(rows)
+        return snapshot
 
     def poll(self) -> list[AccountEvent]:
         """One successful read's events; an empty list on any error (never a failure)."""
@@ -194,7 +184,7 @@ class PollAndDiff:
         if self._scope is not None:
             scope = self._scope
         else:
-            scope = frozenset(_broker_of(record.key) for record in snapshot.records)
+            scope = _rs.scope(None, [record.key for record in snapshot.records])
         if self._last_good is not None:
             old = self._last_good.as_contract()
         else:

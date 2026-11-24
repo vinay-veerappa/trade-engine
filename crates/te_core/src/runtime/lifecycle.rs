@@ -1,4 +1,6 @@
 //! After-close decisions. Observations arrive in original host order, never from a clock.
+use std::collections::HashMap;
+
 use super::Plan;
 use crate::ledger::model::{err, LErr, R};
 use crate::ledger::ops::*;
@@ -115,6 +117,43 @@ pub fn decide(op: &str, t: &[String], n: &[i64], b: &[bool], _f: &[f64]) -> R<Pl
             let valid = b[0] && dec(&t[0]).map(|v|v.is_finite() && gt(&v,&zero()).unwrap_or(false)).unwrap_or(false);
             if !valid {return err("stale",format!("{} dividend going ex {} has no usable amount: {} (I5)",t[1],t[2],t[3]));}
         },
+        "mirror_net" => {
+            // Each occ's quantities summed from zero with Money, in first-appearance order;
+            // a contract that nets to zero leaves the book. `numbers` is each kept occ's
+            // first input row, so the host recovers the instrument object from it.
+            let mut slot: HashMap<&str, usize> = HashMap::new();
+            let mut nets: Vec<(&str, i64, Money)> = Vec::new();
+            for (i, row) in t.chunks_exact(2).enumerate() {
+                let q = dec(&row[1])?;
+                match slot.get(row[0].as_str()) {
+                    Some(&k) => {
+                        let total = add(&nets[k].2, &q)?;
+                        nets[k].2 = total;
+                    }
+                    None => {
+                        slot.insert(row[0].as_str(), nets.len());
+                        let total = add(&zero(), &q)?;
+                        nets.push((row[0].as_str(), i as i64, total));
+                    }
+                }
+            }
+            for (occ, first, net) in nets {
+                if !eq(&net, &zero())? {
+                    p.text.push(occ.to_string());
+                    p.text.push(s(&net));
+                    p.numbers.push(first);
+                }
+            }
+        },
+        // Python's str.strip() and Rust's str::trim() both drop Unicode whitespace. They differ
+        // only on U+001C..U+001F, which Python's isspace() counts and Rust's White_Space omits.
+        "symbol_key" => p.text.push(t[0].trim().to_uppercase()),
+        "settlement_conflict" => if b[0] {
+            return err("value", format!("Two different {} settlements for {} on {} (I5)", t[0], t[1], t[2]));
+        },
+        "settlement_missing" => return err("stale", format!("No {} settlement for {} on {} (I5)", t[0], t[1], t[2])),
+        "dividend_missing" => return err("stale", format!("No dividend record for {} (I5)", t[0])),
+        "quote_missing" => return err("stale", format!("{} is not in the {} chain snapshot of {} (I5)", t[0], t[1], t[2])),
         _ => return err("value",format!("Unknown lifecycle decision {op}")),
     }
     Ok(p)
@@ -128,5 +167,64 @@ mod tests {
         let p = decide("expiry",&["100".into(),"100.010".into(),"PM".into(),"AAPL".into()],&[2026,10,16],&[true,true],&[]).unwrap();
         assert_eq!(p.text,["Exercise","exercised at expiry: 0.01 in the money at the PM settlement 100.010"]);
         assert!(!decide("early",&["100".into(),"101".into(),"2".into(),"1".into(),"2026-10-19".into(),"AAPL".into()],&[2026,10,16],&[],&[]).unwrap().flags[0]);
+    }
+    fn texts(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+    fn refuse(op: &str, t: &[&str], n: &[i64], b: &[bool]) -> LErr {
+        decide(op, &texts(t), n, b, &[]).err().expect("the op refuses")
+    }
+    #[test]
+    fn mirror_net_sums_two_rows_of_one_contract() {
+        let p = decide("mirror_net", &texts(&["AAPL 1", "2", "AAPL 1", "3"]), &[], &[], &[]).unwrap();
+        assert_eq!(p.text, ["AAPL 1", "5"]);
+        assert_eq!(p.numbers, [0]);
+    }
+    #[test]
+    fn mirror_net_drops_a_contract_that_nets_to_zero() {
+        let p = decide("mirror_net", &texts(&["A", "2", "B", "4", "A", "-2", "C", "1"]), &[], &[], &[]).unwrap();
+        assert_eq!(p.text, ["B", "4", "C", "1"]);
+        assert_eq!(p.numbers, [1, 3]);
+    }
+    #[test]
+    fn mirror_net_keeps_first_appearance_order_and_indices() {
+        let p = decide("mirror_net", &texts(&["B", "1", "A", "2", "B", "3"]), &[], &[], &[]).unwrap();
+        assert_eq!(p.text, ["B", "4", "A", "2"]);
+        assert_eq!(p.numbers, [0, 1]);
+    }
+    #[test]
+    fn mirror_net_with_no_rows_is_empty() {
+        let p = decide("mirror_net", &[], &[], &[], &[]).unwrap();
+        assert!(p.text.is_empty() && p.numbers.is_empty());
+    }
+    #[test]
+    fn symbol_key_trims_and_uppercases() {
+        assert_eq!(decide("symbol_key", &texts(&[" aapl\t"]), &[], &[], &[]).unwrap().text, ["AAPL"]);
+        assert_eq!(decide("symbol_key", &texts(&["\u{a0}spx\u{3000}"]), &[], &[], &[]).unwrap().text, ["SPX"]);
+    }
+    #[test]
+    fn settlement_conflict_passes_when_the_prices_agree() {
+        assert!(decide("settlement_conflict", &texts(&["PM", "AAPL", "2026-10-16"]), &[], &[false], &[]).is_ok());
+    }
+    #[test]
+    fn settlement_conflict_refuses_as_value() {
+        let e = refuse("settlement_conflict", &["PM", "AAPL", "2026-10-16"], &[], &[true]);
+        assert_eq!((e.kind, e.msg.as_str()), ("value", "Two different PM settlements for AAPL on 2026-10-16 (I5)"));
+    }
+    #[test]
+    fn missing_settlement_refuses_as_stale() {
+        let e = refuse("settlement_missing", &["AM", "SPX", "2026-10-16"], &[], &[]);
+        assert_eq!((e.kind, e.msg.as_str()), ("stale", "No AM settlement for SPX on 2026-10-16 (I5)"));
+    }
+    #[test]
+    fn missing_dividend_record_refuses_as_stale() {
+        let e = refuse("dividend_missing", &["AAPL"], &[], &[]);
+        assert_eq!((e.kind, e.msg.as_str()), ("stale", "No dividend record for AAPL (I5)"));
+    }
+    #[test]
+    fn missing_quote_refuses_as_stale() {
+        let e = refuse("quote_missing", &["AAPL261016C00250000", "AAPL", "2026-10-15T20:00:00+00:00"], &[], &[]);
+        assert_eq!((e.kind, e.msg.as_str()), ("stale",
+            "AAPL261016C00250000 is not in the AAPL chain snapshot of 2026-10-15T20:00:00+00:00 (I5)"));
     }
 }

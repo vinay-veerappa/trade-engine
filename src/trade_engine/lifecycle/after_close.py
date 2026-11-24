@@ -66,15 +66,9 @@ def _mirror_net(state) -> dict:
     The mirror holds no positions of its own (``__venue__:<venue>``); what it holds at the
     venue is its book, and an expired contract leaves the book only by an ``OptionLifecycle``
     (the fold's ``on_mirror_lifecycle``), or every later reconcile drifts on it."""
-    net: dict = {}
-    keys: dict = {}
-    for (_account, instrument), quantity in state.mirror.book.items():
-        if not isinstance(instrument, OptionContract):
-            continue
-        key = instrument.occ
-        keys.setdefault(key, instrument)
-        net[key] = net.get(key, Decimal(0)) + Decimal(quantity)
-    return {keys[k]: _Net(q) for k, q in net.items() if q != 0}
+    rows = [(i, q) for (_a, i), q in state.mirror.book.items() if isinstance(i, OptionContract)]
+    text, idx, _ = decide("mirror_net", [v for i, q in rows for v in (i.occ, str(q))])
+    return {rows[k][0]: _Net(Decimal(text[2 * j + 1])) for j, k in enumerate(idx)}
 
 
 class LifecyclePass:
