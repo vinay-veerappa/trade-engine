@@ -295,7 +295,7 @@ class OrderManager:
                 # must be the ledger's listeners: an owner-built Ledger has none set, so it is
                 # set here (idempotent).
                 store = self._ledger._store
-                store.set_notifier(self._ledger._notify_listeners)
+                store.set_notifier(self._ledger._notifier())
                 out = _rs.rs.oms_flow_native(operation, store, self._host, text)
             else:
                 out = _rs.rs.oms_flow(operation, self._host, text)

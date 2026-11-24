@@ -91,6 +91,22 @@ class Ledger:
                 except Exception:
                     pass
 
+    def _notifier(self) -> Callable[[Sequence[Event]], None]:
+        """The native store's post-commit callback, holding this ledger only weakly.
+
+        A bound ``_notify_listeners`` would close the cycle Ledger -> LedgerStore ->
+        method -> Ledger through a native object the GC cannot traverse, so an unclosed
+        Ledger would keep its I4 lock until the process exits.
+        """
+        method = weakref.WeakMethod(self._notify_listeners)
+
+        def notify(events: Sequence[Event]) -> None:
+            target = method()
+            if target is not None:
+                target(events)
+
+        return notify
+
     # -- lifecycle ---------------------------------------------------------------
 
     def open(self) -> Ledger:
@@ -100,7 +116,7 @@ class Ledger:
         sidecar = self.path.with_name(self.path.name + ".lock")
         self._native = _rs.rs.LedgerStore(str(self.path), str(sidecar), str(os.getpid()))
         self._conn = self._native.connection()
-        self._native.set_notifier(self._notify_listeners)
+        self._native.set_notifier(self._notifier())
         self._carriers.clear()
         return self
 
