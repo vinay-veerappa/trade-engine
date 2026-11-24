@@ -528,12 +528,14 @@ class EodRunner:
     def _rehydrate_venue(
         self, account_id: str, broker: BrokerAdapter, state: AccountState
     ) -> None:
-        """Make sure the venue holds every order the ledger says is working.
+        """Make sure the venue holds what the ledger says it holds.
 
         A SimBroker lives in memory, so a new process starts with an empty book while
         the ledger still holds yesterday's D+1 entries and GTC stops. An empty
-        SimBroker is restored from the fold (I2). Any venue is then checked: a working
-        order it does not hold would silently never fill, so the run refuses (I5).
+        SimBroker is restored from the fold (I2), positions included: a held stock or
+        option with no working order is still held at the venue. Any venue is then
+        checked: a working order it does not hold would silently never fill, so the run
+        refuses (I5).
         """
         if (
             isinstance(broker, (SimBroker, SnapshotVenue))
@@ -541,8 +543,9 @@ class EodRunner:
             and not broker.fills(MIN_TIME)
         ):
             orders, fills = self._restorable(account_id, state)
-            if orders:
-                broker.restore(orders, fills, self._restorable_positions(state))
+            positions = self._restorable_positions(state)
+            if orders or positions:
+                broker.restore(orders, fills, positions)
         held = {item.venue_order_id: item for item in broker.orders(MIN_TIME)}
         for order in sorted(state.orders.values(), key=lambda value: value.order_id):
             if not flag("eod:working", (order.state.value,)):
