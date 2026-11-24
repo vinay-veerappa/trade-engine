@@ -5,17 +5,13 @@
 //! the `at` text. `run_pass_mirror` (it drives a broker) stays Python until T9/T10.
 
 use super::netting::vertical_reason;
-use super::wire::{
-    instrument, jstr, linstr, linstr_json, obj, req, req_arr, req_str, side_of, wire, ComboLeg,
-};
+use super::wire::{instrument, linstr_json, wire, ComboLeg};
 use super::{EXIT_PLAN, VALUE};
-use crate::ledger::bridge::{uncanon_account, uncanon_mirror};
 use crate::ledger::codec::py_repr;
 use crate::ledger::fold::AccountState;
-use crate::ledger::json::Json;
 use crate::ledger::mirror::{book_hk, ticket_contracts, MirrorState, MirrorTicketState};
 use crate::ledger::model::{
-    parse_datetime, Instrument as LInstrument, LErr, Order, OrderState, OrderType, Side, Tif, R,
+    Instrument as LInstrument, LErr, Order, OrderState, OrderType, Side, Tif, R,
 };
 use crate::ledger::ops::{div_i, eq, gt, le, lt, mul, s, sub, zero, OMap};
 use crate::money::Money;
@@ -567,177 +563,6 @@ pub fn plan_exits(ctx: &Ctx, name: &str) -> R<Exit> {
     planner.plan(name)?;
     Ok(planner.out)
 }
-
-// -- the door ---------------------------------------------------------------------------------------
-
-pub fn ctx_of(doc: &Json) -> R<Ctx> {
-    let mut accounts = OMap::new();
-    for row in req_arr(doc, "accounts")? {
-        let Json::Arr(r) = row else { return wire("an account row is not a pair") };
-        let [Json::Str(name), tree] = r.as_slice() else { return wire("an account row is not a pair") };
-        accounts.insert(name.clone(), name.clone(), uncanon_account(tree)?);
-    }
-    let mut prices = Vec::new();
-    for row in req_arr(doc, "prices")? {
-        let Json::Arr(r) = row else { return wire("a price row is not a triple") };
-        let [inst, Json::Str(sd), p] = r.as_slice() else { return wire("a price row is not a triple") };
-        let p = match p {
-            Json::Null => None,
-            Json::Str(t) => Some(super::wire::dec_of(t)?),
-            _ => return wire("a price is not text"),
-        };
-        prices.push((linstr(inst)?.hk(), side_of(sd)?, p));
-    }
-    let mut mirrored = Vec::new();
-    for m in req_arr(doc, "mirrored")? {
-        let Json::Str(t) = m else { return wire("a mirrored account is not text") };
-        mirrored.push(t.clone());
-    }
-    let at = req_str(doc, "at")?.to_string();
-    let (_, aware) = parse_datetime(&at)?;
-    Ok(Ctx {
-        mirror: uncanon_mirror(req(doc, "mirror")?)?,
-        accounts,
-        empty: AccountState::new(""),
-        mirrored,
-        session: req_str(doc, "session")?.to_string(),
-        prices,
-        at,
-        aware,
-    })
-}
-
-fn order_json(o: &XOrder, at: &str) -> Json {
-    obj(vec![
-        ("order_id", jstr(o.order_id.clone())),
-        ("account_id", jstr(o.account_id.clone())),
-        ("instrument", linstr_json(&o.instrument)),
-        ("order_type", jstr(OrderType::Limit.value())),
-        ("side", jstr(o.side.value())),
-        ("quantity", jstr(s(&o.quantity))),
-        ("command_id", jstr(o.order_id.clone())),
-        ("created_at", jstr(at)),
-        ("limit_price", super::wire::jopt_dec(&o.limit_price)),
-        ("tif", jstr(Tif::Day.value())),
-    ])
-}
-
-fn pair(a: &str, b: &str) -> Json {
-    Json::Arr(vec![jstr(a), jstr(b)])
-}
-
-pub fn exit_json(e: &Exit, at: &str) -> Json {
-    obj(vec![
-        ("cancel", Json::Arr(e.cancel.iter().map(|k| jstr(k.clone())).collect())),
-        ("orders", Json::Arr(e.orders.iter().map(|o| order_json(o, at)).collect())),
-        (
-            "refused",
-            Json::Arr(
-                e.refused
-                    .iter()
-                    .map(|(o, a, r)| Json::Arr(vec![jstr(o.clone()), jstr(a.clone()), jstr(r.clone())]))
-                    .collect(),
-            ),
-        ),
-        ("waits", Json::Arr(e.waits.iter().map(|(k, o)| pair(k, o)).collect())),
-        (
-            "priced",
-            Json::Arr(
-                e.priced.iter().map(|(i, sd)| Json::Arr(vec![linstr_json(i), jstr(sd.value())])).collect(),
-            ),
-        ),
-    ])
-}
-
-pub fn plan_exits_op(doc: &Json) -> R<Json> {
-    let ctx = ctx_of(doc)?;
-    let out = plan_exits(&ctx, req_str(doc, "name")?)?;
-    Ok(exit_json(&out, &ctx.at))
-}
-
-pub fn plan_verticals_op(doc: &Json) -> R<Json> {
-    let ctx = ctx_of(doc)?;
-    let mut planner = Planner::new(&ctx);
-    let covered = planner.plan_verticals(req_str(doc, "name")?)?;
-    let mut out = exit_json(&planner.out, &ctx.at);
-    if let Json::Obj(fields) = &mut out {
-        fields.push((
-            "covered".to_string(),
-            Json::Arr(covered.iter().map(|(a, c)| Json::Arr(vec![jstr(a.clone()), linstr_json(c)])).collect()),
-        ));
-    }
-    Ok(out)
-}
-
-pub fn verticals_op(doc: &Json) -> R<Json> {
-    let ctx = ctx_of(doc)?;
-    let planner = Planner::new(&ctx);
-    let mut rows = Vec::new();
-    for (account, legs, tickets) in planner.verticals()? {
-        rows.push(Json::Arr(vec![
-            jstr(account),
-            linstr_json(&LInstrument::Combo(legs)),
-            Json::Arr(tickets.iter().map(|t| jstr(t.queued.ticket_key.clone())).collect()),
-        ]));
-    }
-    Ok(Json::Arr(rows))
-}
-
-pub fn ids_op(doc: &Json) -> R<Json> {
-    let session = req_str(doc, "session")?;
-    let id = match req_str(doc, "which")? {
-        "close" => close_id(req_str(doc, "account")?, &linstr(req(doc, "instrument")?)?, session, req_str(doc, "name")?)?,
-        "target" => target_id(req_str(doc, "order_id")?, session),
-        _ => refusal_id(req_str(doc, "account")?, &linstr(req(doc, "instrument")?)?, session)?,
-    };
-    Ok(obj(vec![("id", jstr(id))]))
-}
-
-fn held_of(doc: &Json) -> R<OMap<LInstrument, Money>> {
-    let mut held = OMap::new();
-    for row in req_arr(doc, "held")? {
-        let Json::Arr(r) = row else { return wire("a held row is not a pair") };
-        let [inst, Json::Str(q)] = r.as_slice() else { return wire("a held row is not a pair") };
-        let i = linstr(inst)?;
-        held.insert(i.hk(), i, super::wire::dec_of(q)?);
-    }
-    Ok(held)
-}
-
-pub fn units_op(doc: &Json) -> R<Json> {
-    let LInstrument::Combo(legs) = linstr(req(doc, "combo")?)? else { return wire("units wants a combo") };
-    let out = units(&held_of(doc)?, &legs)?;
-    Ok(obj(vec![("units", out.map_or(Json::Null, |u| jstr(s(&u))))]))
-}
-
-pub fn flip_op(doc: &Json) -> R<Json> {
-    let LInstrument::Combo(legs) = linstr(req(doc, "combo")?)? else { return wire("flip wants a combo") };
-    Ok(linstr_json(&LInstrument::Combo(flip(&legs))))
-}
-
-pub fn open_on_op(doc: &Json) -> R<Json> {
-    let ctx = ctx_of(doc)?;
-    let contract = linstr(req(doc, "contract")?)?;
-    let account = req_str(doc, "account")?;
-    let (open, vertical) = if req_str(doc, "which")? == "open_on" {
-        (open_on(&ctx.mirror, account, &contract)?, false)
-    } else {
-        (Vec::new(), in_vertical(&ctx.mirror, account, &contract)?)
-    };
-    Ok(obj(vec![
-        ("keys", Json::Arr(open.iter().map(|t| jstr(t.queued.ticket_key.clone())).collect())),
-        ("in_vertical", Json::Bool(vertical)),
-    ]))
-}
-
-pub fn sim_orders_op(doc: &Json) -> R<Json> {
-    let ctx = ctx_of(doc)?;
-    let key = req_str(doc, "ticket")?;
-    let Some(ticket) = ctx.mirror.tickets.get(key) else { return wire("no such ticket") };
-    let found = sim_orders(ctx.state(req_str(doc, "account")?), ticket, &ctx.session);
-    Ok(Json::Arr(found.iter().map(|o| jstr(o.order_id.clone())).collect()))
-}
-
 
 #[cfg(test)]
 mod tests {

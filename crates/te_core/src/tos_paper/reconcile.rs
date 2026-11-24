@@ -251,6 +251,7 @@ pub struct Ticket {
     pub limit_price: Option<Money>,
 }
 
+#[cfg(test)]
 fn ticket_of(j: &Json) -> R<Ticket> {
     Ok(Ticket {
         instrument: linstr(req(j, "instrument")?)?,
@@ -374,64 +375,6 @@ fn confirm_combo(
     Ok(("ACCEPTED", "filled (every leg's position moved)".into()))
 }
 
-// -- the door ------------------------------------------------------------------------------------
-
-pub fn position_book_op(doc: &Json) -> R<Json> {
-    Ok(pairs_json(&position_book(&positions_of(doc)?)?))
-}
-
-pub fn reconcile_op(doc: &Json) -> R<Json> {
-    reconcile(
-        req_str(doc, "venue")?,
-        req_str(doc, "as_of")?,
-        &pairs_of(doc, "expected")?,
-        &positions_of(doc)?,
-        &rows_of(doc, "working")?,
-    )
-}
-
-pub fn unreadable_op(doc: &Json) -> R<Json> {
-    let mut contracts = Vec::new();
-    for c in req_arr(doc, "contracts")? {
-        contracts.push(linstr(c)?);
-    }
-    unreadable(req_str(doc, "venue")?, req_str(doc, "as_of")?, &contracts, req_str(doc, "why")?)
-}
-
-pub fn confirm_ticket_op(doc: &Json) -> R<Json> {
-    let mut claimed: Vec<usize> = Vec::new();
-    for c in req_arr(doc, "claimed")? {
-        match c {
-            Json::Int(n) if *n >= 0 => claimed.push(*n as usize),
-            _ => return wire("claimed holds a non-index"),
-        }
-    }
-    let (status, reason) = confirm_ticket(
-        &ticket_of(req(doc, "ticket")?)?,
-        &pairs_of(doc, "before")?,
-        &positions_of(doc)?,
-        &rows_of(doc, "working")?,
-        &mut claimed,
-    )?;
-    claimed.sort_unstable();
-    claimed.dedup();
-    Ok(obj(vec![
-        ("status", jstr(status)),
-        ("reason", jstr(reason)),
-        ("claimed", Json::Arr(claimed.into_iter().map(|i| Json::Int(i as i128)).collect())),
-    ]))
-}
-
-pub fn ticket_contracts_op(doc: &Json) -> R<Json> {
-    let ticket = ticket_of(req(doc, "ticket")?)?;
-    let units = match doc.get("units") {
-        None | Some(Json::Null) => None,
-        Some(Json::Str(u)) => Some(dec_of(u)?),
-        Some(_) => return wire("units must be a Decimal string or null"),
-    };
-    Ok(pairs_json(&ticket_contracts(&ticket, units.as_ref())?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,9 +395,16 @@ mod tests {
     }
 
     fn reconcile_of(expected: &str, positions: &str, working: &str) -> Json {
-        reconcile_op(&doc(&format!(
+        let doc = doc(&format!(
             r#"{{"venue":"D-1","as_of":"2026-09-24T20:00:00+00:00","expected":{expected},"positions":{positions},"working":{working}}}"#
-        )))
+        ));
+        reconcile(
+            req_str(&doc, "venue").unwrap(),
+            req_str(&doc, "as_of").unwrap(),
+            &pairs_of(&doc, "expected").unwrap(),
+            &positions_of(&doc).unwrap(),
+            &rows_of(&doc, "working").unwrap(),
+        )
         .unwrap()
     }
 
@@ -484,9 +434,16 @@ mod tests {
     #[test]
     fn a_naive_instant_and_an_empty_venue_refuse_as_the_event_does() {
         let bad = |venue: &str, at: &str| {
-            reconcile_op(&doc(&format!(
+            let doc = doc(&format!(
                 r#"{{"venue":"{venue}","as_of":"{at}","expected":[],"positions":[],"working":[]}}"#
-            )))
+            ));
+            reconcile(
+                req_str(&doc, "venue").unwrap(),
+                req_str(&doc, "as_of").unwrap(),
+                &pairs_of(&doc, "expected").unwrap(),
+                &positions_of(&doc).unwrap(),
+                &rows_of(&doc, "working").unwrap(),
+            )
             .unwrap_err()
         };
         assert_eq!(bad("", "2026-09-24T20:00:00+00:00").msg, "VenueReconcile.venue must be non-empty");
@@ -506,19 +463,36 @@ mod tests {
                 r#"{{"instrument":{c},"side":"{side}","quantity":"{qty}","filled":"0","order_type":"LIMIT","limit_price":"1.50","state":"ACCEPTED"}}"#
             )
         };
-        let confirm = |working: &str, claimed: &str| {
-            confirm_ticket_op(&doc(&format!(
+        let confirm = |working: &str, claimed: &str| -> (&'static str, Vec<usize>) {
+            let doc = doc(&format!(
                 r#"{{"ticket":{{"instrument":{combo},"order_type":"LIMIT","side":"SELL","quantity":"1","limit_price":"1.50"}},
                     "before":[],"positions":[],"working":[{working}],"claimed":{claimed}}}"#
-            )))
-            .unwrap()
+            ));
+            let mut claimed: Vec<usize> = Vec::new();
+            for c in req_arr(&doc, "claimed").unwrap() {
+                match c {
+                    Json::Int(n) if *n >= 0 => claimed.push(*n as usize),
+                    _ => panic!("claimed holds a non-index"),
+                }
+            }
+            let (status, _) = confirm_ticket(
+                &ticket_of(req(&doc, "ticket").unwrap()).unwrap(),
+                &pairs_of(&doc, "before").unwrap(),
+                &positions_of(&doc).unwrap(),
+                &rows_of(&doc, "working").unwrap(),
+                &mut claimed,
+            )
+            .unwrap();
+            claimed.sort_unstable();
+            claimed.dedup();
+            (status, claimed)
         };
         let both = format!("{},{}", row(P200, "SELL", "1"), row(P195, "BUY", "1"));
         let out = confirm(&both, "[]");
-        assert_eq!(out.get("status"), Some(&Json::Str("ACCEPTED".into())));
-        assert_eq!(out.get("claimed"), Some(&Json::Arr(vec![Json::Int(0), Json::Int(1)])));
-        assert_eq!(confirm(&both, "[0]").get("status"), Some(&Json::Str("PENDING".into())));
-        assert_eq!(confirm(&row(P200, "SELL", "1"), "[]").get("status"), Some(&Json::Str("PENDING".into())));
+        assert_eq!(out.0, "ACCEPTED");
+        assert_eq!(out.1, vec![0usize, 1]);
+        assert_eq!(confirm(&both, "[0]").0, "PENDING");
+        assert_eq!(confirm(&row(P200, "SELL", "1"), "[]").0, "PENDING");
     }
 
     #[test]

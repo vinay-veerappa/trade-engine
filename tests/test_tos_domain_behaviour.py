@@ -152,18 +152,3 @@ def test_a_kind_the_door_does_not_name_is_the_ledgers_fold_error() -> None:
 def test_a_ledger_fold_kind_keeps_its_message_unprefixed() -> None:
     refused = door.refusal("fold", "boom")
     assert type(refused) is LedgerFoldError and str(refused) == "boom"
-
-
-# -- the door's text probe: explicit Unicode facts, one row per character -------------------------
-
-
-def test_the_text_probe_classifies_explicit_code_points() -> None:
-    chars = "7²A\t ͸"  # digit seven, superscript two, A, tab, no-break space, unassigned U+0378
-    assert door.decide("text_probe", {"chars": chars}) == [
-        [True, True, False],    # '7': a digit, printable, not space
-        [True, True, False],    # '²': isdigit (superscript), printable
-        [False, True, False],   # 'A'
-        [False, False, True],   # tab: not printable, space
-        [False, False, True],   # no-break space: not printable, space
-        [False, False, False],  # U+0378: unassigned, not printable
-    ]

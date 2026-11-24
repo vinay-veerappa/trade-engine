@@ -34,11 +34,9 @@ use std::collections::HashMap;
 
 use chrono::NaiveDate;
 use proptest::prelude::*;
-use te_core::ledger::json::{parse, Json};
 use te_core::ledger::mirror::MirrorState;
 use te_core::ledger::model::*;
 use te_core::money::Money;
-use te_core::tos_paper::decide;
 use te_core::tos_paper::netting::Ticket;
 use te_core::tos_paper::session::*;
 use te_core::tos_paper::SESSION;
@@ -678,63 +676,4 @@ fn test_clear_halt_validations() {
     assert_eq!(ev.reason, "operator verified venue");
     assert_eq!(ev.reconcile_seq, 2);
     assert_eq!(cmd, "halt-cleared:paper-venue:ACC_1:2");
-}
-
-// -------------------------------------------------------------------------------------------------
-// Group 8: Door JSON Handlers
-// -------------------------------------------------------------------------------------------------
-
-#[test]
-fn test_door_session_ops() {
-    // 1. deferred_why
-    let doc = r#"{"doing": "collecting fills", "exc": "connection lost", "recorded": ""}"#;
-    let res = decide("session_deferred_why", doc).unwrap();
-    let parsed = parse(&res).unwrap();
-    let why = match parsed.get("why") {
-        Some(Json::Str(s)) => s,
-        _ => panic!("missing why"),
-    };
-    assert!(why.contains("the venue could not be asked while collecting fills (connection lost); nothing was sent or recorded; the next run asks again"));
-
-    // 2. clear_halt via decide
-    let clear_doc = r#"{
-        "venue": "paper-venue",
-        "reason": "fixed",
-        "as_of": "2026-01-02T12:00:00+00:00",
-        "holders": ["ACC_1"],
-        "reconciles": [
-            [1, {"dc": "VenueReconcile", "f": {"venue": "paper-venue", "as_of": {"T": "2026-01-02T11:00:00+00:00"}, "reconciled": true, "drift": {"t": []}, "note": {"n": true}}}]
-        ]
-    }"#;
-    let res = decide("session_clear_halt", clear_doc).unwrap();
-    let parsed = parse(&res).unwrap();
-    let holders = match parsed.get("holders") {
-        Some(Json::Arr(a)) => a,
-        _ => panic!("missing holders"),
-    };
-    assert_eq!(holders.len(), 1);
-
-    // 3. reconcile_command_id via decide
-    let rec_doc = r#"{
-        "venue": "paper-venue",
-        "phase": "collect",
-        "as_of": "2026-01-02T10:30:00+00:00",
-        "event": {"dc": "VenueReconcile", "f": {"venue": "paper-venue", "as_of": {"T": "2026-01-02T10:30:00+00:00"}, "reconciled": true, "drift": {"t": []}, "note": {"n": true}}}
-    }"#;
-    let res = decide("session_reconcile_command_id", rec_doc).unwrap();
-    let parsed = parse(&res).unwrap();
-    assert!(parsed.get("command_id").is_some());
-
-    // 4. build_cancel_ack via decide
-    let cancel_doc = r#"{
-        "venue": "paper-venue",
-        "ticket_key": "t-1",
-        "order_id": "v-101",
-        "ack_status": "ACCEPTED",
-        "ack_message": "cancelled",
-        "ack_timestamp": "2026-01-02T10:30:00+00:00"
-    }"#;
-    let res = decide("session_build_cancel_ack", cancel_doc).unwrap();
-    let parsed = parse(&res).unwrap();
-    assert!(parsed.get("ack").is_some());
 }

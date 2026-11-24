@@ -6,10 +6,13 @@
 //! The mirror crosses as the ledger's canonical tree (`codec.canon(MirrorState)`), read by
 //! `bridge::uncanon_mirror`; an instrument as the wire document of [`super::wire`].
 
-use super::reconcile::{pairs_json, pairs_of};
+#[cfg(test)]
+use super::reconcile::pairs_of;
 use super::OVERFLOW_ERROR;
-use super::wire::{jstr, linstr, linstr_json, obj, req, req_arr, req_dec, req_str, side_of, wire};
-use crate::ledger::bridge::uncanon_mirror;
+#[cfg(test)]
+use super::wire::jstr;
+use super::wire::wire;
+#[cfg(test)]
 use crate::ledger::json::Json;
 use crate::ledger::mirror::{ticket_contracts, MirrorState};
 use crate::ledger::model::{derr, err, Instrument, OptionContract, Side, R};
@@ -157,21 +160,6 @@ pub fn holdings(mirror: &MirrorState) -> R<Held> {
 /// What a single-leg SELL of shares or of a call gives up.
 pub type Sold = Option<(Instrument, Money)>;
 
-/// `_sold` over an order document `{instrument, side, quantity}`.
-pub fn sold_of(order: &Json) -> R<Sold> {
-    let side = side_of(req_str(order, "side")?)?;
-    let instrument = req(order, "instrument")?;
-    let single = match req_str(instrument, "kind")? {
-        "equity" => true,
-        "option" => req_str(instrument, "right")? == "C",
-        _ => false,
-    };
-    if side != Side::Sell || !single {
-        return Ok(None);
-    }
-    Ok(Some((linstr(instrument)?, req_dec(order, "quantity")?)))
-}
-
 /// `_sold` over a typed order: what a single-leg SELL of shares or of a call gives up.
 pub fn sold(instrument: &Instrument, side: Side, quantity: &Money) -> R<Sold> {
     let single = match instrument {
@@ -236,62 +224,12 @@ pub fn cover_reason(mirror: &MirrorState, sold: &Sold, accepted: &[Sold]) -> R<O
     )))
 }
 
-// -- the door ------------------------------------------------------------------------------------
-
-fn option_of(j: &Json) -> R<OptionContract> {
-    match linstr(j)? {
-        Instrument::Option(c) => Ok(c),
-        _ => wire("expected an option contract"),
-    }
-}
-
-fn options_of(doc: &Json, key: &str) -> R<Vec<OptionContract>> {
-    req_arr(doc, key)?.iter().map(option_of).collect()
-}
-
-fn mirror_of(doc: &Json) -> R<MirrorState> {
-    uncanon_mirror(req(doc, "mirror")?)
-}
-
-pub fn covers_op(doc: &Json) -> R<Json> {
-    let result = covers(&option_of(req(doc, "long")?)?, &option_of(req(doc, "short")?)?)?;
-    Ok(obj(vec![("result", Json::Bool(result))]))
-}
-
-pub fn bare_op(doc: &Json) -> R<Json> {
-    let shorts = options_of(doc, "shorts")?;
-    let left = bare(&options_of(doc, "longs")?, &shorts)?;
-    let out = left.into_iter().map(|i| linstr_json(&Instrument::Option(shorts[i].clone()))).collect();
-    Ok(obj(vec![("left", Json::Arr(out))]))
-}
-
-pub fn uncovered_op(doc: &Json) -> R<Json> {
-    let found = uncovered(&pairs_of(doc, "held")?)?;
-    Ok(Json::Arr(found.iter().map(|(u, c)| Json::Arr(vec![jstr(u.clone()), jstr(s(c))])).collect()))
-}
-
-pub fn holdings_op(doc: &Json) -> R<Json> {
-    Ok(pairs_json(&holdings(&mirror_of(doc)?)?))
-}
-
-pub fn sold_op(doc: &Json) -> R<Json> {
-    Ok(match sold_of(req(doc, "order")?)? {
-        None => Json::Null,
-        Some((i, q)) => Json::Arr(vec![linstr_json(&i), jstr(s(&q))]),
-    })
-}
-
-pub fn cover_reason_op(doc: &Json) -> R<Json> {
-    let mirror = mirror_of(doc)?;
-    let sold = sold_of(req(doc, "order")?)?;
-    let accepted: Vec<Sold> = req_arr(doc, "accepted")?.iter().map(sold_of).collect::<R<_>>()?;
-    Ok(obj(vec![("reason", cover_reason(&mirror, &sold, &accepted)?.map_or(Json::Null, jstr))]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ledger::json::parse;
+    use crate::ledger::model::LErr;
+    use chrono::NaiveDate;
 
     fn call(strike: &str, expiry: &str, multiplier: i64) -> String {
         format!(
@@ -299,20 +237,29 @@ mod tests {
         )
     }
 
-    fn found(held: &str) -> Result<Json, crate::ledger::model::LErr> {
-        uncovered_op(&parse(&format!(r#"{{"held":{held}}}"#)).unwrap())
+    fn opt(strike: &str, expiry: &str, multiplier: i128) -> OptionContract {
+        OptionContract {
+            underlying: "AAPL".to_string(),
+            expiry: NaiveDate::parse_from_str(expiry, "%Y-%m-%d").unwrap(),
+            strike: Money::parse(strike).unwrap(),
+            right: Right::Call,
+            multiplier,
+        }
+    }
+
+    fn found(held: &str) -> Result<Json, LErr> {
+        let doc = parse(&format!(r#"{{"held":{held}}}"#)).unwrap();
+        let found = uncovered(&pairs_of(&doc, "held")?)?;
+        Ok(Json::Arr(found.iter().map(|(u, c)| Json::Arr(vec![jstr(u.clone()), jstr(s(c))])).collect()))
     }
 
     #[test]
     fn a_maximum_matching_hands_the_wide_long_on_to_the_later_short() {
-        let (wide, narrow) = (call("200", "2026-12-18", 100), call("205", "2026-10-16", 100));
-        let (s1, s2) = (call("210", "2026-10-16", 100), call("210", "2026-11-20", 100));
-        let doc = |longs: String, shorts: String| parse(&format!(r#"{{"longs":[{longs}],"shorts":[{shorts}]}}"#)).unwrap();
-        let out = bare_op(&doc(format!("{wide},{narrow}"), format!("{s1},{s2}"))).unwrap();
-        assert_eq!(out.get("left"), Some(&Json::Arr(vec![])));
+        let (wide, narrow) = (opt("200", "2026-12-18", 100), opt("205", "2026-10-16", 100));
+        let (s1, s2) = (opt("210", "2026-10-16", 100), opt("210", "2026-11-20", 100));
+        assert!(bare(&[wide.clone(), narrow], &[s1.clone(), s2.clone()]).unwrap().is_empty());
         // one long, two shorts: the first short is covered, the second is left
-        let out = bare_op(&doc(wide.clone(), format!("{s1},{s2}"))).unwrap();
-        let Some(Json::Arr(left)) = out.get("left") else { panic!("no left") };
+        let left = bare(&[wide], &[s1, s2]).unwrap();
         assert_eq!(left.len(), 1);
     }
 

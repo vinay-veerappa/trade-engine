@@ -39,7 +39,6 @@ import json
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
 
 import trade_engine_rs as rs  # noqa: F401 - D5: missing is an error, never a skip
 
@@ -82,15 +81,6 @@ refusal = bridge.refusal
 call = bridge.call
 
 
-def decide(op: str, doc: Mapping[str, Any]) -> Any:
-    """``op`` over ``doc`` through the one pyo3 door; the answer as parsed JSON.
-
-    ``default=str``: a transport row holding a value JSON cannot carry (the host's own
-    ``Decimal`` or ``date``) reaches the core as its text, never as a crash on the host.
-    """
-    return json.loads(call(rs.tos_paper_decide, op, json.dumps(doc, default=str)))
-
-
 # -- the wire: domain objects <-> the core's JSON ------------------------------------------------
 
 
@@ -123,14 +113,6 @@ def text(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
 
 
-def pairs(mapping: Mapping[Instrument, Decimal]) -> list:
-    return [[wire(k), str(v)] for k, v in mapping.items()]
-
-
-def unpairs(doc: list) -> dict[Instrument, Decimal]:
-    return {unwire(i): Decimal(q) for i, q in doc}
-
-
 def holdings_doc(holdings: Mapping[tuple[str, Instrument], Decimal] | None) -> list:
     return [[a, wire(i), str(q)] for (a, i), q in (holdings or {}).items()]
 
@@ -156,12 +138,6 @@ def venue_order(d: Mapping) -> VenueOrder:
         allocations=tuple(VenueOrderAllocation(o, a, Decimal(q)) for o, a, q in d["allocations"]))
 
 
-def ticket_doc(t: VenueOrder) -> dict:
-    """The part of a ticket a read-back is judged against."""
-    return {"instrument": wire(t.instrument), "order_type": t.order_type.value, "side": t.side.value,
-            "quantity": str(t.quantity), "limit_price": text(t.limit_price)}
-
-
 def event(d: Mapping) -> VenueReconcile:
     return VenueReconcile(venue=d["venue"], as_of=datetime.fromisoformat(d["as_of"]), reconciled=d["reconciled"],
                           drift=tuple(d["drift"]), note=d["note"])
@@ -172,6 +148,6 @@ def ack(d: Mapping) -> VenueAck:
 
 
 __all__ = [
-    "ack", "call", "dec", "decide", "event", "holdings_doc", "order_doc", "pairs", "refusal", "rs", "text",
-    "ticket_doc", "unpairs", "unwire", "venue_order", "venue_order_doc", "wire",
+    "ack", "call", "dec", "event", "holdings_doc", "order_doc", "refusal", "rs", "text",
+    "unwire", "venue_order", "venue_order_doc", "wire",
 ]

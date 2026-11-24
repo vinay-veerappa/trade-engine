@@ -2,9 +2,11 @@
 //! `vertical_reason`, which the ticket mapping needs; the netting itself arrives with T6.
 
 use super::wire::{
-    dec_of, instrument, jopt_dec, jstr, linstr, linstr_json, obj, opt_dec, order_type_of, req, req_arr, req_dec,
+    dec_of, instrument, jopt_dec, jstr, linstr, linstr_json, obj, opt_dec, order_type_of, req, req_dec,
     req_str, side_of, tif_of, wire, ComboLeg, Instrument, OptionC,
 };
+#[cfg(test)]
+use super::wire::req_arr;
 use super::{NETTING, VALUE};
 use crate::ledger::codec::py_repr;
 use crate::ledger::json::Json;
@@ -51,14 +53,6 @@ pub fn vertical_reason(legs: &[ComboLeg]) -> R<Option<String>> {
         return Ok(Some(format!("a {}:{} ratio spread is not a 1:1 vertical", legs[0].ratio, legs[1].ratio)));
     }
     Ok(None)
-}
-
-/// The door's `vertical_reason`: `{"instrument": <combo>}` -> `{"reason": str | null}`.
-pub fn vertical_reason_op(doc: &Json) -> R<Json> {
-    let Instrument::Combo(legs) = instrument(req(doc, "instrument")?)? else {
-        return super::wire::wire("vertical_reason takes a combo");
-    };
-    Ok(obj(vec![("reason", vertical_reason(&legs)?.map_or(Json::Null, jstr))]))
 }
 
 /// A ledger-model instrument as the wire form `vertical_reason` reads.
@@ -551,6 +545,7 @@ pub fn ticket_json(t: &Ticket) -> Json {
     ])
 }
 
+#[cfg(test)]
 fn strings_of(doc: &Json, key: &str) -> R<Vec<String>> {
     req_arr(doc, key)?
         .iter()
@@ -574,78 +569,6 @@ pub fn holdings_of(rows: &[Json]) -> R<OMap<(String, LInstrument), Money>> {
     Ok(holdings)
 }
 
-pub fn net_op(doc: &Json) -> R<Json> {
-    let orders: Vec<NOrder> = req_arr(doc, "orders")?.iter().map(norder_of).collect::<R<_>>()?;
-    let holdings = holdings_of(req_arr(doc, "holdings")?)?;
-    let batch = net_strategy_orders(
-        &orders,
-        req_str(doc, "venue_account")?,
-        &strings_of(doc, "mirrored")?,
-        req_str(doc, "at")?,
-        &holdings,
-    )?;
-    Ok(obj(vec![
-        ("venue_orders", Json::Arr(batch.venue_orders.iter().map(ticket_json).collect())),
-        (
-            "refused",
-            Json::Arr(batch.refused.iter().map(|(o, r)| Json::Arr(vec![jstr(o.clone()), jstr(r.clone())])).collect()),
-        ),
-    ]))
-}
-
-pub fn ticket_key_op(doc: &Json) -> R<Json> {
-    let limit = opt_dec(doc, "limit_price")?;
-    let key = ticket_key(
-        req_str(doc, "venue_account")?,
-        &linstr(req(doc, "instrument")?)?,
-        side_of(req_str(doc, "side")?)?,
-        &req_dec(doc, "quantity")?,
-        order_type_of(req_str(doc, "order_type")?)?,
-        &limit,
-        tif_of(req_str(doc, "tif")?)?,
-        &strings_of(doc, "order_ids")?,
-    )?;
-    Ok(obj(vec![("key", jstr(key))]))
-}
-
-pub fn screen_op(doc: &Json) -> R<Json> {
-    let reason = screen(&norder_of(req(doc, "order")?)?, &strings_of(doc, "mirrored")?)?;
-    Ok(obj(vec![("reason", reason.map_or(Json::Null, jstr))]))
-}
-
-pub fn mixed_signs_op(doc: &Json) -> R<Json> {
-    let mut book: Vec<(String, Money)> = Vec::new();
-    for row in req_arr(doc, "book")? {
-        let Json::Arr(r) = row else { return wire("a book row is not a pair") };
-        let [Json::Str(a), Json::Str(q)] = r.as_slice() else { return wire("a book row is not a pair") };
-        book.push((a.clone(), dec_of(q)?));
-    }
-    Ok(obj(vec![("result", Json::Bool(mixed_signs(&book)?))]))
-}
-
-pub fn ticket_op(doc: &Json) -> R<Json> {
-    let group: Vec<NOrder> = req_arr(doc, "group")?.iter().map(norder_of).collect::<R<_>>()?;
-    let refs: Vec<&NOrder> = group.iter().collect();
-    let t = make_ticket(
-        req_str(doc, "venue_account")?,
-        &linstr(req(doc, "instrument")?)?,
-        order_type_of(req_str(doc, "order_type")?)?,
-        tif_of(req_str(doc, "tif")?)?,
-        &opt_dec(doc, "limit_price")?,
-        &refs,
-        req_str(doc, "at")?,
-    )?;
-    Ok(ticket_json(&t))
-}
-
-pub fn account_for_everything_op(doc: &Json) -> R<Json> {
-    let mut outcomes = strings_of(doc, "allocated")?;
-    outcomes.extend(strings_of(doc, "refused")?);
-    account_for_everything(&strings_of(doc, "orders")?, &outcomes)?;
-    Ok(obj(vec![("ok", Json::Bool(true))]))
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,10 +584,10 @@ mod tests {
     }
 
     fn reason(doc: &Json) -> Option<String> {
-        match vertical_reason_op(doc).unwrap().get("reason").unwrap() {
-            Json::Str(s) => Some(s.clone()),
-            _ => None,
-        }
+        let Instrument::Combo(legs) = instrument(req(doc, "instrument").unwrap()).unwrap() else {
+            panic!("vertical_reason takes a combo")
+        };
+        vertical_reason(&legs).unwrap()
     }
 
     const P195: &str = r#"{"kind": "option", "underlying": "AAPL", "expiry": "2026-10-16", "strike": "195", "right": "P", "multiplier": 100}"#;
@@ -699,7 +622,22 @@ mod tests {
             orders.join(",")
         ))
         .unwrap();
-        net_op(&doc)
+        let orders: Vec<NOrder> = req_arr(&doc, "orders")?.iter().map(norder_of).collect::<R<_>>()?;
+        let holdings = holdings_of(req_arr(&doc, "holdings")?)?;
+        let batch = net_strategy_orders(
+            &orders,
+            req_str(&doc, "venue_account")?,
+            &strings_of(&doc, "mirrored")?,
+            req_str(&doc, "at")?,
+            &holdings,
+        )?;
+        Ok(obj(vec![
+            ("venue_orders", Json::Arr(batch.venue_orders.iter().map(ticket_json).collect())),
+            (
+                "refused",
+                Json::Arr(batch.refused.iter().map(|(o, r)| Json::Arr(vec![jstr(o.clone()), jstr(r.clone())])).collect()),
+            ),
+        ]))
     }
 
     fn count(doc: &Json, key: &str) -> usize {
@@ -736,7 +674,18 @@ mod tests {
                 r#"{{"venue_account": "v", "instrument": {OPT}, "side": "SELL", "quantity": "{q}", "order_type": "LIMIT", "limit_price": "{l}", "tif": "DAY", "order_ids": ["a"]}}"#
             ))
             .unwrap();
-            ticket_key_op(&doc).unwrap()
+            let limit = opt_dec(&doc, "limit_price").unwrap();
+            ticket_key(
+                req_str(&doc, "venue_account").unwrap(),
+                &linstr(req(&doc, "instrument").unwrap()).unwrap(),
+                side_of(req_str(&doc, "side").unwrap()).unwrap(),
+                &req_dec(&doc, "quantity").unwrap(),
+                order_type_of(req_str(&doc, "order_type").unwrap()).unwrap(),
+                &limit,
+                tif_of(req_str(&doc, "tif").unwrap()).unwrap(),
+                &strings_of(&doc, "order_ids").unwrap(),
+            )
+            .unwrap()
         };
         assert_eq!(one("2", "2.00"), one("2.0", "2"));
         assert_ne!(one("2", "2.00"), one("3", "2.00"));
