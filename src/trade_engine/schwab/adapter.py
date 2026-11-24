@@ -300,6 +300,7 @@ class SchwabAccountsAdapter:
                 interval_seconds=self.interval_seconds,
                 stale_after=self.stale_after,
                 on_poll=self._on_poll,
+                broker=BROKER,
             )
         return self._poller
 
