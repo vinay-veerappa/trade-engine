@@ -104,16 +104,9 @@ from trade_engine.eod._runtime import decide, flag, micros
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
-MORNING_SUFFIX = "-morning"
 # The in-session passes, in the order a session runs them: the morning's entries, then
 # the midday and late exits (owner, 2026-09-26: exits reach the venue the same day).
 PASSES = ("morning", "midday", "late")
-
-
-def pass_of(job: str) -> str | None:
-    """The in-session pass a run marker's job names (``eod-midday``), or None."""
-    names = decide("eod:pass_of", (job,))[0]
-    return names[0] if names else None
 
 
 def _void_command(job: str, account_id: str, session: date) -> str:
