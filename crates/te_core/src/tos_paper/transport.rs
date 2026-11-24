@@ -10,14 +10,14 @@
 //! validated ticket may be any JSON value (the validators `repr` what they refuse).
 
 use super::netting::vertical_reason;
-use super::pytext::repr;
+use super::pytext::{repr, repr_str};
 use super::wire::{
     instrument, int_json, jopt_dec, jstr, obj, opt_dec, req, req_arr, req_dec, req_str, wire, ComboLeg, Instrument,
     OptionC,
 };
-use super::{UNSUPPORTED, VALUE};
+use super::{UNSUPPORTED, VALUE, WIRE};
 use crate::ledger::json::Json;
-use crate::ledger::model::{derr, err, R};
+use crate::ledger::model::{derr, err, LErr, R};
 use crate::money::Money;
 use crate::options::equity_symbol;
 
@@ -29,16 +29,51 @@ fn unsupported<T>(msg: impl Into<String>) -> R<T> {
     err(UNSUPPORTED, msg)
 }
 
-fn is_text(v: &Json, allowed: &[&str]) -> bool {
-    matches!(v, Json::Str(s) if allowed.contains(&s.as_str()))
+/// A ticket field a validator reads: the value, with the text Python's `repr` gives it
+/// (for a refusal message) computed once at the door. A `str` and a positive `int` are the
+/// only shapes that can pass; anything else is carried as its repr so a refusal built from
+/// a JSON door and one built from a Python door read byte-identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arg {
+    Str(String),
+    Int(i128),
+    BigInt(String),
+    Other(String),
 }
 
-/// `isinstance(v, int) and not isinstance(v, bool) and v > 0`.
-fn is_positive_int(v: &Json) -> bool {
+impl Arg {
+    pub fn is_text(&self, allowed: &[&str]) -> bool {
+        matches!(self, Arg::Str(s) if allowed.contains(&s.as_str()))
+    }
+
+    /// `isinstance(v, int) and not isinstance(v, bool) and v > 0`.
+    pub fn is_positive_int(&self) -> bool {
+        match self {
+            Arg::Int(n) => *n > 0,
+            Arg::BigInt(t) => !t.starts_with('-'),
+            _ => false,
+        }
+    }
+
+    /// `repr(value)`, exactly as Python would print it.
+    pub fn py_repr(&self) -> String {
+        match self {
+            Arg::Str(s) => repr_str(s),
+            Arg::Int(n) => n.to_string(),
+            Arg::BigInt(t) => t.clone(),
+            Arg::Other(t) => t.clone(),
+        }
+    }
+}
+
+/// A door's JSON value as an [`Arg`]: the `repr` of a value that is not a `str` or an `int`
+/// is computed here, so a typed validator never knows which door it came from.
+pub fn arg_of(v: &Json) -> Arg {
     match v {
-        Json::Int(n) => *n > 0,
-        Json::BigInt(t) => !t.starts_with('-'),
-        _ => false,
+        Json::Str(s) => Arg::Str(s.clone()),
+        Json::Int(n) => Arg::Int(*n),
+        Json::BigInt(t) => Arg::BigInt(t.clone()),
+        other => Arg::Other(repr(other)),
     }
 }
 
@@ -54,93 +89,146 @@ fn field<'a>(doc: &'a Json, key: &str) -> R<&'a Json> {
     req(doc, key)
 }
 
-/// The checks `MirrorTicket` and `MirrorStockTicket` share, in the dataclass's order.
-fn check_single(doc: &Json) -> R<()> {
-    let side = field(doc, "side")?;
-    if !is_text(side, &["BUY", "SELL"]) {
-        return value(format!("ticket side must be BUY or SELL, got {}", repr(side)));
+/// The typed checks `MirrorTicket` and `MirrorStockTicket` share, in the dataclass's order.
+pub fn validate_single(side: &Arg, quantity: &Arg, order_type: &Arg, tif: &Arg, limit: &Option<Money>) -> R<()> {
+    if !side.is_text(&["BUY", "SELL"]) {
+        return value(format!("ticket side must be BUY or SELL, got {}", side.py_repr()));
     }
-    let quantity = field(doc, "quantity")?;
-    if !is_positive_int(quantity) {
-        return value(format!("ticket quantity must be a positive int, got {}", repr(quantity)));
+    if !quantity.is_positive_int() {
+        return value(format!("ticket quantity must be a positive int, got {}", quantity.py_repr()));
     }
-    let order_type = field(doc, "order_type")?;
-    if !is_text(order_type, &["MKT", "LMT"]) {
-        return value(format!("ticket order_type must be MKT or LMT, got {}", repr(order_type)));
+    if !order_type.is_text(&["MKT", "LMT"]) {
+        return value(format!("ticket order_type must be MKT or LMT, got {}", order_type.py_repr()));
     }
-    let limit = opt_dec(doc, "limit_price")?;
-    if is_text(order_type, &["LMT"]) && missing_or_nonpositive(&limit)? {
+    if order_type.is_text(&["LMT"]) && missing_or_nonpositive(limit)? {
         return value("an LMT ticket needs a positive limit_price (I5)");
     }
-    if is_text(order_type, &["MKT"]) && limit.is_some() {
+    if order_type.is_text(&["MKT"]) && limit.is_some() {
         return value("a MKT ticket cannot carry a limit_price");
     }
-    let tif = field(doc, "tif")?;
-    if !is_text(tif, &["DAY", "GTC"]) {
-        return value(format!("ticket tif must be DAY or GTC, got {}", repr(tif)));
+    if !tif.is_text(&["DAY", "GTC"]) {
+        return value(format!("ticket tif must be DAY or GTC, got {}", tif.py_repr()));
     }
     Ok(())
 }
 
-fn check_stock(doc: &Json) -> R<()> {
-    let symbol = field(doc, "symbol")?;
-    let refused = || {
-        value::<()>(format!("stock ticket symbol must be an upper-case equity symbol, got {}", repr(symbol)))
-    };
+/// The typed `MirrorStockTicket` check: the upper-case equity symbol, then the shared checks.
+pub fn validate_stock(
+    symbol: &Arg,
+    side: &Arg,
+    quantity: &Arg,
+    order_type: &Arg,
+    tif: &Arg,
+    limit: &Option<Money>,
+) -> R<()> {
     let parsed = match symbol {
-        Json::Str(s) => equity_symbol(Some(s)),
+        Arg::Str(s) => equity_symbol(Some(s)),
         _ => equity_symbol(None),
     };
     match (parsed, symbol) {
-        (Ok(p), Json::Str(s)) if &p == s => {}
-        _ => return refused(),
+        (Ok(p), Arg::Str(s)) if &p == s => {}
+        _ => {
+            return value(format!(
+                "stock ticket symbol must be an upper-case equity symbol, got {}",
+                symbol.py_repr()
+            ))
+        }
     }
-    check_single(doc)
+    validate_single(side, quantity, order_type, tif, limit)
 }
 
-fn check_leg(doc: &Json) -> R<()> {
-    let side = field(doc, "side")?;
-    if !is_text(side, &["BUY", "SELL"]) {
-        return value(format!("leg side must be BUY or SELL, got {}", repr(side)));
+/// The typed one-leg check (`MirrorComboLeg`).
+pub fn validate_leg(side: &Arg, ratio: &Arg) -> R<()> {
+    if !side.is_text(&["BUY", "SELL"]) {
+        return value(format!("leg side must be BUY or SELL, got {}", side.py_repr()));
     }
-    let ratio = field(doc, "ratio")?;
-    if !is_positive_int(ratio) {
-        return value(format!("leg ratio must be a positive int, got {}", repr(ratio)));
+    if !ratio.is_positive_int() {
+        return value(format!("leg ratio must be a positive int, got {}", ratio.py_repr()));
     }
     Ok(())
 }
 
-fn check_combo(doc: &Json) -> R<()> {
-    let legs = req_arr(doc, "legs")?;
-    let sides: Vec<&Json> = legs.iter().filter_map(|l| l.get("side")).collect();
-    let bought = sides.iter().any(|s| is_text(s, &["BUY"]));
-    let sold = sides.iter().any(|s| is_text(s, &["SELL"]));
+/// The typed `MirrorComboTicket` check: two legs, one bought one sold, equal ratios, then the
+/// quantity/limit/effect/tif checks.
+pub fn validate_combo(
+    legs: &[(Arg, Arg)],
+    quantity: &Arg,
+    order_type: &Arg,
+    limit: &Option<Money>,
+    effect: &Arg,
+    tif: &Arg,
+) -> R<()> {
+    let sides: Vec<&Arg> = legs.iter().map(|(s, _)| s).collect();
+    let bought = sides.iter().any(|s| s.is_text(&["BUY"]));
+    let sold = sides.iter().any(|s| s.is_text(&["SELL"]));
     // `{leg.side for leg in legs} != {"BUY", "SELL"}`: with two legs, one of each.
     let one_each = legs.len() == 2 && bought && sold;
     if legs.len() != 2 || !one_each {
         return value("a combo ticket is a vertical: one leg bought, one sold");
     }
-    let ratios: Vec<&Json> = legs.iter().filter_map(|l| l.get("ratio")).collect();
+    let ratios: Vec<&Arg> = legs.iter().map(|(_, r)| r).collect();
     if ratios.iter().any(|r| *r != ratios[0]) {
         return value("a vertical's legs trade in equal ratio");
     }
-    let quantity = field(doc, "quantity")?;
-    if !is_positive_int(quantity) {
-        return value(format!("ticket quantity must be a positive int, got {}", repr(quantity)));
+    if !quantity.is_positive_int() {
+        return value(format!("ticket quantity must be a positive int, got {}", quantity.py_repr()));
     }
-    let limit = opt_dec(doc, "limit_price")?;
-    if !is_text(field(doc, "order_type")?, &["LMT"]) || missing_or_nonpositive(&limit)? {
+    if !order_type.is_text(&["LMT"]) || missing_or_nonpositive(limit)? {
         return value("a vertical ticket is LMT with a positive net limit_price (I5)");
     }
-    let effect = field(doc, "price_effect")?;
-    if !is_text(effect, &["CREDIT", "DEBIT"]) {
-        return value(format!("price_effect must be CREDIT or DEBIT, got {}", repr(effect)));
+    if !effect.is_text(&["CREDIT", "DEBIT"]) {
+        return value(format!("price_effect must be CREDIT or DEBIT, got {}", effect.py_repr()));
     }
-    let tif = field(doc, "tif")?;
-    if !is_text(tif, &["DAY", "GTC"]) {
-        return value(format!("ticket tif must be DAY or GTC, got {}", repr(tif)));
+    if !tif.is_text(&["DAY", "GTC"]) {
+        return value(format!("ticket tif must be DAY or GTC, got {}", tif.py_repr()));
     }
     Ok(())
+}
+
+// -- the JSON door forms (thin wrappers over the typed checks) ---------------------------
+
+fn check_single(doc: &Json) -> R<()> {
+    validate_single(
+        &arg_of(field(doc, "side")?),
+        &arg_of(field(doc, "quantity")?),
+        &arg_of(field(doc, "order_type")?),
+        &arg_of(field(doc, "tif")?),
+        &opt_dec(doc, "limit_price")?,
+    )
+}
+
+fn check_stock(doc: &Json) -> R<()> {
+    validate_stock(
+        &arg_of(field(doc, "symbol")?),
+        &arg_of(field(doc, "side")?),
+        &arg_of(field(doc, "quantity")?),
+        &arg_of(field(doc, "order_type")?),
+        &arg_of(field(doc, "tif")?),
+        &opt_dec(doc, "limit_price")?,
+    )
+}
+
+fn check_leg(doc: &Json) -> R<()> {
+    validate_leg(&arg_of(field(doc, "side")?), &arg_of(field(doc, "ratio")?))
+}
+
+fn check_combo(doc: &Json) -> R<()> {
+    let legs = req_arr(doc, "legs")?;
+    let mut pairs = Vec::with_capacity(legs.len());
+    for leg in legs {
+        pairs.push((
+            arg_of(leg.get("side").ok_or_else(|| LErr { kind: WIRE, msg: "a combo leg lacks side".into() })?),
+            arg_of(leg.get("ratio").ok_or_else(|| LErr { kind: WIRE, msg: "a combo leg lacks ratio".into() })?),
+        ));
+    }
+    validate_combo(
+        &pairs,
+        &arg_of(field(doc, "quantity")?),
+        &arg_of(field(doc, "order_type")?),
+        &opt_dec(doc, "limit_price")?,
+        &arg_of(field(doc, "price_effect")?),
+        &arg_of(field(doc, "tif")?),
+    )
 }
 
 /// The door's `ticket_validate`: a ticket (or one combo leg) as the dataclass would build
@@ -184,26 +272,44 @@ struct Order {
     limit_price: Option<Money>,
 }
 
+/// The typed `ticket_for`: a venue order's fields as te_core values -> the ticket, or
+/// `UnsupportedCapability`, or the ticket's own `ValueError`.
+pub fn ticket_for_typed(
+    inst: &Instrument,
+    order_type: &str,
+    tif: &str,
+    quantity: &Money,
+    side: &str,
+    limit_price: Option<&Money>,
+) -> R<Json> {
+    let order = Order {
+        order_type: order_type.to_string(),
+        tif: tif.to_string(),
+        quantity: quantity.clone(),
+        side: side.to_string(),
+        limit_price: limit_price.cloned(),
+    };
+    match inst {
+        Instrument::Combo(legs) => combo_ticket(&order, legs),
+        Instrument::Equity { symbol } => stock_ticket(&order, symbol),
+        Instrument::Option(contract) => option_ticket(&order, contract),
+        Instrument::Other { repr } => {
+            unsupported(format!("{repr}: only single option contracts, shares and verticals are mirrored (§4.7)"))
+        }
+    }
+}
+
 /// The door's `ticket_for`: `{"instrument", "order_type", "tif", "quantity", "side",
 /// "limit_price"}` (the venue order's `.value`s and Decimal text) -> the ticket, or
 /// `UnsupportedCapability`, or the ticket's own `ValueError`.
 pub fn ticket_for(doc: &Json) -> R<Json> {
     let inst = instrument(req(doc, "instrument")?)?;
-    let order = Order {
-        order_type: req_str(doc, "order_type")?.to_string(),
-        tif: req_str(doc, "tif")?.to_string(),
-        quantity: req_dec(doc, "quantity")?,
-        side: req_str(doc, "side")?.to_string(),
-        limit_price: opt_dec(doc, "limit_price")?,
-    };
-    match inst {
-        Instrument::Combo(legs) => combo_ticket(&order, &legs),
-        Instrument::Equity { symbol } => stock_ticket(&order, &symbol),
-        Instrument::Option(contract) => option_ticket(&order, &contract),
-        Instrument::Other { repr } => {
-            unsupported(format!("{repr}: only single option contracts, shares and verticals are mirrored (§4.7)"))
-        }
-    }
+    let order_type = req_str(doc, "order_type")?;
+    let tif = req_str(doc, "tif")?;
+    let quantity = req_dec(doc, "quantity")?;
+    let side = req_str(doc, "side")?;
+    let limit = opt_dec(doc, "limit_price")?;
+    ticket_for_typed(&inst, order_type, tif, &quantity, side, limit.as_ref())
 }
 
 /// The checks every single-instrument order passes before a ticket: type, TIF, whole size.
@@ -380,5 +486,45 @@ mod tests {
         );
         assert!(ticket_validate(&parse(&base("stock", r#", "symbol": "BRK.B""#)).unwrap()).is_ok());
         assert_eq!(v(r#"{"kind": "leg", "side": "BUY", "ratio": 0}"#), "leg ratio must be a positive int, got 0");
+    }
+
+    #[test]
+    fn the_typed_ticket_for_makes_a_ticket_and_refuses_with_the_exact_text() {
+        let inst = instrument(&parse(P200).unwrap()).unwrap();
+        let two = Money::parse("2").unwrap();
+        let t = ticket_for_typed(&inst, "LIMIT", "DAY", &two, "SELL", Some(&Money::parse("2.00").unwrap())).unwrap();
+        assert_eq!(
+            crate::ledger::json::dumps(&t),
+            r#"{"expiry":"2026-10-16","kind":"option","limit_price":"2","order_type":"LMT","quantity":2,"right":"P","side":"SELL","strike":"200","symbol":"AAPL  261016P00200000","tif":"DAY","underlying":"AAPL"}"#
+        );
+        let e = ticket_for_typed(&inst, "STOP", "DAY", &two, "BUY", None).unwrap_err();
+        assert_eq!((e.kind, e.msg.as_str()), (UNSUPPORTED, "order type STOP: MARKET/LIMIT only"));
+    }
+
+    #[test]
+    fn the_typed_validators_say_what_python_says() {
+        let limit = Some(Money::parse("2").unwrap());
+        assert!(validate_single(&Arg::Str("SELL".into()), &Arg::Int(1), &Arg::Str("LMT".into()), &Arg::Str("DAY".into()), &limit).is_ok());
+        let e = validate_single(
+            &Arg::Str("SHORT".into()),
+            &Arg::Int(1),
+            &Arg::Str("LMT".into()),
+            &Arg::Str("DAY".into()),
+            &limit,
+        )
+        .unwrap_err();
+        assert_eq!((e.kind, e.msg.as_str()), (VALUE, "ticket side must be BUY or SELL, got 'SHORT'"));
+        let e = validate_single(
+            &Arg::Str("SELL".into()),
+            &Arg::Other("1.0".into()),
+            &Arg::Str("LMT".into()),
+            &Arg::Str("DAY".into()),
+            &limit,
+        )
+        .unwrap_err();
+        assert_eq!(e.msg, "ticket quantity must be a positive int, got 1.0");
+        assert!(validate_leg(&Arg::Str("BUY".into()), &Arg::Int(1)).is_ok());
+        let e = validate_leg(&Arg::Str("BUY".into()), &Arg::Int(0)).unwrap_err();
+        assert_eq!(e.msg, "leg ratio must be a positive int, got 0");
     }
 }
