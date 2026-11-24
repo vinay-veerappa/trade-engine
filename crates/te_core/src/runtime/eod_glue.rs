@@ -621,8 +621,8 @@ pub fn record_verdict<L: Ledger, C: Clock>(
     Ok(())
 }
 
-/// Fold-derived risk measurements for one intent's instrument. Equity is `None` unless every
-/// non-flat position is marked, so an unmarked book is never valued as if it were marked.
+/// Fold-derived risk measurements for one intent's instrument, as `EodRunner._derive_risk_context`:
+/// equity is cash plus `quantity * mark` over the marked positions, and `None` unless positive.
 pub fn derive_risk_context(state: &AccountState, instrument: &Instrument) -> R<RiskContext> {
     let held_quantity = match state.positions.get(&instrument.hk()) {
         Some(p) => text(&p.quantity),
@@ -631,7 +631,6 @@ pub fn derive_risk_context(state: &AccountState, instrument: &Instrument) -> R<R
     let positions: Vec<&Position> = state.positions.values().collect();
     let mut rows: Vec<String> = Vec::with_capacity(positions.len() * 2);
     let mut held: Vec<bool> = Vec::with_capacity(positions.len());
-    let mut all_marked = true;
     for position in &positions {
         let key = position.instrument.hk();
         let marked = state.marks.contains(&key);
@@ -639,12 +638,9 @@ pub fn derive_risk_context(state: &AccountState, instrument: &Instrument) -> R<R
         rows.push(text(&position.quantity));
         rows.push(text(&mark));
         held.push(marked);
-        if !marked && eod::nonzero(&text(&position.quantity))? {
-            all_marked = false;
-        }
     }
     let r = eod::risk(&text(&state.cash), &held_quantity, &rows, &held)?;
-    let equity = if all_marked && r.equity_positive { Some(dec(&r.equity)?) } else { None };
+    let equity = if r.equity_positive { Some(dec(&r.equity)?) } else { None };
     let current_position_quantity = r.base.parse::<i128>().map_err(|_| LErr {
         kind: "value",
         msg: format!("current position quantity {} is not an integer", r.base),
@@ -1097,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_risk_context_is_none_until_every_position_is_marked() {
+    fn derive_risk_context_values_only_marked_positions() {
         let mut l = MemLedger::default();
         positions_book(&mut l);
         deposit(&mut l, "A", "1000");
@@ -1105,7 +1101,9 @@ mod tests {
 
         let state = l.state("A").expect("state");
         let unmarked = derive_risk_context(&state, &spy).expect("risk");
-        assert!(unmarked.equity.is_none(), "SPY has no mark yet");
+        // SPY has no mark yet, so equity is cash alone: 1000 - 200 - 50 + 51 = 801.
+        let cash_only = unmarked.equity.expect("positive cash");
+        assert!(ops::eq(&cash_only, &money("801")).expect("cmp"));
         assert_eq!(unmarked.open_positions, 1);
         assert_eq!(unmarked.current_position_quantity, 2);
 
@@ -1115,7 +1113,7 @@ mod tests {
         let state = l.state("A").expect("state");
         let marked = derive_risk_context(&state, &spy).expect("risk");
         // Cash 1000 - 200 - 50 + 51 = 801, plus SPY 2 at 101.
-        let equity = marked.equity.expect("every position is marked");
+        let equity = marked.equity.expect("positive equity");
         assert!(ops::eq(&equity, &money("1003")).expect("cmp"));
         assert!(ops::eq(&marked.gross_exposure, &money("202")).expect("cmp"));
     }
