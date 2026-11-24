@@ -1,0 +1,160 @@
+### scenario: usage-errors
+$ trade_engine eod --session 2026-09-23
+exit: 2
+stdout:
+stderr:
+usage: trade_engine eod [-h] --session SESSION --ledger LEDGER
+                        [--market-data MARKET_DATA] [--accounts ACCOUNTS]
+                        [--slippage-bps SLIPPAGE_BPS] [--void] [--write-off]
+                        [--order ORDER] [--reason REASON] [--owner OWNER]
+                        [--venue-cancel-confirmed]
+trade_engine eod: error: the following arguments are required: --ledger
+$ trade_engine eod --session 2026-13-01 --ledger ledger.db
+exit: 2
+stdout:
+stderr:
+usage: trade_engine eod [-h] --session SESSION --ledger LEDGER
+                        [--market-data MARKET_DATA] [--accounts ACCOUNTS]
+                        [--slippage-bps SLIPPAGE_BPS] [--void] [--write-off]
+                        [--order ORDER] [--reason REASON] [--owner OWNER]
+                        [--venue-cancel-confirmed]
+trade_engine eod: error: argument --session: expected YYYY-MM-DD, got '2026-13-01'
+$ trade_engine eod --session 2026-09-23 --ledger ledger.db --slippage-bps -1
+exit: 2
+stdout:
+stderr:
+usage: trade_engine eod [-h] --session SESSION --ledger LEDGER
+                        [--market-data MARKET_DATA] [--accounts ACCOUNTS]
+                        [--slippage-bps SLIPPAGE_BPS] [--void] [--write-off]
+                        [--order ORDER] [--reason REASON] [--owner OWNER]
+                        [--venue-cancel-confirmed]
+trade_engine eod: error: argument --slippage-bps: must be finite and non-negative, got '-1'
+$ trade_engine eod --session 2026-09-23 --ledger ledger.db --slippage-bps abc
+exit: 2
+stdout:
+stderr:
+usage: trade_engine eod [-h] --session SESSION --ledger LEDGER
+                        [--market-data MARKET_DATA] [--accounts ACCOUNTS]
+                        [--slippage-bps SLIPPAGE_BPS] [--void] [--write-off]
+                        [--order ORDER] [--reason REASON] [--owner OWNER]
+                        [--venue-cancel-confirmed]
+trade_engine eod: error: argument --slippage-bps: expected a number, got 'abc'
+### scenario: no-market-data
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account
+exit: 2
+stdout:
+stderr:
+eod: refused: No trade_engine.marketdata plugins are installed; cannot source bars (I5)
+### scenario: market-data-selection
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account
+exit: 2
+stdout:
+stderr:
+eod: refused: Exactly one trade_engine.marketdata plugin must be installed to run the EOD job; found 2. Pass --market-data to name one (I5)
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account --market-data nope
+exit: 2
+stdout:
+stderr:
+eod: refused: No market-data plugin named 'nope' among ['_Plugin', '_Plugin']
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account --market-data other-fake
+exit: 0
+stdout:
+cli-account: bars=0 fills=0 marks=0 orders=0
+stderr:
+### scenario: no-accounts-anywhere
+$ trade_engine eod --ledger ledger.db --session 2026-09-23
+exit: 2
+stdout:
+stderr:
+eod: no accounts in the ledger and none given with --accounts (I5)
+### scenario: run-and-rerun
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account --slippage-bps 1.5
+exit: 0
+stdout:
+cli-account: bars=0 fills=0 marks=0 orders=0
+stderr:
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account --slippage-bps 1.5
+exit: 0
+stdout:
+cli-account: bars=0 fills=0 marks=0 orders=0
+stderr:
+### scenario: skipped-predecessor-refusal
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account
+exit: 0
+stdout:
+cli-account: bars=0 fills=0 marks=0 orders=0
+stderr:
+$ trade_engine eod --ledger ledger.db --session 2026-09-25 --accounts cli-account
+exit: 2
+stdout:
+stderr:
+eod: refused: Cannot run 2026-09-25 for 'cli-account': the previous session 2026-09-24 has no eod marker; complete it first (I3)
+### scenario: accounts-from-ledger
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account
+exit: 0
+stdout:
+cli-account: bars=0 fills=0 marks=0 orders=0
+stderr:
+$ trade_engine eod --ledger ledger.db --session 2026-09-24
+exit: 0
+stdout:
+cli-account: bars=0 fills=0 marks=0 orders=0
+stderr:
+### scenario: admitted-not-terminal
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account
+exit: 2
+stdout:
+stderr:
+eod: session 2026-09-23 was admitted as admitted; no side effects were replayed
+### scenario: void
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account
+exit: 0
+stdout:
+cli-account: bars=0 fills=0 marks=0 orders=0
+stderr:
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --void --accounts cli-account
+exit: 2
+stdout:
+stderr:
+eod: refused: a void needs a non-empty reason (I5)
+$ trade_engine eod --ledger ledger.db --session 2026-09-25 --void --accounts cli-account --reason feed outage --owner ops
+exit: 0
+stdout:
+cli-account: voided 2026-09-25 (reason: feed outage; owner: ops)
+stderr:
+$ trade_engine eod --ledger ledger.db --session 2026-09-25 --void --accounts cli-account --reason feed outage --owner ops
+exit: 0
+stdout:
+cli-account: already voided 2026-09-25 (reason: feed outage; owner: ops)
+stderr:
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --void --accounts cli-account --reason feed outage --owner ops
+exit: 2
+stdout:
+stderr:
+eod: refused: cli-account already ran 2026-09-23: a session that ran cannot be voided (I3)
+$ trade_engine eod --ledger ledger.db --session 2026-09-25 --void --reason x --owner ops
+exit: 2
+stdout:
+stderr:
+eod: --void needs --accounts; a void never defaults to every account
+### scenario: write-off
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --accounts cli-account
+exit: 0
+stdout:
+cli-account: bars=0 fills=0 marks=0 orders=0
+stderr:
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --write-off --accounts cli-account
+exit: 2
+stdout:
+stderr:
+eod: --write-off needs --order
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --write-off --accounts a,b --order ord-1 --reason stuck --owner ops
+exit: 2
+stdout:
+stderr:
+eod: --write-off needs exactly one --accounts
+$ trade_engine eod --ledger ledger.db --session 2026-09-23 --write-off --accounts cli-account --order ord-1 --reason stuck --owner ops
+exit: 2
+stdout:
+stderr:
+eod: refused: cli-account has no order 'ord-1' (I5)

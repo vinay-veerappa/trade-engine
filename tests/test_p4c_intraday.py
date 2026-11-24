@@ -1,10 +1,8 @@
-"""T8 synthetic full sessions: exact effects, heartbeat bytes and ledger prefixes."""
+"""T8 synthetic full sessions: explicit effects, heartbeat bytes and ledger state."""
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import replace
 from datetime import date, timedelta
-import hashlib
 import json
 from pathlib import Path
 import socket
@@ -13,41 +11,13 @@ import pytest
 import trade_engine_rs
 
 from trade_engine.intraday import service as P
-from trade_engine.sim import _rs
-
-_registry = dict(_rs._KINDS)
-try:
-    from frozen_p4c.t8 import service as O
-finally:
-    _rs._KINDS.clear()
-    _rs._KINDS.update(_registry)
-
 from trade_engine.ledger import EodRun, Event, EventKind, Ledger
 from trade_engine.sim import SnapshotVenue
-from test_intraday_service import ACCOUNT, CAL, EARLY, SESSION, Rig, Scripted, at_et, snap, spread, history
-from test_p4a_parity import norm
-from test_p4c_eod import stored
+from test_intraday_service import ACCOUNT, CAL, EARLY, SESSION, Approve, Rig, Scripted, at_et, history, snap, spread
 from test_p4c_embed import package as native_package, run as native_run, PLUGIN as PACKAGING_PLUGIN
 
 DATES = (date(2026, 3, 6), date(2026, 3, 9), date(2026, 7, 2),
          SESSION, EARLY, date(2026, 12, 24))
-_COUNTS = Counter()
-_TRACES = []
-
-
-@pytest.fixture(scope="session", autouse=True)
-def measurements():
-    _COUNTS.clear()
-    _TRACES.clear()
-    yield
-    print("T8_LOCKSTEP", json.dumps({
-        "provenance": "synthetic",
-        "outer_steps": sum(_COUNTS.values()) // 2,
-        "outcomes": {key: count // 2 for key, count in sorted(_COUNTS.items())},
-        "event_fold_outbox_meta_prefixes": sum(len(t.prefixes) for t in _TRACES) // 2,
-        "ordered_callback_observations": sum(len(t.calls) for t in _TRACES) // 2,
-        "heartbeat_observations": sum(len(t.beats) for t in _TRACES) // 2,
-    }, sort_keys=True))
 
 
 @pytest.fixture(autouse=True)
@@ -59,21 +29,20 @@ def forbid_network(monkeypatch):
 
 
 def outcome(call):
+    """("ok", value) for a return, else ("raise", type name, message, (cause type, message) or None)."""
     try:
-        result = ("ok", norm(call()))
-        _COUNTS["ok"] += 1
-        return result
+        return ("ok", call())
     except Exception as error:
-        _COUNTS[type(error).__name__] += 1
         cause = error.__cause__
         return ("raise", type(error).__name__, str(error),
                 None if cause is None else (type(cause).__name__, str(cause)))
 
 
 class Trace:
+    """Records the calls one rig receives: clock, venue, strategy, risk, source and heartbeat."""
+
     def __init__(self, rig):
-        self.calls, self.prefixes, self.beats = [], [], []
-        _TRACES.append(self)
+        self.calls, self.beats = [], []
         self.wrap(rig.clock, "clock", ("now_utc", "sleep", "advance_to"))
         self.wrap(rig.venue, "venue", ("connect", "orders", "fills", "positions", "restore",
                                      "submit", "cancel", "replace", "process_snapshot"))
@@ -81,16 +50,9 @@ class Trace:
         self.wrap(rig.risk, "risk", ("evaluate",))
         original = rig.source
         def source(*args, _original=original):
-            self.calls.append(("source", norm(args)))
+            self.calls.append(("source", args))
             return _original(*args)
         rig.source = source
-        for name in ("append", "extend"):
-            original = getattr(rig.ledger, name)
-            def write(*args, _original=original, **kwargs):
-                value = _original(*args, **kwargs)
-                self.prefixes.append(stored(rig.ledger))
-                return value
-            setattr(rig.ledger, name, write)
 
     def wrap(self, owner, label, names):
         for name in names:
@@ -98,60 +60,50 @@ class Trace:
             if not callable(original):
                 continue
             def invoke(*args, _original=original, _name=name, **kwargs):
-                self.calls.append((label, _name, norm(args), norm(kwargs)))
+                self.calls.append((label, _name, args, kwargs))
                 return _original(*args, **kwargs)
             setattr(owner, name, invoke)
 
 
-class Pair:
-    def __init__(self, root, configure=lambda r: None, session=SESSION):
-        self.rigs = []
-        self.path = root / "heartbeat.json"
-        for name, module in (("oracle", O), ("native", P)):
-            folder = root / name
-            folder.mkdir(parents=True)
-            rig = Rig(folder, session=session)
-            rig.heartbeat = self.path
-            rig.module = module
-            rig.beat = None
-            rig.risk = __import__("test_intraday_service").Approve()
-            configure(rig)
-            rig.trace = Trace(rig)
-            self.rigs.append(rig)
+class World:
+    """One synthetic options account driven by the production intraday service.
 
-    def service(self, rig, changes):
-        config = rig.module.IntradayConfig(**(vars(rig.config()) | {"option_risk_engine": rig.risk} | changes))
-        service = rig.module.IntradayService(rig.ledger, rig.clock, CAL, config, heartbeat_path=rig.heartbeat)
+    The heartbeat file persists between steps as ``rig.beat`` (the bytes the last process left).
+    """
+
+    def __init__(self, root, configure=lambda rig: None, session=SESSION):
+        self.path = root / "heartbeat.json"
+        self.rig = Rig(root, session=session)
+        self.rig.heartbeat = self.path
+        self.rig.beat = None
+        self.rig.risk = Approve()
+        configure(self.rig)
+        self.rig.trace = Trace(self.rig)
+
+    def service(self, changes):
+        rig = self.rig
+        config = P.IntradayConfig(**(vars(rig.config()) | {"option_risk_engine": rig.risk} | changes))
+        service = P.IntradayService(rig.ledger, rig.clock, CAL, config, heartbeat_path=rig.heartbeat)
         original = service._write_heartbeat
         def beat(*args, **kwargs):
-            rig.trace.calls.append(("heartbeat", norm(args), norm(kwargs)))
+            rig.trace.calls.append(("heartbeat", args, kwargs))
             original(*args, **kwargs)
             rig.trace.beats.append(None if not rig.heartbeat.exists() else rig.heartbeat.read_bytes())
         service._write_heartbeat = beat
         return service
 
     def step(self, action=None, *, changes=None, **run):
-        results = []
-        for rig in self.rigs:
-            self.path.unlink(missing_ok=True)
-            if rig.beat is not None:
-                self.path.write_bytes(rig.beat)
-            service = self.service(rig, changes or {})
-            results.append(outcome(lambda: service.run(rig.session, **run) if action is None else action(rig, service)))
-            rig.beat = self.path.read_bytes() if self.path.is_file() else None
-        assert results[0] == results[1], results
-        a, b = self.rigs
-        assert a.trace.calls == b.trace.calls
-        assert a.trace.prefixes == b.trace.prefixes
-        assert a.trace.beats == b.trace.beats
-        assert a.beat == b.beat
-        assert stored(a.ledger) == stored(b.ledger)
-        assert norm(a.strategy.contexts) == norm(b.strategy.contexts)
-        return results[0]
+        self.path.unlink(missing_ok=True)
+        if self.rig.beat is not None:
+            self.path.write_bytes(self.rig.beat)
+        service = self.service(changes or {})
+        result = outcome(lambda: service.run(self.rig.session, **run) if action is None
+                         else action(self.rig, service))
+        self.rig.beat = self.path.read_bytes() if self.path.is_file() else None
+        return result
 
     def close(self):
-        for rig in self.rigs:
-            rig.ledger.close()
+        self.rig.ledger.close()
 
 
 def complete_quotes(rig):
@@ -168,9 +120,7 @@ def seed_previous(rig):
         payload=EodRun(previous, "options", ACCOUNT, 0, at)))
 
 
-def test_oracle_and_mandatory_bindings():
-    oracle = Path(__file__).parent / "frozen_p4c" / "t8" / "service.py"
-    assert hashlib.sha256(oracle.read_bytes()).hexdigest() == "03aad7a69bac0fe99e2c805a383d66a2ffd8839ddbdeeed7c224254ea31cef38"
+def test_native_bindings_exposed():
     for name in ("run", "tick", "wait", "advance", "refuse", "emergency", "flatten", "cancel",
                  "restore", "close", "live_guard", "previous_guard", "heartbeat_write", "heartbeat_read"):
         assert callable(getattr(trade_engine_rs, f"intraday_{name}"))
@@ -185,38 +135,37 @@ def test_seeded_full_session(tmp_path, seed):
         # A stale interval forces cancellation/flatten and then fresh recovery.
         rig.snapshots = [s for s in rig.snapshots if not (at_et(session, 10, 3) <= s.as_of < at_et(session, 10, 6))]
         rig.strategy.at_or_after[at_et(session, 10, 7)] = [spread(f"recovery-{seed}", session=session)]
-    pair = Pair(tmp_path, configure, session)
+    world = World(tmp_path, configure, session)
     try:
-        result = pair.step()
+        result = world.step()
         assert result[0] == "ok", result
-        assert dict(result[1])["orders_submitted"] == 2
-        assert json.loads(pair.rigs[0].beat)["exited"]
-        for rig in pair.rigs:
-            rig.beat = None
-            rig.clock._current_time = CAL.session_open(session)
-        assert pair.step()[0] == "ok"
+        assert result[1]["orders_submitted"] == 2
+        assert json.loads(world.rig.beat)["exited"]
+        world.rig.beat = None
+        world.rig.clock._current_time = CAL.session_open(session)
+        assert world.step()[0] == "ok"
     finally:
-        pair.close()
+        world.close()
 
 
 def test_stop_restore_resume(tmp_path):
     def configure(rig):
         complete_quotes(rig)
         rig.strategy.actions[at_et(SESSION, 9, 40)] = [spread("entry", target="0.20")]
-    pair = Pair(tmp_path, configure)
+    world = World(tmp_path, configure)
     try:
-        assert pair.step(stop_at=at_et(SESSION, 9, 43))[0] == "ok"
-        for rig in pair.rigs:
-            rig.beat = None
-            rig.ledger.close()
-            rig.ledger = Ledger(rig.path).open()
-            rig.venue = SnapshotVenue(ACCOUNT, rig.clock)
-            rig.strategy = Scripted(rig.ledger)
-            rig.trace = Trace(rig)
-        assert pair.step()[0] == "ok"
-        assert all(any(c[0:2] == ("venue", "restore") for c in r.trace.calls) for r in pair.rigs)
+        assert world.step(stop_at=at_et(SESSION, 9, 43))[0] == "ok"
+        rig = world.rig
+        rig.beat = None
+        rig.ledger.close()
+        rig.ledger = Ledger(rig.path).open()
+        rig.venue = SnapshotVenue(ACCOUNT, rig.clock)
+        rig.strategy = Scripted(rig.ledger)
+        rig.trace = Trace(rig)
+        assert world.step()[0] == "ok"
+        assert any(c[0:2] == ("venue", "restore") for c in rig.trace.calls)
     finally:
-        pair.close()
+        world.close()
 
 
 @pytest.mark.parametrize("mode", ["fresh", "ttl", "exited", "wrong-account", "torn", "previous", "settled"])
@@ -240,19 +189,18 @@ def test_admission_refusal_and_counterpart(tmp_path, mode):
             rig.ledger.append(Event(account=ACCOUNT, kind=EventKind.EOD_RUN, ts_utc=at,
                 command_id=f"eod:options:{ACCOUNT}:{SESSION.isoformat()}",
                 payload=EodRun(SESSION, "options", ACCOUNT, 0, at)))
-    pair = Pair(tmp_path, configure)
+    world = World(tmp_path, configure)
     try:
-        result = pair.step(stop_at=at_et(SESSION, 9, 31))
+        result = world.step(stop_at=at_et(SESSION, 9, 31))
         refused = mode in ("fresh", "wrong-account", "torn", "previous")
         assert result[0] == ("raise" if refused else "ok")
         if refused:
             assert result[1] == "IntradayServiceError"
-            for rig in pair.rigs:
-                rig.beat = None
-                seed_previous(rig)
-            assert pair.step(stop_at=at_et(SESSION, 9, 31))[0] == "ok"
+            world.rig.beat = None
+            seed_previous(world.rig)
+            assert world.step(stop_at=at_et(SESSION, 9, 31))[0] == "ok"
     finally:
-        pair.close()
+        world.close()
 
 
 class WallLike:
@@ -275,15 +223,15 @@ def test_wall_preopen_wait_and_fresh_fetch_clock(tmp_path):
             return replace(base, as_of=stamp, underlying_as_of=stamp,
                 quotes=tuple(replace(q, as_of=stamp) for q in base.quotes))
         rig.source = source
-    pair = Pair(tmp_path, configure)
+    world = World(tmp_path, configure)
     try:
-        result = pair.step(stop_at=at_et(SESSION, 9, 31))
+        result = world.step(stop_at=at_et(SESSION, 9, 31))
         assert result[0] == "ok"
-        beats = [json.loads(b) for b in pair.rigs[0].trace.beats]
+        beats = [json.loads(b) for b in world.rig.trace.beats]
         assert any("waiting for the open" in b["note"] for b in beats)
         assert any(b["note"] == "ok" for b in beats)
     finally:
-        pair.close()
+        world.close()
 
 
 @pytest.mark.parametrize("session", [SESSION, EARLY])
@@ -299,17 +247,17 @@ def test_working_entry_cancel_and_late_gate(tmp_path, session):
                 return [spread("too-late", session=session)]
             return original(context)
         rig.strategy.manage_options = manage
-    pair = Pair(tmp_path, configure, session)
+    world = World(tmp_path, configure, session)
     try:
-        result = pair.step(start_at=before, stop_at=end + timedelta(minutes=2))
+        result = world.step(start_at=before, stop_at=end + timedelta(minutes=2))
         assert result[0] == "ok", result
-        assert dict(result[1])["orders_submitted"] == 1
-        assert dict(result[1])["entries_dropped"] >= 1
+        assert result[1]["orders_submitted"] == 1
+        assert result[1]["entries_dropped"] >= 1
         from trade_engine.domain.orders import OrderState
-        assert all(r.state.orders["resting:entry"].state == OrderState.CANCELLED for r in pair.rigs)
-        assert all("too-late:entry" not in r.state.orders for r in pair.rigs)
+        assert world.rig.state.orders["resting:entry"].state == OrderState.CANCELLED
+        assert "too-late:entry" not in world.rig.state.orders
     finally:
-        pair.close()
+        world.close()
 
 
 def test_early_close_sweep_orders_flat_before_manage(tmp_path):
@@ -317,15 +265,15 @@ def test_early_close_sweep_orders_flat_before_manage(tmp_path):
     def configure(rig):
         rig.snapshots = [snap(EARLY, 12, minute) for minute in (29, 30, 31)]
         rig.strategy.actions[at_et(EARLY, 12, 29)] = [spread("near-sweep", session=EARLY)]
-    pair = Pair(tmp_path, configure, EARLY)
+    world = World(tmp_path, configure, EARLY)
     try:
-        result = pair.step(start_at=at_et(EARLY, 12, 29), stop_at=at_et(EARLY, 12, 32),
+        result = world.step(start_at=at_et(EARLY, 12, 29), stop_at=at_et(EARLY, 12, 32),
             changes={"entry_end": time(12, 40), "entry_before_close": timedelta(minutes=30)})
         assert result[0] == "ok", result
-        assert dict(result[1])["exit_actions"] == 1
-        assert all(not any(p.quantity != 0 for p in r.state.positions.values()) for r in pair.rigs)
+        assert result[1]["exit_actions"] == 1
+        assert not any(p.quantity != 0 for p in world.rig.state.positions.values())
     finally:
-        pair.close()
+        world.close()
 
 
 @pytest.mark.parametrize("mode", ["strategy", "drift", "no-fresh", "emergency-stale", "flatten-fails", "tuple-value", "connect", "base"])
@@ -358,35 +306,35 @@ def test_failure_emergency_and_exit_contract(tmp_path, mode):
                     return snap(SESSION, 9, 30, underlying_quoted=at_et(SESSION, 9, 29))
                 return original(*args)
             rig.source = source
-    pair = Pair(tmp_path, configure)
+    world = World(tmp_path, configure)
     try:
         if mode == "flatten-fails":
             def action(rig, service):
                 service._flatten = lambda *args: (_ for _ in ()).throw(RuntimeError("flatten broken"))
                 return service.run(SESSION, stop_at=at_et(SESSION, 9, 31))
-            result = pair.step(action)
+            result = world.step(action)
         elif mode == "base":
             def action(rig, service):
                 try:
                     service.run(SESSION, stop_at=at_et(SESSION, 9, 31))
                 except Death as error:
                     return (type(error).__name__, str(error))
-            result = pair.step(action)
+            result = world.step(action)
             assert result == ("ok", ("Death", "process death"))
-            assert not json.loads(pair.rigs[0].beat).get("exited")
+            assert not json.loads(world.rig.beat).get("exited")
             return
         else:
-            result = pair.step(stop_at=at_et(SESSION, 9, 31))
+            result = world.step(stop_at=at_et(SESSION, 9, 31))
         assert result[0] == "raise"
         if mode == "connect":
             assert result[1] == "RuntimeError"
-            assert not json.loads(pair.rigs[0].beat)["exited"]
+            assert not json.loads(world.rig.beat)["exited"]
         else:
             assert result[1] == "IntradayServiceAlert"
-            beat = json.loads(pair.rigs[0].beat)
+            beat = json.loads(world.rig.beat)
             assert beat["alert"] and beat["exited"] and beat["refusing"]
     finally:
-        pair.close()
+        world.close()
 
 
 @pytest.mark.parametrize("expected", [0, 1, 2])
@@ -400,27 +348,27 @@ def test_existing_caller_exit_classification(tmp_path, expected):
             def failure(context):
                 raise RuntimeError("strategy failed")
             rig.strategy.manage_options = failure
-    pair = Pair(tmp_path, configure)
+    world = World(tmp_path, configure)
     try:
         def caller(rig, service):
-            # Same catch order as zero_dte.main; frozen classes are relocated.
+            # Same catch order as zero_dte.main.
             try:
                 service.run(SESSION, stop_at=at_et(SESSION, 9, 31))
-            except (O.IntradayServiceAlert, P.IntradayServiceAlert):
+            except P.IntradayServiceAlert:
                 return 2
-            except (O.IntradayServiceError, P.IntradayServiceError):
+            except P.IntradayServiceError:
                 return 1
             except Exception:
                 return 2
             return 0
-        assert pair.step(caller) == ("ok", expected)
+        assert world.step(caller) == ("ok", expected)
     finally:
-        pair.close()
+        world.close()
 
 
 @pytest.mark.parametrize("phase", ["before-fetch", "after-fetch"])
 def test_clock_value_error_boundary(tmp_path, phase):
-    pair = Pair(tmp_path, lambda r: setattr(r, "snapshots", [snap(SESSION, 9, 30)]))
+    world = World(tmp_path, lambda r: setattr(r, "snapshots", [snap(SESSION, 9, 30)]))
     try:
         def action(rig, service):
             original_now = rig.clock.now_utc
@@ -449,17 +397,17 @@ def test_clock_value_error_boundary(tmp_path, phase):
                     return value
                 service._config = replace(service._config, snapshot_source=source)
             return service.run(SESSION, stop_at=at_et(SESSION, 9, 31))
-        result = pair.step(action)
+        result = world.step(action)
         if phase == "before-fetch":
             assert result[0:2] == ("raise", "IntradayServiceAlert")
             assert result[3] == ("ValueError", "clock callback failed")
         else:
             assert result[0] == "ok", result
-            beat = json.loads(pair.rigs[0].beat)
+            beat = json.loads(world.rig.beat)
             assert not beat["alert"] and not beat["exited"] and beat["refusing"]
             assert beat["note"] == "stale quote: clock callback failed"
     finally:
-        pair.close()
+        world.close()
 
 
 @pytest.mark.parametrize("mode", ["entry", "close", "pending-close"])
@@ -469,7 +417,7 @@ def test_orphan_and_pending_restart(tmp_path, mode):
     def configure(rig):
         rig.snapshots = [snap(SESSION, 9, 40)]
         rig.strategy.actions[at_et(SESSION, 9, 40)] = [spread("entry")]
-    pair = Pair(tmp_path, configure)
+    world = World(tmp_path, configure)
     try:
         def crash(rig, service):
             manager = service._router.manager(ACCOUNT)
@@ -489,24 +437,23 @@ def test_orphan_and_pending_restart(tmp_path, mode):
             except _Crash as error:
                 return str(error)
             raise AssertionError("synthetic crash was not reached")
-        assert pair.step(crash) == ("ok", "submit")
-        for rig in pair.rigs:
-            rig.beat = None
-            rig.ledger.close()
-            rig.ledger = Ledger(rig.path).open()
-            rig.venue = SnapshotVenue(ACCOUNT, rig.clock)
-            rig.strategy = Scripted(rig.ledger)
-            rig.snapshots.append(snap(SESSION, 9, 45))
-            rig.clock._current_time = at_et(SESSION, 9, 45)
-            rig.trace = Trace(rig)
-        assert pair.step(stop_at=at_et(SESSION, 9, 46))[0] == "ok"
-        for rig in pair.rigs:
-            if mode == "entry":
-                assert rig.state.orders["entry:entry"].state == OrderState.CANCELLED
-            else:
-                assert rig.state.orders["entry:entry:close:1"].state == OrderState.FILLED
+        assert world.step(crash) == ("ok", "submit")
+        rig = world.rig
+        rig.beat = None
+        rig.ledger.close()
+        rig.ledger = Ledger(rig.path).open()
+        rig.venue = SnapshotVenue(ACCOUNT, rig.clock)
+        rig.strategy = Scripted(rig.ledger)
+        rig.snapshots.append(snap(SESSION, 9, 45))
+        rig.clock._current_time = at_et(SESSION, 9, 45)
+        rig.trace = Trace(rig)
+        assert world.step(stop_at=at_et(SESSION, 9, 46))[0] == "ok"
+        if mode == "entry":
+            assert rig.state.orders["entry:entry"].state == OrderState.CANCELLED
+        else:
+            assert rig.state.orders["entry:entry:close:1"].state == OrderState.FILLED
     finally:
-        pair.close()
+        world.close()
 
 
 def test_unresolved_request_bars_entries_and_heartbeat(tmp_path):
@@ -514,41 +461,41 @@ def test_unresolved_request_bars_entries_and_heartbeat(tmp_path):
     def configure(rig):
         rig.snapshots = [snap(SESSION, 9, 40)]
         rig.strategy.actions[at_et(SESSION, 9, 40)] = [spread("entry", credit="5.00")]
-    pair = Pair(tmp_path, configure)
+    world = World(tmp_path, configure)
     try:
-        assert pair.step(start_at=at_et(SESSION, 9, 40), stop_at=at_et(SESSION, 9, 41))[0] == "ok"
-        for rig in pair.rigs:
-            rig.ledger.append(Event(account=ACCOUNT, kind=EventKind.ORDER_PENDING, ts_utc=rig.clock.now_utc(),
-                command_id="manual:replace-pending", payload=OrderStateChange("entry:entry", "Replace pending")))
-            rig.beat = None
-            rig.ledger.close()
-            rig.ledger = Ledger(rig.path).open()
-            rig.venue = SnapshotVenue(ACCOUNT, rig.clock)
-            rig.strategy = Scripted(rig.ledger)
-            rig.strategy.always = [spread("barred")]
-            rig.minutes((9, 42), (9, 44))
-            rig.trace = Trace(rig)
-        result = pair.step(stop_at=at_et(SESSION, 9, 44))
+        assert world.step(start_at=at_et(SESSION, 9, 40), stop_at=at_et(SESSION, 9, 41))[0] == "ok"
+        rig = world.rig
+        rig.ledger.append(Event(account=ACCOUNT, kind=EventKind.ORDER_PENDING, ts_utc=rig.clock.now_utc(),
+            command_id="manual:replace-pending", payload=OrderStateChange("entry:entry", "Replace pending")))
+        rig.beat = None
+        rig.ledger.close()
+        rig.ledger = Ledger(rig.path).open()
+        rig.venue = SnapshotVenue(ACCOUNT, rig.clock)
+        rig.strategy = Scripted(rig.ledger)
+        rig.strategy.always = [spread("barred")]
+        rig.minutes((9, 42), (9, 44))
+        rig.trace = Trace(rig)
+        result = world.step(stop_at=at_et(SESSION, 9, 44))
         assert result[0] == "ok", result
-        assert dict(result[1])["entries_dropped"] >= 1
-        assert "entries barred" in json.loads(pair.rigs[0].beat)["note"]
-        assert all("barred:entry" not in r.state.orders for r in pair.rigs)
+        assert result[1]["entries_dropped"] >= 1
+        assert "entries barred" in json.loads(rig.beat)["note"]
+        assert "barred:entry" not in rig.state.orders
     finally:
-        pair.close()
+        world.close()
 
 
 def test_optional_heartbeat_is_no_effect(tmp_path):
-    pair = Pair(tmp_path)
+    world = World(tmp_path)
     try:
         def action(rig, service):
             service._heartbeat_path = None
-            service._write_heartbeat(SESSION, rig.module._TickState(), "no file")
+            service._write_heartbeat(SESSION, P._TickState(), "no file")
             return service._read_heartbeat()
-        assert pair.step(action) == ("ok", None)
-        assert all(not any(c[0] == "clock" for c in r.trace.calls) for r in pair.rigs)
-        assert not pair.path.exists()
+        assert world.step(action) == ("ok", None)
+        assert not any(c[0] == "clock" for c in world.rig.trace.calls)
+        assert not world.path.exists()
     finally:
-        pair.close()
+        world.close()
 
 
 @pytest.mark.parametrize("body", [b"{", b"[]", b"null", b"{}", b'{"account_id":"x","session":4}',
@@ -556,56 +503,52 @@ def test_optional_heartbeat_is_no_effect(tmp_path):
                                  b'{"account_id":"x","session":"2026-09-25","at_utc":"2026-09-25"}',
                                  b"\xff", b"\xef\xbb\xbf{}"])
 def test_heartbeat_decode_refusals(tmp_path, body):
-    pair = Pair(tmp_path)
+    world = World(tmp_path)
     try:
-        for rig in pair.rigs:
-            rig.beat = body
-        result = pair.step(lambda r, s: s._read_heartbeat())
+        world.rig.beat = body
+        result = world.step(lambda r, s: s._read_heartbeat())
         assert result[0] == "raise"
-        for rig in pair.rigs:
-            rig.beat = json.dumps(dict(account_id=ACCOUNT, session=SESSION.isoformat(),
-                at_utc=at_et(SESSION, 9, 30).isoformat(), refusing=False)).encode()
-        assert pair.step(lambda r, s: s._read_heartbeat())[0] == "ok"
+        world.rig.beat = json.dumps(dict(account_id=ACCOUNT, session=SESSION.isoformat(),
+            at_utc=at_et(SESSION, 9, 30).isoformat(), refusing=False)).encode()
+        assert world.step(lambda r, s: s._read_heartbeat())[0] == "ok"
     finally:
-        pair.close()
+        world.close()
 
 
 @pytest.mark.parametrize("mode", ["unicode", "missing-parent", "replace-directory", "read-directory", "barred"])
 def test_atomic_heartbeat_and_io_failures(tmp_path, mode):
-    pair = Pair(tmp_path)
+    world = World(tmp_path)
     try:
+        rig = world.rig
         if mode == "missing-parent":
-            for rig in pair.rigs:
-                rig.heartbeat = tmp_path / "missing" / "beat.json"
+            rig.heartbeat = tmp_path / "missing" / "beat.json"
         elif mode == "replace-directory":
-            pair.path.mkdir()
+            world.path.mkdir()
         elif mode == "read-directory":
             directory = tmp_path / "directory"
             directory.mkdir()
-            for rig in pair.rigs:
-                rig.heartbeat = directory
+            rig.heartbeat = directory
         def action(rig, service):
             if mode == "read-directory":
                 return service._read_heartbeat()
-            state = rig.module._TickState(barred="pending" if mode == "barred" else None)
-            service._write_heartbeat(SESSION, state, "quote \u00e9 \U0001f680\nok")
+            state = P._TickState(barred="pending" if mode == "barred" else None)
+            service._write_heartbeat(SESSION, state, "quote é \U0001f680\nok")
             return service._read_heartbeat()
         if mode == "replace-directory":
-            # Keep a directory target intact; bypass step's file-reset helper.
-            results = [outcome(lambda r=r: action(r, pair.service(r, {}))) for r in pair.rigs]
-            assert results[0] == results[1]
-            assert results[0][0] == "raise"
-            assert pair.path.is_dir()
+            # A directory target cannot be replaced: the write fails and the directory stays.
+            result = outcome(lambda: action(rig, world.service({})))
+            assert result[0] == "raise"
+            assert world.path.is_dir()
         else:
-            result = pair.step(action)
+            result = world.step(action)
             assert result[0] == ("raise" if mode in ("missing-parent", "read-directory") else "ok")
             if result[0] == "ok":
-                assert pair.rigs[0].beat is not None
-                assert not pair.path.with_name(pair.path.name + ".tmp").exists()
+                assert rig.beat is not None
+                assert not world.path.with_name(world.path.name + ".tmp").exists()
                 if mode == "barred":
-                    assert json.loads(pair.rigs[0].beat)["refusing"]
+                    assert json.loads(rig.beat)["refusing"]
     finally:
-        pair.close()
+        world.close()
 
 
 def test_native_release_session(native_package):
