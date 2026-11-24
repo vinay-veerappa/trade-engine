@@ -28,13 +28,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from trade_engine.domain.orders import OrderState
-from trade_engine.interfaces.broker import (
-    VenueFill,
-    VenueOrder,
-    VenueOrderAllocation,
-    VenuePosition,
-)
-from trade_engine.ledger import EventKind, codec
+from trade_engine.interfaces.broker import VenueFill, VenueOrder, VenuePosition
 from trade_engine.ledger.state import AccountState
 from trade_engine.sim import _rs
 
@@ -65,17 +59,9 @@ class PendingResolution:
     unresolved: dict[str, str] = field(default_factory=dict)  # order id -> why not
 
 
-def _pending_events(ledger: Any, account_id: str) -> list[tuple[str, str | None, str]]:
-    return [
-        (event.payload.order_id, event.command_id, str(event.payload.reason))
-        for event in ledger.events(account=account_id)
-        if event.kind is EventKind.ORDER_PENDING
-    ]
-
-
 def pending_request(ledger: Any, account_id: str, order_id: str) -> str:
     """Which request left ``order_id`` pending: ``submit``, ``cancel`` or ``unknown``."""
-    return _rs.rs.oms_pending_request(_pending_events(ledger, account_id), order_id)
+    return _rs.call(_rs.rs.oms_native_pending_request, ledger, account_id, order_id)
 
 
 def restorable(
@@ -90,101 +76,26 @@ def restorable(
     and its siblings' exits. NEW orders were never sent, so they stay out.
 
     Which orders, fills and refusals is Rust's (``te_core::oms::restore``, P3b-1); the
-    ledger reads it needs come back through two callbacks, in the order it makes them,
-    and this builds the venue carriers from the state's own objects.
+    ledger's events and the submission events are read natively, and the venue carriers
+    are built by Rust. A ``resolve`` resolution is reported back as ``(resolved,
+    unresolved)`` and applied here.
     """
     if not isinstance(pending, str):
         raise ValueError(f"pending must be 'refuse' or 'resolve', got {pending!r}")
-    events: list[tuple[str, str | None, str]] = []
-    if (
-        pending == "resolve"
-        and resolution is not None
-        and any(order.state is OrderState.PENDING_UNKNOWN for order in state.orders.values())
-    ):
-        events = _pending_events(ledger, account_id)
-
-    def note(resolved: list[str], unresolved: list[tuple[str, str]]) -> None:
-        assert resolution is not None
+    orders, fills, resolved, unresolved = _rs.call(
+        _rs.rs.oms_native_restorable,
+        ledger,
+        account_id,
+        state,
+        pending,
+        resolution,
+    )
+    if resolution is not None:
         resolution.resolved.extend(resolved)
         resolution.unresolved.update(unresolved)
-
-    # The submission event is read for its timestamp too, so keep the one the check found.
-    found: dict[str, Any] = {}
-
-    def has_submission(command: str) -> bool:
-        event = ledger.event_by_command(command)
-        if event is not None:
-            found[command] = event
-        return event is not None
-
-    plan_orders, plan_fills = _rs.call(
-        _rs.rs.oms_restorable,
-        codec.text(codec.canon(state)),
-        account_id,
-        pending,
-        resolution is not None,
-        [] if resolution is None else list(resolution.unresolved),
-        events,
-        note,
-        has_submission,
-    )
-    orders: list[tuple[VenueOrder, Any]] = []
-    for order_id, venue_order_id, venue_state in plan_orders:
-        order = state.orders[order_id]
-        orders.append(
-            (
-                VenueOrder(
-                    venue_order_id=venue_order_id,
-                    instrument=order.instrument,
-                    order_type=order.order_type,
-                    side=order.side,
-                    quantity=order.quantity,
-                    submitted_at=found[f"{order.command_id}:submit"].ts_utc,
-                    tif=order.tif,
-                    limit_price=order.limit_price,
-                    stop_price=order.stop_price,
-                    trail_amount=order.trail_amount,
-                    allocations=(
-                        VenueOrderAllocation(order_id, order.account_id, order.quantity),
-                    ),
-                    parent_order_id=order.parent_order_id,
-                    oco_group=order.oco_group,
-                ),
-                OrderState(venue_state),
-            )
-        )
-    fills = []
-    for index, venue_fill_id, venue_order_id in plan_fills:
-        fill = state.fills[index]
-        fills.append(
-            VenueFill(
-                venue_fill_id=venue_fill_id,
-                venue_order_id=venue_order_id,
-                instrument=fill.instrument,
-                quantity=fill.quantity,
-                price=fill.price,
-                filled_at=fill.filled_at,
-                side=fill.side,
-                fee=fill.fee,
-                leg_id=fill.leg_id,
-            )
-        )
     return orders, fills
 
 
 def restorable_positions(state: AccountState) -> list[VenuePosition]:
-    held = list(state.positions.items())
-    positions = []
-    for index, latest in _rs.call(_rs.rs.oms_restorable_positions, codec.text(codec.canon(state))):
-        instrument, position = held[index]
-        # SimBroker reads only the quantity; as_of dates it by its latest fill.
-        as_of = MIN_TIME if latest is None else state.fills[latest].filled_at
-        positions.append(
-            VenuePosition(
-                instrument=instrument,
-                quantity=position.quantity,
-                avg_price=position.avg_cost,
-                as_of=as_of,
-            )
-        )
-    return positions
+    """The venue's held positions, in state order, each dated by its latest fill."""
+    return _rs.call(_rs.rs.oms_native_positions, state)
