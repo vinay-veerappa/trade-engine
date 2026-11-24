@@ -86,13 +86,8 @@ class Trace:
         self.wrap(rig.risk, "risk", ("evaluate",))
         for destination, sink in sorted(getattr(rig, "sinks", {}).items()):
             self.wrap(sink, f"sink:{destination}", ("publish",))
-        for name in ("append", "extend"):
-            original = getattr(rig.ledger, name)
-            def write(*args, _original=original, **kwargs):
-                result = _original(*args, **kwargs)
-                self.event_counts.append(len(rig.ledger.events()))
-                return result
-            setattr(rig.ledger, name, write)
+        # The ledger's after-commit listener sees every write, Python or native, once per event.
+        rig.ledger.add_listener(lambda _event: self.event_counts.append(len(rig.ledger.events())))
 
     def wrap(self, owner, label, names):
         for name in names:
