@@ -278,13 +278,14 @@ impl<'py> Host<'py> {
         kwargs.set_item("account_id", account)?;
         Ok(kwargs)
     }
-    /// The venue's working book: venue order id to filled quantity, as the native prepare checks it (I5).
-    fn held_at_venue(&self, broker: &Value<'py>) -> PyResult<BTreeMap<String, Money>> {
+    /// The venue's working book: venue order id to filled quantity as Python `str` spells it,
+    /// so the I5 refusal text is the venue's own (`Decimal("2.0")` stays `"2.0"`).
+    fn held_at_venue(&self, broker: &Value<'py>) -> PyResult<BTreeMap<String, String>> {
         let min_time = self.module()?.getattr("MIN_TIME")?;
         let mut held = BTreeMap::new();
         for order in values(&broker.call_method1("orders", (&min_time,))?)? {
             let venue_id: String = order.getattr("venue_order_id")?.extract()?;
-            held.insert(venue_id, sl::money(&order.getattr("filled_quantity")?)?);
+            held.insert(venue_id, order.getattr("filled_quantity")?.str()?.extract()?);
         }
         Ok(held)
     }

@@ -406,9 +406,10 @@ pub fn replay_instruments(state: &AccountState) -> R<Vec<Instrument>> {
 }
 
 /// The venue must hold every working order, filled at least as far as the ledger records
-/// (I5). `held` maps each venue order id to the venue's filled quantity. Orders are checked
-/// in order_id order, so the first refusal is the same one the Python loop raised.
-pub fn check_venue(account: &str, state: &AccountState, held: &BTreeMap<String, Money>) -> R<()> {
+/// (I5). `held` maps each venue order id to the venue's filled quantity as the venue spells
+/// it (Python `str(Decimal)`, so `"2.0"` stays `"2.0"` in the refusal text). Orders are
+/// checked in order_id order, so the first refusal is the same one the Python loop raised.
+pub fn check_venue(account: &str, state: &AccountState, held: &BTreeMap<String, String>) -> R<()> {
     let mut orders: Vec<&Order> = state.orders.values().collect();
     orders.sort_by(|a, b| a.order_id.cmp(&b.order_id));
     for order in orders {
@@ -420,15 +421,12 @@ pub fn check_venue(account: &str, state: &AccountState, held: &BTreeMap<String, 
             None => order.order_id.clone(),
         };
         let found = held.get(&venue_id);
-        let venue_filled = match found {
-            Some(filled) => text(filled),
-            None => "0".to_string(),
-        };
+        let venue_filled = found.map_or("0", String::as_str);
         let recorded = match state.filled_quantity.get(&order.order_id) {
             Some(filled) => text(filled),
             None => "0".to_string(),
         };
-        eod::rehydrate(account, &order.order_id, order.state.value(), found.is_some(), &venue_filled, &recorded)?;
+        eod::rehydrate(account, &order.order_id, order.state.value(), found.is_some(), venue_filled, &recorded)?;
     }
     Ok(())
 }
@@ -1738,8 +1736,8 @@ mod tests {
         put(l, "A", EventKind::OrderCancelled, payload, &format!("cancel:{order_id}"));
     }
 
-    fn venue(pairs: &[(&str, &str)]) -> BTreeMap<String, Money> {
-        pairs.iter().map(|(id, qty)| (id.to_string(), money(qty))).collect()
+    fn venue(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(id, qty)| (id.to_string(), qty.to_string())).collect()
     }
 
     #[test]
@@ -1775,6 +1773,9 @@ mod tests {
         let refused = check_venue("A", &state, &venue(&[("W", "0.5")])).expect_err("under-filled");
         assert_eq!(refused.kind, "runtime_eod");
         assert_eq!(refused.msg, "Venue reports 0.5 filled for 'W' but the ledger records 1 (I5)");
+        // The venue's own spelling reaches the text: Python's str(Decimal("0.50")) is "0.50".
+        let refused = check_venue("A", &state, &venue(&[("W", "0.50")])).expect_err("under-filled");
+        assert_eq!(refused.msg, "Venue reports 0.50 filled for 'W' but the ledger records 1 (I5)");
     }
 
     #[test]
@@ -1786,9 +1787,9 @@ mod tests {
         check_venue("A", &state, &venue(&[])).expect("a cancelled order needs no venue");
     }
 
-    /// `text` is `str(Decimal)` for the values the venue and ledger quantities take. Money
-    /// spells in canonical form, so a trailing zero is dropped: `"2.0"` reads back as `"2"`,
-    /// where Python's `str(Decimal("2.0"))` is `"2.0"` (a refusal-text gap, noted in W6-C3b).
+    /// `text` is `str(Decimal)` for canonical values. Money spells in canonical form, so a
+    /// trailing zero is dropped (`"2.0"` reads back as `"2"`); that is why `check_venue` takes
+    /// the venue's own text rather than a Money.
     #[test]
     fn decimal_text_matches_python_str_decimal() {
         assert_eq!(text(&money("0")), "0");
