@@ -13,23 +13,13 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from trade_engine.domain.option_orders import (
-    CloseHolding,
-    CloseStructure,
-    OpenStructure,
-    OptionIntent,
-)
-from trade_engine.domain.risk import RiskVerdict
+from trade_engine.domain.option_orders import OpenStructure, OptionIntent
 from trade_engine.eod.options import OptionContext
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Event, EventKind, Ledger
+from trade_engine.ledger import Ledger
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.options import OptionOrderManager, open_structures
-from trade_engine.sim import underlying_of
-from trade_engine.eod._runtime import decide, flag
 from trade_engine.sim._rs import rs
-
-ROUNDS = 4  # how many times a strategy may act at one snapshot: a buy-write needs two
 
 
 @dataclass
@@ -42,10 +32,9 @@ class RoutingTally:
 
     def __add__(self, other: "RoutingTally") -> "RoutingTally":
         return RoutingTally(
-            *(int(v) for v in decide("routing:tally", text=tuple(str(v) for v in (
-                self.orders_submitted, self.exit_actions, self.snapshots_processed,
-                other.orders_submitted, other.exit_actions, other.snapshots_processed,
-            )))[0])
+            self.orders_submitted + other.orders_submitted,
+            self.exit_actions + other.exit_actions,
+            self.snapshots_processed + other.snapshots_processed,
         )
 
 
@@ -99,35 +88,13 @@ class OptionRouter:
         return OptionContext(
             session=session,
             account_id=account_id,
-            phase=decide("routing:phase", (phase or "",), flags=(snapshot is not None,))[0][0],
+            phase=rs.routing_phase(phase, snapshot is not None),
             now=now,
             state=self._ledger.state(account_id),
             structures=structures,
             snapshot=snapshot,
             snapshots=dict(snapshots or {}),
         )
-
-    def taken(self, action: Any) -> bool:
-        """Whether an action was already routed: ordered, or (an entry) refused by risk.
-
-        An entry whose verdict was accepted but whose order never went out is not taken:
-        the interrupted entry resumes its open on the next pass (F3).
-        """
-        command_id = getattr(action, "command_id", None)
-        if not command_id:
-            return False
-        if flag("routing:taken", flags=(True, self._ledger.has_command(command_id), False, False)):
-            return True
-        if not flag("routing:risk_lookup", flags=(bool(command_id), isinstance(action, OptionIntent))):
-            return False
-        verdict = self.recorded_verdict(action.account_id, action)
-        refused = verdict is not None and not verdict.accepted
-        return flag("routing:taken", flags=(True, False, verdict is not None, refused))
-
-    def recorded_verdict(self, account_id: str, intent: OptionIntent) -> RiskVerdict | None:
-        """The verdict an earlier, interrupted run recorded for this intent, if any (F3)."""
-        event = self._ledger.event_by_command(f"risk:{intent.command_id}")
-        return None if event is None else event.payload
 
     # -- the snapshot pass -------------------------------------------------------
 
@@ -185,22 +152,6 @@ class OptionRouter:
         """
         return rs.options_apply(self, account_id, session, actions, snapshot, snapshots, cause)
 
-    def _action_underlying(self, account_id: str, action: Any) -> str:
-        entry = None
-        if isinstance(action, OptionIntent):
-            kind, underlying = "intent", underlying_of(action.instrument)
-        elif isinstance(action, CloseHolding):
-            kind, underlying = "holding", action.instrument.symbol
-        elif isinstance(action, CloseStructure):
-            entry = self._ledger.state(account_id).orders.get(action.entry_order_id)
-            kind, underlying = "close", underlying_of(entry.instrument) if entry is not None else ""
-        else:
-            kind, underlying = "unknown", ""
-        return decide("routing:underlying", (
-            kind, account_id, getattr(action, "command_id", ""), getattr(action, "entry_order_id", ""),
-            underlying, type(action).__name__,
-        ), flags=(entry is not None,))[0][0]
-
     def enter_option(
         self,
         account_id: str,
@@ -210,15 +161,3 @@ class OptionRouter:
         snapshots: dict[str, ChainSnapshot] | None,
     ) -> int:
         return rs.options_enter(self, account_id, session, intent, snapshot, snapshots)
-
-    def _record_verdict(self, account_id: str, intent: OptionIntent, verdict: RiskVerdict) -> None:
-        now = self._clock.now_utc()
-        self._ledger.append(
-            Event(
-                account=account_id,
-                kind=EventKind.RISK_VERDICT,
-                payload=verdict,
-                ts_utc=now,
-                command_id=f"risk:{intent.command_id}",
-            )
-        )

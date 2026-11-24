@@ -2,8 +2,16 @@ use std::cell::RefCell;
 use pyo3::exceptions::{PyAttributeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use te_core::ledger::model::Obj;
 use te_core::runtime::eod_flow::{self as flow, ActionKind, EntryHost, RoutingHost};
+use te_core::runtime::eod_glue::{self as glue, Ledger as _};
 use te_core::runtime::routing;
+use te_core::sim::snapshot::underlying_of;
+
+use crate::store_ledger::{self as sl, Pending};
+
+/// how many times a strategy may act at one snapshot: a buy-write needs two
+const ROUNDS: usize = 4;
 
 type Value<'py> = Bound<'py, PyAny>;
 
@@ -39,6 +47,37 @@ impl<'py> Router<'py> {
         kwargs.set_item("snapshots", &self.snapshots)?;
         self.owner.call_method("context", (&self.account, &self.session, manage_now, structures), Some(&kwargs))
     }
+    /// The underlying an action concerns, checked by `routing::underlying` (was `_action_underlying`).
+    fn action_underlying(&self, action: &Value<'py>) -> PyResult<String> {
+        let classes = self.owner.py().import("trade_engine.domain.option_orders")?;
+        let (kind, underlying, is_order) = if action.is_instance(&classes.getattr("OptionIntent")?)? {
+            let instrument = sl::instrument_of(&action.getattr("instrument")?)?;
+            ("intent", underlying_of(&instrument).map_err(super::flow_refusal)?, false)
+        } else if action.is_instance(&classes.getattr("CloseHolding")?)? {
+            ("holding", action.getattr("instrument")?.getattr("symbol")?.extract::<String>()?, false)
+        } else if action.is_instance(&classes.getattr("CloseStructure")?)? {
+            let order_id: String = action.getattr("entry_order_id")?.extract()?;
+            let store = sl::ledger_store(&self.owner.getattr("_ledger")?)?;
+            let pending = Pending::default();
+            let account = self.account.as_str();
+            let entry = sl::with_native(&store, &self.owner.getattr("_clock")?, &pending, |l, _| {
+                let state = l.state(account)?;
+                Ok(state.orders.get(&order_id).map(|order| order.instrument.clone()))
+            })?;
+            match entry {
+                Some(instrument) => ("close", underlying_of(&instrument).map_err(super::flow_refusal)?, true),
+                None => ("close", String::new(), false),
+            }
+        } else {
+            ("unknown", String::new(), false)
+        };
+        let command = optional(action, "command_id")?;
+        let command_id = if command.is_none() { String::new() } else { text(&command)? };
+        let named = optional(action, "entry_order_id")?;
+        let named_id = if named.is_none() { String::new() } else { text(&named)? };
+        routing::underlying(kind, &self.account, &command_id, &named_id, is_order, &underlying, &typename(action)?)
+            .map_err(super::flow_refusal)
+    }
 }
 
 impl<'py> RoutingHost for Router<'py> {
@@ -72,13 +111,24 @@ impl<'py> RoutingHost for Router<'py> {
         actions.try_iter()?.collect()
     }
     fn taken(&self, action: &Self::Action) -> PyResult<bool> {
-        self.owner.call_method1("taken", (action,))?.extract()
+        let command = optional(action, "command_id")?;
+        if !command.is_truthy()? { return Ok(false); }
+        let command_id = text(&command)?;
+        let store = sl::ledger_store(&self.owner.getattr("_ledger")?)?;
+        // The native `has_command`: the store's own existence check, without decoding the event.
+        let direct: bool = store.call_method1("has_command", (&command_id,))?.extract()?;
+        if routing::taken(true, direct, false, false) { return Ok(true); }
+        let intent = action.is_instance(&self.owner.py().import("trade_engine.domain.option_orders")?.getattr("OptionIntent")?)?;
+        if !routing::risk_lookup(true, intent) { return Ok(false); }
+        let pending = Pending::default();
+        let verdict = sl::with_native(&store, &self.owner.getattr("_clock")?, &pending,
+            |l, _| glue::recorded_verdict(&*l, &command_id))?;
+        let refused = verdict.as_ref().is_some_and(|v| !v.accepted);
+        Ok(routing::taken(true, false, verdict.is_some(), refused))
     }
     fn classify(&self, action: &Self::Action) -> PyResult<ActionKind> {
         let classes = self.owner.py().import("trade_engine.domain.option_orders")?;
-        let underlying = if !self.snapshot.is_none() {
-            self.owner.call_method1("_action_underlying", (&self.account, action))?.extract::<String>()?
-        } else { String::new() };
+        let underlying = if !self.snapshot.is_none() { self.action_underlying(action)? } else { String::new() };
         let entry = action.is_instance(&classes.getattr("OptionIntent")?)?;
         let structure = action.is_instance(&classes.getattr("CloseStructure")?)?;
         let holding = action.is_instance(&classes.getattr("CloseHolding")?)?;
@@ -113,9 +163,8 @@ impl<'py> RoutingHost for Router<'py> {
         self.owner.py().import("trade_engine.eod.options_routing")?.getattr("RoutingTally")?.call1((orders, exits, snapshots))
     }
     fn rounds_refusal(&self) -> PyErr {
-        match (|| {
-            let rounds: i64 = self.owner.py().import("trade_engine.eod.options_routing")?.getattr("ROUNDS")?.extract()?;
-            routing::rounds(&self.account, &self.snapshot.getattr("underlying")?.extract::<String>()?, rounds)
+        match (|| -> PyResult<()> {
+            routing::rounds(&self.account, &self.snapshot.getattr("underlying")?.extract::<String>()?, ROUNDS as i64)
                 .map_err(super::flow_refusal)?;
             Err(PyValueError::new_err("snapshot round guard did not refuse"))
         })() {
@@ -138,8 +187,15 @@ impl<'py> EntryHost for Entry<'py> {
     type Value = Value<'py>;
     type Error = PyErr;
     fn recorded(&self, intent: &Self::Value) -> PyResult<Option<Self::Value>> {
-        let verdict = self.owner.call_method1("recorded_verdict", (&self.account, intent))?;
-        Ok(if verdict.is_none() { None } else { Some(verdict) })
+        let command: String = intent.getattr("command_id")?.extract()?;
+        let store = sl::ledger_store(&self.owner.getattr("_ledger")?)?;
+        let pending = Pending::default();
+        let verdict = sl::with_native(&store, &self.owner.getattr("_clock")?, &pending,
+            |l, _| glue::recorded_verdict(&*l, &command))?;
+        match verdict {
+            Some(verdict) => Ok(Some(sl::obj_py(self.owner.py(), &Obj::RiskVerdict(verdict))?)),
+            None => Ok(None),
+        }
     }
     fn validate(&mut self, intent: &Self::Value) -> PyResult<()> {
         let valid = intent.is_instance(&self.owner.py().import("trade_engine.domain.option_orders")?.getattr("OptionIntent")?)?;
@@ -166,8 +222,13 @@ impl<'py> EntryHost for Entry<'py> {
         self.engine.as_ref().expect("validated engine").call_method1("evaluate", (intent, context))
     }
     fn record(&self, intent: &Self::Value, verdict: &Self::Value) -> PyResult<()> {
-        self.owner.call_method1("_record_verdict", (&self.account, intent, verdict))?;
-        Ok(())
+        let command: String = intent.getattr("command_id")?.extract()?;
+        let verdict = sl::verdict_of(verdict)?;
+        let store = sl::ledger_store(&self.owner.getattr("_ledger")?)?;
+        let pending = Pending::default();
+        let account = self.account.as_str();
+        sl::with_native(&store, &self.owner.getattr("_clock")?, &pending,
+            |l, c| glue::record_verdict(l, c, account, &command, verdict))
     }
     fn approved(&self, intent: &Self::Value, verdict: &Self::Value) -> PyResult<(bool, bool)> {
         let quantity = verdict.getattr("approved_quantity")?;
@@ -189,10 +250,9 @@ impl<'py> EntryHost for Entry<'py> {
 #[pyfunction]
 fn options_manage<'py>(owner: Value<'py>, account: String, session: Value<'py>, snapshot: Value<'py>,
     snapshots: Value<'py>, cause: Value<'py>) -> PyResult<Value<'py>> {
-    let rounds = owner.py().import("trade_engine.eod.options_routing")?.getattr("ROUNDS")?.extract::<usize>()?;
     let host = Router { owner, account, session, snapshot, snapshots, cause,
         manager: RefCell::new(None), manage: RefCell::new(None) };
-    flow::manage_snapshot(&host, rounds)
+    flow::manage_snapshot(&host, ROUNDS)
 }
 
 #[pyfunction]
@@ -214,7 +274,15 @@ fn options_enter<'py>(owner: Value<'py>, account: String, session: Value<'py>, i
     flow::enter_option(&mut host, intent)
 }
 
+/// The phase a context reports (`routing::phase`): a named phase, else the snapshot or close.
+#[pyfunction]
+#[pyo3(signature = (phase, has_snapshot))]
+fn routing_phase(phase: Option<String>, has_snapshot: bool) -> String {
+    routing::phase(phase.as_deref().unwrap_or(""), has_snapshot)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(routing_phase, m)?)?;
     m.add_function(wrap_pyfunction!(options_manage, m)?)?;
     m.add_function(wrap_pyfunction!(options_apply, m)?)?;
     m.add_function(wrap_pyfunction!(options_enter, m)?)?;
