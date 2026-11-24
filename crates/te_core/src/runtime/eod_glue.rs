@@ -1117,6 +1117,38 @@ mod tests {
         assert_eq!(l.events("A").expect("events").len(), before);
     }
 
+    /// A ledger whose writes the host refuses, as a failed store write does (kind `host`).
+    struct RefusingWrites(MemLedger);
+
+    impl Ledger for RefusingWrites {
+        fn accounts(&self) -> R<Vec<String>> {
+            self.0.accounts()
+        }
+        fn events(&self, account: &str) -> R<Vec<Event>> {
+            self.0.events(account)
+        }
+        fn state(&self, account: &str) -> R<AccountState> {
+            self.0.state(account)
+        }
+        fn event_by_command(&self, command_id: &str) -> R<Option<Event>> {
+            self.0.event_by_command(command_id)
+        }
+        fn append(&mut self, _events: Vec<Event>) -> R<Vec<Event>> {
+            err("host", "the store refused the write".to_string())
+        }
+    }
+
+    #[test]
+    fn write_off_order_refused_write_leaves_the_ledger_unchanged() {
+        let mut l = RefusingWrites(MemLedger::default());
+        entry_with_brackets(&mut l.0);
+        let before = l.0.events("A").expect("events").len();
+        let got = write_off_order(&mut l, &clock(), "A", "E", Some("stuck"), Some("vinay"), false).unwrap_err();
+        assert_eq!(got.kind, "host");
+        assert_eq!(l.0.events("A").expect("events").len(), before);
+        assert!(l.0.event_by_command("eod-writeoff:A:E").expect("read").is_none());
+    }
+
     #[test]
     fn write_off_order_refuses_unknown_order() {
         let mut l = MemLedger::default();
@@ -1176,6 +1208,15 @@ mod tests {
         deposit(&mut l, "A", "100");
         append_run_marker(&mut l, &clock(), "eod", "A", day("2026-11-23"), 0, None).expect("run");
         assert!(account_has_history(&l, "eod", "A", day("2026-11-24")).expect("history"));
+    }
+
+    #[test]
+    fn a_void_only_account_is_not_history() {
+        let mut l = MemLedger::default();
+        deposit(&mut l, "A", "100");
+        void_session(&mut l, &clock(), "eod", day("2026-11-23"), &["A".to_string()], Some("r"), Some("o")).expect("void");
+        assert!(l.event_by_command("eod-void:eod:A:2026-11-23").expect("read").is_some());
+        assert!(!account_has_history(&l, "eod", "A", day("2026-11-24")).expect("history"));
     }
 
     #[test]
@@ -1591,6 +1632,47 @@ mod tests {
         let equity = marked.equity.expect("positive equity");
         assert!(ops::eq(&equity, &money("1003")).expect("cmp"));
         assert!(ops::eq(&marked.gross_exposure, &money("202")).expect("cmp"));
+    }
+
+    #[test]
+    fn derive_risk_context_signs_a_short_position() {
+        let mut l = MemLedger::default();
+        created(&mut l, vec![order("S", "SPY", Side::Sell, OrderType::Limit, "2", None)]);
+        fill(&mut l, "F1", "S", "SPY", Side::Sell, "2", "100");
+        deposit(&mut l, "A", "1000");
+        let spy = make_equity("SPY").expect("equity");
+        let mut closes: OMap<Instrument, Money> = OMap::new();
+        closes.insert(spy.hk(), spy.clone(), money("101"));
+        mark_positions(&mut l, &clock(), "eod", "A", &closes, day("2026-11-24")).expect("mark");
+
+        let risk = derive_risk_context(&l.state("A").expect("state"), &spy).expect("risk");
+        // Cash 1000 + 200 = 1200; SPY -2 at 101 subtracts 202.
+        assert!(ops::eq(&risk.equity.expect("positive equity"), &money("998")).expect("cmp"));
+        // Gross exposure uses |q|.
+        assert!(ops::eq(&risk.gross_exposure, &money("202")).expect("cmp"));
+        assert_eq!(risk.current_position_quantity, -2);
+        assert_eq!(risk.open_positions, 1);
+    }
+
+    #[test]
+    fn derive_risk_context_has_no_equity_when_it_is_not_positive() {
+        let mut l = MemLedger::default();
+        created(&mut l, vec![order("E", "SPY", Side::Buy, OrderType::Limit, "2", None)]);
+        fill(&mut l, "F1", "E", "SPY", Side::Buy, "2", "100");
+        deposit(&mut l, "A", "100");
+        let spy = make_equity("SPY").expect("equity");
+
+        // Unmarked: equity is cash alone, 100 - 200 = -100.
+        let risk = derive_risk_context(&l.state("A").expect("state"), &spy).expect("risk");
+        assert!(risk.equity.is_none());
+
+        // Marked at 50: -100 + 2 * 50 = 0, which is not positive either.
+        let mut closes: OMap<Instrument, Money> = OMap::new();
+        closes.insert(spy.hk(), spy.clone(), money("50"));
+        mark_positions(&mut l, &clock(), "eod", "A", &closes, day("2026-11-24")).expect("mark");
+        let risk = derive_risk_context(&l.state("A").expect("state"), &spy).expect("risk");
+        assert!(risk.equity.is_none());
+        assert!(ops::eq(&risk.gross_exposure, &money("100")).expect("cmp"));
     }
 
     #[test]

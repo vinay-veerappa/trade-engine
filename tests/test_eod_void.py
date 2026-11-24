@@ -8,7 +8,7 @@ not trading history (the history probe, the fold and the TOS paper session ignor
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -18,8 +18,7 @@ from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.cli import main
 from trade_engine.clock.replay import ReplayClock
 from trade_engine.eod import EodRunner, EodRunnerConfig, SessionIncompleteError
-from trade_engine.eod.runner import EodRunnerError, _void_command, void_session
-from trade_engine.interfaces.market_data import Bar
+from trade_engine.eod.runner import EodRunnerError, void_session
 from trade_engine.ledger import EodRun, EodVoid, Event, EventKind, Ledger
 from trade_engine.ledger.codec import decode_event, encode_event
 from trade_engine.sim import SimBroker
@@ -152,23 +151,6 @@ def test_a_void_unblocks_the_previous_session_gate(ledger: Ledger) -> None:
     assert ledger.event_by_command(f"eod:eod:{B}:{NEXT.isoformat()}") is not None
     # the void is B's only record for 09-23: no EodRun was invented for it
     assert ledger.event_by_command(f"eod:eod:{B}:{VOIDED.isoformat()}") is None
-
-
-def test_a_void_is_not_history(ledger: Ledger) -> None:
-    with Ledger(ledger.path.parent / "fresh.db") as fresh:
-        _run_marker(fresh, B, VOIDED)  # B exists in the ledger, but only on the void session
-        clock = SettableClock(NOW)
-        runner = _runner(fresh, clock)
-        before = runner._account_has_history(B, VOIDED + timedelta(days=1))
-        fresh.append(
-            Event(
-                account=B, kind=EventKind.EOD_VOID,
-                payload=EodVoid(BEFORE, B, REASON, "owner", "eod"),
-                ts_utc=NOW, command_id=_void_command("eod", B, BEFORE),
-            )
-        )
-        assert runner._account_has_history(B, VOIDED + timedelta(days=1)) is before
-        assert runner._account_has_history(B, VOIDED) is False
 
 
 def test_the_fold_ignores_a_void(ledger: Ledger) -> None:

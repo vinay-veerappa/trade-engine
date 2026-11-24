@@ -11,8 +11,6 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from types import MappingProxyType
-
 import pytest
 
 from trade_engine.calendar.sessions import ExchangeCalendar
@@ -320,73 +318,57 @@ def test_a_working_entry_with_a_venue_id_succeeds_with_the_flag_and_carries_venu
     assert ledger.state(ACCOUNT).orders[entry_id].state is OrderState.CANCELLED
 
 
-def test_a_child_with_a_venue_id_refuses_without_the_flag(rig, monkeypatch) -> None:
+STOP_VENUE_ID = "VENUE-STOP-7"
+
+
+def _accept_stop_at_venue(ledger: Ledger, bracket) -> None:
+    """The stop is sent and the venue accepts it: working, with a venue order id.
+
+    The manager holds a child until its entry fills, and a filled entry refuses on I5 first, so
+    the venue events are written directly, in the fold's legal order: NEW to SUBMITTED to ACCEPTED.
+    """
+    stop = ledger.state(ACCOUNT).orders[bracket.stop.order_id]
+    ledger.append(Event(
+        account=ACCOUNT, kind=EventKind.ORDER_UPDATED,
+        payload=OrderUpdated(replace(stop, state=OrderState.SUBMITTED), reason="test: the stop is sent"),
+        ts_utc=PREV_EOD, command_id="test-stop-sent",
+    ))
+    ledger.append(Event(
+        account=ACCOUNT, kind=EventKind.ORDER_ACCEPTED,
+        payload=OrderStateChange(bracket.stop.order_id, reason="test: the venue accepted the stop",
+                                 venue_order_id=STOP_VENUE_ID),
+        ts_utc=PREV_EOD, command_id="test-stop-accepted",
+    ))
+
+
+def test_a_child_with_a_venue_id_refuses_without_the_flag(rig) -> None:
     ledger, clock, _b, _m, bracket = rig
-    entry_id, stop_id = bracket.entry.order_id, bracket.stop.order_id
-    real_state = ledger.state
-
-    def with_child_venue(account):
-        state = real_state(account)
-        venues = {k: v for k, v in state.venue_order_ids.items() if k != entry_id}
-        venues[stop_id] = "VENUE-STOP-7"
-        return replace(state, venue_order_ids=MappingProxyType(venues))
-
-    monkeypatch.setattr(ledger, "state", with_child_venue)
+    _accept_stop_at_venue(ledger, bracket)
     size = _count(ledger)
-    with pytest.raises(EodRunnerError, match="VENUE-STOP-7"):
-        _writeoff(ledger, clock, entry_id)
+    with pytest.raises(EodRunnerError, match=STOP_VENUE_ID):
+        _writeoff(ledger, clock, bracket.stop.order_id)
     assert _count(ledger) == size
 
 
-def test_a_child_cancel_carries_the_child_venue_id(rig, monkeypatch) -> None:
+def test_a_child_cancel_carries_the_child_venue_id(rig) -> None:
     ledger, clock, _b, _m, bracket = rig
-    entry_id, stop_id = bracket.entry.order_id, bracket.stop.order_id
-    real_state = ledger.state
-
-    def with_child_venue(account):
-        state = real_state(account)
-        venues = {k: v for k, v in state.venue_order_ids.items() if k != entry_id}
-        venues[stop_id] = "VENUE-STOP-7"
-        return replace(state, venue_order_ids=MappingProxyType(venues))
-
-    monkeypatch.setattr(ledger, "state", with_child_venue)
-    _writeoff(ledger, clock, entry_id, venue_cancel_confirmed=True)
-    monkeypatch.undo()
+    _accept_stop_at_venue(ledger, bracket)
+    _writeoff(ledger, clock, bracket.stop.order_id, venue_cancel_confirmed=True)
     cancels = {e.payload.order_id: e.payload.venue_order_id
                for e in ledger.events_of_kind(EventKind.ORDER_CANCELLED)}
-    assert cancels[stop_id] == "VENUE-STOP-7"
+    assert cancels[bracket.stop.order_id] == STOP_VENUE_ID
 
 
-def test_the_cancels_are_written_in_one_extend_call(rig, monkeypatch) -> None:
+def test_the_three_cancels_are_committed_as_consecutive_events(rig) -> None:
+    # The listener is called once per committed event, not once per batch, so the batch shows as
+    # three consecutive events with no other write between them.
     ledger, clock, _b, _m, bracket = rig
-    real_extend = ledger.extend
-    batches: list[list] = []
-
-    def spy(events):
-        batch = list(events)
-        batches.append(batch)
-        return real_extend(batch)
-
-    monkeypatch.setattr(ledger, "extend", spy)
+    seen: list = []
+    ledger.add_listener(seen.append)
     _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True)
-    assert len(batches) == 1
-    assert len(batches[0]) == 3
-
-
-def test_a_failed_write_leaves_no_partial_cancel(rig, monkeypatch) -> None:
-    ledger, clock, _b, _m, bracket = rig
-    before = {o.order_id: o.state for o in ledger.state(ACCOUNT).orders.values()}
-
-    def boom(events):
-        raise RuntimeError("write failed")
-
-    monkeypatch.setattr(ledger, "extend", boom)
-    size = _count(ledger)
-    with pytest.raises(RuntimeError, match="write failed"):
-        _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True)
-    assert _count(ledger) == size
-    after = {o.order_id: o.state for o in ledger.state(ACCOUNT).orders.values()}
-    assert after == before
+    assert [e.kind for e in seen] == [EventKind.ORDER_CANCELLED] * 3
+    seqs = [e.seq for e in seen]
+    assert seqs == list(range(seqs[0], seqs[0] + 3))
 
 
 def test_cli_venue_live_order_refuses_without_the_flag_and_passes_with_it(rig, capsys) -> None:

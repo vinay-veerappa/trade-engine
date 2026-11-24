@@ -72,15 +72,11 @@ from collections.abc import Iterable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from trade_engine.calendar.sessions import ExchangeCalendar
-from trade_engine.domain.exits import ClosePosition, MoveStop, OpenBracket, ReducePosition
-from trade_engine.domain.instruments import Equity, Instrument, OptionContract
-from trade_engine.domain.option_roots import SettleTime
-from trade_engine.domain.orders import OrderState, OrderType
-from trade_engine.domain.risk import RiskVerdict
-from trade_engine.domain.signals import OrderIntent, Signal
+from trade_engine.domain.instruments import Equity, Instrument
+from trade_engine.domain.orders import OrderState
+from trade_engine.domain.signals import OrderIntent
 from trade_engine.interfaces.broker import (
     BrokerAdapter,
     VenueFill,
@@ -89,21 +85,20 @@ from trade_engine.interfaces.broker import (
 )
 from trade_engine.interfaces.clock import Clock
 from trade_engine.eod.options_routing import OptionRouter
-from trade_engine.interfaces.market_data import MarketData, StaleDataError
-from trade_engine.ledger import CashFlow, EodRun, EodVoid, Event, EventKind, Ledger, Mark, OrderStateChange
-from trade_engine.ledger.state import AccountState, fold_account
+from trade_engine.interfaces.market_data import MarketData
+from trade_engine.ledger import Ledger
+from trade_engine.ledger.state import AccountState
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
-from trade_engine.oms.options import OptionOrderManager, open_structures
+from trade_engine.oms.options import OptionOrderManager
 from trade_engine.oms.reconcile import ReconcileError, resync_open_brackets
 from trade_engine.oms.restore import RestoreError
 from trade_engine.risk import RiskContext, RiskEngine
-from trade_engine.sim import SimBroker, SnapshotVenue, underlying_of
+from trade_engine.sim import SimBroker, SnapshotVenue
 from trade_engine.sim._rs import register, rs
 from trade_engine.eod._runtime import decide, flag, micros
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
-NEW_YORK = ZoneInfo("America/New_York")
 # The in-session passes, in the order a session runs them: the morning's entries, then
 # the midday and late exits (owner, 2026-09-26: exits reach the venue the same day).
 PASSES = ("morning", "midday", "late")
@@ -154,45 +149,7 @@ def void_session(
     account and session is an idempotent no-op (I3, the command id). Returns the
     accounts handled, in the order given with repeats dropped.
     """
-    is_date = isinstance(session, date) and not isinstance(session, datetime)
-    chosen = tuple(dict.fromkeys(accounts))
-    known = set(ledger.accounts())
-    account_fields: list[str] = []
-    account_flags: list[bool] = []
-    for account_id in chosen:
-        is_str = isinstance(account_id, str)
-        k = is_str and account_id in known
-        ran = k and is_date and ledger.event_by_command(
-            decide("eod:command", ("eod", job, account_id, session.isoformat()))[0][0]
-        ) is not None
-        account_fields.append(account_id if is_str else "")
-        account_flags.extend((is_str, k, ran))
-    text = decide(
-        "eod:void_check",
-        (
-            repr(session),
-            str(session) if is_date else "",
-            reason if isinstance(reason, str) else "",
-            owner if isinstance(owner, str) else "",
-            *account_fields,
-        ),
-        flags=(
-            is_date,
-            isinstance(reason, str),
-            isinstance(owner, str),
-            is_date and calendar.is_session(session),
-            *account_flags,
-        ),
-    )[0]
-    for account_id in chosen:
-        ledger.append(Event(
-            account=account_id,
-            kind=EventKind.EOD_VOID,
-            payload=EodVoid(session, account_id, text[0], text[1], job),
-            ts_utc=clock.now_utc(),
-            command_id=_void_command(job, account_id, session),
-        ))
-    return chosen
+    return tuple(rs.eod_void_session(ledger, clock, calendar, job, session, list(accounts), reason, owner))
 
 
 def write_off_order(
@@ -227,73 +184,7 @@ def write_off_order(
 
     Returns the ids cancelled.
     """
-    known = account_id in set(ledger.accounts())
-    command = f"eod-writeoff:{account_id}:{order_id}"
-    already = known and ledger.event_by_command(command) is not None
-    # The order fields are read only when the write-off could still happen (I3 repeats write nothing).
-    state = None
-    order = None
-    order_fields = ("", "0", "", "0", "")
-    children: list[str] = []
-    if known and not already:
-        state = ledger.state(account_id)
-        order = state.orders.get(order_id)
-        parent_id = "" if order is None or order.parent_order_id is None else order.parent_order_id
-        order_fields = (
-            "" if order is None else order.state.value,
-            str(state.filled_quantity.get(order_id, Decimal("0"))),
-            parent_id,
-            str(state.filled_quantity.get(parent_id, Decimal("0"))) if parent_id else "0",
-            state.venue_order_ids.get(order_id) or "",
-        )
-        for child_id, child in state.orders.items():
-            if child.parent_order_id == order_id:
-                children.extend((child_id, child.state.value, state.venue_order_ids.get(child_id) or ""))
-    text, _numbers, flags = decide(
-        "eod:writeoff_check",
-        (
-            reason if isinstance(reason, str) else "",
-            owner if isinstance(owner, str) else "",
-            account_id,
-            order_id,
-            *order_fields,
-            *children,
-        ),
-        flags=(
-            isinstance(reason, str),
-            isinstance(owner, str),
-            known,
-            already,
-            order is not None,
-            bool(venue_cancel_confirmed),
-        ),
-    )
-    if not flags[0]:
-        return ()
-    cancelled = text[1:]
-    entry_id, child_ids = cancelled[0], cancelled[1:]
-    ts = clock.now_utc()
-    events = [Event(
-        account=account_id,
-        kind=EventKind.ORDER_CANCELLED,
-        payload=OrderStateChange(entry_id, reason=text[0], venue_order_id=state.venue_order_ids.get(entry_id)),
-        ts_utc=ts,
-        command_id=command,
-    )]
-    for child_id in child_ids:
-        events.append(Event(
-            account=account_id,
-            kind=EventKind.ORDER_CANCELLED,
-            payload=OrderStateChange(
-                child_id,
-                reason=f"{text[0]} (bracket child of {order_id})",
-                venue_order_id=state.venue_order_ids.get(child_id),
-            ),
-            ts_utc=ts,
-            command_id=f"{command}:child:{child_id}",
-        ))
-    ledger.extend(events)
-    return tuple(cancelled)
+    return tuple(rs.eod_write_off(ledger, clock, account_id, order_id, reason, owner, bool(venue_cancel_confirmed)))
 register("runtime_incomplete", SessionIncompleteError)
 register("runtime_replay", ReplayDataError)
 
@@ -409,6 +300,9 @@ class EodRunner:
         self._calendar = calendar
         self._market_data = market_data
         self._config = config.normalized
+        # The native EOD host needs a plain Ledger on the XNYS calendar; it refuses otherwise
+        # (no Python fallback, W6-C3a).
+        rs.eod_require_native(ledger, calendar)
         self._managers: dict[str, OrderManager] = {}
         self._option_managers: dict[str, OptionOrderManager] = {}
         self._option_routers: dict[str, OptionRouter] = {
@@ -464,61 +358,8 @@ class EodRunner:
             reason=reason, owner=owner,
         )
 
-    def _pass_job(self, name: str) -> str:
-        return decide("eod:pass_job", (self._config.job_name, name))[0][0]
-
-    def _pass_command(self, account_id: str, session: date, name: str) -> str:
-        return decide("eod:command", ("eod", self._pass_job(name), account_id, session.isoformat()))[0][0]
-
-    def _passes_through(self, account_id: str, session: date) -> datetime | None:
-        """Where the account's newest pass of the session stopped, if one ran."""
-        ends = [
-            event.payload.at_close
-            for name in PASSES
-            if (event := self._ledger.event_by_command(self._pass_command(account_id, session, name))) is not None
-        ]
-        chosen = decide("eod:latest", numbers=tuple(micros(end) for end in ends))[1]
-        return ends[chosen[0]] if chosen else None
-
     def _is_options(self, account_id: str) -> bool:
         return callable(getattr(self._config.brokers[account_id], "process_snapshot", None))
-
-    def _run_command(self, account_id: str, session: date) -> str:
-        return decide("eod:command", ("eod", self._config.job_name, account_id, session.isoformat()))[0][0]
-
-    def _require_previous_session_complete(self, session: date) -> None:
-        previous = self._calendar.previous_session(session)
-        for account_id in sorted(self._config.brokers):
-            if self._ledger.event_by_command(self._run_command(account_id, session)) is not None:
-                # This session already completed; the re-run proves idempotency itself.
-                continue
-            if self._account_has_history(account_id, session):
-                # The third flag is the owner's void of that session (EOD-VOID-1): it counts as complete.
-                decide("eod:previous", (session.isoformat(), account_id, previous.isoformat(), self._config.job_name),
-                    flags=(True,
-                           self._ledger.event_by_command(self._run_command(account_id, previous)) is not None,
-                           self._ledger.event_by_command(_void_command(self._config.job_name, account_id, previous))
-                           is not None))
-
-    def _account_has_history(self, account_id: str, session: date) -> bool:
-        """Whether this job has marked a session BEFORE ``session`` for the account.
-
-        Only this job's own markers count: an account the intraday service also runs
-        carries that service's markers, and its first after-close run must not be
-        refused for lacking a previous session it never had (I3). An in-session pass is
-        this job's own: the session it began still needs its after-close run. But the
-        run session's own markers are not history: the ledger's first session starts
-        with a pass, and that session's passes and after-close run must not be refused
-        for lacking a previous session it never had either.
-        """
-        for event in self._ledger.events(account=account_id):
-            is_run = event.kind is EventKind.EOD_RUN
-            if flag("eod:history",
-                    (event.payload.job if is_run else "", self._config.job_name,
-                     event.payload.session.isoformat() if is_run else "", session.isoformat()),
-                    flags=(is_run,)):
-                return True
-        return False
 
     # -- per-account run ---------------------------------------------------------
 
@@ -562,17 +403,6 @@ class EodRunner:
         tally: "_Tally",
     ) -> AccountRunResult:
         return rs.eod_finish(self, account_id, session, instruments, tally, False)
-
-    def _fill_count(self, account_id: str) -> int:
-        return decide("eod:count_events", (EventKind.FILL.value, "", *(value
-            for event in self._ledger.events(account=account_id)
-            for value in (event.kind.value, event.command_id or ""))))[1][0]
-
-    def _marks_appended(self, account_id: str, session: date) -> int:
-        return decide("eod:count_events", (EventKind.MARK.value,
-            f"eod:mark:{account_id}:{session.isoformat()}:", *(value
-            for event in self._ledger.events(account=account_id)
-            for value in (event.kind.value, event.command_id or ""))))[1][0]
 
     def _rehydrate_venue(
         self, account_id: str, broker: BrokerAdapter, state: AccountState
@@ -707,65 +537,6 @@ class EodRunner:
             self._managers[account_id] = manager
         return manager
 
-    def _mark_positions(
-        self,
-        account_id: str,
-        last_regular_closes: Mapping[Instrument, Decimal],
-        session: date,
-    ) -> None:
-        state = self._ledger.state(account_id)
-        for instrument, position in sorted(
-            state.positions.items(), key=lambda item: item[0].symbol
-        ):
-            if not flag("eod:nonzero", (str(position.quantity),)):
-                continue
-            mark_command = decide("eod:command", ("eod:mark",account_id,session.isoformat(),instrument.symbol))[0][0]
-            if self._ledger.event_by_command(mark_command) is not None:
-                continue
-            close = last_regular_closes.get(instrument)
-            decide("eod:mark", (str(position.quantity), instrument.symbol, account_id), flags=(False, close is not None))
-            now = self._clock.now_utc()
-            self._ledger.append(
-                Event(
-                    account=account_id,
-                    kind=EventKind.MARK,
-                    payload=Mark(
-                        instrument=instrument,
-                        price=close,
-                        as_of=now,
-                        source=f"eod:{self._config.job_name}",
-                    ),
-                    ts_utc=now,
-                    command_id=mark_command,
-                )
-            )
-
-    def _append_run_marker(
-        self,
-        account_id: str,
-        session: date,
-        bars_processed: int,
-        *,
-        job: str | None = None,
-        command_id: str | None = None,
-    ) -> None:
-        now = self._clock.now_utc()
-        self._ledger.append(
-            Event(
-                account=account_id,
-                kind=EventKind.EOD_RUN,
-                payload=EodRun(
-                    session=session,
-                    job=job or self._config.job_name,
-                    account_id=account_id,
-                    bars_processed=bars_processed,
-                    at_close=now,
-                ),
-                ts_utc=now,
-                command_id=command_id or self._run_command(account_id, session),
-            )
-        )
-
     # -- exits: strategy exit rules at the close ---------------------------------
 
     def _manage_positions(
@@ -783,131 +554,10 @@ class EodRunner:
         """
         return rs.eod_manage_positions(self, account_id, session, last_regular_closes)
 
-    def _open_brackets(
-        self,
-        account_id: str,
-        session: date,
-        last_regular_closes: Mapping[Instrument, Decimal],
-    ) -> list[OpenBracket]:
-        state = self._ledger.state(account_id)
-        brackets: list[OpenBracket] = []
-        for entry in sorted(state.orders.values(), key=lambda order: order.order_id):
-            if entry.parent_order_id is not None:
-                continue
-            orders = tuple(state.orders.values())
-            _, indices, child_mask = decide("eod:children", (entry.order_id, *(value
-                for order in orders for value in (order.parent_order_id or "", order.order_type.value, order.state.value))))
-            children = [order for order, child in zip(orders, child_mask) if child]
-            stop = orders[indices[0]] if indices[0] >= 0 else None
-            entry_fills = [fill for fill in state.fills if fill.order_id == entry.order_id]
-            if stop is None or stop.stop_price is None or not entry_fills:
-                continue
-            values, _, opened = decide("eod:bracket", (
-                *(str(fill.quantity) for fill in entry_fills),
-                *(str(state.filled_quantity.get(order.order_id, Decimal("0"))) for order in children),
-                *(value for fill in entry_fills for value in (str(fill.price), str(fill.quantity))),
-            ), numbers=(len(entry_fills), len(entry_fills) + len(children)))
-            if not opened[0]:
-                continue
-            filled, open_quantity, average = map(Decimal, values)
-            targets = [orders[i] for i in indices[1:]]
-            first_fill = entry_fills[decide("eod:earliest", numbers=tuple(micros(fill.filled_at) for fill in entry_fills))[1][0]].filled_at
-            entry_session = self._calendar.roll_to_session(
-                first_fill.astimezone(NEW_YORK).date(), "next"
-            )
-            brackets.append(
-                OpenBracket(
-                    entry_order_id=entry.order_id,
-                    account_id=account_id,
-                    instrument=entry.instrument,
-                    side=entry.side,
-                    entry_quantity=filled,
-                    open_quantity=open_quantity,
-                    average_entry_price=average,
-                    entry_filled_at=first_fill,
-                    entry_session=entry_session,
-                    sessions_held=len(self._calendar.sessions_in_range(entry_session, session))
-                    - 1,
-                    stop_price=stop.stop_price,
-                    targets_filled=decide("eod:filled", tuple(order.state.value for order in targets))[1][0],
-                    open_targets=tuple(
-                        (
-                            order.limit_price,
-                            Decimal(decide("eod:subtract", (str(order.quantity),
-                                str(state.filled_quantity.get(order.order_id, Decimal("0")))))[0][0]),
-                        )
-                        for order in targets
-                        if not flag("eod:terminal", (order.state.value,)) and order.limit_price is not None
-                    ),
-                    last_close=last_regular_closes.get(entry.instrument),
-                )
-            )
-        return brackets
-
     # -- entries for D+1 ---------------------------------------------------------
 
     def _submit_new_orders(self, account_id: str, session: date) -> int:
         return rs.eod_entries(self, account_id, session, None, False)
-
-    def _record_signal(self, account_id: str, signal: Signal) -> None:
-        now = self._clock.now_utc()
-        self._ledger.append(
-            Event(
-                account=account_id,
-                kind=EventKind.SIGNAL_SEEN,
-                payload=signal,
-                ts_utc=now,
-                command_id=f"signal:{signal.signal_id}",
-            )
-        )
-
-    def recorded_verdict(self, account_id: str, intent: OrderIntent) -> RiskVerdict | None:
-        """The verdict an earlier, interrupted run recorded for this intent, if any (F3)."""
-        event = self._ledger.event_by_command(f"risk:{intent.command_id}")
-        return None if event is None else event.payload
-
-    def _record_verdict(self, account_id: str, intent: OrderIntent, verdict: RiskVerdict) -> None:
-        now = self._clock.now_utc()
-        self._ledger.append(
-            Event(
-                account=account_id,
-                kind=EventKind.RISK_VERDICT,
-                payload=verdict,
-                ts_utc=now,
-                command_id=f"risk:{intent.command_id}",
-            )
-        )
-
-    def _derive_risk_context(
-        self, intent: OrderIntent, state: AccountState
-    ) -> RiskContext:
-        """Fold-derived measurements; every input the fold cannot supply stays None,
-        so the matching rule records UNKNOWN and refuses (I5), never guesses."""
-        held = state.positions.get(intent.instrument)
-        positions = tuple(state.positions.values())
-        values, counts, positive = decide("eod:risk", (
-            str(state.cash), str(held.quantity) if held is not None else "0",
-            *(value for position in positions for value in (
-                str(position.quantity), str(state.marks.get(position.instrument, Decimal("0"))))),
-        ), flags=tuple(position.instrument in state.marks for position in positions))
-        return RiskContext(
-            equity=Decimal(values[0]) if positive[0] else None,
-            current_price=None,
-            gross_exposure=Decimal(values[1]),
-            portfolio_heat=None,
-            open_positions=counts[0],
-            industry=None,
-            industry_positions=None,
-            average_dollar_volume_20d=None,
-            sessions_until_earnings=None,
-            regime=None,
-            macro_high_risk_day=None,
-            drawdown_from_peak_frac=None,
-            previous_session_pnl_frac=None,
-            venue_orders_today=None,
-            venue_daily_pnl=None,
-            current_position_quantity=int(values[2]),
-        )
 
     # -- options accounts (O4) ---------------------------------------------------
 
@@ -918,78 +568,8 @@ class EodRunner:
             self._option_managers[account_id] = manager
         return manager
 
-    def _session_snapshots(
-        self, session: date, options: Sequence[str], *, covered: bool = True
-    ) -> list[ChainSnapshot]:
-        """The session's chain snapshots, checked before anything is replayed (I5).
-
-        Each must lie inside the session. With ``covered``, every underlying an options
-        account holds an option on or has an order working on needs one: without it
-        nothing could fill or be marked, and a guess is not a mark.
-        """
-        if not options:
-            return []
-        decide("eod:snapshots_wiring", (str(list(options)),),
-            flags=(self._config.chain_snapshots is not None, self._config.settlements is not None))
-        session_open = self._calendar.session_open(session)
-        session_close = self._calendar.session_close(session)
-        snapshots = sorted(
-            self._config.chain_snapshots(session), key=lambda item: (item.as_of, item.underlying)
-        )
-        for snapshot in snapshots:
-            valid = isinstance(snapshot, ChainSnapshot)
-            decide("eod:snapshot", (type(snapshot).__name__, snapshot.underlying if valid else "",
-                snapshot.as_of.isoformat() if valid else "", session.isoformat()),
-                numbers=(micros(session_open), micros(snapshot.as_of) if valid else 0, micros(session_close)),
-                flags=(valid,))
-        have = {snapshot.underlying for snapshot in snapshots}
-        for account_id in options if covered else ():
-            missing = sorted(self._option_underlyings(self._ledger.state(account_id)) - have)
-            decide("eod:coverage", (", ".join(missing), session.isoformat(), account_id))
-        return snapshots
-
-    @staticmethod
-    def _option_underlyings(state: AccountState) -> set[str]:
-        needed = {
-            underlying_of(instrument)
-            for instrument, position in state.positions.items()
-            if isinstance(instrument, OptionContract) and flag("eod:nonzero", (str(position.quantity),))
-        }
-        needed |= {
-            underlying_of(order.instrument)
-            for order in state.orders.values()
-            if flag("eod:working", (order.state.value,))
-        }
-        return needed
-
-    def _options_at_snapshot(
-        self, account_id: str, session: date, snapshot: ChainSnapshot, tally: "_Tally"
-    ) -> None:
-        """Match the account's working orders, then let the strategy act on these quotes."""
-        tallied = self._router(account_id).manage_at_snapshot(
-            account_id, session, snapshot, tally.snapshots, self._run_command(account_id, session)
-        )
-        tally.orders_submitted, tally.exit_actions, tally.snapshots_processed = (int(v) for v in decide("routing:tally", text=tuple(str(v) for v in (
-            tally.orders_submitted, tally.exit_actions, tally.snapshots_processed,
-            tallied.orders_submitted, tallied.exit_actions, tallied.snapshots_processed)))[0])
-
     def _router(self, account_id: str) -> "OptionRouter":
         return self._option_routers[account_id]
-
-    def _settle_options(self, session: date, options: Sequence[str]) -> None:
-        """Expiry, exercise and assignment, on the official prices (O2, I9)."""
-        holding = [
-            account_id
-            for account_id in options
-            if any(
-                isinstance(instrument, OptionContract) and flag("eod:nonzero", (str(position.quantity),))
-                for instrument, position in self._ledger.state(account_id).positions.items()
-            )
-        ]
-        if not holding:
-            return
-        decide("eod:lifecycle", (str(holding),), flags=(bool(holding), self._config.lifecycle is not None))
-        self._config.lifecycle.run(session, holding)
 
     def _finish_options_account(
         self, account_id: str, session: date, tally: "_Tally"
@@ -1012,122 +592,6 @@ class EodRunner:
 
     def _submit_new_option_entries(self, account_id: str, session: date, tally: "_Tally") -> None:
         rs.eod_entries(self, account_id, session, tally, True)
-
-    def _credit_dividends(self, account_id: str, session: date) -> None:
-        """Credit (or charge) today's ex-dividends on the shares held at the open.
-
-        Whoever holds a share when it opens ex-dividend is owed the dividend, so the
-        holding is the account as it stood before the session opened. A short holding
-        pays it. The cash is booked on the ex-date, the day the price drops by it.
-        """
-        session_open = self._calendar.session_open(session)
-        before = fold_account(
-            (event for event in self._ledger.events(account=account_id)
-                if flag("eod:preopen", numbers=(micros(event.ts_utc), micros(session_open)))),
-            account_id,
-        )
-        shares = sorted(
-            (
-                (instrument, position)
-                for instrument, position in before.positions.items()
-                if isinstance(instrument, Equity) and flag("eod:nonzero", (str(position.quantity),))
-            ),
-            key=lambda item: item[0].symbol,
-        )
-        if not shares:
-            return
-        source = self._config.dividends
-        decide("eod:dividend_source", (account_id,), flags=(source is not None,))
-        now = self._clock.now_utc()
-        for instrument, position in shares:
-            try:
-                found = source.dividends(instrument.symbol, session)
-            except StaleDataError as err:
-                raise ReplayDataError(f"'{account_id}' holds {instrument.symbol}: {err}") from err
-            for dividend in found:
-                decide("eod:dividend_stamp", (instrument.symbol, dividend.as_of.isoformat()),
-                    numbers=(micros(dividend.as_of), micros(now)))
-            values, _, credit = decide("eod:dividend", (str(position.quantity), *(str(dividend.amount) for dividend in found)))
-            if not credit[0]:
-                continue
-            per_share, amount = map(Decimal, values)
-            self._ledger.append(
-                Event(
-                    account=account_id,
-                    kind=EventKind.CASH_FLOW,
-                    payload=CashFlow(
-                        amount=amount,
-                        kind="dividend",
-                        as_of=now,
-                        note=(
-                            f"{instrument.symbol} ex-dividend {session.isoformat()}: {per_share} "
-                            f"a share on {position.quantity} held at the open"
-                        ),
-                    ),
-                    ts_utc=now,
-                    command_id=f"dividend:{account_id}:{instrument.symbol}:{session.isoformat()}",
-                )
-            )
-
-    def _mark_options_account(self, account_id: str, session: date, tally: "_Tally") -> None:
-        """Options at the newest snapshot's mid; shares and underlyings at the official close.
-
-        The underlying of every option held is marked too, held or not: its option
-        margin is measured against it (O3). Anything without a price refuses (I5).
-        """
-        state = self._ledger.state(account_id)
-        marks: dict[Instrument, tuple[Decimal, str]] = {}
-        underlyings: set[str] = set()
-        for instrument, position in sorted(state.positions.items(), key=lambda item: item[0].symbol):
-            if not flag("eod:nonzero", (str(position.quantity),)):
-                continue
-            if isinstance(instrument, OptionContract):
-                underlying = underlying_of(instrument)
-                snapshot = tally.snapshots.get(underlying)
-                quote = None if snapshot is None else snapshot.get(instrument)
-                decide("eod:option_mark", (str(quote.mid) if quote is not None else "0",
-                    session.isoformat(), instrument.occ.strip(), account_id), flags=(quote is not None,))
-                # Still the mid (a refused mark would block every run for one illiquid
-                # contract), but its provenance names the quote's real time.
-                source = decide("eod:quote_source", (snapshot.as_of.isoformat(), quote.as_of.isoformat()),
-                                (micros(snapshot.as_of - quote.as_of),),
-                                floats=(self._config.mark_max_quote_age_seconds,))[0][0]
-                marks[instrument] = (quote.mid, source)
-                underlyings.add(underlying)
-            elif isinstance(instrument, Equity):
-                marks[instrument] = self._official_close(instrument.symbol, session)
-            else:
-                decide("eod:unmarkable", (account_id, instrument.symbol))
-        for underlying in sorted(underlyings):
-            if Equity(underlying) not in marks:
-                marks[Equity(underlying)] = self._official_close(underlying, session)
-        now = self._clock.now_utc()
-        for instrument, (price, source) in sorted(marks.items(), key=lambda item: item[0].symbol):
-            command = decide("eod:command", ("eod:mark",account_id,session.isoformat(),instrument.symbol))[0][0]
-            if self._ledger.event_by_command(command) is not None:
-                continue
-            self._ledger.append(
-                Event(
-                    account=account_id,
-                    kind=EventKind.MARK,
-                    payload=Mark(instrument=instrument, price=price, as_of=now, source=source),
-                    ts_utc=now,
-                    command_id=command,
-                )
-            )
-
-    def _official_close(self, symbol: str, session: date) -> tuple[Decimal, str]:
-        try:
-            price = self._config.settlements.settlement(symbol, session, SettleTime.PM)
-        except StaleDataError as err:
-            raise ReplayDataError(f"No official {session.isoformat()} close for {symbol}: {err}") from err
-        decide("eod:official_identity", (symbol, price.underlying, session.isoformat(), price.session.isoformat(), price.settle_time.value))
-        now = self._clock.now_utc()
-        decide("eod:official_future", (symbol, price.as_of.isoformat(), now.isoformat()),
-            numbers=(micros(price.as_of), micros(now)))
-        decide("eod:official_close", (symbol, price.as_of.isoformat()),
-            numbers=(micros(price.as_of), micros(self._calendar.session_close(session))))
-        return price.price, price.source
 
     # -- sinks -------------------------------------------------------------------
 
