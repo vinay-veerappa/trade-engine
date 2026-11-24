@@ -1,174 +1,22 @@
-//! P3b-1: the OMS decisions of `reconcile.py`, `restore.py` and `oms/options.py`
-//! (`te_core::oms::{reconcile, restore, options}`) as the Python shims reach them. Plain
-//! values in and out; a refusal crosses as `ValueError((kind, message))`; an exception a
-//! host callback raised (a ledger read) is re-raised as itself.
+//! P3b-1: the OMS decisions of `oms/options.py` (`te_core::oms::options`) as the Python
+//! shims reach them. Plain values in and out; a refusal crosses as `ValueError((kind,
+//! message))`; an exception a host callback raised (a ledger read) is re-raised as itself.
+//!
+//! W6-D2: the `reconcile.py` / `restore.py` shims moved to `oms_native.rs`; the option
+//! plan/fingerprint pyfunctions below stay here.
 
 use pyo3::prelude::*;
 use te_core::ledger::bridge as lb;
-use te_core::ledger::json::{dumps, Json};
-use te_core::ledger::model::{err, Fill, Instrument, Obj, Side, R as LR};
+use te_core::ledger::model::{err, Instrument, Side, R as LR};
 use te_core::oms::options as oo;
-use te_core::oms::reconcile as rc;
-use te_core::oms::restore as rs;
 
-use crate::sim::{dec, instrument, refuse, Host};
-
-fn fill(text: &str) -> LR<Fill> {
-    match lb::obj_from_text(text)? {
-        Obj::Fill(f) => Ok(f),
-        _ => err("value", "expected a fill"),
-    }
-}
+use crate::sim::{dec, instrument, refuse};
 
 fn side(s: &str) -> LR<Side> {
     match Side::parse(s) {
         Some(v) => Ok(v),
         None => err("value", format!("bad side {s:?}")),
     }
-}
-
-// --- reconcile --------------------------------------------------------------------------
-
-/// The venue orders to re-read, in the venue's order.
-#[pyfunction]
-pub(crate) fn oms_orders_to_read(state: &str, venue_order_ids: Vec<String>) -> PyResult<Vec<String>> {
-    let r = || -> LR<Vec<String>> {
-        let st = lb::account_from_text(state)?;
-        Ok(rc::orders_to_read(&st, &venue_order_ids))
-    };
-    r().map_err(refuse)
-}
-
-#[pyfunction]
-pub(crate) fn oms_check_known_order(state: &str, fill_id: &str, venue_order_id: &str, account_id: &str) -> PyResult<()> {
-    let r = || -> LR<()> {
-        let st = lb::account_from_text(state)?;
-        rc::check_known_order(&st, fill_id, venue_order_id, account_id)
-    };
-    r().map_err(refuse)
-}
-
-/// `json.dumps` of the top-level object without sorting: the payload keeps its order.
-fn ordered(j: &Json) -> String {
-    match j {
-        Json::Obj(pairs) => {
-            let items: Vec<String> =
-                pairs.iter().map(|(k, v)| format!("{}:{}", dumps(&Json::Str(k.clone())), ordered(v))).collect();
-            format!("{{{}}}", items.join(","))
-        }
-        other => dumps(other),
-    }
-}
-
-/// The journal execution as JSON text.
-#[pyfunction]
-pub(crate) fn oms_journal_payload(state: &str, fill_tree: &str, journal_account: &str, has_seq: bool) -> PyResult<String> {
-    let r = || -> LR<String> {
-        let st = lb::account_from_text(state)?;
-        let f = fill(fill_tree)?;
-        Ok(ordered(&rc::journal_payload(&st, &f, journal_account, has_seq)?))
-    };
-    r().map_err(refuse)
-}
-
-/// The account's FILL events as `(seq, order_id, fill_id)`, in ledger-seq order.
-fn fill_refs(raw: Vec<(i64, String, String)>) -> Vec<rc::FillRef> {
-    raw.into_iter().map(|(seq, order_id, fill_id)| rc::FillRef { seq, order_id, fill_id }).collect()
-}
-
-/// The bracket entry and resync fill id for one order, or None when no fill matches.
-#[pyfunction]
-pub(crate) fn oms_bracket_resync_cause(
-    state: &str,
-    fills: Vec<(i64, String, String)>,
-    order_id: &str,
-) -> PyResult<Option<(String, String)>> {
-    let r = || -> LR<Option<(String, String)>> {
-        let st = lb::account_from_text(state)?;
-        rc::bracket_resync_cause(&st, &fill_refs(fills), order_id)
-    };
-    r().map_err(refuse)
-}
-
-/// The `(entry_id, cause_fill_id)` of every bracket to re-sync, in the state's order.
-#[pyfunction]
-pub(crate) fn oms_brackets_to_resync(state: &str, fills: Vec<(i64, String, String)>) -> PyResult<Vec<(String, String)>> {
-    let r = || -> LR<Vec<(String, String)>> {
-        let st = lb::account_from_text(state)?;
-        Ok(rc::brackets_to_resync(&st, &fill_refs(fills)))
-    };
-    r().map_err(refuse)
-}
-
-/// What a recorded fill heals: `(resync, rejournal_candidate)`, `resync` as `(entry_id, fill_id)`.
-#[pyfunction]
-#[pyo3(signature = (state, fills, fill_id, order_id, fill_seq=None))]
-pub(crate) fn oms_heal_plan(
-    state: &str,
-    fills: Vec<(i64, String, String)>,
-    fill_id: &str,
-    order_id: &str,
-    fill_seq: Option<i64>,
-) -> PyResult<(Option<(String, String)>, bool)> {
-    let r = || -> LR<(Option<(String, String)>, bool)> {
-        let st = lb::account_from_text(state)?;
-        let plan = rc::heal_plan(&st, &fill_refs(fills), fill_id, order_id, fill_seq)?;
-        Ok((plan.resync, plan.rejournal_candidate))
-    };
-    r().map_err(refuse)
-}
-
-// --- restore ----------------------------------------------------------------------------
-
-type PendingT = (String, Option<String>, String);
-
-fn events(raw: Vec<PendingT>) -> Vec<rs::PendingEvent> {
-    raw.into_iter().map(|(order_id, command_id, reason)| rs::PendingEvent { order_id, command_id, reason }).collect()
-}
-
-/// `submit`, `cancel` or `unknown`, from the account's ORDER_PENDING events.
-#[pyfunction]
-pub(crate) fn oms_pending_request(raw: Vec<PendingT>, order_id: &str) -> &'static str {
-    rs::pending_request(&events(raw), order_id)
-}
-
-type RestoredT = (Vec<(String, String, String)>, Vec<(usize, String, String)>);
-
-#[pyfunction]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn oms_restorable(
-    state: &str,
-    account_id: &str,
-    pending: &str,
-    has_resolution: bool,
-    pre_unresolved: Vec<String>,
-    raw: Vec<PendingT>,
-    note: &Bound<'_, PyAny>,
-    submitted: &Bound<'_, PyAny>,
-) -> PyResult<RestoredT> {
-    let host = Host::new();
-    let r = (|| -> LR<RestoredT> {
-        let st = lb::account_from_text(state)?;
-        let mut on_note = |resolved: &[String], unresolved: &[(String, String)]| -> LR<()> {
-            note.call1((resolved.to_vec(), unresolved.to_vec())).map(|_| ()).map_err(|e| host.fail(e))
-        };
-        let mut on_submitted = |command: &str| -> LR<bool> {
-            submitted.call1((command,)).and_then(|v| v.extract::<bool>()).map_err(|e| host.fail(e))
-        };
-        let mut cb = rs::Callbacks { note: &mut on_note, submitted: &mut on_submitted };
-        let plan = rs::restorable(&st, account_id, pending, has_resolution, &pre_unresolved, &events(raw), &mut cb)?;
-        Ok((plan.orders.into_iter().map(|(a, b, c)| (a, b, c.to_string())).collect(), plan.fills))
-    })();
-    host.finish(r)
-}
-
-#[pyfunction]
-pub(crate) fn oms_restorable_positions(state: &str) -> PyResult<Vec<(usize, Option<usize>)>> {
-    let r = || -> LR<Vec<(usize, Option<usize>)>> {
-        let st = lb::account_from_text(state)?;
-        rs::positions_plan(&st)
-    };
-    r().map_err(refuse)
 }
 
 // --- options ----------------------------------------------------------------------------
@@ -291,15 +139,6 @@ pub(crate) fn oms_sync_plan(state: &str) -> PyResult<Vec<(String, Option<String>
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(oms_manager_decide, m)?)?;
     m.add_function(wrap_pyfunction!(crate::flow::oms_flow, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_orders_to_read, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_check_known_order, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_journal_payload, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_bracket_resync_cause, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_brackets_to_resync, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_heal_plan, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_pending_request, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_restorable, m)?)?;
-    m.add_function(wrap_pyfunction!(oms_restorable_positions, m)?)?;
     m.add_function(wrap_pyfunction!(oms_intent_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(oms_order_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(oms_replay_conflict, m)?)?;
