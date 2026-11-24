@@ -312,7 +312,8 @@ def test_batch_fold_refusal_and_outbox_constraint_rollback(tmp_path):
 
 
 # field, value, the refusal every read/write action returns, the action that succeeds (if any),
-# the reopened append's refusal, and the accounts the store then lists.
+# the reopened append's refusal, and the accounts the store then lists (or its refusal: a blob account is
+# not an account name).
 MALFORMED = [
     pytest.param("payload_json", "not json", ("err", "JSONDecodeError", "Expecting value"), None,
                  ("err", "JSONDecodeError", "Expecting value"), ["z-last"], id="payload-not-json"),
@@ -342,7 +343,8 @@ MALFORMED = [
                  ("err", "TypeError", "argument 'rows': " + BYTES_TEXT), ["z-last"], id="kind-blob"),
     pytest.param("account", sqlite3.Binary(b"blob-account"),
                  ("err", "TypeError", "argument 'account': " + BYTES_TEXT), "snapshot",
-                 ("err", "JSONDecodeError", "Expecting value"), ["z-last", b"blob-account"], id="account-blob"),
+                 ("err", "JSONDecodeError", "Expecting value"), ("err", "TypeError", "account must be str"),
+                 id="account-blob"),
 ]
 
 
@@ -367,7 +369,7 @@ def test_malformed_history_refuses_with_exact_errors(tmp_path, field, value, ref
             else:
                 state = call()
                 assert (state.last_seq, state.cash) == (1, Decimal("1"))
-        assert ledger.accounts() == accounts
+        assert (result(ledger.accounts) if isinstance(accounts, tuple) else ledger.accounts()) == accounts
         assert ledger.has_command("bad")  # has_command does not decode the row.
         ledger.close()
         ledger.open()

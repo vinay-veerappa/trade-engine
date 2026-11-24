@@ -319,24 +319,6 @@ fn parse_csv(text: &str) -> HashMap<NaiveDate, (DateTime<Utc>, DateTime<Utc>)> {
     map
 }
 
-/// Every date on which the root's table and pmc disagree (open instant, close instant, or one of them has no session).
-fn pmc_diffs(root: &str, csv: &str) -> Vec<(NaiveDate, Option<(DateTime<Utc>, DateTime<Utc>)>, Option<(DateTime<Utc>, DateTime<Utc>)>)> {
-    let cal = globex::GlobexCalendar::for_root(root).unwrap();
-    let pmc = parse_csv(csv);
-    let table: HashSet<NaiveDate> = cal.sessions_in_range(cal.first_date(), cal.last_date()).unwrap().into_iter().collect();
-    let mut dates: Vec<NaiveDate> = table.iter().copied().chain(pmc.keys().copied()).collect::<HashSet<_>>().into_iter().collect();
-    dates.sort();
-    let mut out = Vec::new();
-    for d in dates {
-        let t = table.contains(&d).then(|| (cal.session_open(d).unwrap(), cal.session_close(d).unwrap()));
-        let p = pmc.get(&d).copied();
-        if t != p {
-            out.push((d, t, p));
-        }
-    }
-    out
-}
-
 /// The 72 dates on which the energy table (CL, MCL) and the metals table (GC, MGC) disagree with pmc. Both groups
 /// disagree on the same dates, and every disagreement is an early-halt MINUTE (pmc carries no halt times: it uses
 /// 13:00, 14:30 or a regular 17:00 close, its own rules per era). No pmc session date is missing from, or extra to,

@@ -543,7 +543,7 @@ mod tests {
             started.clone(),
             Box::new(|| Outcome::Completed(json!({"bars": 2}))),
         );
-        let mut actor = world.actor("first", 4, host, Duration::from_secs(30));
+        let actor = world.actor("first", 4, host, Duration::from_secs(30));
         let (record, inserted) = actor.submit(World::request("one")).unwrap();
         assert!(inserted);
         // The duplicate returns the same persisted admission; the worker may
