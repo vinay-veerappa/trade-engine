@@ -94,10 +94,6 @@ def _wire(value):
     return value
 
 
-def _plan(operation: str, **request):
-    return json.loads(_rs.call(_rs.rs.oms_manager_decide, operation, codec.text(_wire(request))))
-
-
 @dataclass(frozen=True)
 class _OrderContext:
     order: Order
@@ -401,52 +397,54 @@ class OrderManager:
     # The pure decisions stay the P3b-2a shims over ``te_core::oms::manager``.
     @staticmethod
     def _is_reduce(order: Order, entry_order_id: str) -> bool:
-        return _plan("is_reduce", entry=entry_order_id, order_id=order.order_id)
+        return _rs.call(_rs.rs.oms_manager_is_reduce, entry_order_id, order.order_id)
 
 
     @staticmethod
     def _replacement_terms(order: Order, changes: OrderChanges, filled: Decimal):
-        _plan("replace_quantity", quantity=changes.new_quantity, filled=filled,
-              equity=isinstance(order.instrument, Equity))
-        quantity, limit, stop, noop = _plan(
-            "replace_terms", order=order, quantity=changes.new_quantity,
-            limit=changes.new_limit_price, stop=changes.new_stop_price,
+        _rs.call(_rs.rs.oms_manager_replace_quantity, changes.new_quantity, filled,
+                 isinstance(order.instrument, Equity))
+        quantity, limit, stop, noop = _rs.call(
+            _rs.rs.oms_manager_replace_terms, order, changes.new_quantity,
+            changes.new_limit_price, changes.new_stop_price,
         )
-        return replace(order, quantity=Decimal(quantity),
-                       limit_price=None if limit is None else Decimal(limit),
-                       stop_price=None if stop is None else Decimal(stop)), noop
+        return replace(order, quantity=quantity,
+                       limit_price=limit,
+                       stop_price=stop), noop
 
 
     @staticmethod
     def _bracket_fingerprint(intent: OrderIntent, quantity: Decimal) -> str:
-        return _plan("bracket_fingerprint", intent=intent, quantity=quantity)
+        return _rs.call(_rs.rs.oms_manager_bracket_fingerprint,
+                        codec.text(_wire({"intent": intent, "quantity": quantity})))
 
     @staticmethod
     def _reduce_fingerprint(entry_order_id: str, fraction: Decimal, reason: str) -> str:
         # The command, not the order: its size depends on the open quantity at the time.
-        return _plan("reduce_fingerprint", entry=entry_order_id, fraction=fraction, reason=reason)
+        return _rs.call(_rs.rs.oms_manager_reduce_fingerprint, entry_order_id, fraction, reason)
 
     @staticmethod
     def _fingerprint_order(order: Order) -> str:
-        return _plan("fingerprint", payload=encode_payload(order))
+        return _rs.call(_rs.rs.oms_manager_fingerprint,
+                        codec.text(_wire({"payload": encode_payload(order)})))
 
     @classmethod
     def _split_quantity(
         cls, quantity: Decimal, count: int, instrument: Instrument
     ) -> tuple[Decimal, ...]:
-        return tuple(map(Decimal, _plan("split", quantity=quantity,
-                         equity=isinstance(instrument, Equity), weights=[Decimal("1")] * count)))
+        return tuple(_rs.call(_rs.rs.oms_manager_split, quantity,
+                              [Decimal("1")] * count, isinstance(instrument, Equity)))
 
     @classmethod
     def _fraction_quantities(
         cls, quantity: Decimal, fractions: tuple[Decimal, ...], instrument: Instrument
     ) -> tuple[Decimal, ...]:
-        return tuple(map(Decimal, _plan("fractions", quantity=quantity,
-                         equity=isinstance(instrument, Equity), weights=fractions)))
+        return tuple(_rs.call(_rs.rs.oms_manager_fractions, quantity,
+                              fractions, isinstance(instrument, Equity)))
 
     @staticmethod
     def _allocate_quantity(
         quantity: Decimal, weights: tuple[Decimal, ...], instrument: Instrument
     ) -> tuple[Decimal, ...]:
-        return tuple(map(Decimal, _plan("allocate", quantity=quantity,
-                         equity=isinstance(instrument, Equity), weights=weights)))
+        return tuple(_rs.call(_rs.rs.oms_manager_allocate, quantity,
+                              weights, isinstance(instrument, Equity)))
