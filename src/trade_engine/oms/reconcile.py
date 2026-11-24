@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
-from trade_engine.domain.orders import OrderState
+from trade_engine.domain.orders import Order, OrderState
 from trade_engine.domain.portfolio import Fill
 from trade_engine.interfaces.broker import BrokerAdapter, VenueFill
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Event, Ledger, codec
+from trade_engine.ledger import Event, EventKind, Ledger, codec
 from trade_engine.ledger.state import AccountState
 from trade_engine.oms.manager import OrderManager
 from trade_engine.sim import _rs
@@ -84,6 +85,8 @@ def _record_venue_fill(
     journal_account: str | None,
 ) -> int:
     if ledger.has_command(f"fill:{venue_fill.venue_fill_id}"):
+        # Recorded before a crash: the sync or the journal row may never have happened (F2).
+        _heal_recorded_fill(ledger, clock, manager, account_id, _fill_of(broker, account_id, venue_fill), journal_account)
         return 0
     state: AccountState = ledger.state(account_id)
     _rs.call(
@@ -93,7 +96,15 @@ def _record_venue_fill(
         venue_fill.venue_order_id,
         account_id,
     )
-    fill = Fill(
+    fill = _fill_of(broker, account_id, venue_fill)
+    manager.record_fill(fill)
+    if journal_account is not None:
+        enqueue_journal_fill(ledger, clock, journal_account, ledger.state(account_id), fill)
+    return 1
+
+
+def _fill_of(broker: BrokerAdapter, account_id: str, venue_fill: VenueFill) -> Fill:
+    return Fill(
         fill_id=venue_fill.venue_fill_id,
         order_id=venue_fill.venue_order_id,
         account_id=account_id,
@@ -108,10 +119,77 @@ def _record_venue_fill(
         venue_execution_id=venue_fill.venue_fill_id,
         leg_id=venue_fill.leg_id,
     )
-    manager.record_fill(fill)
-    if journal_account is not None:
+
+
+def _heal_recorded_fill(
+    ledger: Ledger,
+    clock: Clock,
+    manager: OrderManager,
+    account_id: str,
+    fill: Fill,
+    journal_account: str | None,
+) -> None:
+    """Finish what a crash after a committed fill may have left undone (F2).
+
+    The bracket sync is re-run only for the bracket's latest fill: an older cause can
+    collide with a command id already used for a different quantity. The journal row is
+    re-enqueued only for the account's latest fill: reconcile records and journals one
+    fill at a time, so a crash can leave only the last one unjournaled.
+    """
+    fill_event = ledger.event_by_command(f"fill:{fill.fill_id}")
+    found = bracket_resync_cause(ledger, account_id, fill.order_id)
+    if found is not None and found[1] == fill.fill_id:
+        manager.synchronize_bracket(found[0], found[1])
+    if journal_account is None or fill_event is None:
+        return
+    latest = ledger.events_of_kind(EventKind.FILL, account=account_id)[-1]
+    if latest.seq != fill_event.seq:
+        return
+    if ledger.outbox_row(fill_event.seq, f"journal:{journal_account}") is None:
         enqueue_journal_fill(ledger, clock, journal_account, ledger.state(account_id), fill)
-    return 1
+
+
+def bracket_resync_cause(ledger: Ledger, account_id: str, order_id: str) -> tuple[Order, str] | None:
+    """The bracket entry and the fill id of its latest fill, or None with no fills.
+
+    ``order_id`` is the entry or one of its children. The latest fill is the last FILL
+    event (by ledger seq) of the entry or of any order whose parent is the entry.
+    """
+    orders = ledger.state(account_id).orders
+    order = orders[order_id]
+    entry = orders[order.parent_order_id] if order.parent_order_id is not None else order
+    members = {entry.order_id} | {
+        item.order_id for item in orders.values() if item.parent_order_id == entry.order_id
+    }
+    latest = None
+    for event in ledger.events_of_kind(EventKind.FILL, account=account_id):
+        if event.payload.order_id in members:
+            latest = event
+    return None if latest is None else (entry, latest.payload.fill_id)
+
+
+def resync_open_brackets(ledger: Ledger, manager: OrderManager, account_id: str) -> int:
+    """Re-sync every open bracket with a filled entry, before a run's first reconcile (F2).
+
+    A crash can leave a fill committed with its protective stop never sent, and a rerun
+    may never report that fill again. Returns how many entries were synced.
+    """
+    state = ledger.state(account_id)
+    synced = 0
+    for order in list(state.orders.values()):
+        if order.parent_order_id is not None:
+            continue
+        if state.filled_quantity.get(order.order_id, Decimal("0")) == 0:
+            continue
+        children = [item for item in state.orders.values() if item.parent_order_id == order.order_id]
+        if all(child.state in TERMINAL for child in children):
+            continue
+        found = bracket_resync_cause(ledger, account_id, order.order_id)
+        if found is None:
+            continue
+        manager.synchronize_bracket(*found)
+        synced += 1
+    return synced
 
 
 def enqueue_journal_fill(

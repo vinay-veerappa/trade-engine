@@ -90,7 +90,7 @@ from trade_engine.ledger.state import AccountState, fold_account
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
 from trade_engine.oms.options import OptionOrderManager, open_structures
-from trade_engine.oms.reconcile import ReconcileError
+from trade_engine.oms.reconcile import ReconcileError, resync_open_brackets
 from trade_engine.oms.restore import RestoreError
 from trade_engine.risk import RiskContext, RiskEngine
 from trade_engine.sim import SimBroker, SnapshotVenue, underlying_of
@@ -386,11 +386,19 @@ class EodRunner:
     # -- entry -------------------------------------------------------------------
 
     def run(self, session: date) -> EodRunResult:
+        self._resync_brackets()
         return rs.eod_run(self, session)
 
     def run_morning(self, session: date, through: datetime) -> EodRunResult:
         """The morning pass of ``session`` (``run_pass`` with ``"morning"``)."""
         return self.run_pass(session, through, "morning")
+
+    def _resync_brackets(self) -> None:
+        """Re-sync open brackets before the first reconcile, healing any crash after a fill (F2)."""
+        for account_id in sorted(self._config.brokers):
+            resync_open_brackets(
+                self._ledger, self._manager_for(account_id, self._config.brokers[account_id]), account_id
+            )
 
     def run_pass(self, session: date, through: datetime, name: str) -> EodRunResult:
         """Run options accounts' snapshots of ``session`` up to ``through`` (see above).
@@ -402,6 +410,7 @@ class EodRunner:
         underlying with no snapshot yet is not refused: nothing is marked in a pass, and
         its orders work at a later one.
         """
+        self._resync_brackets()
         return rs.eod_pass(self, session, through, name)
 
     def void_session(self, session: date, accounts: Iterable[str], *, reason: str, owner: str) -> tuple[str, ...]:
