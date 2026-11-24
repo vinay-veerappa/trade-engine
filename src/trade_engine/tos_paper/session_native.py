@@ -1,8 +1,9 @@
 """One mirror session, host-callable: the ledger appends around a TosPaperBroker (§4.7).
 
 The native implementation: pure decisions (which orders form the batch, halt/unproven,
-cover classification, write-ahead items, clear-halt) run in Rust through the
-``tos_paper_session`` door; I/O, orchestration, and host effects remain here.
+cover classification, write-ahead items, clear-halt) run in Rust through the typed
+``trade_engine_rs.session_*`` pyfunctions (W6-E2: no JSON door); I/O, orchestration, and host
+effects remain here.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from datetime import date
 from trade_engine.domain.orders import Order, OrderState
 from trade_engine.interfaces.broker import VenueAck
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Event, EventKind, Ledger, codec
+from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.ledger.events import (
     MirrorAck,
     MirrorFill,
@@ -83,40 +84,37 @@ def _halted(ledger: Ledger) -> frozenset[str]:
 # -- what to mirror --------------------------------------------------------------------
 
 
-def _items(venue: str, rows: Sequence[dict]) -> list[tuple[object, str]]:
-    """Rust's ``{payload, command_id}`` rows as the (payload, command suffix) pairs :func:`_append` takes."""
-    return [(codec.decode_payload(r["payload"]), r["command_id"].removeprefix(f"mirror:{venue}:")) for r in rows]
+def _items(venue: str, rows: Sequence[tuple[object, str]]) -> list[tuple[object, str]]:
+    """Rust's (payload, command id) rows as the (payload, command suffix) pairs :func:`_append` takes."""
+    return [(payload, command.removeprefix(f"mirror:{venue}:")) for payload, command in rows]
 
 
-def _decoded_orders(ledger: Ledger, res: dict) -> tuple[Order, ...]:
-    """Rust's chosen orders, each as the sim holds it now (the decoded copy when the sim lost it)."""
+def _held(ledger: Ledger, orders: Sequence[Order]) -> tuple[Order, ...]:
+    """Rust's chosen orders, each as the sim holds it now (Rust's copy when the sim lost it)."""
     found: list[Order] = []
-    for item in res["orders"]:
-        decoded = codec.decode_payload(item)
-        state = ledger.state(decoded.account_id)
-        found.append(state.orders.get(decoded.order_id, decoded))
+    for order in orders:
+        state = ledger.state(order.account_id)
+        found.append(state.orders.get(order.order_id, order))
     return tuple(found)
 
 
-def _accounts_data(ledger: Ledger, binding: MirrorBinding) -> dict:
-    """Each mirrored account's EOD markers, created-order events and current orders: the batch doors' input."""
+def _accounts_data(ledger: Ledger, binding: MirrorBinding) -> dict[str, tuple]:
+    """Each mirrored account's EOD markers, created-order events and current orders: the batch pyfunctions' input.
+
+    Markers are ``(seq, session, job)``, created batches ``(seq, orders)``, and the current orders a tuple.
+    """
     accounts_data = {}
     for account in binding.mirrored_accounts:
-        markers = [
-            {"seq": e.seq, "session": e.payload.session.isoformat(), "job": e.payload.job}
+        markers = tuple(
+            (e.seq, e.payload.session, e.payload.job)
             for e in ledger.events_of_kind(EventKind.EOD_RUN, account=account)
-        ]
-        created_events = [
-            {"seq": e.seq, "orders": [codec.encode_payload(o) for o in e.payload.orders]}
+        )
+        created = tuple(
+            (e.seq, tuple(e.payload.orders))
             for e in ledger.events_of_kind(EventKind.ORDERS_CREATED, account=account)
-        ]
-        state = ledger.state(account)
-        current_orders = [codec.encode_payload(o) for o in state.orders.values()]
-        accounts_data[account] = {
-            "markers": markers,
-            "created_events": created_events,
-            "current_orders": current_orders,
-        }
+        )
+        current = tuple(ledger.state(account).orders.values())
+        accounts_data[account] = (markers, created, current)
     return accounts_data
 
 
@@ -126,18 +124,16 @@ def working_orders(ledger: Ledger, binding: MirrorBinding) -> tuple[Order, ...]:
     Entries only (no parent order): exits reach the venue through ``tos_paper.exits``. In account
     order, then order-id order, so the first-in rule is deterministic.
     """
-    mirror = mirror_of(ledger, binding.venue_account)
-    account_orders = {}
-    for account in binding.mirrored_accounts:
-        state = ledger.state(account)
-        account_orders[account] = [codec.encode_payload(o) for o in state.orders.values()]
-    doc = {
-        "mirrored_accounts": list(binding.mirrored_accounts),
-        "account_orders": account_orders,
-        "mirror": codec.canon(mirror),
+    account_orders = {
+        account: tuple(ledger.state(account).orders.values()) for account in binding.mirrored_accounts
     }
-    res = _rs.session_decide("session_working_orders", doc)
-    return _decoded_orders(ledger, res)
+    found = _rs.call(
+        _rs.rs.session_working_orders,
+        list(binding.mirrored_accounts),
+        account_orders,
+        mirror_of(ledger, binding.venue_account),
+    )
+    return _held(ledger, found)
 
 
 def pending_orders(
@@ -156,19 +152,16 @@ def pending_orders(
     queued nor refused it. Refuses when a mirrored account has no marker for the
     session (its batch may be incomplete), or markers of two jobs and no ``job`` (I5).
     """
-    close = calendar.session_close(session)
-    mirror = mirror_of(ledger, binding.venue_account)
-    accounts_data = _accounts_data(ledger, binding)
-    doc = {
-        "mirrored_accounts": list(binding.mirrored_accounts),
-        "accounts_data": accounts_data,
-        "session": session.isoformat(),
-        "close": close.isoformat(),
-        "job": job,
-        "mirror": codec.canon(mirror),
-    }
-    res = _rs.session_decide("session_pending_orders", doc)
-    return _decoded_orders(ledger, res)
+    found = _rs.call(
+        _rs.rs.session_pending_orders,
+        list(binding.mirrored_accounts),
+        _accounts_data(ledger, binding),
+        session,
+        calendar.session_close(session),
+        job,
+        mirror_of(ledger, binding.venue_account),
+    )
+    return _held(ledger, found)
 
 
 def morning_orders(
@@ -188,19 +181,16 @@ def morning_orders(
     :func:`pending_orders`. Refuses when a mirrored account has no morning marker for the
     session (the pass may not have run, or not finished), or two jobs' and no ``job`` (I5).
     """
-    session_open = calendar.session_open(session)
-    mirror = mirror_of(ledger, binding.venue_account)
-    accounts_data = _accounts_data(ledger, binding)
-    doc = {
-        "mirrored_accounts": list(binding.mirrored_accounts),
-        "accounts_data": accounts_data,
-        "session": session.isoformat(),
-        "session_open": session_open.isoformat(),
-        "job": job,
-        "mirror": codec.canon(mirror),
-    }
-    res = _rs.session_decide("session_morning_orders", doc)
-    return _decoded_orders(ledger, res)
+    found = _rs.call(
+        _rs.rs.session_morning_orders,
+        list(binding.mirrored_accounts),
+        _accounts_data(ledger, binding),
+        session,
+        calendar.session_open(session),
+        job,
+        mirror_of(ledger, binding.venue_account),
+    )
+    return _held(ledger, found)
 
 
 # -- the session -----------------------------------------------------------------------
@@ -227,14 +217,8 @@ def _append(ledger: Ledger, venue: str, clock: Clock, items: Sequence[tuple[obje
 def _reconcile(ledger: Ledger, broker: TosPaperBroker, clock: Clock, event: VenueReconcile, phase: str) -> VenueReconcile:
     # Keyed by the outcome too: the same reconcile replays (I3), but a drift found at the
     # instant of an earlier clean one is its own event, never swallowed by the replay.
-    doc = {
-        "venue": broker.venue,
-        "phase": phase,
-        "as_of": event.as_of.isoformat(),
-        "event": codec.encode_payload(event),
-    }
-    cmd = _rs.session_decide("session_reconcile_command_id", doc)["command_id"]
-    suffix = cmd.removeprefix(f"mirror:{broker.venue}:")
+    command = _rs.call(_rs.rs.session_reconcile_command_id, broker.venue, phase, event.as_of, event)
+    suffix = command.removeprefix(f"mirror:{broker.venue}:")
     [written] = _append(ledger, broker.venue, clock, [(event, suffix)])
     return written
 
@@ -242,24 +226,22 @@ def _reconcile(ledger: Ledger, broker: TosPaperBroker, clock: Clock, event: Venu
 def _deferred_why(doing: str, exc: BaseException, *, recorded: str = "") -> str:
     """The reason a run was deferred, in the words the operator reads (I11). ``recorded`` says what
     the run had already written, when it is not nothing: the report never claims a clean slate it lacks."""
-    doc = {"doing": doing, "exc": str(exc), "recorded": recorded}
-    return _rs.session_decide("session_deferred_why", doc)["why"]
+    return _rs.call(_rs.rs.session_deferred_why, doing, str(exc), recorded)
 
 
 def _halt_unproven(ledger: Ledger, broker: TosPaperBroker, clock: Clock, phase: str) -> VenueReconcile | None:
     """Halt the venue when an open ticket has no proven Order ID (I5): never silent."""
-    doc = {
-        "venue": broker.venue,
-        "phase": phase,
-        "as_of": clock.now_utc().isoformat(),
-        "mirror": codec.canon(mirror_of(ledger, broker.venue)),
-    }
-    res = _rs.session_decide("session_halt_unproven", doc)
-    if not res.get("halt") and "event" not in res:
+    halt = _rs.call(
+        _rs.rs.session_halt_unproven,
+        broker.venue,
+        phase,
+        clock.now_utc(),
+        mirror_of(ledger, broker.venue),
+    )
+    if halt is None:
         return None
-    event = codec.decode_payload(res["event"])
-    cmd = res["command_id"]
-    suffix = cmd.removeprefix(f"mirror:{broker.venue}:")
+    event, command = halt
+    suffix = command.removeprefix(f"mirror:{broker.venue}:")
     [written] = _append(ledger, broker.venue, clock, [(event, suffix)])
     return written
 
@@ -287,26 +269,26 @@ def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock, settle=None) 
         written = _reconcile(ledger, broker, clock, refused.reconcile, "collect")
         return MirrorRunReport(venue=venue, reconcile=written, halted=True, expired=expired, unsettled=unsettled)
     collected: list[object] = [*collection.fills, *collection.closes]
-    ids = _rs.session_decide("session_collect_items", {
-        "venue": venue,
+    commands = _rs.call(
+        _rs.rs.session_collect_items,
+        venue,
         # str(Decimal), not the codec's canon text: the ids are idempotency keys already in ledgers
-        "fills": [{"ticket_key": f.ticket_key, "filled": str(f.filled)} for f in collection.fills],
-        "closes": [{"ticket_key": c.ticket_key, "book_status": None if c.book_status is None else c.book_status.value}
-                   for c in collection.closes],
-    })["command_ids"]
-    items = [(obj, cid.removeprefix(f"mirror:{venue}:")) for obj, cid in zip(collected, ids, strict=True)]
+        [(f.ticket_key, str(f.filled)) for f in collection.fills],
+        [(c.ticket_key, None if c.book_status is None else c.book_status.value) for c in collection.closes],
+    )
+    items = [(obj, command.removeprefix(f"mirror:{venue}:")) for obj, command in zip(collected, commands, strict=True)]
     try:
         written = _append(ledger, venue, clock, items)
     except LedgerFoldError as err:  # the mirror cannot book these fills honestly: halt
         expired, unsettled = _settle_pass(ledger, venue, clock, settle)
-        doc = {
-            "venue": venue,
-            "as_of": clock.now_utc().isoformat(),
-            "err": str(err),
-            "mirror": codec.canon(mirror_of(ledger, venue)),
-            "fills": [{"ticket_key": f.ticket_key, "filled": str(f.filled)} for f in collection.fills],
-        }
-        halt = codec.decode_payload(_rs.session_decide("session_fold_halt", doc)["event"])
+        halt = _rs.call(
+            _rs.rs.session_fold_halt,
+            venue,
+            clock.now_utc(),
+            str(err),
+            mirror_of(ledger, venue),
+            [(f.ticket_key, str(f.filled)) for f in collection.fills],
+        )
         written_halt = _reconcile(ledger, broker, clock, halt, "collect")
         broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
         return MirrorRunReport(venue=venue, reconcile=written_halt, halted=True, expired=expired, unsettled=unsettled)
@@ -350,19 +332,18 @@ def cancel_ticket(ledger: Ledger, broker: TosPaperBroker, ticket_key: str, *, cl
     broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
     order_id = broker.proven_order_id(ticket_key)
     ack = broker.cancel(ticket_key)
-    doc = {
-        "venue": venue,
-        "ticket_key": ticket_key,
-        "order_id": order_id,
-        "ack_status": ack.status,
-        "ack_message": ack.message or "",
-        "ack_timestamp": ack.timestamp.isoformat(),
-    }
-    res = _rs.session_decide("session_build_cancel_ack", doc)
-    if res.get("ack"):
-        ack_ev = codec.decode_payload(res["ack"]["payload"])
-        suffix = res["ack"]["command_id"].removeprefix(f"mirror:{venue}:")
-        _append(ledger, venue, clock, [(ack_ev, suffix)])
+    res = _rs.call(
+        _rs.rs.session_build_cancel_ack,
+        venue,
+        ticket_key,
+        order_id,
+        ack.status,
+        ack.message or "",
+        ack.timestamp,
+    )
+    if res is not None:
+        ack_event, command = res
+        _append(ledger, venue, clock, [(ack_event, command.removeprefix(f"mirror:{venue}:"))])
     return ack
 
 
@@ -395,33 +376,17 @@ def run_mirror(
     if collected.deferred is not None:  # the venue could not be asked: send nothing over an unread venue
         return collected
     mirror = mirror_of(ledger, venue)
-    doc = {
-        "mirror": codec.canon(mirror),
-        "orders": [codec.encode_payload(o) for o in orders],
-        "may_wait": may_wait,
-    }
-    classified = _rs.session_decide("session_classify_cover", doc)
-    todo_decoded = [codec.decode_payload(o) for o in classified["todo"]]
+    todo, waiting, cover_refused = _rs.call(_rs.rs.session_classify_cover, mirror, list(orders), may_wait)
     orders_by_id = {o.order_id: o for o in orders}
-    todo = [orders_by_id.get(o.order_id, o) for o in todo_decoded]
-    waiting = tuple((oid, reason) for oid, reason in classified["waiting"])
-    cover_refused = classified["refused"]
+    todo = [orders_by_id.get(o.order_id, o) for o in todo]
+    waiting = tuple(waiting)
+    accounts = {order.order_id: order.account_id for order in orders}
     if not todo:  # the cover rule held back or refused every order: nothing to send, so nothing to drain
         if not cover_refused:
             return _with(collected, waiting=waiting)
         now = clock.now_utc()
-        accounts = {order.order_id: order.account_id for order in orders}
-        doc_wa = {
-            "venue": venue,
-            "accounts": accounts,
-            "cover_refused": cover_refused,
-            "batch_refused": [],
-            "batch_venue_orders": [],
-            "broker_queued_keys": [],
-            "now": now.isoformat(),
-        }
-        wa_res = _rs.session_decide("session_prepare_write_ahead", doc_wa)
-        written = _append(ledger, venue, clock, _items(venue, wa_res["items"]))
+        written = _append(ledger, venue, clock, _items(venue, _rs.call(
+            _rs.rs.session_prepare_write_ahead, venue, accounts, cover_refused, [], [], [], now)))
         return _with(collected, refused=tuple(written), waiting=waiting)
     if not broker.halted:
         # Read the venue BEFORE the write-ahead: a venue that cannot be asked defers the whole batch
@@ -438,19 +403,17 @@ def run_mirror(
     # A halted broker refuses the whole batch here, each order with the reason (I11).
     batch = broker.mirror_batch(todo, holdings=mirror.exposure())
     queued_keys = [ticket.venue_order_id for ticket in broker.queued]
-    accounts = {order.order_id: order.account_id for order in orders}
     now = clock.now_utc()
-    doc_wa = {
-        "venue": venue,
-        "accounts": accounts,
-        "cover_refused": cover_refused,
-        "batch_refused": list(batch.refused),
-        "batch_venue_orders": [_rs.venue_order_doc(ticket) for ticket in batch.venue_orders],
-        "broker_queued_keys": queued_keys,
-        "now": now.isoformat(),
-    }
-    wa_res = _rs.session_decide("session_prepare_write_ahead", doc_wa)
-    items = _items(venue, wa_res["items"])
+    items = _items(venue, _rs.call(
+        _rs.rs.session_prepare_write_ahead,
+        venue,
+        accounts,
+        cover_refused,
+        [tuple(refusal) for refusal in batch.refused],
+        list(batch.venue_orders),
+        queued_keys,
+        now,
+    ))
     try:
         written = _append(ledger, venue, clock, items)  # write-ahead: before any send
     except Exception:
@@ -459,19 +422,13 @@ def run_mirror(
         raise
     report = broker.drain()
     drain_acks_input = [
-        [ack.venue_order_id, ack.status, ack.message or "", ack.timestamp.isoformat()]
+        (ack.venue_order_id, ack.status, ack.message or "", ack.timestamp)
         for ack in report.acks
     ]
     proven_input = {
-        key: [prov[0], prov[1].value] for key, prov in report.proven.items()
+        key: (prov[0], prov[1].value) for key, prov in report.proven.items()
     }
-    doc_drain = {
-        "venue": venue,
-        "acks": drain_acks_input,
-        "proven": proven_input,
-    }
-    drain_res = _rs.session_decide("session_build_drain_acks", doc_drain)
-    acks_items = _items(venue, drain_res["acks"])
+    acks_items = _items(venue, _rs.call(_rs.rs.session_build_drain_acks, venue, drain_acks_input, proven_input))
     acked = _append(ledger, venue, clock, acks_items)
     if _halt_unproven(ledger, broker, clock, "drain") is not None:
         broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
@@ -505,31 +462,24 @@ def clear_halt(ledger: Ledger, venue: str, *, reason: str, clock: Clock) -> tupl
         raise MirrorSessionError("a halt is lifted only with the operator's reason (I11)")
     holders = sorted(account for account in ledger.accounts() if venue in ledger.state(account).halted_venues)
     reconciles = [
-        [event.seq, codec.encode_payload(event.payload)]
+        (event.seq, event.payload)
         for event in ledger.events_of_kind(EventKind.VENUE_RECONCILE)
         if event.payload.venue == venue
     ]
     now = clock.now_utc()
-    doc = {
-        "venue": venue,
-        "reason": reason,
-        "as_of": now.isoformat(),
-        "holders": holders,
-        "reconciles": reconciles,
-    }
-    plan = _rs.session_decide("session_clear_halt", doc)
+    cleared, plan = _rs.call(_rs.rs.session_clear_halt, venue, reason, now, holders, reconciles)
     events = [
         Event(
-            account=e["account"],
+            account=account,
             kind=EventKind.VENUE_HALT_CLEARED,
-            payload=codec.decode_payload(e["event"]),
+            payload=payload,
             ts_utc=now,
-            command_id=e["command_id"],
+            command_id=command,
         )
-        for e in plan["events"]
+        for account, payload, command in plan
     ]
     ledger.extend(events)
-    return tuple(plan["holders"])
+    return tuple(cleared)
 
 
 __all__ = [

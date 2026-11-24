@@ -18,7 +18,7 @@ use chrono::NaiveDate;
 
 use super::cover::{self, Sold};
 use super::netting::Ticket;
-use super::wire::{dec_of, jstr, obj, req, req_arr, req_dec, req_str, wire};
+use super::wire::{dec_of, jstr, obj, req, req_arr, req_str, wire};
 use super::{SESSION, VALUE};
 use crate::ledger::codec;
 use crate::ledger::json::Json;
@@ -635,36 +635,56 @@ pub fn halt_unproven_op(doc: &Json) -> R<Json> {
 /// own decimal text (`str(Decimal)`), joined verbatim: `"2.50"` stays `2.50` and `"1E+1"`
 /// stays `1E+1`. It is checked to be a decimal but never re-formatted (the codec's canon
 /// text differs, and a different spelling would book a fill twice).
+/// Typed `collect_items`: `fills` are `(ticket_key, filled text)`, `closes` are `(ticket_key, book_status)`.
+/// `None` book status refuses with `VALUE`. Fill texts are validated as decimals, never re-formatted.
+pub fn collect_items(venue: &str, fills: &[(String, String)], closes: &[(String, Option<String>)]) -> R<Vec<String>> {
+    let mut ids = Vec::new();
+    for (key, filled) in fills {
+        dec_of(filled)?;
+        ids.push(format!("mirror:{venue}:fill:{key}:{filled}"));
+    }
+    for (key, status) in closes {
+        let Some(status) = status else {
+            return err(VALUE, format!("mirror ack {key:?} has no book_status"));
+        };
+        ids.push(format!("mirror:{venue}:book:{key}:{status}"));
+    }
+    Ok(ids)
+}
+
 pub fn collect_items_op(doc: &Json) -> R<Json> {
     let venue = req_str(doc, "venue")?;
-    let mut ids = Vec::new();
+    let mut fills = Vec::new();
     for fill in req_arr(doc, "fills")? {
-        let key = req_str(fill, "ticket_key")?;
-        let filled = req_str(fill, "filled")?;
-        dec_of(filled)?;
-        ids.push(jstr(format!("mirror:{venue}:fill:{key}:{filled}")));
+        fills.push((req_str(fill, "ticket_key")?.to_string(), req_str(fill, "filled")?.to_string()));
     }
+    let mut closes = Vec::new();
     for close in req_arr(doc, "closes")? {
         let key = req_str(close, "ticket_key")?;
         let status = match close.get("book_status") {
-            Some(Json::Str(s)) => s.as_str(),
-            None | Some(Json::Null) => return err(VALUE, format!("mirror ack {key:?} has no book_status")),
+            Some(Json::Str(s)) => Some(s.clone()),
+            None | Some(Json::Null) => None,
             Some(other) => return wire(format!("\"book_status\" must be a string or null, got {}", other.type_name())),
         };
-        ids.push(jstr(format!("mirror:{venue}:book:{key}:{status}")));
+        closes.push((key.to_string(), status));
     }
-    Ok(obj(vec![("command_ids", Json::Arr(ids))]))
+    let ids = collect_items(venue, &fills, &closes)?;
+    Ok(obj(vec![("command_ids", Json::Arr(ids.into_iter().map(jstr).collect()))]))
 }
 
-pub fn fold_halt_op(doc: &Json) -> R<Json> {
-    let venue = req_str(doc, "venue")?;
-    let (as_of, _) = parse_datetime(req_str(doc, "as_of")?)?;
-    let fold_err = req_str(doc, "err")?;
-    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
+/// Typed `fold_halt`: the venue reconcile that halts a venue whose fills the mirror cannot book.
+/// `fills` are `(ticket_key, filled text)`, validated as decimals in order; a key missing from the
+/// mirror refuses with `"key"`.
+pub fn fold_halt(
+    venue: &str,
+    as_of: &DateTime,
+    fold_err: &str,
+    mirror: &MirrorState,
+    fills: &[(String, String)],
+) -> R<VenueReconcile> {
     let mut symbols = BTreeSet::new();
-    for fill in req_arr(doc, "fills")? {
-        let key = req_str(fill, "ticket_key")?;
-        let filled = req_dec(fill, "filled")?;
+    for (key, filled) in fills {
+        let filled = dec_of(filled)?;
         let Some(ticket) = mirror.tickets.get(key) else {
             return err("key", format!("no mirror ticket {key:?}"));
         };
@@ -673,13 +693,25 @@ pub fn fold_halt_op(doc: &Json) -> R<Json> {
         }
     }
     let drift: Vec<String> = if symbols.is_empty() { vec![venue.to_string()] } else { symbols.into_iter().collect() };
-    let event = VenueReconcile {
+    Ok(VenueReconcile {
         venue: venue.to_string(),
-        as_of,
+        as_of: as_of.clone(),
         reconciled: false,
         drift,
         note: Some(format!("the mirror cannot book the venue's fills ({fold_err}); venue halted")),
-    };
+    })
+}
+
+pub fn fold_halt_op(doc: &Json) -> R<Json> {
+    let venue = req_str(doc, "venue")?;
+    let (as_of, _) = parse_datetime(req_str(doc, "as_of")?)?;
+    let fold_err = req_str(doc, "err")?;
+    let mirror: MirrorState = crate::ledger::bridge::uncanon_mirror(req(doc, "mirror")?)?;
+    let mut fills = Vec::new();
+    for fill in req_arr(doc, "fills")? {
+        fills.push((req_str(fill, "ticket_key")?.to_string(), req_str(fill, "filled")?.to_string()));
+    }
+    let event = fold_halt(venue, &as_of, fold_err, &mirror, &fills)?;
     Ok(obj(vec![("event", codec::enc_obj(&Obj::Reconcile(event))?)]))
 }
 
