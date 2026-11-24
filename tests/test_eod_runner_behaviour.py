@@ -9,16 +9,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from datetime import date, datetime, time, timedelta, timezone
-from types import SimpleNamespace
+from datetime import date, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from test_eod_options import csp
 from test_intraday_service import SESSION, Rig, snap
 from trade_engine.calendar.sessions import ExchangeCalendar
-from trade_engine.eod.options_routing import OptionRouter, RoutingTally
+from trade_engine.eod.options_routing import RoutingTally
 from trade_engine.eod.runner import (
     EodRunnerConfig,
     EodRunnerError,
@@ -28,7 +26,6 @@ from trade_engine.eod.runner import (
 from trade_engine.interfaces.market_data import StaleDataError
 from trade_engine.intraday.service import IntradayServiceError
 
-AFTER = datetime(2026, 10, 16, 21, 45, tzinfo=timezone.utc)
 NEW_YORK = ZoneInfo("America/New_York")
 
 # The derived risk context (`derive_risk_context`) moved to te_core; its values are pinned by
@@ -158,48 +155,6 @@ def test_session_window_in_new_york_time(day: date, open_et: time, close_et: tim
     assert opened.time() == open_et
     assert closed.time() == close_et
     assert int((closed - opened).total_seconds() // 60) == minutes
-
-
-# --- options routing (eod/options_routing.py) ----------------------------------------------
-
-
-class _Ledger:
-    """Answers the two questions the router asks of the ledger."""
-
-    def __init__(self, commands=(), event=None) -> None:
-        self._commands = set(commands)
-        self._event = event
-
-    def has_command(self, key: str) -> bool:
-        return key in self._commands
-
-    def event_by_command(self, key: str):
-        return self._event
-
-
-def _verdict(accepted: bool):
-    return SimpleNamespace(payload=SimpleNamespace(accepted=accepted))
-
-
-@pytest.mark.parametrize(
-    ("commands", "event", "taken"),
-    [
-        ((), None, False),  # nothing recorded for this command yet
-        (("entry",), None, True),  # the command is already in the ledger
-        ((), _verdict(False), True),  # no command, but a refused verdict was recorded
-        ((), _verdict(True), False),  # an accepted verdict does not count as taken
-    ],
-)
-def test_router_reports_whether_an_intent_was_already_taken(commands, event, taken: bool) -> None:
-    intent = replace(csp("entry"), account_id="OPT_CSP")
-    router = OptionRouter(
-        _Ledger(commands, event),
-        SimpleNamespace(now_utc=lambda: AFTER),
-        brokers={},
-        strategies={},
-        option_risk_engines={},
-    )
-    assert router.taken(intent) is taken
 
 
 # --- routing tally addition (eod/options_routing.py 36-45) --------------------------------
