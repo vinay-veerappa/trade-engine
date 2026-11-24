@@ -272,20 +272,28 @@ def _reconcile(ledger: Ledger, broker: TosPaperBroker, clock: Clock, event: Venu
     return written
 
 
+def _settle_pass(ledger: Ledger, venue: str, clock: Clock, settle) -> tuple[tuple, tuple[str, ...]]:
+    """This pass's expiry settle: (expired events, unsettled "<expiry>: <why>"); nothing without ``settle``."""
+    if settle is None:  # (calendar, settlements): expired contracts leave the book (tos_paper.expiry)
+        return (), ()
+    from trade_engine.tos_paper.expiry import settle_expired
+
+    outcome = settle_expired(ledger, venue, clock, *settle)
+    return outcome.events, outcome.unsettled
+
+
 def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock, settle=None) -> MirrorRunReport:
     venue = broker.venue
-    if settle is not None:  # (calendar, settlements): expired contracts leave the book before the reconcile
-        from trade_engine.tos_paper.expiry import settle_expired
-        outcome = settle_expired(ledger, venue, clock, *settle)
-        report = _collect(ledger, broker, clock)
-        return replace(report, expired=outcome.events, unsettled=outcome.unsettled)
     try:
         collection = broker.collect_fills(mirror_of(ledger, venue))
     except TransportUnavailable as exc:  # could not ask: record and halt nothing, ask again next run
-        return MirrorRunReport(venue=venue, halted=broker.halted, deferred=_deferred_why("collecting fills", exc))
+        expired, unsettled = _settle_pass(ledger, venue, clock, settle)
+        return MirrorRunReport(venue=venue, halted=broker.halted, deferred=_deferred_why("collecting fills", exc),
+                               expired=expired, unsettled=unsettled)
     except VenueUnreadable as refused:
+        expired, unsettled = _settle_pass(ledger, venue, clock, settle)
         written = _reconcile(ledger, broker, clock, refused.reconcile, "collect")
-        return MirrorRunReport(venue=venue, reconcile=written, halted=True)
+        return MirrorRunReport(venue=venue, reconcile=written, halted=True, expired=expired, unsettled=unsettled)
     items: list[tuple[object, str]] = [
         (fill, f"fill:{fill.ticket_key}:{fill.filled}") for fill in collection.fills
     ] + [
@@ -294,6 +302,7 @@ def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock, settle=None) 
     try:
         written = _append(ledger, venue, clock, items)
     except LedgerFoldError as err:  # the mirror cannot book these fills honestly: halt
+        expired, unsettled = _settle_pass(ledger, venue, clock, settle)
         tickets = mirror_of(ledger, venue).tickets
         names = sorted(
             {
@@ -311,20 +320,33 @@ def _collect(ledger: Ledger, broker: TosPaperBroker, clock: Clock, settle=None) 
         )
         written_halt = _reconcile(ledger, broker, clock, halt, "collect")
         broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
-        return MirrorRunReport(venue=venue, reconcile=written_halt, halted=True)
+        return MirrorRunReport(venue=venue, reconcile=written_halt, halted=True, expired=expired, unsettled=unsettled)
     fills = tuple(p for p in written if isinstance(p, MirrorFill))
     closes = tuple(p for p in written if isinstance(p, MirrorAck))
     _halt_unproven(ledger, broker, clock, "collect")
+    # The fills and closes above are in the book now, so an expiry that this pass's fills complete
+    # settles here, before the reconcile sees the book (F9).
+    expired, unsettled = _settle_pass(ledger, venue, clock, settle)
     broker.restore(mirror_of(ledger, venue), halted_venues=_halted(ledger))
     try:
         now_state = broker.reconcile_now(defer_unavailable=True)
     except TransportUnavailable as exc:  # the fills above are recorded; only the closing reconcile waits
-        return MirrorRunReport(venue=venue, fills=fills, closes=closes, halted=broker.halted,
-                               deferred=_deferred_why(
-                                   "reconciling", exc,
-                                   recorded="the fills and closes listed are recorded, only the closing reconcile was not made"))
+        return MirrorRunReport(
+            venue=venue,
+            fills=fills,
+            closes=closes,
+            halted=broker.halted,
+            deferred=_deferred_why(
+                "reconciling",
+                exc,
+                recorded="the fills and closes listed are recorded, only the closing reconcile was not made",
+            ),
+            expired=expired,
+            unsettled=unsettled,
+        )
     check = _reconcile(ledger, broker, clock, now_state, "collect")
-    return MirrorRunReport(venue=venue, fills=fills, closes=closes, reconcile=check, halted=broker.halted)
+    return MirrorRunReport(venue=venue, fills=fills, closes=closes, reconcile=check, halted=broker.halted,
+                           expired=expired, unsettled=unsettled)
 
 
 def _deferred_why(doing: str, exc: BaseException, *, recorded: str = "") -> str:
