@@ -1,6 +1,6 @@
 """F10: a restored sim/snapshot venue holds the ledger's positions even with no working orders.
 
-``EodRunner._rehydrate_venue`` used to restore positions only when at least one working
+``EodRunner._restore_venue`` used to restore positions only when at least one working
 order came back. An account holding stock, or an option with no working order, then saw
 an empty venue while the ledger (I2, the source of truth) said otherwise.
 """
@@ -83,7 +83,9 @@ def _prepare(ledger: Ledger, clock, venue) -> None:
         NoBars(),
         EodRunnerConfig(job_name="eod", brokers={ACCOUNT: venue}),
     )
-    runner._prepare_account(ACCOUNT)
+    # The native prepare runs the restore through ``_restore_venue``; drive that step directly.
+    venue.connect()
+    runner._restore_venue(ACCOUNT, venue)
 
 
 def _held(venue) -> list[tuple[Equity, Decimal]]:
@@ -134,7 +136,9 @@ def test_option_held_with_no_working_order_is_restored(tmp_path) -> None:
                    for order in rig.state.orders.values())
 
         rig.venue = SnapshotVenue(OPT_ACCOUNT, rig.clock)  # the next run is a new process
-        EodRunner(rig.ledger, rig.clock, CALENDAR, NoBars(), rig.config())._prepare_account(OPT_ACCOUNT)
+        runner = EodRunner(rig.ledger, rig.clock, CALENDAR, NoBars(), rig.config())
+        rig.venue.connect()
+        runner._restore_venue(OPT_ACCOUNT, rig.venue)
 
         assert _held(rig.venue) == [(P270, Decimal("-1"))]
     finally:

@@ -21,7 +21,7 @@ from trade_engine.domain.orders import OrderState
 from trade_engine.domain.portfolio import Fill
 from trade_engine.domain.signals import OrderIntent
 from trade_engine.eod import EodRunner, EodRunnerConfig
-from trade_engine.eod.runner import EodRunnerError, write_off_order
+from trade_engine.eod.runner import EodRunnerError, ReplayDataError, write_off_order
 from trade_engine.ledger import Event, EventKind, Ledger, OrderStateChange, OrderUpdated
 from trade_engine.oms.manager import OrderManager
 from trade_engine.sim import SimBroker
@@ -42,15 +42,15 @@ class SettableClock(ReplayClock):
         self._current_time = now.astimezone(UTC)
 
 
-class NoBarsAtAll:
-    """Market data that fails the test if the session asks for any bars."""
+class EmptyBars:
+    """Market data with no bars at all: every bar request comes back empty."""
 
     def __init__(self) -> None:
         self.calls = 0
 
     def bars(self, instrument, tf, start, end, max_age_seconds):
         self.calls += 1
-        raise AssertionError(f"bars requested for {instrument}")
+        return []
 
 
 @pytest.fixture
@@ -138,15 +138,17 @@ def test_a_partly_filled_state_with_no_fills_is_not_working(rig) -> None:
 def test_the_session_no_longer_asks_for_the_instruments_bars(rig) -> None:
     ledger, clock, broker, _m, bracket = rig
     clock.set(SESSION_OPEN - timedelta(minutes=1))
-    data = NoBarsAtAll()
+    data = EmptyBars()
     runner = EodRunner(
         ledger, clock, CALENDAR, data, EodRunnerConfig(job_name="eod", brokers={ACCOUNT: broker})
     )
-    assert runner._replay_instruments(ledger.state(ACCOUNT)) == (INSTRUMENT,)
+    # The working stop-limit makes the session replay INSTRUMENT; it has no bars, so it refuses.
+    with pytest.raises(ReplayDataError):
+        runner.run(SESSION)
+    assert data.calls == 1
     _writeoff(ledger, clock, bracket.entry.order_id, venue_cancel_confirmed=True)
-    assert runner._replay_instruments(ledger.state(ACCOUNT)) == ()
     runner.run(SESSION)
-    assert data.calls == 0
+    assert data.calls == 1
 
 
 def test_a_second_call_writes_nothing(rig) -> None:
