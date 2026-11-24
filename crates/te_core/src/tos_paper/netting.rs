@@ -3,13 +3,13 @@
 
 use super::wire::{
     dec_of, instrument, jopt_dec, jstr, linstr, linstr_json, obj, opt_dec, order_type_of, req, req_arr, req_dec,
-    req_str, side_of, tif_of, wire, ComboLeg, Instrument,
+    req_str, side_of, tif_of, wire, ComboLeg, Instrument, OptionC,
 };
 use super::{NETTING, VALUE};
 use crate::ledger::codec::py_repr;
 use crate::ledger::json::Json;
 use crate::ledger::model::{
-    derr, parse_datetime, Instrument as LInstrument, LErr, OrderType, Side, Tif, R,
+    derr, parse_datetime, ComboLeg as LComboLeg, Instrument as LInstrument, LErr, OrderType, Side, Tif, R,
 };
 use crate::ledger::ops::{add, gt, le, mul_i, ne, neg, s, zero, OMap};
 use crate::money::Money;
@@ -59,6 +59,43 @@ pub fn vertical_reason_op(doc: &Json) -> R<Json> {
         return super::wire::wire("vertical_reason takes a combo");
     };
     Ok(obj(vec![("reason", vertical_reason(&legs)?.map_or(Json::Null, jstr))]))
+}
+
+/// A ledger-model instrument as the wire form `vertical_reason` reads.
+fn wire_instrument(i: &LInstrument) -> Instrument {
+    match i {
+        LInstrument::Equity(s) => Instrument::Equity { symbol: s.clone() },
+        LInstrument::Option(c) => Instrument::Option(OptionC {
+            underlying: c.underlying.clone(),
+            expiry: crate::ledger::model::date_iso(&c.expiry),
+            strike: c.strike.clone(),
+            right: c.right,
+            multiplier: c.multiplier,
+        }),
+        LInstrument::Combo(legs) => Instrument::Combo(
+            legs.iter()
+                .map(|l| ComboLeg {
+                    contract: wire_instrument(&l.contract),
+                    ratio: l.ratio,
+                    side: l.side.value().to_string(),
+                })
+                .collect(),
+        ),
+        LInstrument::Future(f) => Instrument::Other { repr: f.root.clone() },
+    }
+}
+
+/// `vertical_reason` over the ledger-model legs (the typed door's input).
+pub fn vertical_reason_model(legs: &[LComboLeg]) -> R<Option<String>> {
+    let wire_legs: Vec<ComboLeg> = legs
+        .iter()
+        .map(|l| ComboLeg {
+            contract: wire_instrument(&l.contract),
+            ratio: l.ratio,
+            side: l.side.value().to_string(),
+        })
+        .collect();
+    vertical_reason(&wire_legs)
 }
 
 

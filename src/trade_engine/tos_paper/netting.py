@@ -71,15 +71,13 @@ def ticket_key(
     The same allocation always hashes to the same key, and any change — account,
     contract, side, size, price, TIF or the constituent strategy orders — to a new one.
     """
-    return _rs.decide("ticket_key", {
-        "venue_account": venue_account, "instrument": _rs.wire(instrument), "side": side.value,
-        "quantity": str(quantity), "order_type": order_type.value, "limit_price": _rs.text(limit_price),
-        "tif": tif.value, "order_ids": list(order_ids)})["key"]
+    return _rs.call(_rs.rs.tos_netting_ticket_key, venue_account, instrument, side.value, quantity,
+                    order_type.value, limit_price, tif.value, list(order_ids))
 
 
 def vertical_reason(combo: Combo) -> str | None:
     """Why ``combo`` is not a mirrorable 2-leg 1:1 vertical, or None when it is."""
-    return _rs.decide("vertical_reason", {"instrument": _rs.wire(combo)})["reason"]
+    return _rs.call(_rs.rs.tos_netting_vertical_reason, combo)
 
 
 def net_strategy_orders(
@@ -96,11 +94,9 @@ def net_strategy_orders(
     currently holds on this venue, keyed ``(account_id, instrument)``. ``at`` stamps the
     tickets (injected clock, I7).
     """
-    out = _rs.decide("net_strategy_orders", {
-        "orders": [_rs.order_doc(o) for o in orders], "venue_account": venue_account,
-        "mirrored": list(mirrored_accounts), "at": at.isoformat(), "holdings": _rs.holdings_doc(holdings)})
-    return NettedBatch(venue_orders=tuple(_rs.venue_order(d) for d in out["venue_orders"]),
-                       refused=tuple((o, r) for o, r in out["refused"]))
+    venue_orders, refused = _rs.call(_rs.rs.tos_netting_net_strategy_orders, orders, venue_account,
+                                     list(mirrored_accounts), at, holdings)
+    return NettedBatch(venue_orders=tuple(venue_orders), refused=tuple((o, r) for o, r in refused))
 
 
 def _account_for_everything(
@@ -109,7 +105,7 @@ def _account_for_everything(
     refused: list[tuple[str, str]],
 ) -> None:
     """Every input order ends in exactly one outcome: allocated or refused (I11)."""
-    _rs.decide("account_for_everything", {
-        "orders": [o.order_id for o in orders],
-        "allocated": [a.strategy_order_id for vo in venue_orders for a in vo.allocations],
-        "refused": [oid for oid, _ in refused]})
+    _rs.call(_rs.rs.tos_netting_account_for_everything,
+             [o.order_id for o in orders],
+             [a.strategy_order_id for vo in venue_orders for a in vo.allocations],
+             [oid for oid, _ in refused])

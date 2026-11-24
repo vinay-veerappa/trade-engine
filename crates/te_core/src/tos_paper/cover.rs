@@ -172,6 +172,20 @@ pub fn sold_of(order: &Json) -> R<Sold> {
     Ok(Some((linstr(instrument)?, req_dec(order, "quantity")?)))
 }
 
+/// `_sold` over a typed order: what a single-leg SELL of shares or of a call gives up.
+pub fn sold(instrument: &Instrument, side: Side, quantity: &Money) -> R<Sold> {
+    let single = match instrument {
+        Instrument::Equity(_) => true,
+        Instrument::Option(c) => c.right == Right::Call,
+        Instrument::Combo(_) => false,
+        Instrument::Future(_) => false,
+    };
+    if side != Side::Sell || !single {
+        return Ok(None);
+    }
+    Ok(Some((instrument.clone(), quantity.clone())))
+}
+
 fn lookup(found: &[(String, Money)], underlying: &str) -> Money {
     found.iter().find(|(u, _)| u == underlying).map_or_else(zero, |(_, c)| c.clone())
 }

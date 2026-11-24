@@ -105,8 +105,36 @@ pub fn get(book: &Book, instrument: &Instrument) -> Money {
     book.get(&instrument.hk()).cloned().unwrap_or_else(zero)
 }
 
-/// The `VenueReconcile` event as the ledger's constructor builds it (its refusals included).
-pub fn venue_reconcile(venue: &str, as_of: &str, reconciled: bool, drift: Vec<String>, note: Option<String>) -> R<Json> {
+/// The `VenueReconcile` event, as the ledger's constructor builds it (its refusals included).
+#[derive(Debug)]
+pub struct ReconcileEvent {
+    pub venue: String,
+    pub as_of: String,
+    pub reconciled: bool,
+    pub drift: Vec<String>,
+    pub note: Option<String>,
+}
+
+impl ReconcileEvent {
+    fn json(&self) -> Json {
+        obj(vec![
+            ("venue", jstr(self.venue.clone())),
+            ("as_of", jstr(self.as_of.clone())),
+            ("reconciled", Json::Bool(self.reconciled)),
+            ("drift", Json::Arr(self.drift.iter().cloned().map(Json::Str).collect())),
+            ("note", self.note.clone().map_or(Json::Null, Json::Str)),
+        ])
+    }
+}
+
+/// The `VenueReconcile` event, with the constructor's refusals applied (its refusals included).
+pub fn venue_reconcile_event(
+    venue: &str,
+    as_of: &str,
+    reconciled: bool,
+    drift: Vec<String>,
+    note: Option<String>,
+) -> R<ReconcileEvent> {
     if venue.is_empty() {
         return err("payload", "VenueReconcile.venue must be non-empty");
     }
@@ -120,24 +148,23 @@ pub fn venue_reconcile(venue: &str, as_of: &str, reconciled: bool, drift: Vec<St
     if !reconciled && drift.is_empty() {
         return err("payload", "VenueReconcile that is not reconciled must name the drifting instruments (I11)");
     }
-    Ok(obj(vec![
-        ("venue", jstr(venue)),
-        ("as_of", jstr(as_of)),
-        ("reconciled", Json::Bool(reconciled)),
-        ("drift", Json::Arr(drift.into_iter().map(Json::Str).collect())),
-        ("note", note.map_or(Json::Null, Json::Str)),
-    ]))
+    Ok(ReconcileEvent { venue: venue.to_string(), as_of: as_of.to_string(), reconciled, drift, note })
+}
+
+/// The `VenueReconcile` event as its JSON door form.
+pub fn venue_reconcile(venue: &str, as_of: &str, reconciled: bool, drift: Vec<String>, note: Option<String>) -> R<Json> {
+    Ok(venue_reconcile_event(venue, as_of, reconciled, drift, note)?.json())
 }
 
 /// `reconcile`: per contract, the venue position plus the live working remainder must equal
 /// what the mirror expects; a contract with an unknown-state row always drifts.
-pub fn reconcile(
+pub fn reconcile_event(
     venue: &str,
     as_of: &str,
     expected: &Book,
     positions: &[(Instrument, Money)],
     working: &[Row],
-) -> R<Json> {
+) -> R<ReconcileEvent> {
     let held = position_book(positions)?;
     let mut resting = Book::new();
     let mut unknown: OMap<Instrument, ()> = OMap::new();
@@ -167,7 +194,7 @@ pub fn reconcile(
     }
     if !drift.is_empty() {
         drift.sort();
-        return venue_reconcile(
+        return venue_reconcile_event(
             venue,
             as_of,
             false,
@@ -175,11 +202,22 @@ pub fn reconcile(
             Some("venue positions + working orders disagree with the mirror book; venue halted".into()),
         );
     }
-    venue_reconcile(venue, as_of, true, Vec::new(), None)
+    venue_reconcile_event(venue, as_of, true, Vec::new(), None)
+}
+
+/// `reconcile`: the `VenueReconcile` event as its JSON door form.
+pub fn reconcile(
+    venue: &str,
+    as_of: &str,
+    expected: &Book,
+    positions: &[(Instrument, Money)],
+    working: &[Row],
+) -> R<Json> {
+    Ok(reconcile_event(venue, as_of, expected, positions, working)?.json())
 }
 
 /// `unreadable`: drift on every contract in play, or on the unreadable marker.
-pub fn unreadable(venue: &str, as_of: &str, contracts: &[Instrument], why: &str) -> R<Json> {
+pub fn unreadable_event(venue: &str, as_of: &str, contracts: &[Instrument], why: &str) -> R<ReconcileEvent> {
     let mut names: Vec<String> = Vec::new();
     for c in contracts {
         let symbol = c.symbol()?;
@@ -191,13 +229,18 @@ pub fn unreadable(venue: &str, as_of: &str, contracts: &[Instrument], why: &str)
     if names.is_empty() {
         names.push(UNREADABLE.to_string());
     }
-    venue_reconcile(
+    venue_reconcile_event(
         venue,
         as_of,
         false,
         names,
         Some(format!("cannot read the venue ({why}); refusing to assume it matches (I5)")),
     )
+}
+
+/// `unreadable`: drift on every contract in play, or on the unreadable marker.
+pub fn unreadable(venue: &str, as_of: &str, contracts: &[Instrument], why: &str) -> R<Json> {
+    Ok(unreadable_event(venue, as_of, contracts, why)?.json())
 }
 
 pub struct Ticket {

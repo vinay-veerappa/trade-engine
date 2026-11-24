@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 
 from trade_engine.domain.orders import Order
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Event, EventKind, Ledger, codec
+from trade_engine.ledger import Event, EventKind, Ledger
 from trade_engine.ledger.events import MirrorRefused
 from trade_engine.ledger.state import AccountState
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
@@ -107,24 +107,28 @@ def follow_entries(
     An entry is a sim order with no parent, created since ``session_open``, that the sim
     did not cancel, reject or expire unfilled, and this venue has not handled.
     """
-    out = _rs.decide("follow_entries", {
-        "mirror": codec.canon(mirror_of(ledger, binding.venue_account)),
-        "accounts": [[a, codec.canon(ledger.state(a))] for a in binding.mirrored_accounts],
-        "mirrored": list(binding.mirrored_accounts), "now": now.isoformat(),
-        "session_open": session_open.isoformat(), "max_age_us": max_age // timedelta(microseconds=1)})
-    send = tuple(ledger.state(account).orders[order_id] for account, order_id in out["send"])
-    return send, tuple((o, a, r) for o, a, r in out["refused"])
+    out = _rs.call(
+        _rs.rs.tos_follow_entries,
+        mirror_of(ledger, binding.venue_account),
+        [(a, ledger.state(a)) for a in binding.mirrored_accounts],
+        list(binding.mirrored_accounts),
+        session_open,
+        now,
+        max_age // timedelta(microseconds=1),
+    )
+    send = tuple(ledger.state(account).orders[order_id] for account, order_id in out[0])
+    return send, tuple(out[1])
 
 
 def _flat(state: AccountState, order: Order) -> bool:
     """The sim holds none of ``order``'s instrument (a vertical by its spreads)."""
-    return _rs.decide("follow_flat", {"account": codec.canon(state), "order_id": order.order_id})["flat"]
+    return _rs.call(_rs.rs.tos_follow_flat, state, order)
 
 
 def pass_name(now: datetime) -> str:
     # A naive clock reads as local time, as ``astimezone`` always did.
     when = now if now.tzinfo is not None else now.astimezone(UTC)
-    return _rs.decide("pass_name", {"now": when.isoformat()})["name"]
+    return _rs.call(_rs.rs.tos_follow_pass_name, when)
 
 
 def follow_cycle(

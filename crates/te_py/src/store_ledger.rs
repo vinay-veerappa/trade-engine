@@ -263,6 +263,14 @@ pub(crate) fn instrument_of(value: &Bound<'_, PyAny>) -> PyResult<Instrument> {
     py_result(sim::instrument(&payload_text(value)?))
 }
 
+/// A Python `AccountState` carrier as te_core's folded state (its canonical tree).
+pub(crate) fn account_of(value: &Bound<'_, PyAny>) -> PyResult<AccountState> {
+    let codec = value.py().import("trade_engine.ledger.codec")?;
+    let canon = codec.call_method1("canon", (value,))?;
+    let text: String = codec.call_method1("text", (canon,))?.extract()?;
+    py_result(lb::account_from_text(&text))
+}
+
 /// A Python `Decimal` as a te_core money value, from its `str` (exact).
 pub(crate) fn money(value: &Bound<'_, PyAny>) -> PyResult<Money> {
     py_result(sim::dec(&value.str()?.extract::<String>()?))
@@ -284,6 +292,17 @@ pub(crate) fn closes(value: &Bound<'_, PyAny>) -> PyResult<OMap<Instrument, Mone
         out.insert(instrument.hk(), instrument, price);
     }
     Ok(out)
+}
+
+/// A Python `MirrorState` carrier as the te_core mirror state, through its canonical tree
+/// (`codec.canon` then `lb::uncanon_mirror`).
+pub(crate) fn mirror_of(value: &Bound<'_, PyAny>) -> PyResult<MirrorState> {
+    let py = value.py();
+    let codec = py.import("trade_engine.ledger.codec")?;
+    let tree = codec.call_method1("canon", (value,))?;
+    let text: String = codec.call_method1("text", (tree,))?.extract()?;
+    let json = py_result(lb::json_from_text(&text))?;
+    py_result(lb::uncanon_mirror(&json))
 }
 
 /// A te_core JSON tree as the Python object the codec builds from it (`codec.build_text`).

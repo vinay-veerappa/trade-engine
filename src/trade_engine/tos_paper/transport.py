@@ -67,10 +67,8 @@ class MirrorTicket:
     right: Literal["C", "P"]
 
     def __post_init__(self) -> None:
-        _rs.decide("ticket_validate", {
-            "kind": "option", "side": self.side, "quantity": self.quantity, "order_type": self.order_type,
-            "tif": self.tif, "limit_price": _rs.text(self.limit_price),
-        })
+        _rs.call(_rs.rs.tos_transport_validate_option, self.side, self.quantity, self.order_type, self.tif,
+                 self.limit_price)
 
 
 @dataclass(frozen=True)
@@ -89,10 +87,8 @@ class MirrorStockTicket:
     tif: Literal["DAY", "GTC"]
 
     def __post_init__(self) -> None:
-        _rs.decide("ticket_validate", {
-            "kind": "stock", "symbol": self.symbol, "side": self.side, "quantity": self.quantity,
-            "order_type": self.order_type, "tif": self.tif, "limit_price": _rs.text(self.limit_price),
-        })
+        _rs.call(_rs.rs.tos_transport_validate_stock, self.symbol, self.side, self.quantity, self.order_type,
+                 self.tif, self.limit_price)
 
 
 @dataclass(frozen=True)
@@ -107,7 +103,7 @@ class MirrorComboLeg:
     right: Literal["C", "P"]
 
     def __post_init__(self) -> None:
-        _rs.decide("ticket_validate", {"kind": "leg", "side": self.side, "ratio": self.ratio})
+        _rs.call(_rs.rs.tos_transport_validate_leg, self.side, self.ratio)
 
 
 @dataclass(frozen=True)
@@ -129,19 +125,14 @@ class MirrorComboTicket:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "legs", tuple(self.legs))
-        _rs.decide("ticket_validate", {
-            "kind": "combo", "legs": [{"side": leg.side, "ratio": leg.ratio} for leg in self.legs],
-            "quantity": self.quantity, "order_type": self.order_type, "limit_price": _rs.text(self.limit_price),
-            "price_effect": self.price_effect, "tif": self.tif,
-        })
+        _rs.call(_rs.rs.tos_transport_validate_combo, [(leg.side, leg.ratio) for leg in self.legs],
+                 self.quantity, self.order_type, self.limit_price, self.price_effect, self.tif)
 
 
 def ticket_for(order: VenueOrder) -> MirrorTicket | MirrorComboTicket | MirrorStockTicket:
     """The ticket for one venue order, or UnsupportedCapability — never an approximation."""
-    return ticket_of(_rs.decide("ticket_for", {
-        "instrument": _rs.wire(order.instrument), "order_type": order.order_type.value, "tif": order.tif.value,
-        "quantity": str(order.quantity), "side": order.side.value, "limit_price": _rs.text(order.limit_price),
-    }))
+    return ticket_of(_rs.call(_rs.rs.tos_transport_ticket_for, order.instrument, order.order_type.value,
+                              order.tif.value, order.quantity, order.side.value, order.limit_price))
 
 
 def ticket_of(d: Mapping) -> MirrorTicket | MirrorComboTicket | MirrorStockTicket:
