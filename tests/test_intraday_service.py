@@ -892,6 +892,9 @@ def test_the_close_mark_skips_a_snapshot_whose_option_quote_is_older_than_the_li
     rig.ledger.close()
 
 
+# -- unexpected errors ----------------------------------------------------------------------
+
+
 def test_an_unexpected_error_flattens_at_a_fresh_quote_alerts_and_exits(rig) -> None:
     rig.strategy.actions[at_et(SESSION, 9, 40)] = [spread("o-1")]
     rig.strategy.raise_at = at_et(SESSION, 9, 41)
