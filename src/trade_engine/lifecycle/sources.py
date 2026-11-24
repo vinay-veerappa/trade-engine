@@ -26,13 +26,14 @@ from trade_engine.domain.instruments import OptionContract
 from trade_engine.domain.option_roots import SettleTime, option_style
 from trade_engine.interfaces.market_data import OptionQuote, StaleDataError
 from trade_engine.market_data.chains import ChainSnapshotStore
-from trade_engine._lifecycle_runtime import aware, decide, journal, register
+from trade_engine._lifecycle_runtime import journal, register
+from trade_engine.sim._rs import rs
 
 register("stale", StaleDataError)
 
 
 def _aware(stamp: datetime, what: str) -> None:
-    aware(stamp, what)
+    rs.lifecycle_aware(stamp.tzinfo is not None and stamp.tzinfo.utcoffset(stamp) is not None, what)
 
 
 @dataclass(frozen=True)
@@ -48,9 +49,9 @@ class SettlementPrice:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "underlying", journal("symbol", self.underlying))
-        decide("value", [self.underlying and "_", str(self.price) if isinstance(self.price, Decimal) else "",
-                         "SettlementPrice", repr(self.price)],
-               flags=[True, isinstance(self.price, Decimal), bool(self.source)])
+        rs.lifecycle_value(True, self.underlying and "_", isinstance(self.price, Decimal),
+                           str(self.price) if isinstance(self.price, Decimal) else "",
+                           "SettlementPrice", repr(self.price), bool(self.source))
         _aware(self.as_of, "SettlementPrice.as_of")
 
 
@@ -70,15 +71,15 @@ class FixedSettlements:
         for price in items:
             key = (price.underlying, price.session, price.settle_time)
             differs = key in self._prices and self._prices[key] != price
-            decide("settlement_conflict", [key[2].value, key[0], str(key[1])], flags=[differs])
+            rs.lifecycle_settlement_conflict(differs, key[2].value, key[0], str(key[1]))
             self._prices[key] = price
 
     def settlement(self, underlying: str, session: date, settle_time: SettleTime) -> SettlementPrice:
-        key = (decide("symbol_key", [underlying])[0][0], session, settle_time)
+        key = (rs.lifecycle_symbol_key(underlying), session, settle_time)
         found = self._prices.get(key)
         if found is not None:
             return found
-        decide("settlement_missing", [settle_time.value, key[0], session.isoformat()])  # refuses (I5)
+        rs.lifecycle_settlement_missing(settle_time.value, key[0], session.isoformat())  # refuses (I5)
         raise AssertionError("unreachable: decide refuses")
 
 
@@ -94,9 +95,9 @@ class Dividend:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", journal("symbol", self.symbol))
-        decide("value", [self.symbol and "_", str(self.amount) if isinstance(self.amount, Decimal) else "",
-                         "Dividend", repr(self.amount)],
-               flags=[False, isinstance(self.amount, Decimal), bool(self.source)])
+        rs.lifecycle_value(False, self.symbol and "_", isinstance(self.amount, Decimal),
+                           str(self.amount) if isinstance(self.amount, Decimal) else "",
+                           "Dividend", repr(self.amount), bool(self.source))
         _aware(self.as_of, "Dividend.as_of")
 
 
@@ -112,12 +113,12 @@ class FixedDividends:
     with no dividends to say it pays none."""
 
     def __init__(self, by_symbol: Mapping[str, list[Dividend] | tuple[Dividend, ...]]) -> None:
-        self._by_symbol = {decide("symbol_key", [symbol])[0][0]: tuple(items) for symbol, items in by_symbol.items()}
+        self._by_symbol = {rs.lifecycle_symbol_key(symbol): tuple(items) for symbol, items in by_symbol.items()}
 
     def dividends(self, symbol: str, ex_date: date) -> tuple[Dividend, ...]:
-        key = decide("symbol_key", [symbol])[0][0]
+        key = rs.lifecycle_symbol_key(symbol)
         if key not in self._by_symbol:
-            decide("dividend_missing", [key])  # refuses (I5)
+            rs.lifecycle_dividend_missing(key)  # refuses (I5)
             raise AssertionError("unreachable: decide refuses")
         return tuple(d for d in self._by_symbol[key] if d.ex_date == ex_date)
 
@@ -144,8 +145,7 @@ class CorporateActionDividends:
                 amount = Decimal(str(raw)) if raw is not None else None
             except (InvalidOperation, ValueError):
                 amount = None
-            decide("action_amount", [str(amount), symbol, str(ex_date), repr(raw)],
-                   flags=[amount is not None])
+            rs.lifecycle_action_amount(amount is not None, str(amount), symbol, str(ex_date), repr(raw))
             found.append(Dividend(symbol, ex_date, amount, "corporate_actions", action.as_of))
         return tuple(found)
 
@@ -171,5 +171,5 @@ class SnapshotQuotes:
         found = snapshot.get(contract)
         if found is not None:
             return found
-        decide("quote_missing", [contract.occ.strip(), underlying, snapshot.as_of.isoformat()])  # refuses (I5)
+        rs.lifecycle_quote_missing(contract.occ.strip(), underlying, snapshot.as_of.isoformat())  # refuses (I5)
         raise AssertionError("unreachable: decide refuses")

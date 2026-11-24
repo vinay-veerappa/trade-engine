@@ -137,19 +137,37 @@ pub(crate) fn refuse(py: Python<'_>, msg: &str) -> PyErr {
     }
 }
 
+/// The exception a gate raises for its refusal text: `refuse` for EOD, the lifecycle pass's own class otherwise.
+pub(crate) type Raise = for<'py> fn(Python<'py>, &str) -> PyErr;
+
 /// The store behind a plain `Ledger` that is open. `refusal` is the text for a ledger that is not one.
-fn plain_store<'py>(ledger: &Bound<'py, PyAny>, refusal: &str) -> PyResult<Bound<'py, LedgerStore>> {
+fn plain_store<'py>(ledger: &Bound<'py, PyAny>, refusal: &str, raise: Raise) -> PyResult<Bound<'py, LedgerStore>> {
     let py = ledger.py();
     let plain = py.import("trade_engine.ledger.store")?.getattr("Ledger")?;
     if !ledger.get_type().is(&plain) {
-        return Err(refuse(py, refusal));
+        return Err(raise(py, refusal));
     }
     // A closed ledger has no store (`_native` is None).
     let native = ledger.getattr("_native")?;
     if native.is_none() {
-        return Err(refuse(py, "the ledger is closed"));
+        return Err(raise(py, "the ledger is closed"));
     }
     Ok(native.downcast_into::<LedgerStore>()?)
+}
+
+/// `require_native` for a gate that raises its own class: the same checks, the caller's `raise` and `refusal`.
+pub(crate) fn require_native_with<'py>(
+    ledger: &Bound<'py, PyAny>,
+    calendar: &Bound<'py, PyAny>,
+    raise: Raise,
+    refusal: &str,
+) -> PyResult<Bound<'py, LedgerStore>> {
+    let py = calendar.py();
+    let exchange = py.import("trade_engine.calendar.sessions")?.getattr("ExchangeCalendar")?;
+    if !calendar.get_type().is(&exchange) || calendar.getattr("exchange")?.extract::<String>()? != "XNYS" {
+        return Err(raise(py, refusal));
+    }
+    plain_store(ledger, refusal, raise)
 }
 
 /// The store behind the native path: a plain `Ledger` on the XNYS `ExchangeCalendar`. Anything
@@ -158,13 +176,7 @@ pub(crate) fn require_native<'py>(
     ledger: &Bound<'py, PyAny>,
     calendar: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, LedgerStore>> {
-    let py = calendar.py();
-    let exchange = py.import("trade_engine.calendar.sessions")?.getattr("ExchangeCalendar")?;
-    let refusal = "EOD needs a plain Ledger on the XNYS ExchangeCalendar";
-    if !calendar.get_type().is(&exchange) || calendar.getattr("exchange")?.extract::<String>()? != "XNYS" {
-        return Err(refuse(py, refusal));
-    }
-    plain_store(ledger, refusal)
+    require_native_with(ledger, calendar, refuse, "EOD needs a plain Ledger on the XNYS ExchangeCalendar")
 }
 
 /// The store behind the runner's ledger and calendar (`require_native` on the runner's attributes).
@@ -174,7 +186,7 @@ pub(crate) fn native_store<'py>(runner: &Bound<'py, PyAny>) -> PyResult<Bound<'p
 
 /// The store behind a write-off, which takes no calendar: a plain open `Ledger` only.
 pub(crate) fn ledger_store<'py>(ledger: &Bound<'py, PyAny>) -> PyResult<Bound<'py, LedgerStore>> {
-    plain_store(ledger, "EOD needs a plain Ledger")
+    plain_store(ledger, "EOD needs a plain Ledger", refuse)
 }
 
 /// Run `f` against the native ledger and clock. The store's borrow lasts for the call.
