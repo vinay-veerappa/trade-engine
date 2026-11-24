@@ -26,6 +26,7 @@ pub mod http;
 mod eod_once;
 mod factory_run;
 mod mirror_loop;
+mod plain;
 pub mod plugins;
 
 /// The same module initializer is registered before custom CPython startup.
