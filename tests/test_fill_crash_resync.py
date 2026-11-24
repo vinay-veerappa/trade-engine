@@ -71,16 +71,17 @@ def _reconcile(ledger, clock, broker, manager, *, journal_account=None) -> int:
 
 
 def _crash_after_fill_append(patch) -> None:
-    """The real append commits the FILL; the process then dies before the bracket sync."""
-    real_append = _Host.append
+    """The native append commits the FILL; the process then dies before the bracket sync.
 
-    def crashing(self, text):
-        event = real_append(self, text)
-        if json.loads(text)["kind"] == EventKind.FILL.value:
+    ``after_append`` runs after the commit with the written event's bytes, so the FILL is
+    durable when it raises.
+    """
+
+    def crashing(self, data: bytes) -> None:
+        if json.loads(data)["kind"] == EventKind.FILL.value:
             raise RuntimeError("crash")
-        return event
 
-    patch.setattr(_Host, "append", crashing)
+    patch.setattr(_Host, "after_append", crashing)
 
 
 def _venue_fill(fill_id: str, quantity: str, broker) -> VenueFill:
