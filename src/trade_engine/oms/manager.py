@@ -14,6 +14,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
+import trade_engine_rs as rs
+
 from trade_engine.domain.instruments import Equity, Instrument, Side
 from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
 from trade_engine.domain.portfolio import Fill
@@ -28,7 +30,6 @@ from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import EmulatedOrderState, Event, EventKind, Ledger, codec
 from trade_engine.ledger.codec import DecimalRangeError, canon_decimal, encode_payload
 from trade_engine.oms.models import Bracket
-from trade_engine.oms.precheck import Precheck, PrecheckConfig, PrecheckConfigError
 from trade_engine.sim import _rs
 
 
@@ -133,7 +134,7 @@ class _Host:
     after_append = None
     """Test seam: a callable that receives the written event's bytes after the native append commits."""
 
-    def __init__(self, manager: OrderManager, broker, clock, ledger, gate: Precheck | None = None) -> None:
+    def __init__(self, manager: OrderManager, broker, clock, ledger, gate: "Precheck | None" = None) -> None:
         self._manager = manager
         self._broker = broker
         self._clock = clock
@@ -266,133 +267,8 @@ class _Host:
         return _rs.refusal(kind, message)
 
 
-class OrderManager:
+class OrderManager(rs.OrderManagerBase):
     """Manage orders using the E1 ledger as the sole source of local state."""
-
-    def __init__(
-        self, broker: BrokerAdapter, clock: Clock, ledger: Ledger, precheck: PrecheckConfig | None = None
-    ) -> None:
-        from trade_engine.tradovate.adapter import TradovateAdapter  # lazy: the adapter imports the OMS carriers
-
-        if isinstance(broker, TradovateAdapter) and (precheck is None or precheck.mode != "enforce"):
-            # Warn or off would send unchecked orders to a live venue (OA-3).
-            raise PrecheckConfigError("TradovateAdapter needs riskguard.precheck.mode = enforce")
-        self._broker = broker
-        self._clock = clock
-        self._ledger = ledger
-        gate = Precheck(precheck, clock, ledger) if precheck is not None and precheck.mode != "off" else None
-        self._host = _Host(self, broker, clock, ledger, gate)
-
-    def _flow(self, operation: str, **request):
-        try:
-            text = codec.text(_wire(request))
-            if type(self._ledger) is Ledger:
-                # The ledger's effects run natively against its store. The store's notifier
-                # must be the ledger's listeners: an owner-built Ledger has none set, so it is
-                # set here (idempotent).
-                store = self._ledger._store
-                store.set_notifier(self._ledger._notifier())
-                out = _rs.rs.oms_flow_native(operation, store, self._host, text)
-            else:
-                out = _rs.rs.oms_flow(operation, self._host, text)
-        except ValueError as err:
-            if type(err) is ValueError and len(err.args) == 2 and all(isinstance(a, str) for a in err.args):
-                raise _rs.refusal(*err.args) from err.__cause__
-            raise
-        return json.loads(out)
-
-    def create_bracket(self, intent: OrderIntent, quantity: Decimal) -> Bracket:
-        """Persist a deterministic bracket; conflicting command replays are refused."""
-        return _bracket(self._flow("create_bracket", intent=intent, quantity=quantity))
-
-    def get_order(self, order_id: str) -> Order:
-        return _order(self._flow("get_order", order_id=order_id))
-
-    def submit(self, order: Order) -> Order:
-        """Submit one native venue order, recording ambiguity before network I/O."""
-        return _order(self._flow("submit", order=order))
-
-    def submit_trailing(self, order: Order) -> Order:
-        """Start a native venue trail or persist a live emulated trail locally."""
-        return _order(self._flow("submit_trailing", order=order))
-
-    def update_trailing(
-        self, order_id: str, price: Decimal, *, command_id: str
-    ) -> Order:
-        """Apply one live price observation to a persisted emulated trailing stop."""
-        return _order(self._flow("update_trailing", order_id=order_id, price=price, command_id=command_id))
-
-    def update_emulated_order(
-        self, order_id: str, price: Decimal, *, command_id: str
-    ) -> Order:
-        """Evaluate one observed price against a persisted emulated order."""
-        return _order(self._flow("update_emulated_order", order_id=order_id, price=price,
-                                 command_id=command_id))
-
-    def record_fill(self, fill: Fill) -> Order:
-        """Persist a venue fill and synchronize bracket protection from folded state."""
-        return _order(self._flow("record_fill", fill=fill))
-
-    def synchronize_bracket(self, order: Order, cause: str) -> None:
-        """Re-run a bracket's protection sync under ``cause`` (F2, after a crash).
-
-        Safe to repeat: a replayed command id with the same payload returns the stored
-        event, and a child already sized and submitted is left alone. ``cause`` must be
-        the bracket's latest fill; an older one can collide with a command id already
-        used for a different quantity, and that refuses.
-        """
-        self._flow("synchronize_bracket", order=order, cause=cause)
-
-    def cancel(self, order_id: str, *, command_id: str) -> Order:
-        """Cancel a working order; only a confirmed venue ack becomes CANCELLED."""
-        return _order(self._flow("cancel", order_id=order_id, command_id=command_id))
-
-    def move_stop(self, entry_order_id: str, stop_price: Decimal, *, command_id: str) -> Order:
-        """Tighten an open bracket's protective stop; loosening it refuses (I5)."""
-        return _order(self._flow("move_stop", entry=entry_order_id, stop_price=stop_price,
-                                 command_id=command_id))
-
-    def close_bracket(self, entry_order_id: str, *, command_id: str, reason: str) -> Order:
-        """Exit an open bracket's whole open quantity with a DAY market order.
-
-        Entered after the close, it works the next session's open. The protective stop
-        stays live until the close order fills; the fill then cancels the remaining exits.
-        """
-        return _order(self._flow("close_bracket", entry=entry_order_id, command_id=command_id, reason=reason))
-
-    def reduce_bracket(
-        self, entry_order_id: str, fraction: Decimal, *, command_id: str, reason: str
-    ) -> Order:
-        """Exit ``fraction`` of an open bracket, rounded down, with a DAY market order.
-
-        The reduce replaces the resting profit targets and cancels them: the partial is
-        taken at the target or after N days, whichever comes first. The protective stop
-        stays live; once the reduce fills, it shrinks to the remaining open quantity.
-        """
-        return _order(self._flow("reduce_bracket", entry=entry_order_id, fraction=fraction,
-                                 command_id=command_id, reason=reason))
-
-    def replace(
-        self, order_id: str, changes: OrderChanges, *, command_id: str
-    ) -> Order:
-        """Replace a live order; pending/unknown acknowledgements remain unknown."""
-        return _order(self._flow("replace", order_id=order_id, changes=_changes(changes),
-                                 command_id=command_id))
-
-    def reconcile_order(self, order_id: str) -> Order:
-        """Read back an ambiguous venue order; never resend it."""
-        return _order(self._flow("reconcile_order", order_id=order_id))
-
-    def _send_reduce(self, reduce: Order, command_id: str) -> Order:
-        """Cancel the resting profit targets, then submit the reduce."""
-        return _order(self._flow("send_reduce", order=reduce, command_id=command_id))
-
-    def _bracket_children(self, entry_order_id: str) -> list[Order]:
-        return [_order(item) for item in self._flow("bracket_children", entry=entry_order_id)]
-
-    def _open_bracket_stop(self, entry_order_id: str) -> tuple[Order, Decimal]:
-        stop, open_quantity = self._flow("open_bracket_stop", entry=entry_order_id)
-        return _order(stop), Decimal(open_quantity)
 
     # The pure decisions stay the P3b-2a shims over ``te_core::oms::manager``.
     @staticmethod
