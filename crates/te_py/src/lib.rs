@@ -36,6 +36,7 @@ mod plain;
 pub mod plugins;
 mod option_router;
 mod lifecycle;
+mod ibkr_adapter;
 
 /// The git sha (with a `-dirty` suffix) this binary was built from. Python
 /// reads it as `trade_engine_rs.__git_sha__`; the runtime owner's report reads
@@ -951,6 +952,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LedgerFold>()?;
     m.add_class::<option_router::OptionRouterBase>()?;
     m.add_class::<lifecycle::LifecyclePassBase>()?;
+    m.add_class::<ibkr_adapter::IbkrAccountsAdapterBase>()?;
     accounts::register(m)?;
     registry_outbox::register(m)?;
     register_options(m)?;
