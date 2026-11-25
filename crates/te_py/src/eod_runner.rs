@@ -80,7 +80,8 @@ fn ctx(py: Python<'_>) -> PyResult<&'static Ctx> {
     CTX.get_or_try_init(py, || Ctx::new(py))
 }
 
-/// `EodRunnerError(str(err))` when `e` is the given exception class, else `e` unchanged.
+/// `raise EodRunnerError(str(err)) from err` when `e` is the given exception class, else `e`
+/// unchanged.
 fn map_to_eod(py: Python<'_>, e: PyErr, exc: &Bound<'_, PyAny>, eod: &Bound<'_, PyAny>) -> PyErr {
     if e.is_instance(py, exc) {
         let msg: String = e
@@ -89,7 +90,11 @@ fn map_to_eod(py: Python<'_>, e: PyErr, exc: &Bound<'_, PyAny>, eod: &Bound<'_, 
             .and_then(|s| s.extract())
             .unwrap_or_default();
         match eod.call1((msg,)) {
-            Ok(value) => PyErr::from_value(value),
+            Ok(value) => {
+                let raised = PyErr::from_value(value);
+                raised.set_cause(py, Some(e));
+                raised
+            }
             Err(fallback) => fallback,
         }
     } else {
