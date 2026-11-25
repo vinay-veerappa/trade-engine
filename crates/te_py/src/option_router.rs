@@ -146,7 +146,10 @@ impl OptionRouterBase {
                     .import("trade_engine.eod.runner")?
                     .getattr("EodRunnerError")?
                     .call1((message,))?;
-                return Err(PyErr::from_value(raised));
+                // `raise _fail(str(err)) from err`
+                let raised = PyErr::from_value(raised);
+                raised.set_cause(py, Some(err));
+                return Err(raised);
             }
             Err(err) => return Err(err),
         };
