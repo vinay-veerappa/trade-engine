@@ -243,12 +243,13 @@ def test_eod_runner_sweeps_open_brackets_before_its_first_reconcile(tmp_path: Pa
 
 
 def test_intraday_service_sweeps_its_account_at_run_start(rig, monkeypatch) -> None:
-    from trade_engine.intraday import service as intraday_service
+    from trade_engine.oms import reconcile
     from test_intraday_service import SESSION, at_et, snap
 
+    # The Rust IntradayService looks the sweep up on trade_engine.oms.reconcile at each run (intraday.rs).
     calls: list[str] = []
     monkeypatch.setattr(
-        intraday_service, "resync_open_brackets",
+        reconcile, "resync_open_brackets",
         lambda ledger, manager, account_id: calls.append(account_id) or 0,
     )
     rig.snapshots = [snap(SESSION, 15, 59)]

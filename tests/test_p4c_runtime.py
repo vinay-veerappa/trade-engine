@@ -26,6 +26,14 @@ def bundle() -> Path:
     return ROOT
 
 
+def final_report(stdout: str) -> dict:
+    """The serve report: the last stdout JSON line that is not a ``job_finished`` event (actor.rs)."""
+    docs = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    reports = [d for d in docs if d.get("event") != "job_finished"]
+    assert reports, stdout
+    return reports[-1]
+
+
 def plugin_dir(tmp_path: Path) -> Path:
     plugins = tmp_path / "plugins"
     plugins.mkdir(exist_ok=True)
@@ -85,7 +93,7 @@ def test_serve_composes_owner_journal_and_recovers(bundle, tmp_path):
     config = base_config(tmp_path)
     proc = run_serve(config, tmp_path)
     assert proc.returncode == 0, proc.stderr
-    report = json.loads(proc.stdout)
+    report = final_report(proc.stdout)
     assert report["role"] == ROLE
     assert list(report["jobs"]) == JOBS
     assert report["recovered"] is True
@@ -290,7 +298,7 @@ def test_serve_http_loop_admits_over_the_wire_and_stops_cleanly(bundle, tmp_path
         # Stop the owner: closing stdin drains and releases the guard last.
         proc.stdin.close()
         proc.wait(timeout=60)
-        report = json.loads(proc.stdout.read())
+        report = final_report(proc.stdout.read())
         assert report["served"]["port"] == port
         assert proc.returncode == 0
         # The sidecar guard is released after the clean stop.
