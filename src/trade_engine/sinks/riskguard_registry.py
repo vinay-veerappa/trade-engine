@@ -18,10 +18,10 @@ to Rust and persists the state Rust serialises.
 
 The sink never reads a clock: `now` comes from the injected clock (I7).
 
-The delivery sequencing and the POST socket I/O now live in `trade_engine_rs`
-(`RiskguardRegistrySinkBase` / `registry_http_post`); this module keeps the import path, the
-public names, the config dataclass, the token/persist helpers, and the thin state helpers the
-Rust base reaches through attribute lookup.
+The delivery sequencing now lives in `trade_engine_rs` (`RiskguardRegistrySinkBase`); this
+module keeps the import path, the public names, the config dataclass, the urllib POST shell
+(`_default_post`), the token/persist helpers, and the thin state helpers the Rust base reaches
+through attribute lookup.
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ import json
 import logging
 import os
 import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -119,8 +121,18 @@ class TokenUnavailable(RuntimeError):
 
 
 def _default_post(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> tuple[int, str]:
-    """POST to the registry; the socket I/O lives in `trade_engine_rs`."""
-    return _rs.rs.registry_http_post(url, body, headers, timeout)
+    """One POST through stdlib urllib (the I/O shell); any transport failure is `(0, "")`."""
+    req = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - loopback/owner URL
+            return resp.status, resp.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+        finally:
+            exc.close()
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0, ""
 
 
 def read_token(path: str) -> str:

@@ -19,13 +19,16 @@ Written against the journal's routes in `third_party/trade-journal/apps/web/src/
 - With a password configured every route answers 401; that raises `JournalAuthError` so
   the outbox records why it is stuck instead of retrying silently.
 
-The delivery sequencing and the HTTP socket I/O now live in `trade_engine_rs`
-(`HttpJournalSinkBase` / `journal_http_request`); this module keeps the import path, the
-public names, the docstrings and the stdlib JSON/stamp helpers the tests still read.
+The delivery sequencing now lives in `trade_engine_rs` (`HttpJournalSinkBase`); this module
+keeps the import path, the public names, the urllib I/O shell (`_default_http_request`) and
+the stamp helpers the tests still read.
 """
 
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
 from datetime import datetime
 from typing import Any, Callable
 
@@ -59,8 +62,23 @@ def _default_http_request(
     body: dict[str, Any] | None = None,
     timeout: float = 10.0,
 ) -> tuple[int, dict[str, Any]]:
-    """Default HTTP request handler; the socket I/O lives in `trade_engine_rs`."""
-    return rs.journal_http_request(url, method, body, timeout)
+    """Default HTTP request handler using standard library urllib (the I/O shell)."""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            content = resp.read().decode("utf-8")
+            parsed = json.loads(content) if content else {}
+            return status, parsed
+    except urllib.error.HTTPError as exc:
+        content = exc.read().decode("utf-8")
+        try:
+            parsed = json.loads(content) if content else {}
+        except ValueError:
+            parsed = {"error": content}
+        return exc.code, parsed
 
 
 class HttpJournalSink(rs.HttpJournalSinkBase):

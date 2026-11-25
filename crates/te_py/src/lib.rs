@@ -956,8 +956,6 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     registry_outbox::register(m)?;
     m.add_class::<sinks::HttpJournalSinkBase>()?;
     m.add_class::<sinks::RiskguardRegistrySinkBase>()?;
-    m.add_function(wrap_pyfunction!(sinks::journal_http_request, m)?)?;
-    m.add_function(wrap_pyfunction!(sinks::registry_http_post, m)?)?;
     register_options(m)?;
     register_futures(m)?;
     m.add_function(wrap_pyfunction!(risk_rules_from_mapping, m)?)?;
