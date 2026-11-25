@@ -17,6 +17,7 @@ mod oms_native;
 mod oms_manager;
 mod precheck;
 mod sim;
+mod sim_broker;
 mod lock;
 pub mod store;
 mod store_ledger;
@@ -892,6 +893,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     http::register(m)?;
     plugins::register(m)?;
     sim::register(m)?;
+    m.add_class::<sim_broker::SimBrokerBase>()?;
     oms::register(m)?;
     oms_native::register(m)?;
     oms_manager::register(m)?;

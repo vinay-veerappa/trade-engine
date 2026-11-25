@@ -73,7 +73,7 @@ pub(crate) fn dec(s: &str) -> LR<Money> {
     }
 }
 
-fn opt_dec(s: &Option<String>) -> LR<Option<Money>> {
+pub(crate) fn opt_dec(s: &Option<String>) -> LR<Option<Money>> {
     s.as_deref().map(dec).transpose()
 }
 
@@ -88,7 +88,7 @@ pub(crate) fn side(s: &str) -> LR<Side> {
     Side::parse(s).map_or_else(|| err("value", format!("bad side {s:?}")), Ok)
 }
 
-type OrderT = (
+pub(crate) type OrderT = (
     String,
     String,
     String,
@@ -102,7 +102,7 @@ type OrderT = (
     Option<String>,
 );
 
-fn vorder(t: &OrderT) -> LR<VOrder> {
+pub(crate) fn vorder(t: &OrderT) -> LR<VOrder> {
     let (id, instr, otype, sd, qty, submitted, tif, (limit, stop, trail), allocs, parent, oco) = t;
     let mut a = Vec::new();
     for (soid, account, q) in allocs {
@@ -125,15 +125,15 @@ fn vorder(t: &OrderT) -> LR<VOrder> {
     })
 }
 
-type AckT = (String, &'static str, String, Option<String>);
+pub(crate) type AckT = (String, &'static str, String, Option<String>);
 
-fn ack(a: sb::Ack) -> AckT {
+pub(crate) fn ack(a: sb::Ack) -> AckT {
     (a.id, a.status, a.ts.iso, a.msg)
 }
 
-type BarT = (String, String, String, String, String, String, String, String);
+pub(crate) type BarT = (String, String, String, String, String, String, String, String);
 
-fn bar(t: &BarT) -> LR<sb::Bar> {
+pub(crate) fn bar(t: &BarT) -> LR<sb::Bar> {
     let (instr, ts, o, h, l, c, v, as_of) = t;
     Ok(sb::Bar {
         instr: instrument(instr)?,
