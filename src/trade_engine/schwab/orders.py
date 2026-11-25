@@ -15,13 +15,16 @@ Three pieces, the first two pure:
   nothing here talks to Schwab. Loopback only, one call per request, never retried.
 
 No clock is read here (I7); the adapter passes the window in.
+
+The order-route call sequencing and outcome classification live in Rust (`HubOrdersClientBase`);
+the HTTP I/O stays on urllib (`urllib_transport`, which the base calls when no transport is
+injected). This module keeps the public class (a thin subclass), the pure builders and the
+carriers.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import socket
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping
@@ -29,11 +32,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
-from urllib.parse import quote, urlencode
+
+import trade_engine_rs as rs
 
 from trade_engine.domain import Equity, OptionContract, OrderType, Side, TimeInForce
 from trade_engine.interfaces.broker import UnsupportedCapability, VenueOrder
-from trade_engine.schwab.hub_client import DEFAULT_HUB_URL, MAX_RESPONSE_BYTES, check_loopback
+from trade_engine.schwab.hub_client import DEFAULT_HUB_URL, MAX_RESPONSE_BYTES
 
 log = logging.getLogger(__name__)
 
@@ -258,93 +262,15 @@ def urllib_transport(method: str, url: str, body: bytes | None,
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - loopback only
             return response.status, response.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+        try:
+            return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+        finally:
+            exc.close()
 
 
-class HubOrdersClient:
+class HubOrdersClient(rs.HubOrdersClientBase):
+    """The hub's order routes, loopback only, one call per request, never retried."""
+
     def __init__(self, base_url: str = DEFAULT_HUB_URL, transport: Transport = urllib_transport,
                  timeout_s: float = DEFAULT_TIMEOUT_S) -> None:
-        check_loopback(base_url)
-        self._base = base_url.strip().rstrip("/")
-        self._transport = transport
-        self._timeout = timeout_s
-
-    def place(self, account_hash: str, order: Mapping[str, Any]) -> HubOrderResult:
-        return self._call("POST", self._path(account_hash), order)
-
-    def replace(self, account_hash: str, order_id: str, order: Mapping[str, Any]) -> HubOrderResult:
-        return self._call("PUT", self._path(account_hash, order_id), order)
-
-    def cancel(self, account_hash: str, order_id: str) -> HubOrderResult:
-        return self._call("DELETE", self._path(account_hash, order_id), None)
-
-    def list_orders(self, account_hash: str, start: datetime, end: datetime) -> list[dict] | None:
-        """One account's orders entered in [start, end]; ``None`` when the read failed."""
-        query = urlencode({"fromEnteredTime": schwab_time(start), "toEnteredTime": schwab_time(end)})
-        result = self._call("GET", self._path(account_hash) + "?" + query, None)
-        if result.outcome != "ok":
-            return None
-        try:
-            orders = json.loads(result.body or "[]")
-        except ValueError:
-            return None
-        return orders if isinstance(orders, list) else None
-
-    def _path(self, account_hash: str, order_id: str | None = None) -> str:
-        path = f"{self._base}/accounts/{quote(account_hash, safe='')}/orders"
-        return path if order_id is None else f"{path}/{quote(order_id, safe='')}"
-
-    def _call(self, method: str, url: str, order: Mapping[str, Any] | None) -> HubOrderResult:
-        body = None if order is None else json.dumps(order, separators=(",", ":")).encode()
-        headers = {"Accept": "application/json"}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        try:
-            status, text = self._transport(method, url, body, headers, self._timeout)
-        except ConnectionRefusedError:
-            return HubOrderResult("not_sent", 0, message="hub_unreachable")
-        except (TimeoutError, socket.timeout):
-            return HubOrderResult("unknown", 0, message="outcome_unknown")
-        except (OSError, urllib.error.URLError) as exc:
-            reason = getattr(exc, "reason", None)
-            if isinstance(reason, ConnectionRefusedError):
-                return HubOrderResult("not_sent", 0, message="hub_unreachable")
-            return HubOrderResult("unknown", 0, message="outcome_unknown")
-        return _classify(status, text)
-
-
-def _classify(status: int, text: str) -> HubOrderResult:
-    try:
-        payload = json.loads(text) if text else {}
-    except ValueError:
-        payload = None
-    if not isinstance(payload, dict):
-        # Not the hub's shape: from a 2xx this is unknown (the call may have gone through).
-        return HubOrderResult("unknown" if status == 0 or status >= 200 and status < 300 or status >= 500
-                              else "not_sent", status, message="bad_shape")
-    if "error" in payload:
-        error = str(payload["error"])
-        if status in (502, 504) or status == 0:
-            return HubOrderResult("unknown", status, message=error)
-        return HubOrderResult("not_sent", status, message=error)
-    schwab = payload.get("status")
-    order_id = payload.get("order_id")
-    body = payload.get("body") if isinstance(payload.get("body"), str) else ""
-    order_id = str(order_id) if order_id not in (None, "") else None
-    if not isinstance(schwab, int):
-        return HubOrderResult("unknown", status, message="bad_shape")
-    if 200 <= schwab < 300:
-        return HubOrderResult("ok", schwab, order_id, body)
-    if 400 <= schwab < 500:
-        return HubOrderResult("rejected", schwab, order_id, body, message=_schwab_message(body))
-    return HubOrderResult("unknown", schwab, order_id, body, message="upstream_status")
-
-
-def _schwab_message(body: str) -> str:
-    try:
-        parsed = json.loads(body)
-    except ValueError:
-        return body[:200]
-    if isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
-        return parsed["message"][:200]
-    return body[:200]
+        super().__init__()

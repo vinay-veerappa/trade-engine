@@ -26,17 +26,22 @@ Rules it carries:
   the host's backoff decide when `read()` is called (B7).
 
 No clock is read here (I7): the timeout is passed to the socket, not measured.
+
+The read sequencing and failure classification live in Rust (`HubAccountsClientBase`); the HTTP
+I/O stays on urllib (`_default_post`, which the base calls when no `post` is injected). This
+module keeps the public class (a thin subclass), the constants and the exceptions.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
+
+import trade_engine_rs as rs
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +108,7 @@ def _default_post(
             exc.close()
 
 
-class HubAccountsClient:
+class HubAccountsClient(rs.HubAccountsClientBase):
     """The hub's `/request` door for the two account reads. One pair per `read()`."""
 
     def __init__(
@@ -113,11 +118,7 @@ class HubAccountsClient:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         post: Post | None = None,
     ) -> None:
-        check_loopback(base_url)
-        self.base_url = base_url.strip().rstrip("/")
-        self.timeout_s = timeout_s
-        self._post = post or _default_post
-        self.reads = 0  # pairs completed, for the host's own accounting
+        super().__init__()
 
     @classmethod
     def from_env(
@@ -126,7 +127,7 @@ class HubAccountsClient:
         *,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         post: Post | None = None,
-    ) -> HubAccountsClient:
+    ) -> "HubAccountsClient":
         """The configured client; a non-loopback `TE_SCHWAB_HUB_URL` raises ValueError."""
         return cls(hub_base_url(environ), timeout_s=timeout_s, post=post)
 
@@ -134,66 +135,6 @@ class HubAccountsClient:
         return (
             f"HubAccountsClient(base_url={self.base_url!r}, timeout_s={self.timeout_s})"
         )
-
-    def read(self) -> tuple[str, str]:
-        """The two reads as `(account_numbers_json, accounts_json)` text, in that order."""
-        numbers = self._one(READ_METHODS[0])
-        accounts = self._one(READ_METHODS[1])
-        self.reads += 1
-        return json.dumps(numbers), json.dumps(accounts)
-
-    def _one(self, method: str) -> Any:
-        body = json.dumps({"method": method}).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        try:
-            status, text = self._post(
-                self.base_url + REQUEST_PATH, body, headers, self.timeout_s
-            )
-        except TimeoutError:
-            raise HubReadError(
-                "timeout", f"{method} was not answered in time"
-            ) from None
-        except urllib.error.URLError as exc:
-            kind = "timeout" if isinstance(exc.reason, TimeoutError) else "unreachable"
-            raise HubReadError(kind, f"{method} could not reach the hub") from None
-        except OSError:
-            raise HubReadError(
-                "unreachable", f"{method} could not reach the hub"
-            ) from None
-        if status == 0:
-            raise HubReadError("unreachable", f"{method} got no answer")
-        if status == 403:
-            raise HubReadError("refused", f"{method} was refused")
-        if status >= 500:
-            raise HubReadError("unreachable", f"{method} got HTTP {status}")
-        if status != 200:
-            raise HubReadError("refused", f"{method} got HTTP {status}")
-        return self._data(method, text)
-
-    @staticmethod
-    def _data(method: str, text: str) -> Any:
-        """The `data` of a success answer; every other shape is a failure with a kind."""
-        try:
-            answer = json.loads(text)
-        except ValueError:
-            raise HubReadError(
-                "bad_shape", f"{method} did not answer with JSON"
-            ) from None
-        if not isinstance(answer, dict):
-            raise HubReadError("bad_shape", f"{method} did not answer with an object")
-        code = answer.get("code")
-        if str(code).strip().lower() == "timeout":
-            raise HubReadError("timeout", f"{method} timed out in the hub")
-        if code in (403, "403", "refused"):
-            raise HubReadError("refused", f"{method} is not an allowed hub read")
-        status = answer.get("status")
-        if status is None:
-            raise HubReadError("bad_shape", f"{method} answered without a status")
-        if status != "success":
-            raise HubReadError("refused", f"{method} answered status {status!r}")
-        if "data" not in answer:
-            raise HubReadError("bad_shape", f"{method} answered success without data")
-        return answer["data"]
 
 
 __all__ = [

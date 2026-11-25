@@ -39,6 +39,7 @@ mod lifecycle;
 mod schwab_adapter;
 mod ibkr_adapter;
 mod sinks;
+mod schwab_hub;
 
 /// The git sha (with a `-dirty` suffix) this binary was built from. Python
 /// reads it as `trade_engine_rs.__git_sha__`; the runtime owner's report reads
@@ -984,6 +985,9 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     snapshot::register(m)?;
     market_data::register(m)?;
     m.add_class::<chain_store::ChainStoreBase>()?;
+    m.add_class::<schwab_hub::HubAccountsClientBase>()?;
+    m.add_class::<schwab_hub::HubOrdersClientBase>()?;
+    m.add_class::<schwab_hub::HubHintListenerBase>()?;
     Ok(())
 }
 
