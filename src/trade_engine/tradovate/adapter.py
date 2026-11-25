@@ -116,6 +116,9 @@ class TradovateAdapter(rs.TradovateAdapterBase):
         self._orders: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # OA-5: reconcile verdicts for PENDING entries, read back by the OMS through `orders()`.
         self._resolved: OrderedDict[str, Any] = OrderedDict()
+        # OA-5: called at the tail of `reconcile` with the report, so the OMS reads back the
+        # PENDING verdicts the adapter just resolved. None means no OMS is wired (read-only).
+        self._on_reconciled: Callable[[ReconcileReport], None] | None = None
         self._logged_unmatched: set[str] = set()
         self._last_payload: dict[str, Any] | None = None  # the last good /snapshot, for reconcile
         self._on_poll = on_poll

@@ -150,6 +150,13 @@ impl OrderManagerBase {
             ));
         }
 
+        // OA-5: a TradovateAdapter hands every PENDING verdict it reconciles back to this
+        // manager so the ledger is updated on the same read (no resend, no manual read-back).
+        // The read-back helper lives on the Python `OrderManager` subclass.
+        if broker.is_instance(&tradovate)? {
+            broker.setattr("_on_reconciled", slf.getattr("_read_back_reconciled")?)?;
+        }
+
         // gate = Precheck(precheck, clock, ledger) if precheck is not None and precheck.mode != "off"
         let gate: Option<Bound<'_, PyAny>> = match precheck {
             Some(config) => {
