@@ -1257,6 +1257,13 @@ impl TradovateAdapterBase {
         log(py, &ctx, "info", &format!(
             "ntx reconcile: mapped={mapped} unmatched={unmatched} accepted={accepted} rejected={rejected}"
         ))?;
+        // OA-5: hand the resolved PENDING verdicts back to the OMS so the ledger is updated on
+        // the same read that resolved them. Never fire on a skipped reconcile (no ledger) or a
+        // failed read (those paths returned above), and only when there is a verdict to apply.
+        let on_reconciled = slf.getattr("_on_reconciled")?;
+        if !on_reconciled.is_none() && accepted + rejected > 0 {
+            on_reconciled.call1((&report,))?;
+        }
         Ok(report.unbind())
     }
 

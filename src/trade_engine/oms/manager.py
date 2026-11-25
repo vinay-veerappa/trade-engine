@@ -9,6 +9,7 @@ nothing. ``trade_engine_rs`` missing is an ImportError (D5).
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime
 from decimal import Decimal
@@ -269,6 +270,24 @@ class _Host:
 
 class OrderManager(rs.OrderManagerBase):
     """Manage orders using the E1 ledger as the sole source of local state."""
+
+    def _read_back_reconciled(self, report):
+        """Read back every PENDING verdict the adapter just resolved (OA-5).
+
+        The adapter calls this from the tail of ``reconcile`` with its report; each id in
+        ``accepted`` then ``rejected`` is read back through the OMS so the ledger leaves
+        PENDING_UNKNOWN on the same read. One bad id must not strand the rest: the failure is
+        logged and the loop continues.
+        """
+        logger = logging.getLogger("trade_engine.oms.manager")
+        for order_id in report.accepted + report.rejected:
+            try:
+                self.reconcile_order(order_id)
+            except Exception as exc:
+                logger.error(
+                    "reconcile read-back failed for %s (%s)",
+                    order_id, type(exc).__name__,
+                )
 
     # The pure decisions stay the P3b-2a shims over ``te_core::oms::manager``.
     @staticmethod

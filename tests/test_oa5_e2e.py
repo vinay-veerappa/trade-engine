@@ -369,8 +369,7 @@ def test_pending_entry_resolves_from_one_read_and_is_never_resent(fake, ledger, 
     assert fake.snapshots == reads + 1
     resolved = report.accepted if expected is OrderState.ACCEPTED else report.rejected
     assert resolved == [entry.order_id]
-    for order_id in report.accepted + report.rejected:
-        manager.reconcile_order(order_id)
+    # The OMS read the verdict back automatically (adapter._on_reconciled): no manual loop.
     assert manager.get_order(entry.order_id).state is expected
     assert len(fake.ops("place")) == 1  # never resent
     if expected is OrderState.ACCEPTED:
@@ -382,6 +381,65 @@ def test_pending_entry_resolves_from_one_read_and_is_never_resent(fake, ledger, 
     else:
         assert "code=not_at_venue" in caplog.text
         assert entry.order_id not in adapter._orders
+
+
+def test_read_back_continues_past_a_failing_id(fake, ledger, guard, monkeypatch, caplog):
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    fake.timeout = "present"
+
+    def bracket(command_id):
+        targets = (Decimal("22010"),)
+        intent = replace(
+            make_intent(command_id=command_id, side=Side.BUY, targets=targets),
+            entry_price=Decimal("22000"), exit_tif=TimeInForce.DAY,
+            stop_loss=Decimal("21990"), profit_targets=targets,
+        )
+        return manager.create_bracket(intent, Decimal("2"))
+
+    first = manager.submit(bracket("readback-a").entry)
+    second = manager.submit(bracket("readback-b").entry)
+    assert first.state is OrderState.PENDING_UNKNOWN
+    assert second.state is OrderState.PENDING_UNKNOWN
+    fake.timeout = None
+
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    original = manager.reconcile_order
+    seen: list[str] = []
+
+    def flaky(order_id):
+        seen.append(order_id)
+        if len(seen) == 1:  # the first id fails; the rest must still be read back
+            raise RuntimeError("read-back boom")
+        return original(order_id)
+
+    monkeypatch.setattr(manager, "reconcile_order", flaky)
+    with caplog.at_level(logging.ERROR, logger="trade_engine.oms.manager"):
+        report = adapter.reconcile()
+    assert set(report.accepted) == {first.order_id, second.order_id}
+    assert seen == list(report.accepted)
+    failed, ok = seen
+    assert manager.get_order(failed).state is OrderState.PENDING_UNKNOWN  # read-back failed
+    assert manager.get_order(ok).state is OrderState.ACCEPTED  # the rest still resolved
+    assert "reconcile read-back failed" in caplog.text
+    assert failed in caplog.text and "RuntimeError" in caplog.text
+
+
+def test_adapter_without_an_order_manager_reconciles_unchanged(fake, ledger, guard, monkeypatch):
+    adapter, manager = start(fake, ledger, guard, monkeypatch)
+    fake.timeout = "present"
+    entry = manager.submit(new_bracket(manager).entry)
+    assert entry.state is OrderState.PENDING_UNKNOWN
+    fake.timeout = None
+
+    # A fresh adapter with no OrderManager wired: `_on_reconciled` is None, so reconcile still
+    # resolves the verdict in the adapter but never reads it back into the ledger.
+    adapter = TradovateAdapter(fake, clock=Clock(), ledger=ledger,
+                               account_bindings={ENGINE: Binding(NTX_ACCOUNT)})
+    assert adapter._on_reconciled is None
+    report = adapter.reconcile()
+    assert report.accepted == [entry.order_id]
+    # The verdict is stored for a future OMS read-back, but the ledger is untouched.
+    assert manager.get_order(entry.order_id).state is OrderState.PENDING_UNKNOWN
 
 
 def test_resolved_and_mapped_ids_stay_capped(fake, ledger, guard, monkeypatch):
