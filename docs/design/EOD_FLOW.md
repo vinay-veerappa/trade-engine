@@ -128,6 +128,18 @@ production 2026-11-24). The guard refuses to serve instead:
 - The owner's startup `serving` status and report carry `"git_sha"` (the built sha)
   (crates/te_runtime/src/main.rs:100, :188), so a logged report names the exact build.
 
+### Job timestamps, duration and completion log (W7)
+
+The runtime owner runs each scheduled job as a durable `Record`, but the record held no
+time, so a pass killed by its task limit left no trace of how long its owner job took.
+W7 stores the times under a sibling meta key (`te.runtime.jobtimes.v1:<request_id>`, JSON
+`{"admitted_at","started_at","finished_at"}` as RFC 3339 UTC with milliseconds), never on
+the record itself — `Record` is `deny_unknown_fields`, so an older te.exe decoding the
+ledger must keep starting. The submit/job/wait wire shape gains `admitted_at`,
+`started_at`, `finished_at` and `duration_ms` (all `null` when unknown), and, after
+`journal.finish`, the owner prints one `{"event":"job_finished",...}` line to stdout with
+the state, duration and the first 300 chars of any error.
+
 ## 7. Alternatives rejected
 
 None.
