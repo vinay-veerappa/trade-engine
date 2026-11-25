@@ -15,47 +15,38 @@ the reconcile expects exactly what the fold says the venue should hold.
 ``MirrorFill`` increments (and the Order Book closes) for the host to append. The
 session order and the ledger appends live in ``tos_paper.session_native``.
 
-The engine never imports tos-ui-mcp: the transport and balance reader are protocols
-(``transport``) the host wires. Nothing here places a real order or calls any Schwab
-endpoint. Unknown venue state is PENDING, never ACCEPTED (§4.5, I5); every strategy
-order is either allocated to a ticket or refused with a reason (I11).
+Every decision (the submit queue, the expected book, the sent tickets, the cancelled set,
+the keys, the sticky halt, what to call next) lives in Rust: ``te_core::tos_paper::broker``,
+owned by ``trade_engine_rs.TosPaperBrokerBase``. This module keeps the public class (a thin
+subclass), its class attributes, the carriers and the module-level helpers the rest of the
+engine imports; the transport and balance reader are protocols the host wires. Nothing here
+places a real order or calls any Schwab endpoint. Unknown venue state is PENDING, never
+ACCEPTED (§4.5, I5); every strategy order is either allocated to a ticket or refused with a
+reason (I11).
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 
-from trade_engine.accounts.poll import PollAndDiff
-from trade_engine.domain.instruments import Instrument
-from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
+import trade_engine_rs as rs
+
+from trade_engine.domain.orders import OrderState, OrderType, TimeInForce
 from trade_engine.interfaces.broker import (
-    AccountEvent,
     AccountRecord,
-    AccountSnapshot,
     BrokerAdapter,
-    Route,
     Capabilities,
-    OrderChanges,
+    Route,
     VenueAck,
-    VenueCashEvent,
-    VenueFill,
-    VenueIdentity,
     VenueOrder,
     VenueOrderAllocation,
-    VenueOrderState,
-    VenuePosition,
 )
-from trade_engine.ledger import codec
 from trade_engine.ledger.events import MirrorAck, MirrorFill, MirrorQueued, VenueReconcile
-from trade_engine.ledger.mirror import MirrorState
-from trade_engine.tos_paper import _rs
-from trade_engine.tos_paper.netting import NettedBatch
 from trade_engine.tos_paper.transport import (
     BalanceReader,
     OrderCanceller,
@@ -182,13 +173,14 @@ class _Host:
         raise self._last  # the very exception object the transport raised (TransportUnavailable)
 
 
-class TosPaperBroker(BrokerAdapter):
+class TosPaperBroker(rs.TosPaperBrokerBase, BrokerAdapter):
     """BrokerAdapter for one paperMoney mirror account.
 
     Every decision (the submit queue, the expected book, the sent tickets, the cancelled set, the
-    keys, the sticky halt, what to call next) is ``trade_engine_rs.TosBroker``'s; this class is the
-    I/O around it: the transport's sends, reads and cancels, ``connect`` and ``balance``, and the
-    carriers the rest of the engine takes back.
+    keys, the sticky halt, what to call next) is ``trade_engine_rs.TosBrokerBase``'s (the Rust
+    ``te_core::tos_paper::broker::Broker``); this class is the I/O around it: the transport's
+    sends, reads and cancels, ``connect`` and ``balance``, and the carriers the rest of the
+    engine takes back.
     """
 
     name = "TosPaperBroker"
@@ -207,6 +199,8 @@ class TosPaperBroker(BrokerAdapter):
         mirror_path: str | Path | None = None,
         account_ledger=None,
     ) -> None:
+        # The Rust base's __new__ built the core (venue, mirrored accounts, sticky halt).
+        super().__init__()
         self.transport = transport
         self.binding = binding
         self._clock = clock
@@ -214,15 +208,12 @@ class TosPaperBroker(BrokerAdapter):
         # paperMoney entry becomes one record), else the one account this mirror binds.
         self._mirror_path = None if mirror_path is None else Path(mirror_path)
         self._account_ledger = account_ledger
-        self._last_accounts: AccountSnapshot | None = None
-        self._poller: PollAndDiff | None = None
+        self._last_accounts = None
+        self._poller = None
         self._balance_reader = balance_reader
         self._balance_unproven_ok = balance_unproven_ok
-        self._identity: VenueIdentity | None = None
+        self._identity = None
         self.balance_proven: bool | None = None  # recorded at connect
-        # Restored from the ledger fold (``ledger.state.halted_venues``): a halt survives replay.
-        self._core = _rs.rs.TosBroker(binding.venue_account, list(binding.mirrored_accounts),
-                                      binding.venue_account in frozenset(halted_venues))
         self._host = _Host(self)
         self.capabilities = Capabilities(
             supported_order_types=frozenset({OrderType.MARKET, OrderType.LIMIT}),
@@ -231,240 +222,6 @@ class TosPaperBroker(BrokerAdapter):
             supports_native_stops=False,
             supports_streaming=False,
         )
-
-    @property
-    def venue(self) -> str:
-        """The venue key a VenueReconcile names and the halt is latched under."""
-        return self.binding.venue_account
-
-    @property
-    def halted(self) -> bool:
-        return self._core.halted
-
-    @property
-    def queued(self) -> tuple[VenueOrder, ...]:
-        return tuple(_rs.venue_order(d) for d in self._core.state()["queued"])
-
-    def _go(self, method, *args):
-        return _rs.call(method, self._host, *args)
-
-    # -- connection ----------------------------------------------------------
-
-    def connect(self) -> VenueIdentity:
-        """Prove the account number AND type (I10), then the balance (§4.7).
-
-        The transport proves the window is paperMoney. Here the banner must name the
-        configured account and type — a CSP order must never reach the IRA — and the
-        balance must cover the mirrored accounts. With no balance reader the connect
-        refuses unless the host explicitly passed ``balance_unproven_ok=True``, which is
-        recorded as ``balance_proven = False``.
-        """
-        identity = self.transport.connect()
-        number = str(identity.get("number", ""))
-        kind = str(identity.get("type", "")).strip().lower()
-        if number != self.binding.venue_account:
-            raise TosPaperBrokerError(
-                f"transport connected {number!r}, binding is {self.binding.venue_account!r} "
-                "— refusing to mirror"
-            )
-        if kind != self.binding.account_type:
-            raise TosPaperBrokerError(
-                f"{number} is a {kind or 'unknown'!r} account, binding needs "
-                f"{self.binding.account_type!r} — refusing to mirror"
-            )
-        balance = self.balance()
-        if balance is None:
-            if not self._balance_unproven_ok:
-                raise TosPaperBrokerError(
-                    f"{number}: no balance reader, so the §4.7 minimum "
-                    f"{self.binding.minimum_balance} is unproven — refusing to mirror "
-                    "(pass balance_unproven_ok=True to accept that explicitly)"
-                )
-            self.balance_proven = False
-        else:
-            if balance < self.binding.minimum_balance:
-                raise TosPaperBrokerError(
-                    f"{number} balance {balance} is under the §4.7 minimum "
-                    f"{self.binding.minimum_balance}; refusing to mirror"
-                )
-            self.balance_proven = True
-        self._identity = VenueIdentity(
-            account_id=self.binding.venue_account,
-            env=self.env,
-            connected_at=self._clock.now_utc(),
-            broker_name=self.name,
-        )
-        self._core.mark_connected()
-        return self._identity
-
-    def balance(self) -> Decimal | None:
-        """Net liquidation from the host's reader; None when no reader is wired."""
-        if self._balance_reader is None:
-            return None
-        return _as_decimal(self._balance_reader.net_liquidation(), "net liquidation")
-
-    def _require_connected(self, what: str) -> None:
-        if self._identity is None:
-            raise TosPaperBrokerError(f"{what} before connect; prove the venue first (I10)")
-
-    # -- the mirror layer (sim critical path: no transport calls) ------------
-
-    def mirror_batch(
-        self,
-        strategy_orders: Sequence[Order],
-        *,
-        holdings: Mapping[tuple[str, Instrument], Decimal],
-    ) -> NettedBatch:
-        """Net a batch and queue its tickets. Never calls the transport.
-
-        ``holdings`` is what each mirrored virtual account holds or has resting on this
-        venue, signed contracts keyed ``(account_id, instrument)`` — conflicts are screened
-        against it (``MirrorState.exposure()``: the mirror book plus every open ticket's
-        unfilled remainder, per allocation). Before ``restore`` it is also the expected
-        venue book; after ``restore`` the expectation is the fold's (``MirrorState.expected``),
-        so an open ticket is never counted twice. The sim book takes every order; refusals
-        here are venue refusals the caller records (I11).
-        """
-        self._require_connected("mirror_batch")
-        out = self._go(
-            self._core.mirror_batch,
-            [_rs.order_doc(o) for o in list(strategy_orders)],
-            _rs.holdings_doc(holdings))
-        return NettedBatch(venue_orders=tuple(_rs.venue_order(d) for d in out["venue_orders"]),
-                           refused=tuple((o, r) for o, r in out["refused"]))
-
-    # -- the ledger's memory (restart-safe) ------------------------------------
-
-    def restore(self, mirror: MirrorState, *, halted_venues: Collection[str] = ()) -> None:
-        """Load the venue's folded mirror: the fold, not this process, is the memory (I2).
-
-        - expected = the mirror book (proven venue fills) + every open ticket's live
-          remainder; a ticket that was rejected, cancelled or expired adds nothing;
-        - every ticket key the fold holds is used (never queued again, I3);
-        - the venue Order IDs sends proved make a cancel possible after a restart;
-        - a halt in ``halted_venues`` (``ledger.state.halted_venues``) is kept.
-
-        Refuses over an undrained queue: the queue would be lost or sent twice.
-        """
-        _rs.call(self._core.restore, codec.canon(mirror), list(halted_venues))
-
-    def collect_fills(self, mirror: MirrorState) -> FillCollection:
-        """Read the venue's cumulative fills per Order ID: the ``MirrorFill`` increments, and the
-        Order Book closes, for the host to append (see ``tos_paper.session_native``)."""
-        out = self._go(self._core.collect_fills, codec.canon(mirror))
-        return FillCollection(
-            fills=tuple(MirrorFill(venue=f["venue"], ticket_key=f["ticket_key"], venue_order_id=f["venue_order_id"],
-                                   filled=Decimal(f["filled"]), avg_price=_rs.dec(f["avg_price"]),
-                                   at=datetime.fromisoformat(f["at"])) for f in out["fills"]),
-            closes=tuple(MirrorAck(venue=c["venue"], ticket_key=c["ticket_key"], status=c["status"],
-                                   message=c["message"], at=datetime.fromisoformat(c["at"]),
-                                   venue_order_id=c["venue_order_id"], book_status=OrderState(c["book_status"]))
-                         for c in out["closes"]))
-
-    # -- the slow path (host-driven, off the sim critical path) --------------
-
-    def preflight(self) -> None:
-        """Read the venue's positions now, before anything is recorded, for the next drain.
-
-        The session calls this BEFORE its write-ahead: a venue that cannot be asked
-        (:class:`TransportUnavailable`) raises here, while nothing is queued in the ledger, so the
-        run defers whole and loses nothing. The drain then sends from this read instead of
-        reading again, so no read sits between the write-ahead and the send.
-        """
-        self._go(self._core.preflight)
-
-    def drain(self) -> DrainReport:
-        """Send the queue one ticket at a time, each read back before the next, then reconcile."""
-        out = self._go(self._core.drain)
-        return DrainReport(
-            acks=tuple(_rs.ack(a) for a in out["acks"]),
-            reconcile=None if out["reconcile"] is None else _rs.event(out["reconcile"]),
-            proven={k: (oid, OrderState(state)) for k, (oid, state) in out["proven"]})
-
-    def reconcile_now(self, *, defer_unavailable: bool = False) -> VenueReconcile:
-        """Read the venue and compare it with what the mirror expects (drift halts the venue)."""
-        return _rs.event(self._go(self._core.reconcile_now, defer_unavailable))
-
-    def submit(self, order: VenueOrder) -> VenueAck:
-        return _rs.ack(self._go(self._core.submit, _rs.venue_order_doc(order)))
-
-    def cancel(self, venue_order_id: str) -> VenueAck:
-        return _rs.ack(self._go(self._core.cancel, venue_order_id))
-
-    def proven_order_id(self, ticket_key: str) -> str | None:
-        """The venue Order ID a send (or the restored fold) proved for a ticket, or None."""
-        return self._core.proven_order_id(ticket_key)
-
-    def replace(self, venue_order_id: str, changes: OrderChanges) -> VenueAck:
-        raise TosPaperBrokerError(
-            "replace (TOS Cancel/replace order) is not mapped over JAB yet; "
-            "cancel() and submit a new ticket instead"
-        )
-
-    def orders(self, since: datetime) -> list[VenueOrderState]:
-        raise TosPaperBrokerError(
-            "venue order states cannot be read per venue order id over JAB yet; "
-            "use reconcile_now() (Order Book vs mirror book)"
-        )
-
-    def fills(self, since: datetime) -> list[VenueFill]:
-        raise TosPaperBrokerError(
-            "venue fills are not read per fill id (not wired); use collect_fills(mirror), "
-            "which reads cumulative fills per venue Order ID into the mirror ledger"
-        )
-
-    def positions(self) -> list[VenuePosition]:
-        self._require_connected("positions")
-        return [VenuePosition(_rs.unwire(p["instrument"]), Decimal(p["quantity"]), Decimal(p["avg_price"]),
-                              datetime.fromisoformat(p["as_of"]))
-                for p in self._go(self._core.positions)]
-
-    def cash_events(self, since: datetime) -> list[VenueCashEvent]:
-        raise TosPaperBrokerError("venue cash events (assignment/exercise) cannot be read yet")
-
-    # -- the account port (BROKER_PLATFORM phase 2) -------------------------------------
-
-    def accounts(self) -> AccountSnapshot:
-        """The paperMoney fixed list: `mirror.json` when wired, else this mirror's account.
-
-        A failed or malformed read keeps the last good list (B3) instead of emptying it.
-        """
-        try:
-            confirmed_at = self._clock.now_utc()
-            if self._mirror_path is None:
-                records = (
-                    AccountRecord.of(
-                        "tos_paper",
-                        self.binding.venue_account,
-                        env=self.env,
-                        status="active",
-                        account_type=self.binding.account_type,
-                        routes=(Route("tos", self.binding.venue_account),),
-                        source="tos_paper",
-                        confirmed_at=confirmed_at,
-                    ),
-                )
-            else:
-                records = tuple(load_mirror_accounts(self._mirror_path, clock=self._clock))
-            snapshot = AccountSnapshot(records=records, confirmed_at=confirmed_at)
-        except Exception:
-            if self._last_accounts is not None:
-                return self._last_accounts
-            raise
-        self._last_accounts = snapshot
-        return snapshot
-
-    def account_events(self, since: datetime) -> list[AccountEvent]:
-        """The poll helper's diff: this venue cannot push account changes."""
-        if self._poller is None:
-            self._poller = PollAndDiff(
-                self,
-                clock=self._clock,
-                ledger=self._account_ledger,
-                stale_after=self.stale_after,
-                broker="tos_paper",
-            )
-        return self._poller.account_events(since)
 
 
 def load_mirror_accounts(path: str | Path, *, clock) -> list[AccountRecord]:
