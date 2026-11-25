@@ -971,6 +971,10 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     tos_paper_plan::register(m)?;
     tos_paper_session::register(m)?;
     tos_paper_rules::register(m)?;
+    m.add_function(wrap_pyfunction!(tos_paper_session_host::run_mirror, m)?)?;
+    m.add_function(wrap_pyfunction!(tos_paper_session_host::collect_only, m)?)?;
+    m.add_function(wrap_pyfunction!(tos_paper_session_host::cancel_ticket, m)?)?;
+    m.add_function(wrap_pyfunction!(tos_paper_session_host::clear_halt, m)?)?;
     snapshot::register(m)?;
     market_data::register(m)?;
     m.add_class::<chain_store::ChainStoreBase>()?;
@@ -982,6 +986,7 @@ mod runtime;
 mod tos_paper;
 mod tos_paper_plan;
 mod tos_paper_session;
+mod tos_paper_session_host;
 mod tos_paper_rules;
 mod snapshot;
 mod snapshot_venue;
