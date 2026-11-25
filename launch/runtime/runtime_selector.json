@@ -10,6 +10,7 @@
         "OptionsMidday": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger-p7.db",
         "OptionsLate": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger-p7.db",
         "OptionsEod": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger-p7.db",
+        "OptionsEodHeal": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger-p7.db",
         "OptionsMirrorFollow": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger-p7.db",
         "OptionsMirrorCollect": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\options-ledger-p7.db",
         "ScanEod": "C:\\Users\\vinay\\tvDownloadOHLC\\data\\trade_engine\\scan-ledger-p7.db"

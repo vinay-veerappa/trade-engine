@@ -55,6 +55,7 @@ def test_the_shipped_selector_routes_each_live_client_task_to_its_owner():
     assert {name: ledger.rsplit("\\", 1)[-1] for name, ledger in selector["tasks"].items()} == {
         "OptionsMorning": "options-ledger-p7.db", "OptionsMidday": "options-ledger-p7.db",
         "OptionsLate": "options-ledger-p7.db", "OptionsEod": "options-ledger-p7.db",
+        "OptionsEodHeal": "options-ledger-p7.db",
         "OptionsMirrorFollow": "options-ledger-p7.db", "OptionsMirrorCollect": "options-ledger-p7.db",
         "ScanEod": "scan-ledger-p7.db",
     }
