@@ -15,6 +15,7 @@ mod flow;
 mod oms;
 mod oms_native;
 mod oms_manager;
+mod order_manager;
 mod precheck;
 mod riskguard;
 mod sim;
@@ -896,6 +897,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     oms::register(m)?;
     oms_native::register(m)?;
     oms_manager::register(m)?;
+    m.add_class::<order_manager::OrderManagerBase>()?;
     m.add_function(wrap_pyfunction!(flow::oms_flow_native, m)?)?;
     precheck::register(m)?;
     m.add_function(wrap_pyfunction!(riskguard::riskguard_check, m)?)?;
