@@ -99,19 +99,6 @@ class WorkingOrder:
         return self.state in _LIVE
 
 
-def working_order_of(row: Mapping) -> WorkingOrder:
-    """The ``te_core`` row (``working_order``) as the carrier."""
-    return WorkingOrder(_rs.unwire(row["instrument"]), Side(row["side"]), Decimal(row["quantity"]),
-                        Decimal(row["filled"]), OrderType(row["order_type"]), _rs.dec(row["limit_price"]),
-                        OrderState(row["state"]))
-
-
-def working_order_doc(row: WorkingOrder) -> dict:
-    return {"instrument": _rs.wire(row.instrument), "side": row.side.value, "quantity": str(row.quantity),
-            "filled": str(row.filled), "order_type": row.order_type.value, "limit_price": _rs.text(row.limit_price),
-            "state": row.state.value}
-
-
 def normalize_working_order(raw: Mapping[str, object]) -> WorkingOrder:
     """One Order Book row → WorkingOrder. An unknown status is PENDING_UNKNOWN."""
     return _rs.call(_rs.rs.tos_normalize_working_order, raw)

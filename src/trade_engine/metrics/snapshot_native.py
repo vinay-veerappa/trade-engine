@@ -122,14 +122,6 @@ def _payload_as_of(event: Event) -> datetime:
     return as_of
 
 
-def _working_stop_risk(state: AccountState, session: date | None = None) -> tuple[Decimal, tuple[str, ...]]:
-    """Sum (mark - stop) risk over open positions with a working protective stop."""
-    del session
-    state_text = codec.text(codec.canon(state))
-    heat_str, unknown = _call(_rs.snapshot_working_stop_risk, state_text)
-    return Decimal(heat_str), tuple(unknown)
-
-
 def _protective_stop(state: AccountState, instrument: Instrument) -> Decimal | None:
     """The stop price of a working order on the opposite side (reduce side) of a position."""
     state_text = codec.text(codec.canon(state))

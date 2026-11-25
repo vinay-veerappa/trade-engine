@@ -167,19 +167,11 @@ fn snapshot_protective_stop(state_text: &str, instrument_text: &str) -> PyResult
     Ok(snap::protective_stop(&st, &instr).map(|d| d.to_string()))
 }
 
-#[pyfunction]
-fn snapshot_working_stop_risk(state_text: &str) -> PyResult<(String, Vec<String>)> {
-    let st = te_core::ledger::bridge::account_from_text(state_text).map_err(refuse_ledger)?;
-    let (heat, unknown) = snap::working_stop_risk(&st).map_err(refuse_snapshot)?;
-    Ok((heat.to_string(), unknown))
-}
-
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(snapshot_daily, m)?)?;
     m.add_function(wrap_pyfunction!(snapshot_peak_margin, m)?)?;
     m.add_function(wrap_pyfunction!(snapshot_max_drawdown, m)?)?;
     m.add_function(wrap_pyfunction!(snapshot_day_note_line, m)?)?;
     m.add_function(wrap_pyfunction!(snapshot_protective_stop, m)?)?;
-    m.add_function(wrap_pyfunction!(snapshot_working_stop_risk, m)?)?;
     Ok(())
 }
