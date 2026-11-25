@@ -8,35 +8,27 @@ in-session passes are documented in ``docs/design/EOD_FLOW.md``.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from collections.abc import Iterable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 from trade_engine.calendar.sessions import ExchangeCalendar
 from trade_engine.domain.instruments import Instrument
-from trade_engine.domain.orders import OrderState
 from trade_engine.domain.signals import OrderIntent
-from trade_engine.interfaces.broker import (
-    BrokerAdapter,
-    VenueFill,
-    VenueOrder,
-    VenuePosition,
-)
-from trade_engine.interfaces.clock import Clock
 from trade_engine.eod.options_routing import OptionRouter
+from trade_engine.interfaces.broker import BrokerAdapter
+from trade_engine.interfaces.clock import Clock
 from trade_engine.interfaces.market_data import MarketData
 from trade_engine.ledger import Ledger
 from trade_engine.ledger.state import AccountState
 from trade_engine.market_data.chains import ChainSnapshot
 from trade_engine.oms.manager import OrderManager
 from trade_engine.oms.options import OptionOrderManager
-from trade_engine.oms.reconcile import ReconcileError, resync_open_brackets
-from trade_engine.oms.restore import RestoreError
+# Kept importable: EodRunnerBase._resync_brackets reaches it by name (tests monkeypatch it).
+from trade_engine.oms.reconcile import resync_open_brackets  # noqa: F401
 from trade_engine.risk import RiskContext, RiskEngine
-from trade_engine.sim import SimBroker, SnapshotVenue
 from trade_engine.sim._rs import register, rs
 
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
@@ -85,7 +77,7 @@ def void_session(
     account and session is an idempotent no-op (I3, the command id). Returns the
     accounts handled, in the order given with repeats dropped.
     """
-    return tuple(rs.eod_void_session(ledger, clock, calendar, job, session, list(accounts), reason, owner))
+    return rs.void_session(ledger, clock, calendar, job, session, accounts, reason=reason, owner=owner)
 
 
 def write_off_order(
@@ -120,7 +112,12 @@ def write_off_order(
 
     Returns the ids cancelled.
     """
-    return tuple(rs.eod_write_off(ledger, clock, account_id, order_id, reason, owner, bool(venue_cancel_confirmed)))
+    return rs.write_off_order(
+        ledger, clock, account_id, order_id,
+        reason=reason, owner=owner, venue_cancel_confirmed=bool(venue_cancel_confirmed),
+    )
+
+
 register("runtime_incomplete", SessionIncompleteError)
 register("runtime_replay", ReplayDataError)
 
@@ -216,7 +213,7 @@ class _Tally:
     snapshots: dict[str, ChainSnapshot] = field(default_factory=dict)
 
 
-class EodRunner:
+class EodRunner(rs.EodRunnerBase):
     """Run the EOD job for one session across the configured accounts."""
 
     def __init__(
@@ -227,6 +224,7 @@ class EodRunner:
         market_data: MarketData,
         config: EodRunnerConfig,
     ) -> None:
+        super().__init__()
         self._ledger = ledger
         self._clock = clock
         self._calendar = calendar
@@ -248,146 +246,3 @@ class EodRunner:
             )
             for account_id in self._config.brokers
         }
-
-    # -- entry -------------------------------------------------------------------
-
-    def run(self, session: date) -> EodRunResult:
-        self._resync_brackets()
-        return rs.eod_run(self, session)
-
-    def run_morning(self, session: date, through: datetime) -> EodRunResult:
-        """The morning pass of ``session`` (``run_pass`` with ``"morning"``)."""
-        return self.run_pass(session, through, "morning")
-
-    def _resync_brackets(self) -> None:
-        """Re-sync open brackets before the first reconcile, healing any crash after a fill (F2)."""
-        for account_id in sorted(self._config.brokers):
-            resync_open_brackets(
-                self._ledger, self._manager_for(account_id, self._config.brokers[account_id]), account_id
-            )
-
-    def run_pass(self, session: date, through: datetime, name: str) -> EodRunResult:
-        """Run options accounts' snapshots of ``session`` up to ``through`` (see above).
-
-        Only options accounts take part; an account whose ``name`` pass or after-close run
-        of the session is already recorded is left alone (I3). A pass must end after the
-        account's previous pass of the session: the snapshots up to that one are already
-        matched. The previous session must be complete, as for ``run``. A held
-        underlying with no snapshot yet is not refused: nothing is marked in a pass, and
-        its orders work at a later one.
-        """
-        self._resync_brackets()
-        return rs.eod_pass(self, session, through, name)
-
-    def void_session(self, session: date, accounts: Iterable[str], *, reason: str, owner: str) -> tuple[str, ...]:
-        """Void ``session`` for ``accounts``: the owner's signed record that it is complete (I3).
-
-        See ``void_session`` (module level), which this runs against the runner's own
-        ledger, clock, calendar and job name.
-        """
-        return void_session(
-            self._ledger, self._clock, self._calendar, self._config.job_name, session, accounts,
-            reason=reason, owner=owner,
-        )
-
-    # -- per-account run ---------------------------------------------------------
-
-    def _restore_venue(self, account_id: str, broker: BrokerAdapter) -> None:
-        """Restore an empty simulated venue from the ledger.
-
-        A SimBroker lives in memory, so a new process starts with an empty book while
-        the ledger still holds yesterday's D+1 entries and GTC stops. An empty
-        SimBroker is restored from the fold (I2), positions included: a held stock or
-        option with no working order is still held at the venue. The native prepare
-        then checks every working order against the venue (I5).
-        """
-        if (
-            isinstance(broker, (SimBroker, SnapshotVenue))
-            and not broker.orders(MIN_TIME)
-            and not broker.fills(MIN_TIME)
-        ):
-            state = self._ledger.state(account_id)
-            orders, fills = self._restorable(account_id, state)
-            positions = self._restorable_positions(state)
-            if orders or positions:
-                broker.restore(orders, fills, positions)
-
-    def _restorable(
-        self, account_id: str, state: AccountState
-    ) -> tuple[list[tuple[VenueOrder, OrderState]], list[VenueFill]]:
-        """Working orders plus their brackets: a child's cap needs its parent's fills
-        and its siblings' exits. NEW orders were never sent, so they stay out."""
-        from trade_engine.oms.restore import restorable
-
-        try:
-            return restorable(self._ledger, account_id, state)
-        except RestoreError as err:
-            raise EodRunnerError(str(err)) from err
-
-    @staticmethod
-    def _restorable_positions(state: AccountState) -> list[VenuePosition]:
-        from trade_engine.oms.restore import restorable_positions
-
-        return restorable_positions(state)
-
-    def _reconcile_after_bar(
-        self,
-        account_id: str,
-        broker: BrokerAdapter,
-        manager: OrderManager,
-        bar_timestamp: datetime | None,
-    ) -> int:
-        """Ingest everything the venue changed at this bar, immediately (E4's contract).
-
-        The rule lives in ``oms.reconcile`` so the intraday service ingests through the
-        same code; a raise fails the whole run loudly, which is what the guard is for.
-        """
-        from trade_engine.oms.reconcile import MIN_TIME, reconcile_after
-
-        try:
-            return reconcile_after(
-                self._ledger,
-                self._clock,
-                broker,
-                manager,
-                account_id,
-                MIN_TIME if bar_timestamp is None else bar_timestamp,
-                journal_account=self._config.journal_accounts.get(account_id),
-            )
-        except ReconcileError as err:
-            raise EodRunnerError(str(err)) from err
-
-    def _manager_for(self, account_id: str, broker: BrokerAdapter) -> OrderManager:
-        if callable(getattr(self._config.brokers[account_id], "process_snapshot", None)):
-            return self._option_manager(account_id).orders
-        manager = self._managers.get(account_id)
-        if manager is None:
-            manager = OrderManager(broker, self._clock, self._ledger)
-            self._managers[account_id] = manager
-        return manager
-
-    # -- options accounts (O4) ---------------------------------------------------
-
-    def _option_manager(self, account_id: str) -> OptionOrderManager:
-        manager = self._option_managers.get(account_id)
-        if manager is None:
-            manager = OptionOrderManager(self._config.brokers[account_id], self._clock, self._ledger)
-            self._option_managers[account_id] = manager
-        return manager
-
-    def _router(self, account_id: str) -> "OptionRouter":
-        return self._option_routers[account_id]
-
-    def _enter_option(
-        self,
-        account_id: str,
-        session: date,
-        intent: Any,
-        tally: "_Tally",
-        snapshot: ChainSnapshot | None,
-    ) -> int:
-        # The risk engine sees the session's snapshots, as every entry decided at the
-        # close always did: a combo's margin needs its underlying's quotes (O3).
-        return self._router(account_id).enter_option(
-            account_id, session, intent, snapshot, tally.snapshots
-        )
