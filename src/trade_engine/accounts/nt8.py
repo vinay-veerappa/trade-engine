@@ -11,13 +11,17 @@ to the Rust name map in ``te_core::nt8_routes``; it carries data and decides not
 - anything else is refused with ``unknown_nt8_account``, never guessed (I5).
 
 Both outcomes carry ``{platform: "nt8", local_name: <name>}``. The name's case is kept.
+
+The mapping bodies live in Rust (``trade_engine_rs.nt8_map_account`` /
+``nt8_map_accounts``); this module keeps the `Nt8Account` carrier and the two thin
+wrappers.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from trade_engine.accounts import _rs
+import trade_engine_rs as rs
 from trade_engine.interfaces.broker import Route
 
 
@@ -32,12 +36,7 @@ class Nt8Account:
 
 def map_account(name: str) -> Nt8Account:
     """Map one NT8 account name; an unmatched name raises ``unknown_nt8_account``."""
-    row = _rs.nt8_route(name)
-    return Nt8Account(
-        key=row["key"],
-        local=row["local"],
-        route=Route(row["route"]["platform"], row["route"]["local_name"]),
-    )
+    return rs.nt8_map_account(name)
 
 
 def map_accounts(text: str) -> tuple[Nt8Account, ...]:
@@ -46,14 +45,7 @@ def map_accounts(text: str) -> tuple[Nt8Account, ...]:
     A list holding one unknown account is refused as a whole, so a refusal can never
     read as a shorter fleet.
     """
-    return tuple(
-        Nt8Account(
-            key=row["key"],
-            local=row["local"],
-            route=Route(row["route"]["platform"], row["route"]["local_name"]),
-        )
-        for row in _rs.nt8_routes_from_text(text)
-    )
+    return rs.nt8_map_accounts(text)
 
 
 __all__ = ["Nt8Account", "map_account", "map_accounts"]

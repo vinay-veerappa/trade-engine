@@ -36,6 +36,7 @@ mod plain;
 pub mod plugins;
 mod option_router;
 mod lifecycle;
+mod accounts_poll;
 
 /// The git sha (with a `-dirty` suffix) this binary was built from. Python
 /// reads it as `trade_engine_rs.__git_sha__`; the runtime owner's report reads
@@ -952,6 +953,9 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<option_router::OptionRouterBase>()?;
     m.add_class::<lifecycle::LifecyclePassBase>()?;
     accounts::register(m)?;
+    m.add_class::<accounts_poll::PollAndDiffBase>()?;
+    m.add_function(wrap_pyfunction!(accounts_poll::nt8_map_account, m)?)?;
+    m.add_function(wrap_pyfunction!(accounts_poll::nt8_map_accounts, m)?)?;
     registry_outbox::register(m)?;
     register_options(m)?;
     register_futures(m)?;
