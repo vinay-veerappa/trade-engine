@@ -27,7 +27,7 @@ use te_core::tos_paper::wire::state_of;
 use crate::store_ledger as sl;
 
 /// The Python classes and functions the host reaches, imported once.
-struct Ctx {
+pub(crate) struct Ctx {
     event: Py<PyAny>,
     mirror_account: Py<PyAny>,
     mirror_state: Py<PyAny>,
@@ -36,6 +36,7 @@ struct Ctx {
     mirror_ack: Py<PyAny>,
     mirror_refused: Py<PyAny>,
     mirror_queued: Py<PyAny>,
+    venue_reconcile: Py<PyAny>,
     kind_fill: Py<PyAny>,
     kind_ack: Py<PyAny>,
     kind_refused: Py<PyAny>,
@@ -64,6 +65,7 @@ impl Ctx {
             mirror_ack: events.getattr("MirrorAck")?.unbind(),
             mirror_refused: events.getattr("MirrorRefused")?.unbind(),
             mirror_queued: events.getattr("MirrorQueued")?.unbind(),
+            venue_reconcile: events.getattr("VenueReconcile")?.unbind(),
             kind_fill: event_kind.getattr("MIRROR_FILL")?.unbind(),
             kind_ack: event_kind.getattr("MIRROR_ACK")?.unbind(),
             kind_refused: event_kind.getattr("MIRROR_REFUSED")?.unbind(),
@@ -81,7 +83,7 @@ impl Ctx {
     }
 }
 
-fn ctx(py: Python<'_>) -> PyResult<&'static Ctx> {
+pub(crate) fn ctx(py: Python<'_>) -> PyResult<&'static Ctx> {
     static CTX: GILOnceCell<Ctx> = GILOnceCell::new();
     CTX.get_or_try_init(py, || Ctx::new(py))
 }
@@ -153,21 +155,23 @@ fn restore<'py>(
     Ok(())
 }
 
-/// The `EventKind` member a payload's `_KIND` entry names.
+/// The `EventKind` for a mirror payload, keyed by its exact type (`_KIND[type(payload)]`):
+/// an unknown payload type is a `KeyError`, never a silent `VENUE_RECONCILE`.
 fn kind_of<'py>(py: Python<'py>, ctx: &Ctx, payload: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    if payload.is_instance(ctx.mirror_queued.bind(py))? {
-        return Ok(ctx.kind_queued.bind(py).clone());
+    let ty = payload.get_type();
+    let table = [
+        (&ctx.mirror_queued, &ctx.kind_queued),
+        (&ctx.mirror_refused, &ctx.kind_refused),
+        (&ctx.mirror_ack, &ctx.kind_ack),
+        (&ctx.mirror_fill, &ctx.kind_fill),
+        (&ctx.venue_reconcile, &ctx.kind_venue_reconcile),
+    ];
+    for (cls, kind) in table {
+        if ty.is(cls.bind(py)) {
+            return Ok(kind.bind(py).clone());
+        }
     }
-    if payload.is_instance(ctx.mirror_refused.bind(py))? {
-        return Ok(ctx.kind_refused.bind(py).clone());
-    }
-    if payload.is_instance(ctx.mirror_ack.bind(py))? {
-        return Ok(ctx.kind_ack.bind(py).clone());
-    }
-    if payload.is_instance(ctx.mirror_fill.bind(py))? {
-        return Ok(ctx.kind_fill.bind(py).clone());
-    }
-    Ok(ctx.kind_venue_reconcile.bind(py).clone())
+    Err(PyKeyError::new_err(ty.unbind()))
 }
 
 /// One Python `Event`, built like the module's `Event(account, kind, payload, ts_utc, command_id)`.
@@ -190,8 +194,9 @@ fn make_event<'py>(
     ctx.event.bind(py).call((), Some(&kwargs))
 }
 
-/// `_append`: append `(payload, suffix)` pairs in one transaction, return the written payloads.
-fn append<'py>(
+/// Append `(payload, suffix)` pairs in one transaction (I2: all or nothing), return the written
+/// payloads. The one mirror-append path: the session host and `tos_paper_follow` both call it.
+pub(crate) fn append<'py>(
     py: Python<'py>,
     ctx: &Ctx,
     ledger: &Bound<'py, PyAny>,

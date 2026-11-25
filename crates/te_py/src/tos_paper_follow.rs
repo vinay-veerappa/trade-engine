@@ -4,7 +4,8 @@
 //! (reached before through `tos_paper_plan.rs`'s typed doors). What is left in Python is the
 //! sequencing: `follow_entries` and `plan_exits` build the mirror and the sim's account states and
 //! rehydrate the orders the decision names; `follow_cycle` and `run_pass_mirror` drive the broker
-//! and the ledger through `session_native`'s helpers. Those helpers (`mirror_of`, `_append`, `_with`,
+//! and the ledger through `session_native`'s helpers (mirror appends go through the session host's
+//! Rust `append`). Those helpers (`mirror_of`, `_with`,
 //! `collect_only`, `run_mirror`, `cancel_ticket`) are Python collaborators in `session_native.py`
 //! (a parallel ticket owns them), so they are reached through Python attribute lookup — never
 //! assumed to be a concrete Rust type. `SplitLedger` becomes a `#[pyclass(subclass)]` base whose
@@ -28,6 +29,7 @@ use te_core::tos_paper::follow;
 
 use crate::sim::refuse;
 use crate::store_ledger as sl;
+use crate::tos_paper_session_host as host;
 
 /// `_rs.call`'s mapping: a `LErr` refusal as `ValueError((kind, message))`.
 fn aware_dt(value: &Bound<'_, PyAny>, key: &str) -> PyResult<DateTime> {
@@ -240,11 +242,10 @@ fn py_or<'py>(a: &Bound<'py, PyAny>, b: &Bound<'py, PyAny>) -> PyResult<Bound<'p
     if a.is_truthy()? { Ok(a.clone()) } else { Ok(b.clone()) }
 }
 
-/// `_append(ledger, venue, clock, items)` with one `MirrorRefused` per unique `(oid, account, reason)`
-/// (`dict.fromkeys(refused)`), each paired with its `refused:<oid>` command suffix.
+/// Append one `MirrorRefused` per unique `(oid, account, reason)` (`dict.fromkeys(refused)`), each
+/// paired with its `refused:<oid>` command suffix, through the session host's `append`.
 fn append_refused<'py>(
     py: Python<'py>,
-    sn: &Bound<'py, PyAny>,
     ledger: &Bound<'py, PyAny>,
     venue: &Bound<'py, PyAny>,
     clock: &Bound<'py, PyAny>,
@@ -252,7 +253,7 @@ fn append_refused<'py>(
     refused: &[(String, String, String)],
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
-    let items = PyList::empty(py);
+    let mut items = Vec::new();
     for (oid, account, reason) in refused {
         if !seen.insert((oid.clone(), account.clone(), reason.clone())) {
             continue;
@@ -264,9 +265,11 @@ fn append_refused<'py>(
         kw.set_item("reason", reason)?;
         kw.set_item("at", now)?;
         let event = pyctx(py)?.mirror_refused.bind(py).call((), Some(&kw))?;
-        items.append((event, format!("refused:{oid}")))?;
+        items.push((event, format!("refused:{oid}")));
     }
-    Ok(sn.call_method1("_append", (ledger, venue, clock, &items))?)
+    let venue_name: String = venue.extract()?;
+    let written = host::append(py, host::ctx(py)?, ledger, &venue_name, clock, items)?;
+    Ok(PyList::new(py, written)?.into_any())
 }
 
 /// `follow_entries(ledger, binding, *, session_open, now, max_age) -> (entries, refused)`.
@@ -417,7 +420,7 @@ pub(crate) fn tos_paper_follow_run_pass_mirror(
 
     // written = _append(ledger, venue, clock, [...MirrorRefused...])
     let now = clock.call_method0("now_utc")?;
-    let written = append_refused(py, sn, ledger, &venue, clock, &now, &refused)?;
+    let written = append_refused(py, ledger, &venue, clock, &now, &refused)?;
 
     // report = run_mirror(ledger, broker, sending, clock=clock, may_wait=may_wait)
     let sending_list = PyList::new(py, sending)?;
@@ -459,7 +462,7 @@ pub(crate) fn tos_paper_follow_cycle(
     let now = clock.call_method0("now_utc")?;
 
     let (entries, refused) = follow_entries_impl(py, ledger, &binding, session_open, &now, max_age_us)?;
-    let written = append_refused(py, sn, ledger, &venue, clock, &now, &refused)?;
+    let written = append_refused(py, ledger, &venue, clock, &now, &refused)?;
 
     let now_dt = dt_of(&now)?;
     let name = follow::pass_name(&now_dt).map_err(refuse)?;

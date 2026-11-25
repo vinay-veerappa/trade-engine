@@ -20,7 +20,7 @@ import trade_engine_rs as rs
 from trade_engine.domain.orders import Order, OrderState
 from trade_engine.interfaces.broker import VenueAck
 from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Event, EventKind, Ledger
+from trade_engine.ledger import EventKind, Ledger
 from trade_engine.ledger.events import (
     MirrorAck,
     MirrorFill,
@@ -38,13 +38,6 @@ from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
 _WORKING = frozenset({OrderState.SUBMITTED, OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED})
 # A morning entry the sim filled at once is still mirrored; one it refused or dropped is not.
 _ENDED_UNFILLED = frozenset({OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED})
-_KIND = {
-    MirrorQueued: EventKind.MIRROR_QUEUED,
-    MirrorRefused: EventKind.MIRROR_REFUSED,
-    MirrorAck: EventKind.MIRROR_ACK,
-    MirrorFill: EventKind.MIRROR_FILL,
-    VenueReconcile: EventKind.VENUE_RECONCILE,
-}
 
 
 class MirrorSessionError(RuntimeError):
@@ -189,24 +182,6 @@ def morning_orders(
 
 
 # -- the session -----------------------------------------------------------------------
-
-
-def _append(ledger: Ledger, venue: str, clock: Clock, items: Sequence[tuple[object, str]]) -> list:
-    """Append (payload, command suffix) pairs in one transaction: all or nothing (I2)."""
-    if not items:
-        return []
-    now = clock.now_utc()
-    events = [
-        Event(
-            account=mirror_account(venue),
-            kind=_KIND[type(payload)],
-            payload=payload,
-            ts_utc=now,
-            command_id=f"mirror:{venue}:{suffix}",
-        )
-        for payload, suffix in items
-    ]
-    return [event.payload for event in ledger.extend(events)]
 
 
 def cancel_ticket(ledger: Ledger, broker: TosPaperBroker, ticket_key: str, *, clock: Clock) -> VenueAck:
