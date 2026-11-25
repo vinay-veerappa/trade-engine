@@ -948,6 +948,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     tos_paper_rules::register(m)?;
     snapshot::register(m)?;
     market_data::register(m)?;
+    m.add_class::<chain_store::ChainStoreBase>()?;
     Ok(())
 }
 
@@ -958,4 +959,5 @@ mod tos_paper_plan;
 mod tos_paper_session;
 mod tos_paper_rules;
 mod snapshot;
+mod chain_store;
 

@@ -10,13 +10,12 @@ and nothing later.
 
 from __future__ import annotations
 
-import gzip
 import json
-import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from pathlib import Path
+
+import trade_engine_rs as rs
 
 from trade_engine.domain.instruments import OptionContract, OptionRight
 from trade_engine.domain.option_roots import chain_roots
@@ -225,70 +224,10 @@ def _quote_from_dict(d: dict) -> OptionQuote:
     )
 
 
-class ChainSnapshotStore:
+class ChainSnapshotStore(rs.ChainStoreBase):
     """Snapshots on disk, one gzipped JSON file each: ``<root>/<UNDERLYING>/<as_of UTC>.json.gz``.
 
     Gzip because a full SPX chain is 4.4 MB of JSON and 0.46 MB compressed (measured
     2026-09-24), about 115 MB a year at one snapshot a day instead of 1.1 GB. Written once: storing the same snapshot again is a no-op (I3), and a different
     snapshot under the same underlying and instant refuses rather than overwrite a record.
     """
-
-    def __init__(self, root: Path) -> None:
-        self._root = Path(root)
-
-    def _dir(self, underlying: str) -> Path:
-        return self._root / underlying.strip().upper()
-
-    _SUFFIX = ".json.gz"
-    _STAMP = "%Y%m%dT%H%M%S%fZ"
-
-    @classmethod
-    def _name(cls, as_of: datetime) -> str:
-        return as_of.astimezone(UTC).strftime(cls._STAMP) + cls._SUFFIX
-
-    @staticmethod
-    def _read(path: Path) -> str:
-        return gzip.decompress(path.read_bytes()).decode("utf-8")
-
-    def put(self, snapshot: ChainSnapshot) -> Path:
-        folder = self._dir(snapshot.underlying)
-        path = folder / self._name(snapshot.as_of)
-        text = snapshot.to_json()
-        if path.exists():
-            if self._read(path) == text:
-                return path
-            raise ValueError(f"A different {snapshot.underlying} snapshot is already stored at {path.name}")
-        folder.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        # mtime=0 keeps the bytes a function of the snapshot alone.
-        tmp.write_bytes(gzip.compress(text.encode("utf-8"), compresslevel=6, mtime=0))
-        os.replace(tmp, path)
-        return path
-
-    def stamps(self, underlying: str) -> tuple[datetime, ...]:
-        folder = self._dir(underlying)
-        if not folder.is_dir():
-            return ()
-        found = []
-        for path in folder.glob("*" + self._SUFFIX):
-            try:
-                found.append(datetime.strptime(path.name[: -len(self._SUFFIX)], self._STAMP).replace(tzinfo=UTC))
-            except ValueError:
-                continue
-        return tuple(sorted(found))
-
-    def load(self, underlying: str, as_of: datetime) -> ChainSnapshot:
-        path = self._dir(underlying) / self._name(_aware(as_of, "as_of"))
-        return ChainSnapshot.from_json(self._read(path))
-
-    def latest(self, underlying: str, now: datetime, max_age_seconds: float) -> ChainSnapshot:
-        """The newest snapshot taken at or before ``now``; none, or too old, refuses (I5).
-
-        Snapshots after ``now`` are invisible, so a replay cannot see a chain from later
-        in its own day.
-        """
-        now = _aware(now, "now")
-        known = [stamp for stamp in self.stamps(underlying) if stamp <= now]
-        if not known:
-            raise StaleDataError(f"No {underlying.upper()} chain snapshot at or before {now.isoformat()} (I5)")
-        return self.load(underlying, known[-1]).require_fresh(now, max_age_seconds)
