@@ -501,7 +501,7 @@ impl SnapBook {
     }
 }
 
-fn lookup_quote(quote: &Bound<'_, PyAny>, occ: &str, host: &Host) -> LR<Option<Quote>> {
+pub(crate) fn lookup_quote(quote: &Bound<'_, PyAny>, occ: &str, host: &Host) -> LR<Option<Quote>> {
     let got = quote.call1((occ,)).and_then(|o| o.extract::<Option<(String, String, String)>>());
     match got {
         Err(e) => Err(host.fail(e)),
