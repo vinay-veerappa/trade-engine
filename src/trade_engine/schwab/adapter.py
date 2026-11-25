@@ -54,6 +54,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Mapping
 
+import trade_engine_rs as rs
+
 from trade_engine.accounts import _rs as _accounts_rs
 from trade_engine.accounts.errors import AccountRuleError
 from trade_engine.accounts.poll import DEFAULT_INTERVAL_SECONDS, PollAndDiff
@@ -229,7 +231,7 @@ def map_responses(
 # --- the adapter -------------------------------------------------------------------------
 
 
-class SchwabAccountsAdapter:
+class SchwabAccountsAdapter(rs.SchwabAccountsAdapterBase):
     """The account port for Schwab, fed by the hub's response text. Read-only."""
 
     name = BROKER
@@ -304,97 +306,8 @@ class SchwabAccountsAdapter:
             )
         return self._poller
 
-    def _on(self) -> None:
-        if not self.enabled:
-            raise AccountRuleError(
-                "switch_off",
-                f"the schwab accounts adapter is off; set {ENV_SWITCH}=on to enable it",
-            )
-
-    # -- the host's side of the poll (the hub is the only Schwab client, D3) --------------
-
-    def feed(self, account_numbers_json: str, accounts_json: str) -> None:
-        """Hand the hub's two response texts to the next poll.
-
-        One slot: a pair that was never read is superseded and counted (B7: no queue).
-        """
-        self._on()
-        for text, what in ((account_numbers_json, "accountNumbers"), (accounts_json, "accounts")):
-            if not isinstance(text, str):
-                raise AccountRuleError("bad_shape", f"{what} is not response text")
-        if self._pending is not None:
-            self.stats.feed_superseded += 1
-        self._pending = (account_numbers_json, accounts_json)
-
-    def next_poll_due(self, now: datetime) -> bool:
-        """True when the 60 s floor has elapsed since the last attempt (the host's timer)."""
-        if not self.enabled:
-            return False
-        if self._last is None:
-            return True
-        last = self._last.confirmed_at
-        if self._last_attempt_at is not None and self._last_attempt_at > last:
-            last = self._last_attempt_at
-        return now - last >= timedelta(seconds=self.interval_seconds)
-
-    def on_activity(self, now: datetime, message: Mapping[str, Any] | None = None) -> bool:
-        """An ACCT_ACTIVITY notice marks "re-poll now"; its content is never read.
-
-        At most one re-poll per `ACTIVITY_REPOLL_SECONDS`; the rest are counted and
-        suppressed. The account set comes from the poll, never from the message.
-        """
-        if not self.enabled:
-            return False
-        if message is not None:
-            self.stats.activity_bodies_ignored += 1
-        if self._last_hint_at is not None:
-            since = now - self._last_hint_at
-            if timedelta(0) <= since < timedelta(seconds=ACTIVITY_REPOLL_SECONDS):
-                self.stats.hints_suppressed += 1
-                return False
-        self._last_hint_at = now
-        self.stats.hints += 1
-        return True
-
-    # -- the account port ---------------------------------------------------------------
-
-    def accounts(self) -> AccountSnapshot:
-        """Map the fed pair to a snapshot; a refusal keeps the last good list (B3)."""
-        self._on()
-        if self._pending is None:
-            raise AccountRuleError(
-                "no_response", "no response text was fed; the hub feeds each poll (D3)"
-            )
-        pair, self._pending = self._pending, None
-        now = self._clock.now_utc()
-        self._last_attempt_at = now
-        try:
-            mapped = map_responses(pair[0], pair[1], now, env=self.env)
-        except AccountRuleError as exc:
-            self.stats.polls_refused += 1
-            log.warning("schwab accounts snapshot refused (%s)", exc.kind)
-            raise
-        self.stats.polls += 1
-        self.stats.types_unmapped += mapped.types_unmapped
-        self.stats.details_unmatched += mapped.details_unmatched
-        self._last = mapped.snapshot
-        return mapped.snapshot
-
-    def poll(self) -> list[AccountEvent]:
-        """One poll: map the fed pair and diff it through the phase 2 port (B3)."""
-        self._on()
-        return self.poller.poll()
-
-    def account_events(self, since: datetime) -> list[AccountEvent]:
-        """The poll's diff, read from the bounded ring (`since` is answered by Rust)."""
-        self._on()
-        return self.poller.account_events(since)
-
-    def is_stale(self, now: datetime) -> bool:
-        """True before the first poll and from `stale_after` seconds after the last good one."""
-        if self._last is None:
-            return True
-        return self._last.is_stale(now, self.stale_after)
+    # The method bodies (`_on`, `feed`, `next_poll_due`, `on_activity`, `accounts`,
+    # `poll`, `account_events`, `is_stale`) live in `rs.SchwabAccountsAdapterBase`.
 
 
 __all__ = [
