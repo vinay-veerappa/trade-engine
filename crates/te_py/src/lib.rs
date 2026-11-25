@@ -974,6 +974,9 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     snapshot::register(m)?;
     market_data::register(m)?;
     m.add_class::<chain_store::ChainStoreBase>()?;
+    m.add_class::<tradovate_adapter::TradovateAdapterBase>()?;
+    m.add_class::<tradovate_adapter::AccountWatcherBase>()?;
+    m.add_function(wrap_pyfunction!(tradovate_adapter::_bracket_index, m)?)?;
     Ok(())
 }
 
@@ -986,4 +989,5 @@ mod tos_paper_rules;
 mod snapshot;
 mod snapshot_venue;
 mod chain_store;
+mod tradovate_adapter;
 
