@@ -5,10 +5,11 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use te_host::actor::Actor;
 use te_host::http::{Control, ControlError};
-use te_host::jobs::Record;
+use te_host::jobs::{JobTimes, Record};
 
-/// JSON shape of one record, preserving exact refusal/result information.
-fn record_json(record: &Record) -> Value {
+/// JSON shape of one record, preserving exact refusal/result information and
+/// adding the four timestamp/duration keys (always present, null when unknown).
+fn record_json(record: &Record, times: &JobTimes) -> Value {
     json!({
         "request_id": record.request_id,
         "state": serde_json::to_value(record.state).unwrap_or_default(),
@@ -20,6 +21,10 @@ fn record_json(record: &Record) -> Value {
             "message": failure.message,
         })),
         "instance": record.instance,
+        "admitted_at": times.admitted_at,
+        "started_at": times.started_at,
+        "finished_at": times.finished_at,
+        "duration_ms": times.duration_ms(),
     })
 }
 
@@ -98,7 +103,8 @@ impl Control for RuntimeControl {
         let (record, inserted) = actor
             .submit(payload)
             .map_err(|e| ControlError::new(e.kind, e.message))?;
-        Ok((to_json(&record_json(&record)), inserted))
+        let times = actor.times(&record.request_id).unwrap_or_default();
+        Ok((to_json(&record_json(&record, &times)), inserted))
     }
 
     fn job(&self, id: &str) -> Result<te_core::ledger::json::Json, ControlError> {
@@ -110,7 +116,10 @@ impl Control for RuntimeControl {
             .get(id)
             .map_err(|e| ControlError::new(e.kind, e.message))?;
         match record {
-            Some(record) => Ok(to_json(&record_json(&record))),
+            Some(record) => {
+                let times = actor.times(&record.request_id).unwrap_or_default();
+                Ok(to_json(&record_json(&record, &times)))
+            }
             None => Err(ControlError::new(
                 "RuntimeJobError",
                 "job admission was not persisted",
@@ -149,4 +158,53 @@ fn to_json(value: &Value) -> te_core::ledger::json::Json {
 fn json_value(record: &te_core::ledger::json::Json) -> Value {
     let text = te_core::ledger::json::dumps(record);
     serde_json::from_str(&text).expect("codec JSON is valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_json;
+    use serde_json::{json, Value};
+    use te_host::jobs::{JobTimes, Record, State};
+
+    fn record() -> Record {
+        Record {
+            version: 1,
+            request_id: "one".into(),
+            instance: "first".into(),
+            payload: json!({}),
+            state: State::Completed,
+            observed_seq: 0,
+            committed_seq: 0,
+            result: Some(json!({"ok": true})),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn record_json_carries_times_and_computes_duration() {
+        let times = JobTimes {
+            admitted_at: Some("2026-11-24T21:45:01.000Z".into()),
+            started_at: Some("2026-11-24T21:45:02.000Z".into()),
+            finished_at: Some("2026-11-24T21:45:03.500Z".into()),
+        };
+        let value = record_json(&record(), &times);
+        assert_eq!(value["admitted_at"], json!("2026-11-24T21:45:01.000Z"));
+        assert_eq!(value["started_at"], json!("2026-11-24T21:45:02.000Z"));
+        assert_eq!(value["finished_at"], json!("2026-11-24T21:45:03.500Z"));
+        assert_eq!(value["duration_ms"], json!(1500));
+        // Existing keys and values are unchanged.
+        assert_eq!(value["request_id"], json!("one"));
+        assert_eq!(value["state"], json!("completed"));
+        assert_eq!(value["instance"], json!("first"));
+        assert_eq!(value["result"], json!({"ok": true}));
+    }
+
+    #[test]
+    fn record_json_times_absent_read_as_null() {
+        let value = record_json(&record(), &JobTimes::default());
+        assert_eq!(value["admitted_at"], Value::Null);
+        assert_eq!(value["started_at"], Value::Null);
+        assert_eq!(value["finished_at"], Value::Null);
+        assert_eq!(value["duration_ms"], Value::Null);
+    }
 }

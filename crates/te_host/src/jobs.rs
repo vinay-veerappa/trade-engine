@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::{collections::BTreeSet, fmt};
 
 pub const PREFIX: &str = "te.runtime.jobs.v1:";
+const TIMES_PREFIX: &str = "te.runtime.jobtimes.v1:";
 const VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +65,30 @@ pub struct Record {
     pub committed_seq: i64,
     pub result: Option<Value>,
     pub error: Option<Failure>,
+}
+
+/// Timestamps for one job, stored under a sibling meta key so an older te.exe
+/// (which decodes every `te.runtime.jobs.v1:*` record with `deny_unknown_fields`)
+/// never sees these fields on the record itself. Each value is an RFC 3339 UTC
+/// string with milliseconds, or absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobTimes {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
+impl JobTimes {
+    /// Whole milliseconds between `started_at` and `finished_at`, when both are
+    /// known and parse as RFC 3339 instants; `None` otherwise.
+    pub fn duration_ms(&self) -> Option<i64> {
+        let started = chrono::DateTime::parse_from_rfc3339(self.started_at.as_deref()?).ok()?;
+        let finished = chrono::DateTime::parse_from_rfc3339(self.finished_at.as_deref()?).ok()?;
+        Some(finished.signed_duration_since(started).num_milliseconds())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +159,44 @@ fn save(connection: &Connection, record: &Record) -> Result<(), Error> {
     Ok(())
 }
 
+fn now_utc() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn times_key(id: &str) -> String {
+    format!("{TIMES_PREFIX}{id}")
+}
+
+fn load_times(connection: &Connection, id: &str) -> Result<JobTimes, Error> {
+    let key = times_key(id);
+    let text: Option<String> = connection
+        .query_row("SELECT value FROM meta WHERE key=?", [&key], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    // A record written before this change has no times key: all-absent, never
+    // an error.
+    match text {
+        Some(text) => serde_json::from_str(&text).map_err(|error| Error {
+            kind: "RuntimeRecordError",
+            message: error.to_string(),
+        }),
+        None => Ok(JobTimes::default()),
+    }
+}
+
+fn save_times(connection: &Connection, id: &str, times: &JobTimes) -> Result<(), Error> {
+    let text = serde_json::to_string(times).map_err(|error| Error {
+        kind: "RuntimeRecordError",
+        message: error.to_string(),
+    })?;
+    connection.execute(
+        "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        rusqlite::params![times_key(id), text],
+    )?;
+    Ok(())
+}
+
 /// Deletes up to `needed` terminal job records, oldest `committed_seq` first
 /// (ties by key), and returns how many were deleted.
 fn prune_terminal(connection: &Connection, needed: u64) -> Result<u64, Error> {
@@ -155,6 +218,10 @@ fn prune_terminal(connection: &Connection, needed: u64) -> Result<u64, Error> {
     let mut deleted = 0;
     for (_, key) in terminal.into_iter().take(needed as usize) {
         deleted += connection.execute("DELETE FROM meta WHERE key=?", [&key])? as u64;
+        // The timestamps live under a sibling key; retire it with the record so
+        // no orphaned times survive a pruned request ID.
+        let id = key.strip_prefix(PREFIX).unwrap_or(&key);
+        connection.execute("DELETE FROM meta WHERE key=?", [&times_key(id)])?;
     }
     Ok(deleted)
 }
@@ -294,6 +361,14 @@ impl Journal {
                 error: None,
             };
             save(connection, &record)?;
+            save_times(
+                connection,
+                &record.request_id,
+                &JobTimes {
+                    admitted_at: Some(now_utc()),
+                    ..JobTimes::default()
+                },
+            )?;
             Ok((record, true))
         })
     }
@@ -316,6 +391,24 @@ impl Journal {
         load(connection, id)
     }
 
+    pub fn times(&self, id: &str) -> Result<JobTimes, Error> {
+        if !identifier(id) {
+            return refuse(
+                "RuntimeRequestError",
+                "request_id must be an opaque identifier",
+            );
+        }
+        let owner = self.connection.lock().map_err(|_| Error {
+            kind: "RuntimeStoreError",
+            message: "owner connection mutex poisoned".into(),
+        })?;
+        let connection = owner.as_ref().ok_or_else(|| Error {
+            kind: "RuntimeStoppedError",
+            message: "owner connection is closed".into(),
+        })?;
+        load_times(connection, id)
+    }
+
     pub fn start(&self, id: &str) -> Result<Record, Error> {
         self.write(|connection| {
             let mut record = load(connection, id)?.ok_or_else(|| Error {
@@ -331,6 +424,9 @@ impl Journal {
             record.state = State::Running;
             record.observed_seq = sequence(connection)?;
             save(connection, &record)?;
+            let mut times = load_times(connection, id)?;
+            times.started_at = Some(now_utc());
+            save_times(connection, id, &times)?;
             Ok(record)
         })
     }
@@ -367,6 +463,9 @@ impl Journal {
             record.error = error;
             record.committed_seq = sequence(connection)?;
             save(connection, &record)?;
+            let mut times = load_times(connection, id)?;
+            times.finished_at = Some(now_utc());
+            save_times(connection, id, &times)?;
             Ok(record)
         })
     }
@@ -692,5 +791,148 @@ mod tests {
         }
         assert!(journal.get("one").unwrap().is_none());
         assert!(journal.admit(request("one")).unwrap().1);
+    }
+
+    #[test]
+    fn admit_start_finish_stamp_times_in_order() {
+        let world = World::new();
+        let journal = world.journal("first", 3);
+        journal.admit(request("one")).unwrap();
+        let admitted = journal.times("one").unwrap();
+        assert!(admitted.admitted_at.is_some());
+        assert!(admitted.started_at.is_none());
+        assert!(admitted.finished_at.is_none());
+
+        journal.start("one").unwrap();
+        let started = journal.times("one").unwrap();
+        assert!(started.started_at.is_some());
+        assert!(started.finished_at.is_none());
+
+        journal
+            .finish("one", State::Completed, Some(json!({"ok": true})), None)
+            .unwrap();
+        let times = journal.times("one").unwrap();
+        let admitted_at = times.admitted_at.as_deref().unwrap();
+        let started_at = times.started_at.as_deref().unwrap();
+        let finished_at = times.finished_at.as_deref().unwrap();
+        // RFC 3339 UTC, millisecond precision, monotonically non-decreasing.
+        for stamp in [admitted_at, started_at, finished_at] {
+            assert_eq!(stamp.len(), "2026-11-24T21:45:03.123Z".len());
+            assert!(stamp.ends_with('Z'));
+            chrono::DateTime::parse_from_rfc3339(stamp).unwrap();
+        }
+        assert!(admitted_at <= started_at);
+        assert!(started_at <= finished_at);
+        assert!(times.duration_ms().is_some());
+    }
+
+    #[test]
+    fn duplicate_admit_keeps_admitted_at() {
+        let world = World::new();
+        let journal = world.journal("first", 3);
+        journal.admit(request("one")).unwrap();
+        // Overwrite the stored time with a sentinel, then admit the same request
+        // again: the duplicate must keep the original time untouched.
+        world
+            .owner
+            .execute(
+                "UPDATE meta SET value=? WHERE key=?",
+                &[
+                    rusqlite::types::Value::Text(
+                        r#"{"admitted_at":"2000-01-01T00:00:00.000Z"}"#.into(),
+                    ),
+                    rusqlite::types::Value::Text("te.runtime.jobtimes.v1:one".into()),
+                ],
+            )
+            .unwrap();
+        let (record, inserted) = journal.admit(request("one")).unwrap();
+        assert!(!inserted);
+        assert_eq!(record.state, State::Queued);
+        assert_eq!(
+            journal.times("one").unwrap().admitted_at.as_deref(),
+            Some("2000-01-01T00:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn pruning_a_terminal_record_removes_its_times_key() {
+        let world = World::new();
+        let journal = world.journal("first", 1);
+        journal.admit(request("a")).unwrap();
+        journal.start("a").unwrap();
+        journal
+            .finish("a", State::Completed, Some(json!({})), None)
+            .unwrap();
+        // "a" is terminal and at capacity; admitting "b" prunes "a".
+        assert!(journal.admit(request("b")).unwrap().1);
+        assert!(journal.get("a").unwrap().is_none());
+        let count: i64 = world
+            .owner
+            .connection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key=?",
+                ["te.runtime.jobtimes.v1:a"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(journal.times("a").unwrap().admitted_at.is_none());
+    }
+
+    #[test]
+    fn missing_times_key_reads_as_all_none() {
+        let world = World::new();
+        let journal = world.journal("first", 3);
+        journal.admit(request("one")).unwrap();
+        // Simulate a record written before this change: no times key.
+        world
+            .owner
+            .execute(
+                "DELETE FROM meta WHERE key=?",
+                &[rusqlite::types::Value::Text(
+                    "te.runtime.jobtimes.v1:one".into(),
+                )],
+            )
+            .unwrap();
+        let times = journal.times("one").unwrap();
+        assert!(times.admitted_at.is_none());
+        assert!(times.started_at.is_none());
+        assert!(times.finished_at.is_none());
+        assert_eq!(times.duration_ms(), None);
+        // The record itself is still present and readable.
+        assert!(journal.get("one").unwrap().is_some());
+    }
+
+    #[test]
+    fn new_records_keep_the_existing_record_shape_and_decode() {
+        let world = World::new();
+        let journal = world.journal("first", 3);
+        let (record, inserted) = journal.admit(request("one")).unwrap();
+        assert!(inserted);
+        let text: String = world
+            .owner
+            .connection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE key=?",
+                [format!("{PREFIX}one")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // The record JSON keeps its pre-change shape: the existing
+        // deny_unknown_fields decoder accepts it, and no times field is present.
+        assert_eq!(decode(&text, &format!("{PREFIX}one")).unwrap(), record);
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed.get("admitted_at").is_none());
+        assert!(parsed.get("started_at").is_none());
+        assert!(parsed.get("finished_at").is_none());
+        assert!(parsed.get("duration_ms").is_none());
     }
 }

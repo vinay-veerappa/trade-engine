@@ -1,6 +1,6 @@
 //! Per-ledger serialized job actor. Exactly one running job, durable admission
 //! before acknowledgment, no resend, restart uncertainty, guard released last.
-use crate::jobs::{Error, Failure, Journal, Record, State};
+use crate::jobs::{Error, Failure, JobTimes, Journal, Record, State};
 use crate::store::Store;
 use serde_json::Value;
 use std::{
@@ -96,9 +96,39 @@ fn execute<H: JobHost>(journal: &Journal, host: &mut H, shared: &Shared, id: &st
         }
     };
     let (state, result, error) = outcome.parts();
-    if let Err(failure) = journal.finish(id, state, result, error) {
-        // Running record stays durable; restart must reconcile, never rerun.
-        shared.failure(format!("job {id} could not record its outcome: {failure}"));
+    let error_message = error
+        .as_ref()
+        .map(|failure| failure.message.chars().take(300).collect::<String>());
+    match journal.finish(id, state, result, error) {
+        Ok(_) => {
+            // One observability line per job; a failed print is ignored and
+            // never changes the outcome.
+            let duration_ms = journal.times(id).ok().and_then(|times| times.duration_ms());
+            emit_job_finished(id, state, duration_ms, error_message);
+        }
+        Err(failure) => {
+            // Running record stays durable; restart must reconcile, never rerun.
+            shared.failure(format!("job {id} could not record its outcome: {failure}"));
+        }
+    }
+}
+
+/// Write the job-finished line to stdout and flush it, never panicking and
+/// never failing the job: an I/O error (a closed pipe, for example) is ignored.
+fn emit_job_finished(id: &str, state: State, duration_ms: Option<i64>, error: Option<String>) {
+    use std::io::Write;
+    let line = serde_json::json!({
+        "event": "job_finished",
+        "request_id": id,
+        "state": state,
+        "duration_ms": duration_ms,
+        "error": error,
+    });
+    if let Ok(text) = serde_json::to_string(&line) {
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(text.as_bytes());
+        let _ = stdout.write_all(b"\n");
+        let _ = stdout.flush();
     }
 }
 
@@ -235,6 +265,10 @@ impl Actor {
 
     pub fn get(&self, id: &str) -> Result<Option<Record>, Error> {
         self.journal.get(id)
+    }
+
+    pub fn times(&self, id: &str) -> Result<JobTimes, Error> {
+        self.journal.times(id)
     }
 
     pub fn status(&self) -> Status {
