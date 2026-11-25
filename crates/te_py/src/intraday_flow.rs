@@ -267,7 +267,7 @@ fn host<'py>(service: Value<'py>, session: Value<'py>, state: Value<'py>) -> Hos
 }
 
 #[pyfunction]
-fn intraday_run<'py>(service: Value<'py>, session: Value<'py>, start: Value<'py>, stop: Value<'py>) -> PyResult<Value<'py>> {
+pub(crate) fn intraday_run<'py>(service: Value<'py>, session: Value<'py>, start: Value<'py>, stop: Value<'py>) -> PyResult<Value<'py>> {
     let state = service.py().None().into_bound(service.py());
     let mut host = host(service, session, state);
     host.start = start;
@@ -275,7 +275,7 @@ fn intraday_run<'py>(service: Value<'py>, session: Value<'py>, start: Value<'py>
     flow::run(&mut host)
 }
 #[pyfunction]
-fn intraday_tick(service: Value<'_>, session: Value<'_>, state: Value<'_>) -> PyResult<()> {
+pub(crate) fn intraday_tick(service: Value<'_>, session: Value<'_>, state: Value<'_>) -> PyResult<()> {
     flow::tick(&mut host(service, session, state))
 }
 /// `_wait_until`: nothing ticks before the open — a replay clock jumps, a wall clock waits.
@@ -307,7 +307,7 @@ fn intraday_refuse(service: Value<'_>, session: Value<'_>, state: Value<'_>, why
     host.increment(&count)
 }
 #[pyfunction]
-fn intraday_flatten(service: Value<'_>, session: Value<'_>, code: &str, reason: &str) -> PyResult<i64> {
+pub(crate) fn intraday_flatten(service: Value<'_>, session: Value<'_>, code: &str, reason: &str) -> PyResult<i64> {
     let py = service.py();
     let host = host(service, session, py.None().into_bound(py));
     let manager = host.manager()?;
@@ -450,7 +450,7 @@ fn intraday_restore(service: Value<'_>, session: Value<'_>, state: Value<'_>) ->
 /// `_close_plan` and the ledger half of the close, natively: the marks at a fresh snapshot taken
 /// near the close (or none), then one MARK per priced symbol and the session's EOD_RUN.
 #[pyfunction]
-fn intraday_close<'py>(service: Value<'py>, session: Value<'py>, state: Value<'py>) -> PyResult<Value<'py>> {
+pub(crate) fn intraday_close<'py>(service: Value<'py>, session: Value<'py>, state: Value<'py>) -> PyResult<Value<'py>> {
     let py = service.py();
     let host = host(service, session, state);
     let session_day = date_of(&host.session)?;
@@ -535,7 +535,7 @@ fn intraday_live_guard(service: Value<'_>, session: Value<'_>) -> PyResult<()> {
     Ok(())
 }
 #[pyfunction]
-fn intraday_require_native(ledger: Value<'_>, calendar: Value<'_>) -> PyResult<()> {
+pub(crate) fn intraday_require_native(ledger: Value<'_>, calendar: Value<'_>) -> PyResult<()> {
     require_native_intraday(&ledger, &calendar).map(|_| ())
 }
 /// `IntradayConfig.__post_init__`'s checks, in the order the rules run them.
@@ -729,7 +729,7 @@ fn path(value: &Value<'_>) -> PyResult<std::path::PathBuf> {
     crate::lock::path_from_python(&value.str()?.into_any())
 }
 #[pyfunction]
-fn intraday_heartbeat_write(service: Value<'_>, session: Value<'_>, state: Value<'_>, note: &str, alert: bool, exited: bool) -> PyResult<()> {
+pub(crate) fn intraday_heartbeat_write(service: Value<'_>, session: Value<'_>, state: Value<'_>, note: &str, alert: bool, exited: bool) -> PyResult<()> {
     let heartbeat_path = service.getattr("_heartbeat_path")?;
     if heartbeat_path.is_none() { return Ok(()); }
     let py = service.py();
@@ -755,7 +755,7 @@ fn intraday_heartbeat_write(service: Value<'_>, session: Value<'_>, state: Value
         .map_err(|error| file_error(py, error).unwrap_or_else(|error| error))
 }
 #[pyfunction]
-fn intraday_heartbeat_read<'py>(service: Value<'py>) -> PyResult<Value<'py>> {
+pub(crate) fn intraday_heartbeat_read<'py>(service: Value<'py>) -> PyResult<Value<'py>> {
     let py = service.py();
     let heartbeat_path = service.getattr("_heartbeat_path")?;
     if heartbeat_path.is_none() { return Ok(py.None().into_bound(py)); }
