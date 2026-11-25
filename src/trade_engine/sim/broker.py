@@ -101,5 +101,6 @@ class SimBroker(_rs.rs.SimBrokerBase):
         clock: Clock,
         slippage_bps: Decimal,
     ) -> None:
-        # The Rust base's __new__ built the book and carriers; nothing else to set up.
+        # The Rust base's __new__ built the book and carriers; keep the public attribute.
         super().__init__()
+        self.account_id = account_id
