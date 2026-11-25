@@ -61,7 +61,7 @@ class PendingResolution:
 
 def pending_request(ledger: Any, account_id: str, order_id: str) -> str:
     """Which request left ``order_id`` pending: ``submit``, ``cancel`` or ``unknown``."""
-    return _rs.call(_rs.rs.oms_native_pending_request, ledger, account_id, order_id)
+    return _rs.call(_rs.rs.pending_request, ledger, account_id, order_id)
 
 
 def restorable(
@@ -80,22 +80,9 @@ def restorable(
     are built by Rust. A ``resolve`` resolution is reported back as ``(resolved,
     unresolved)`` and applied here.
     """
-    if not isinstance(pending, str):
-        raise ValueError(f"pending must be 'refuse' or 'resolve', got {pending!r}")
-    orders, fills, resolved, unresolved = _rs.call(
-        _rs.rs.oms_native_restorable,
-        ledger,
-        account_id,
-        state,
-        pending,
-        resolution,
-    )
-    if resolution is not None:
-        resolution.resolved.extend(resolved)
-        resolution.unresolved.update(unresolved)
-    return orders, fills
+    return _rs.call(_rs.rs.restorable, ledger, account_id, state, pending, resolution)
 
 
 def restorable_positions(state: AccountState) -> list[VenuePosition]:
     """The venue's held positions, in state order, each dated by its latest fill."""
-    return _rs.call(_rs.rs.oms_native_positions, state)
+    return _rs.call(_rs.rs.restorable_positions, state)
