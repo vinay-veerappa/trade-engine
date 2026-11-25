@@ -229,6 +229,9 @@ impl SnapshotVenueBase {
             None => Some(900.0),
             Some(v) => age_arg(v)?,
         };
+        let text = account_id_text(account_id)?;
+        let venue = Venue::new(&text, fraction, fee, slippage, age).map_err(|e| snap_refusal(py, e))?;
+        // The pre-port venue built the book first, then checked the calendar.
         if let Some(calendar) = calendar {
             let exchange = py.import("trade_engine.calendar.sessions")?.getattr("ExchangeCalendar")?;
             if !calendar.is_instance(&exchange)? || calendar.getattr("exchange")?.extract::<String>()? != "XNYS" {
@@ -238,8 +241,6 @@ impl SnapshotVenueBase {
                 )));
             }
         }
-        let text = account_id_text(account_id)?;
-        let venue = Venue::new(&text, fraction, fee, slippage, age).map_err(|e| snap_refusal(py, e))?;
         Ok(SnapshotVenueBase {
             venue,
             account_id: account_id.clone().unbind(),
@@ -248,6 +249,12 @@ impl SnapshotVenueBase {
             fills: Vec::new(),
             restored_positions: Vec::new(),
         })
+    }
+
+    /// The account id as given (the pre-port `self.account_id`).
+    #[getter]
+    fn account_id(&self, py: Python<'_>) -> Py<PyAny> {
+        self.account_id.clone_ref(py)
     }
 
     fn connect(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
