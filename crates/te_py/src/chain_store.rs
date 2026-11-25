@@ -118,7 +118,8 @@ impl ChainStoreBase {
 
     fn put(&self, py: Python<'_>, snapshot: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let underlying: String = snapshot.getattr("underlying")?.extract()?;
-        let as_of = snapshot.getattr("as_of")?;
+        // `_name` converted to UTC before formatting; keep that for any carrier.
+        let as_of = snapshot.getattr("as_of")?.call_method1("astimezone", (utc_tz(py)?,))?;
         let folder = self.dir_of(&underlying);
         let name = name_of(&as_of)?;
         let path = folder.join(&name);
@@ -151,7 +152,7 @@ impl ChainStoreBase {
 
     fn stamps(&self, py: Python<'_>, underlying: &str) -> PyResult<Py<PyTuple>> {
         let folder = self.dir_of(underlying);
-        let mut names = py
+        let names = py
             .allow_threads(move || -> Result<Vec<String>, std::io::Error> {
                 if !folder.is_dir() {
                     return Ok(Vec::new());
@@ -167,8 +168,6 @@ impl ChainStoreBase {
                 Ok(found)
             })
             .map_err(io_error)?;
-        // `%Y%m%dT%H%M%S%fZ` is fixed-width, so lexicographic order is chronological.
-        names.sort();
         let dt_cls = datetime_class(py)?;
         let utc = utc_tz(py)?;
         let mut stamps = Vec::new();
@@ -177,7 +176,10 @@ impl ChainStoreBase {
                 stamps.push(dt);
             }
         }
-        Ok(PyTuple::new(py, stamps)?.unbind())
+        // Sorted by datetime after parsing, as the Python did (strptime accepts a few
+        // non-padded names, so name order is not always time order).
+        let sorted = py.import("builtins")?.getattr("sorted")?.call1((stamps,))?;
+        Ok(PyTuple::new(py, sorted.try_iter()?.collect::<PyResult<Vec<_>>>()?)?.unbind())
     }
 
     fn load(
