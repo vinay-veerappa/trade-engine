@@ -40,6 +40,7 @@ mod schwab_adapter;
 mod ibkr_adapter;
 mod sinks;
 mod schwab_hub;
+mod tos_paper_follow;
 
 /// The git sha (with a `-dirty` suffix) this binary was built from. Python
 /// reads it as `trade_engine_rs.__git_sha__`; the runtime owner's report reads
@@ -960,6 +961,11 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<schwab_adapter::SchwabAccountsAdapterBase>()?;
     m.add_class::<schwab_adapter::SchwabOrderAdapterBase>()?;
     m.add_class::<ibkr_adapter::IbkrAccountsAdapterBase>()?;
+    m.add_function(wrap_pyfunction!(tos_paper_follow::tos_paper_follow_entries, m)?)?;
+    m.add_function(wrap_pyfunction!(tos_paper_follow::tos_paper_follow_cycle, m)?)?;
+    m.add_function(wrap_pyfunction!(tos_paper_follow::tos_paper_follow_plan_exits, m)?)?;
+    m.add_function(wrap_pyfunction!(tos_paper_follow::tos_paper_follow_run_pass_mirror, m)?)?;
+    m.add_class::<tos_paper_follow::SplitLedgerBase>()?;
     accounts::register(m)?;
     registry_outbox::register(m)?;
     m.add_class::<sinks::HttpJournalSinkBase>()?;

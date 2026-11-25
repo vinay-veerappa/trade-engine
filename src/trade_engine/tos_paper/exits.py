@@ -51,18 +51,9 @@ from trade_engine.domain.instruments import Instrument, Side
 from trade_engine.domain.orders import Order
 from trade_engine.interfaces.clock import Clock
 from trade_engine.ledger import Ledger
-from trade_engine.ledger.events import MirrorRefused
 from trade_engine.tos_paper import _rs
 from trade_engine.tos_paper.broker import MirrorBinding, TosPaperBroker
-from trade_engine.tos_paper.session_native import (
-    MirrorRunReport,
-    _append,
-    _with,
-    cancel_ticket,
-    collect_only,
-    mirror_of,
-    run_mirror,
-)
+from trade_engine.tos_paper.session_native import MirrorRunReport
 
 # A contract, or a vertical (a Combo, priced net per spread).
 Price = Callable[[Instrument, Side], "Decimal | None"]
@@ -110,20 +101,15 @@ def plan_exits(
     host's: the core names the (contract, side) it needs next, the host's ``price`` answers it
     once, and the plan is decided again with that answer, until it needs nothing more.
     """
-    mirror = mirror_of(ledger, binding.venue_account)
-    accounts = [(a, ledger.state(a)) for a in binding.mirrored_accounts]
-    cancel, orders, refused, waits = _rs.call(
-        _rs.rs.tos_exits_plan,
-        mirror,
-        accounts,
-        list(binding.mirrored_accounts),
+    return _rs.call(
+        _rs.rs.tos_paper_follow_plan_exits,
+        ledger,
+        binding,
         session,
         name,
-        at,
         price,
+        at,
     )
-    return ExitPlan(
-        cancel=tuple(cancel), orders=tuple(orders), refused=tuple(refused), waits=tuple(waits))
 
 
 def run_pass_mirror(
@@ -144,70 +130,18 @@ def run_pass_mirror(
 
     ``express``, when given, turns each order into the one the venue can take; an order it
     cannot is refused with its reason, and a resting ticket that only it replaced is kept."""
-    venue = broker.venue
-    collected = collect_only(ledger, broker, clock=clock, settle=settle)
-    if collected.deferred is not None:
-        # The venue could not be asked: no cancel, no refusal, no send goes out over an unread venue.
-        # Nothing was recorded, so the whole pass is the next run's to do (I3 keeps it once).
-        return collected
-    plan = plan_exits(ledger, broker.binding, session, name=name, price=price, at=clock.now_utc())
-    refused = list(plan.refused)
-    sending = [*entries, *plan.orders]
-    cancels = list(plan.cancel)
-    if express is not None:
-        expressed: list[Order] = []
-        for order in sending:
-            out = express(order)
-            if isinstance(out, str):
-                refused.append((order.order_id, order.account_id, out))
-            else:
-                expressed.append(out)
-        sending = expressed
-        dropped = {oid for oid, _, _ in refused}
-        cancels = [
-            key for key in cancels
-            if not (waiting := [oid for ticket, oid in plan.waits if ticket == key])
-            or any(oid not in dropped for oid in waiting)
-        ]
-    if not collected.halted:
-        accounts = {order.order_id: order.account_id for order in plan.orders}
-        for key in cancels:
-            ack = cancel_ticket(ledger, broker, key, clock=clock)
-            if ack.status != "ACCEPTED":
-                waiting = [oid for ticket, oid in plan.waits if ticket == key]
-                refused += [
-                    (oid, accounts[oid],
-                     f"the resting ticket {key} was not cancelled ({ack.message or ack.status}); "
-                     "nothing is sent over it")
-                    for oid in waiting
-                ]
-                if not waiting:  # a stale entry or target: nothing waits on it, but it still rests
-                    ticket = mirror_of(ledger, venue).tickets[key]
-                    refused.append((
-                        f"cancel:{key}@{session.isoformat()}", ticket.queued.allocations[0].strategy_account,
-                        f"the resting ticket {key} was not cancelled ({ack.message or ack.status}); "
-                        "it is tried again next pass",
-                    ))
-    # A halted venue refuses the exits in run_mirror, each with the reason (I11).
-    now = clock.now_utc()
-    written = _append(
+    return _rs.call(
+        _rs.rs.tos_paper_follow_run_pass_mirror,
         ledger,
-        venue,
+        broker,
+        entries,
+        session,
+        name,
+        price,
         clock,
-        [
-            (MirrorRefused(venue=venue, strategy_order_id=oid, strategy_account=account, reason=reason, at=now),
-             f"refused:{oid}")
-            for oid, account, reason in dict.fromkeys(refused)
-        ],
-    )
-    # A close refused above is handled now: run_mirror skips it.
-    report = run_mirror(ledger, broker, sending, clock=clock, may_wait=may_wait)
-    return _with(
-        report,
-        fills=collected.fills + report.fills,
-        closes=collected.closes + report.closes,
-        refused=tuple(written) + report.refused,
-        halted=report.halted or collected.halted,
+        express,
+        may_wait,
+        settle,
     )
 
 
