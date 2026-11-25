@@ -1002,6 +1002,9 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<schwab_hub::HubAccountsClientBase>()?;
     m.add_class::<schwab_hub::HubOrdersClientBase>()?;
     m.add_class::<schwab_hub::HubHintListenerBase>()?;
+    m.add_class::<tradovate_adapter::TradovateAdapterBase>()?;
+    m.add_class::<tradovate_adapter::AccountWatcherBase>()?;
+    m.add_function(wrap_pyfunction!(tradovate_adapter::_bracket_index, m)?)?;
     Ok(())
 }
 
@@ -1017,4 +1020,5 @@ mod tos_paper_broker;
 mod snapshot;
 mod snapshot_venue;
 mod chain_store;
+mod tradovate_adapter;
 
