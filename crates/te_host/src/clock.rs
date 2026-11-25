@@ -1,10 +1,30 @@
 //! Owner clocks; core decisions continue to receive time as an argument.
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub fn system_utc_microseconds() -> i128 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(value) => (value.as_nanos() / 1_000) as i128,
         Err(error) => -((error.duration().as_nanos().div_ceil(1_000)) as i128),
+    }
+}
+
+/// Wall-clock UTC as RFC 3339 with milliseconds (`...Z`): owner-side bookkeeping stamps only.
+pub fn wall_utc_rfc3339_millis() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// A monotonic deadline for I/O timeouts (never a decision input).
+#[derive(Clone, Copy, Debug)]
+pub struct Deadline(Instant);
+
+impl Deadline {
+    pub fn after(timeout: Duration) -> Self {
+        Self(Instant::now() + timeout)
+    }
+
+    /// Time left, zero once passed.
+    pub fn remaining(&self) -> Duration {
+        self.0.saturating_duration_since(Instant::now())
     }
 }
 
@@ -55,6 +75,16 @@ pub fn wall_sleep<E>(positive: bool, sleep: impl FnOnce() -> Result<(), E>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deadline_counts_down_and_wall_stamp_is_utc_millis() {
+        let d = Deadline::after(Duration::from_secs(60));
+        assert!(d.remaining() <= Duration::from_secs(60));
+        assert!(d.remaining() > Duration::from_secs(50));
+        assert_eq!(Deadline::after(Duration::ZERO).remaining(), Duration::ZERO);
+        let s = wall_utc_rfc3339_millis();
+        assert!(s.ends_with('Z') && s.len() == 24, "{s}");
+    }
 
     #[test]
     fn replay_is_monotonic_and_failure_preserves_time() {

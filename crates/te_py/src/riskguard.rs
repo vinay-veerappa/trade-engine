@@ -10,7 +10,9 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use te_host::clock::Deadline;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -62,8 +64,8 @@ fn post(
     body: &[u8],
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>), &'static str> {
-    let deadline = Instant::now() + timeout;
-    let remaining = || deadline.saturating_duration_since(Instant::now());
+    let deadline = Deadline::after(timeout);
+    let remaining = || deadline.remaining();
 
     let mut stream: Option<TcpStream> = None;
     for addr in (host, port).to_socket_addrs().map_err(|_| "network")? {

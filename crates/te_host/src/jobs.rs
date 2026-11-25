@@ -160,7 +160,7 @@ fn save(connection: &Connection, record: &Record) -> Result<(), Error> {
 }
 
 fn now_utc() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    crate::clock::wall_utc_rfc3339_millis()
 }
 
 fn times_key(id: &str) -> String {
