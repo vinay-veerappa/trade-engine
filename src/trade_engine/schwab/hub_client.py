@@ -27,13 +27,16 @@ Rules it carries:
 
 No clock is read here (I7): the timeout is passed to the socket, not measured.
 
-The HTTP I/O lives in Rust (`HubAccountsClientBase`); this module keeps the public class (a
-thin subclass), the constants and the exceptions other modules import.
+The read sequencing and failure classification live in Rust (`HubAccountsClientBase`); the HTTP
+I/O stays on urllib (`_default_post`, which the base calls when no `post` is injected). This
+module keeps the public class (a thin subclass), the constants and the exceptions.
 """
 
 from __future__ import annotations
 
 import logging
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -88,6 +91,21 @@ def hub_base_url(environ: Mapping[str, str]) -> str:
     url = (environ.get(ENV_HUB_URL) or "").strip() or DEFAULT_HUB_URL
     check_loopback(url)
     return url
+
+
+def _default_post(
+    url: str, body: bytes, headers: Mapping[str, str], timeout: float
+) -> tuple[int, str]:
+    """POST and return `(status, text)`; a socket failure is raised for the caller to classify."""
+    req = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+        finally:
+            exc.close()
 
 
 class HubAccountsClient(rs.HubAccountsClientBase):

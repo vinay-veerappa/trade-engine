@@ -2,10 +2,12 @@
 //! `HubHintListener`) move into te_py.
 //!
 //! The three classes are loopback HTTP/WS clients for the local Schwab hub (D3). The Rust
-//! base owns the I/O: `HubAccountsClient` and `HubOrdersClient` carry their default HTTP
-//! transport over `std::net::TcpStream` (replacing `urllib`), and `HubHintListener` owns the
-//! RFC 6455 framing (handshake, `Sec-WebSocket-Accept` check, masking, ping/pong, close and
-//! the jittered reconnect/backoff). Every collaborator the tests hand in (`post`, `transport`,
+//! bases own the sequencing and the failure classification; the network I/O stays Python
+//! stdlib. `HubAccountsClient` and `HubOrdersClient` call an injected `post`/`transport` or,
+//! by default, the urllib functions `hub_client._default_post` / `orders.urllib_transport`
+//! (looked up at call time). `HubHintListener` owns the RFC 6455 framing (handshake,
+//! `Sec-WebSocket-Accept` check, masking, ping/pong, close and the jittered reconnect/backoff)
+//! over a socket made by the injected Python `connect` (`socket.create_connection`). Every collaborator the tests hand in (`post`, `transport`,
 //! `connect`, `rand`, `on_hint`, `wait`) is a Python object reached through attribute lookup,
 //! so a fake stands in and the live hub is never contacted.
 //!
@@ -13,10 +15,8 @@
 //! loop takes `&self` (no `&mut` borrow held while another thread's heartbeat reads them).
 //! The GIL is released around the blocking socket reads (via `py.allow_threads`).
 
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use pyo3::exceptions::{PyOSError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
@@ -134,12 +134,16 @@ impl HubAccountsClientBase {
                 Ok((status, text))
             }
             None => {
-                let max_bytes: usize = ctx
+                // `_default_post`: the urllib POST, looked up at call time.
+                let headers = PyDict::new(py);
+                headers.set_item("Content-Type", "application/json")?;
+                let (status, text): (i64, String) = ctx
                     .hub_client
                     .bind(py)
-                    .getattr("MAX_RESPONSE_BYTES")?
+                    .getattr("_default_post")?
+                    .call1((url, PyBytes::new(py, body), &headers, self.timeout_s))?
                     .extract()?;
-                default_post(py, url, body, self.timeout_s, max_bytes)
+                Ok((status, text))
             }
         }
     }
@@ -414,33 +418,24 @@ impl HubOrdersClientBase {
         url: &str,
         body: Option<&[u8]>,
     ) -> PyResult<(i64, String)> {
-        let ctx = ctx(py)?;
-        match &self.transport {
-            Some(t) => {
-                let headers = PyDict::new(py);
-                headers.set_item("Accept", "application/json")?;
-                if body.is_some() {
-                    headers.set_item("Content-Type", "application/json")?;
-                }
-                let body_arg = match body {
-                    Some(b) => PyBytes::new(py, b).into_any(),
-                    None => py.None().into_bound(py).into_any(),
-                };
-                let (status, text): (i64, String) = t
-                    .bind(py)
-                    .call1((method, url, body_arg, &headers, self.timeout_s))?
-                    .extract()?;
-                Ok((status, text))
-            }
-            None => {
-                let max_bytes: usize = ctx
-                    .hub_client
-                    .bind(py)
-                    .getattr("MAX_RESPONSE_BYTES")?
-                    .extract()?;
-                default_transport(py, method, url, body, self.timeout_s, max_bytes)
-            }
+        // No transport injected: `orders.urllib_transport`, looked up at call time.
+        let transport = match &self.transport {
+            Some(t) => t.bind(py).clone(),
+            None => py.import("trade_engine.schwab.orders")?.getattr("urllib_transport")?,
+        };
+        let headers = PyDict::new(py);
+        headers.set_item("Accept", "application/json")?;
+        if body.is_some() {
+            headers.set_item("Content-Type", "application/json")?;
         }
+        let body_arg = match body {
+            Some(b) => PyBytes::new(py, b).into_any(),
+            None => py.None().into_bound(py).into_any(),
+        };
+        let (status, text): (i64, String) = transport
+            .call1((method, url, body_arg, &headers, self.timeout_s))?
+            .extract()?;
+        Ok((status, text))
     }
 
     fn call(&self, py: Python<'_>, method: &str, url: &str, order: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
@@ -1127,178 +1122,5 @@ impl HubHintListenerBase {
         let jitter_const: f64 = ctx.hub_ws.bind(py).getattr("BACKOFF_JITTER")?.extract()?;
         let jitter = 1.0 + ((rand * 2.0) - 1.0) * jitter_const;
         Ok((base * jitter).min(self.backoff_cap))
-    }
-}
-
-// ------------------------------------------------------------------------------------------
-// The default HTTP transport (std::net), replacing `urllib`.
-// ------------------------------------------------------------------------------------------
-
-fn split_http_url(url: &str) -> Option<(String, u16, String)> {
-    let rest = url.strip_prefix("http://")?;
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
-        None => (authority.to_string(), 80),
-    };
-    Some((host, port, path.to_string()))
-}
-
-fn classify_io(e: &std::io::Error) -> &'static str {
-    match e.kind() {
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "timeout",
-        _ => "network",
-    }
-}
-
-fn http_request(
-    method: &str,
-    url: &str,
-    body: Option<&[u8]>,
-    headers: &[(&str, &str)],
-    timeout: Duration,
-    max_bytes: usize,
-) -> Result<(u16, String), &'static str> {
-    let (host, port, path) = split_http_url(url).ok_or("network")?;
-    let deadline = Instant::now() + timeout;
-    let remaining = || deadline.saturating_duration_since(Instant::now());
-
-    let mut stream: Option<TcpStream> = None;
-    for addr in (host.as_str(), port).to_socket_addrs().map_err(|_| "network")? {
-        match TcpStream::connect_timeout(&addr, remaining()) {
-            Ok(s) => {
-                stream = Some(s);
-                break;
-            }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                return Err("timeout");
-            }
-            Err(_) => continue,
-        }
-    }
-    let mut stream = stream.ok_or("network")?;
-    stream.set_read_timeout(Some(remaining())).map_err(|e| classify_io(&e))?;
-    stream.set_write_timeout(Some(remaining())).map_err(|e| classify_io(&e))?;
-
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n");
-    for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
-    }
-    if let Some(b) = body {
-        req.push_str(&format!("Content-Length: {}\r\n", b.len()));
-    }
-    req.push_str("Connection: close\r\n\r\n");
-    let mut req_bytes = req.into_bytes();
-    if let Some(b) = body {
-        req_bytes.extend_from_slice(b);
-    }
-    stream.write_all(&req_bytes).map_err(|e| classify_io(&e))?;
-
-    let mut buf: Vec<u8> = Vec::with_capacity(4096);
-    let mut tmp = [0u8; 2048];
-    let header_end = loop {
-        if remaining().is_zero() {
-            return Err("timeout");
-        }
-        stream.set_read_timeout(Some(remaining())).map_err(|e| classify_io(&e))?;
-        let n = stream.read(&mut tmp).map_err(|e| classify_io(&e))?;
-        if n == 0 {
-            return Err("network");
-        }
-        buf.extend_from_slice(&tmp[..n]);
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos + 4;
-        }
-    };
-    let head = std::str::from_utf8(&buf[..header_end]).map_err(|_| "network")?;
-    let mut lines = head.split("\r\n");
-    let status: u16 = lines
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|c| c.parse().ok())
-        .ok_or("network")?;
-    let mut content_length: Option<usize> = None;
-    for line in lines {
-        let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            content_length = Some(v.trim().parse().map_err(|_| "network")?);
-        }
-    }
-    let mut out = buf[header_end..].to_vec();
-    while content_length.map_or(true, |l| out.len() < l) {
-        if remaining().is_zero() {
-            return Err("timeout");
-        }
-        stream.set_read_timeout(Some(remaining())).map_err(|e| classify_io(&e))?;
-        let n = stream.read(&mut tmp).map_err(|e| classify_io(&e))?;
-        if n == 0 {
-            if content_length.is_none() {
-                break;
-            }
-            return Err("network");
-        }
-        out.extend_from_slice(&tmp[..n]);
-    }
-    if let Some(l) = content_length {
-        out.truncate(l);
-    }
-    if out.len() > max_bytes {
-        out.truncate(max_bytes);
-    }
-    let text = String::from_utf8_lossy(&out).into_owned();
-    Ok((status, text))
-}
-
-fn default_post(
-    py: Python<'_>,
-    url: &str,
-    body: &[u8],
-    timeout: f64,
-    max_bytes: usize,
-) -> PyResult<(i64, String)> {
-    let duration = Duration::from_secs_f64(timeout.max(0.0));
-    let result = py.allow_threads(|| {
-        http_request(
-            "POST",
-            url,
-            Some(body),
-            &[("Content-Type", "application/json")],
-            duration,
-            max_bytes,
-        )
-    });
-    match result {
-        Ok((s, t)) => Ok((s as i64, t)),
-        Err("timeout") => Err(PyTimeoutError::new_err("the hub did not answer")),
-        Err(_) => Err(PyOSError::new_err("could not reach the hub")),
-    }
-}
-
-fn default_transport(
-    py: Python<'_>,
-    method: &str,
-    url: &str,
-    body: Option<&[u8]>,
-    timeout: f64,
-    max_bytes: usize,
-) -> PyResult<(i64, String)> {
-    let duration = Duration::from_secs_f64(timeout.max(0.0));
-    let mut headers: Vec<(&str, &str)> = vec![("Accept", "application/json")];
-    if body.is_some() {
-        headers.push(("Content-Type", "application/json"));
-    }
-    let result = py.allow_threads(|| http_request(method, url, body, &headers, duration, max_bytes));
-    match result {
-        Ok((s, t)) => Ok((s as i64, t)),
-        Err("timeout") => Err(PyTimeoutError::new_err("the hub did not answer")),
-        Err(_) => Err(PyOSError::new_err("could not reach the hub")),
     }
 }

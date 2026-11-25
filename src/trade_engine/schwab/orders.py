@@ -16,13 +16,17 @@ Three pieces, the first two pure:
 
 No clock is read here (I7); the adapter passes the window in.
 
-The hub order-route HTTP I/O lives in Rust (`HubOrdersClientBase`); this module keeps the public
-class (a thin subclass), the pure builders and the carriers.
+The order-route call sequencing and outcome classification live in Rust (`HubOrdersClientBase`);
+the HTTP I/O stays on urllib (`urllib_transport`, which the base calls when no transport is
+injected). This module keeps the public class (a thin subclass), the pure builders and the
+carriers.
 """
 
 from __future__ import annotations
 
 import logging
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,7 +37,7 @@ import trade_engine_rs as rs
 
 from trade_engine.domain import Equity, OptionContract, OrderType, Side, TimeInForce
 from trade_engine.interfaces.broker import UnsupportedCapability, VenueOrder
-from trade_engine.schwab.hub_client import DEFAULT_HUB_URL
+from trade_engine.schwab.hub_client import DEFAULT_HUB_URL, MAX_RESPONSE_BYTES
 
 log = logging.getLogger(__name__)
 
@@ -250,9 +254,23 @@ class HubOrderResult:
     message: str = ""
 
 
+def urllib_transport(method: str, url: str, body: bytes | None,
+                     headers: Mapping[str, str], timeout: float) -> tuple[int, str]:
+    """One HTTP request, no retry. HTTP errors come back as (status, text)."""
+    request = urllib.request.Request(url, data=body, method=method, headers=dict(headers))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - loopback only
+            return response.status, response.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+        finally:
+            exc.close()
+
+
 class HubOrdersClient(rs.HubOrdersClientBase):
     """The hub's order routes, loopback only, one call per request, never retried."""
 
-    def __init__(self, base_url: str = DEFAULT_HUB_URL, transport: Transport | None = None,
+    def __init__(self, base_url: str = DEFAULT_HUB_URL, transport: Transport = urllib_transport,
                  timeout_s: float = DEFAULT_TIMEOUT_S) -> None:
         super().__init__()
