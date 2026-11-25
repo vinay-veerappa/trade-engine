@@ -27,12 +27,38 @@ pub const REASON_CODES: &[&str] = &[
     "INSTRUMENT_BLOCKED",
     "MAX_QTY",
     "COPY_OPENING_REFUSED",
+    "ATW_INITIAL_CAP",
+    "ATW_RISK_GROWS",
+    "ATW_TOO_CLOSE",
+    "FEED_QUIET",
 ];
 
 /// `check.schema.json` `singleResponse`: every key it may carry, and the ones it must.
 pub const RESPONSE_KEYS: &[&str] =
     &["allowed", "isReducing", "reasonCode", "detail", "ruleId", "verdictRevision", "checkedAt"];
 pub const REQUIRED_RESPONSE_KEYS: &[&str] = &["allowed", "isReducing", "reasonCode"];
+
+/// The service-owned refusal `text` (REFUSAL-TEXT-1, `verdict.schema.json` `refusalText`).
+/// The service sends it on `/v1/check` although `check.schema.json` does not list it yet, so
+/// it is accepted beside `RESPONSE_KEYS`, strictly shaped, and never read.
+pub const TEXT_KEY: &str = "text";
+pub const TEXT_SCOPES: &[&str] = &["account", "fleet", "service", "surface"];
+
+/// `refusalText`: exactly `headline` (non-empty), `scope` (one of `TEXT_SCOPES`) and `clears`.
+fn valid_refusal_text(value: &Json) -> bool {
+    let Json::Obj(pairs) = value else { return false };
+    let mut seen: Vec<&str> = Vec::new();
+    for (key, _) in pairs {
+        if !["headline", "scope", "clears"].contains(&key.as_str()) || seen.contains(&key.as_str()) {
+            return false;
+        }
+        seen.push(key);
+    }
+    seen.len() == 3
+        && matches!(value.get("headline"), Some(Json::Str(text)) if !text.is_empty())
+        && matches!(value.get("scope"), Some(Json::Str(scope)) if TEXT_SCOPES.contains(&scope.as_str()))
+        && matches!(value.get("clears"), Some(Json::Str(_)))
+}
 
 const NOT_LOOPBACK: &str = "riskguard.precheck.baseUrl must be a loopback http URL";
 const NO_PORT: &str = "riskguard.precheck.baseUrl needs an explicit port and no path";
@@ -140,7 +166,7 @@ pub fn valid_response(body: &str) -> bool {
     }
     let has = |key: &str| pairs.iter().any(|(k, _)| k == key);
     if !REQUIRED_RESPONSE_KEYS.iter().all(|key| has(key))
-        || !pairs.iter().all(|(key, _)| RESPONSE_KEYS.contains(&key.as_str()))
+        || !pairs.iter().all(|(key, _)| RESPONSE_KEYS.contains(&key.as_str()) || key == TEXT_KEY)
     {
         return false;
     }
@@ -157,6 +183,7 @@ pub fn valid_response(body: &str) -> bool {
             Some(Json::BigInt(text)) => !text.starts_with('-'),
             Some(_) => false,
         }
+        && get(TEXT_KEY).is_none_or(valid_refusal_text)
 }
 
 /// True when the top-level object repeats a key. `json::parse` keeps the last value of a
@@ -434,6 +461,22 @@ mod tests {
     }
 
     #[test]
+    fn valid_response_accepts_a_well_shaped_refusal_text_and_nothing_else() {
+        let with = |text: &str| {
+            format!(r#"{{"allowed":false,"isReducing":false,"reasonCode":"ACCOUNT_BLOCKED","text":{text}}}"#)
+        };
+        assert!(valid_response(&with(r#"{"headline":"Account not registered.","scope":"account","clears":"an operator clear"}"#)));
+        assert!(valid_response(&with(r#"{"clears":"","scope":"fleet","headline":"h"}"#)));
+        assert!(!valid_response(&with(r#"{"headline":"","scope":"account","clears":"x"}"#)));
+        assert!(!valid_response(&with(r#"{"headline":"h","scope":"desk","clears":"x"}"#)));
+        assert!(!valid_response(&with(r#"{"headline":"h","scope":"account"}"#)));
+        assert!(!valid_response(&with(r#"{"headline":"h","scope":"account","clears":"x","extra":1}"#)));
+        assert!(!valid_response(&with(r#"{"headline":"h","scope":"account","clears":5}"#)));
+        assert!(!valid_response(&with(r#""Account not registered.""#)));
+        assert!(!valid_response(&with("null")));
+    }
+
+    #[test]
     fn valid_response_refuses_a_repeated_key_even_when_both_values_are_fine() {
         assert!(!valid_response(
             r#"{"allowed":true,"allowed":true,"isReducing":false,"reasonCode":"OK"}"#
@@ -583,7 +626,10 @@ mod schema_parity {
         assert_eq!(sorted(reason_codes), owned(REASON_CODES));
 
         let properties = match single.get("properties") {
-            Some(Json::Obj(pairs)) => sorted(pairs.iter().map(|(key, _)| key.clone()).collect()),
+            // `text` is accepted beside the schema (see `TEXT_KEY`), listed there or not.
+            Some(Json::Obj(pairs)) => {
+                sorted(pairs.iter().filter(|(key, _)| key != TEXT_KEY).map(|(key, _)| key.clone()).collect())
+            }
             _ => Vec::new(),
         };
         assert_eq!(properties, owned(RESPONSE_KEYS));

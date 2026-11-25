@@ -164,3 +164,30 @@ def test_the_path_account_encoding_and_headers(guard):
     assert sent["authorization"] == "Bearer check-token"
     assert sent["content_type"] == "application/json"
     assert json.loads(sent["raw"])["instrument"] == "AAPL"
+
+
+def test_a_reply_without_content_length_reads_to_eof():
+    # http.client read a length-less body to EOF; the request says `Connection: close`.
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def reply_then_close() -> None:
+        peer, _ = listener.accept()
+        with peer:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += peer.recv(4096)
+            head, _, rest = data.partition(b"\r\n\r\n")
+            length = int(next(l for l in head.split(b"\r\n") if l.lower().startswith(b"content-length:")).split(b":")[1])
+            while len(rest) < length:
+                rest += peer.recv(4096)
+            peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" + json.dumps(REFUSED).encode())
+
+    threading.Thread(target=reply_then_close, daemon=True).start()
+    try:
+        result = RiskGuardClient(f"http://127.0.0.1:{port}", "check-token").check("core-1", {"instrument": "AAPL"})
+    finally:
+        listener.close()
+    assert result == CheckResult(False, "MAX_QTY")

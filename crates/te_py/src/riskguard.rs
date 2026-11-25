@@ -119,27 +119,34 @@ fn post(
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse().ok())
         .ok_or("network")?;
-    let mut content_length: usize = 0;
+    // No Content-Length: the body runs to EOF (the request sent `Connection: close`), as
+    // http.client read it. RiskGuard's axum `Json` replies always carry a length.
+    let mut content_length: Option<usize> = None;
     for line in lines {
         let lower = line.to_ascii_lowercase();
         if let Some(value) = lower.strip_prefix("content-length:") {
-            content_length = value.trim().parse().unwrap_or(0);
+            content_length = Some(value.trim().parse().map_err(|_| "network")?);
         }
     }
 
     let mut out = buf[header_end..].to_vec();
-    while out.len() < content_length {
+    while content_length.is_none_or(|length| out.len() < length) {
         if remaining().is_zero() {
             return Err("timeout");
         }
         stream.set_read_timeout(Some(remaining())).map_err(|e| classify(&e))?;
         let n = stream.read(&mut tmp).map_err(|e| classify(&e))?;
         if n == 0 {
+            if content_length.is_none() {
+                break;
+            }
             return Err("network");
         }
         out.extend_from_slice(&tmp[..n]);
     }
-    out.truncate(content_length);
+    if let Some(length) = content_length {
+        out.truncate(length);
+    }
     Ok((status, out))
 }
 
