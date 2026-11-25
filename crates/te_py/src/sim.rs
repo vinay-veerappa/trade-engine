@@ -88,7 +88,7 @@ pub(crate) fn side(s: &str) -> LR<Side> {
     Side::parse(s).map_or_else(|| err("value", format!("bad side {s:?}")), Ok)
 }
 
-type OrderT = (
+pub(crate) type OrderT = (
     String,
     String,
     String,
@@ -102,7 +102,7 @@ type OrderT = (
     Option<String>,
 );
 
-fn vorder(t: &OrderT) -> LR<VOrder> {
+pub(crate) fn vorder(t: &OrderT) -> LR<VOrder> {
     let (id, instr, otype, sd, qty, submitted, tif, (limit, stop, trail), allocs, parent, oco) = t;
     let mut a = Vec::new();
     for (soid, account, q) in allocs {
@@ -125,9 +125,9 @@ fn vorder(t: &OrderT) -> LR<VOrder> {
     })
 }
 
-type AckT = (String, &'static str, String, Option<String>);
+pub(crate) type AckT = (String, &'static str, String, Option<String>);
 
-fn ack(a: sb::Ack) -> AckT {
+pub(crate) fn ack(a: sb::Ack) -> AckT {
     (a.id, a.status, a.ts.iso, a.msg)
 }
 
@@ -501,7 +501,7 @@ impl SnapBook {
     }
 }
 
-fn lookup_quote(quote: &Bound<'_, PyAny>, occ: &str, host: &Host) -> LR<Option<Quote>> {
+pub(crate) fn lookup_quote(quote: &Bound<'_, PyAny>, occ: &str, host: &Host) -> LR<Option<Quote>> {
     let got = quote.call1((occ,)).and_then(|o| o.extract::<Option<(String, String, String)>>());
     match got {
         Err(e) => Err(host.fail(e)),

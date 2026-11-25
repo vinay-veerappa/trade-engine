@@ -892,6 +892,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     http::register(m)?;
     plugins::register(m)?;
     sim::register(m)?;
+    m.add_class::<snapshot_venue::SnapshotVenueBase>()?;
     oms::register(m)?;
     oms_native::register(m)?;
     oms_manager::register(m)?;
@@ -958,4 +959,5 @@ mod tos_paper_plan;
 mod tos_paper_session;
 mod tos_paper_rules;
 mod snapshot;
+mod snapshot_venue;
 
