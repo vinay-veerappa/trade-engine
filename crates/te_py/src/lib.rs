@@ -31,6 +31,8 @@ mod factory_run;
 mod mirror_loop;
 mod plain;
 pub mod plugins;
+mod option_router;
+mod lifecycle;
 
 /// The git sha (with a `-dirty` suffix) this binary was built from. Python
 /// reads it as `trade_engine_rs.__git_sha__`; the runtime owner's report reads
@@ -939,6 +941,8 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ledger_pro_rata, m)?)?;
     m.add_function(wrap_pyfunction!(ledger_ticket_contracts, m)?)?;
     m.add_class::<LedgerFold>()?;
+    m.add_class::<option_router::OptionRouterBase>()?;
+    m.add_class::<lifecycle::LifecyclePassBase>()?;
     accounts::register(m)?;
     registry_outbox::register(m)?;
     register_options(m)?;

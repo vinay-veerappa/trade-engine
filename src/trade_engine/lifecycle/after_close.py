@@ -25,14 +25,12 @@ quote sources stay Python plugins it calls.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 
-from trade_engine.sim._rs import register
 from trade_engine.interfaces.market_data import StaleDataError
-from trade_engine.ledger import Event, Ledger
-from trade_engine.lifecycle.sources import Dividends, OptionQuotes, Settlements
+from trade_engine.ledger import Event
+from trade_engine.sim._rs import register
 from trade_engine.sim._rs import rs
 
 
@@ -50,25 +48,5 @@ class LifecycleResult:
     events: tuple[Event, ...]
 
 
-class LifecyclePass:
+class LifecyclePass(rs.LifecyclePassBase):
     """Settle a session's expiring option positions and early assignments, after its close."""
-
-    def __init__(
-        self,
-        ledger: Ledger,
-        clock,
-        calendar,
-        settlements: Settlements,
-        *,
-        dividends: Dividends | None = None,
-        quotes: OptionQuotes | None = None,
-    ) -> None:
-        self._ledger = ledger
-        self._clock = clock
-        self._calendar = calendar
-        self._settlements = settlements
-        self._dividends = dividends
-        self._quotes = quotes
-
-    def run(self, session: date, accounts: Iterable[str] | None = None) -> LifecycleResult:
-        return LifecycleResult(session, tuple(rs.lifecycle_run(self, session, accounts)))
