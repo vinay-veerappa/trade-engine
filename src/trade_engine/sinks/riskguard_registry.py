@@ -17,6 +17,11 @@ to Rust and persists the state Rust serialises.
 - **Account ids** reach logs masked only (`*194`); the sink logs counts and kinds.
 
 The sink never reads a clock: `now` comes from the injected clock (I7).
+
+The delivery sequencing and the POST socket I/O now live in `trade_engine_rs`
+(`RiskguardRegistrySinkBase` / `registry_http_post`); this module keeps the import path, the
+public names, the config dataclass, the token/persist helpers, and the thin state helpers the
+Rust base reaches through attribute lookup.
 """
 
 from __future__ import annotations
@@ -25,8 +30,6 @@ import json
 import logging
 import os
 import threading
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -34,7 +37,6 @@ from typing import Any, Callable, Mapping, Sequence
 from trade_engine.accounts import _rs
 from trade_engine.accounts.errors import AccountRuleError
 from trade_engine.clock.wall import pause
-from trade_engine.interfaces.broker import AccountSnapshot, _iso_z
 
 log = logging.getLogger(__name__)
 
@@ -117,17 +119,8 @@ class TokenUnavailable(RuntimeError):
 
 
 def _default_post(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> tuple[int, str]:
-    req = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - loopback/owner URL
-            return resp.status, resp.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        try:
-            return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
-        finally:
-            exc.close()
-    except (urllib.error.URLError, OSError, ValueError):
-        return 0, ""
+    """POST to the registry; the socket I/O lives in `trade_engine_rs`."""
+    return _rs.rs.registry_http_post(url, body, headers, timeout)
 
 
 def read_token(path: str) -> str:
@@ -161,7 +154,21 @@ def read_token(path: str) -> str:
     return text
 
 
-class RiskguardRegistrySink:
+def _worker_run(sink: "RiskguardRegistrySink", tick_seconds: float) -> None:
+    """The worker loop `start` runs on a daemon thread: on each observe, and every tick."""
+    while not sink._stop.is_set():
+        sink._wake.wait(tick_seconds)
+        sink._wake.clear()
+        if sink._stop.is_set():
+            break
+        try:
+            sink.pump()
+        except Exception as exc:  # noqa: BLE001 - the worker must outlive any one failure
+            sink.last_error_kind = type(exc).__name__
+            log.warning("registry sink pump failed (%s)", type(exc).__name__)
+
+
+class RiskguardRegistrySink(_rs.rs.RiskguardRegistrySinkBase):
     """Account snapshots and events to riskguard, through the Rust outbox."""
 
     def __init__(
@@ -171,6 +178,7 @@ class RiskguardRegistrySink:
         clock,
         http_post: HttpPost | None = None,
     ) -> None:
+        super().__init__()
         self._config = config
         self._clock = clock
         self._post = http_post or _default_post
@@ -324,52 +332,10 @@ class RiskguardRegistrySink:
             self.counters["persist_failures"] += 1
             _log_write_failure("registry outbox persist failed", exc, path)
 
-    # -- observing ------------------------------------------------------------------------
+    # -- thin helpers the Rust base reaches through attribute lookup ---------------------
 
-    def observe(
-        self,
-        snapshot: AccountSnapshot,
-        events: list[dict[str, Any]],
-        seq: int,
-        pnl: Sequence[tuple[str, tuple[str, str] | None]] | None = None,
-    ) -> None:
-        """Record one good poll. Memory only; the worker (or `pump`) delivers it.
-
-        `pnl` (PS-4a) is one `(key, (realized_usd, as_of))` row per account in the snapshot, the
-        figure `None` when the account has none this poll. It is forwarded as is; every rule
-        (cap, drop, ordering, the switch) lives in the Rust outbox.
-        """
-        if self._outbox is None:
-            return
-        snap_text = json.dumps(snapshot.as_contract(), separators=(",", ":"))
-        confirmed = _iso_z(snapshot.confirmed_at)
-        with self._lock:
-            try:
-                self._observe_locked(snap_text, self._rebased_events(events), seq + self._seq_base, confirmed)
-            except AccountRuleError as exc:
-                if exc.kind != "seq_gap":
-                    self._refused(exc.kind)
-                    return
-                # The poller and the outbox disagree about the head (a restart, a ledger
-                # replay): drop the outbox's view and re-seed riskguard from this snapshot.
-                self.counters["reseeds"] += 1
-                old_head = json.loads(self._outbox.stats()).get("head_seq", 0)
-                if old_head > self._seq_base:
-                    self._seq_base = old_head
-                    self._persist_base()  # rare and tiny; only on a reseed
-                self._outbox.reset()
-                try:
-                    self._observe_locked(
-                        snap_text, self._rebased_events(events), seq + self._seq_base, confirmed
-                    )
-                except AccountRuleError as again:
-                    self._refused(again.kind)
-                    return
-            self.counters["observed"] += 1
-            self._dirty = True
-            if pnl is not None and self._config.pnl_enabled:
-                self._forward_pnl(pnl)
-        self._wake.set()
+    def _observe_locked(self, snap_text: str, ev_text: str, seq: int, confirmed: str) -> None:
+        _rs._call(self._outbox.observe, snap_text, ev_text, seq, confirmed)
 
     def _forward_pnl(self, rows: Sequence[tuple[str, tuple[str, str] | None]]) -> None:
         for key, figure in rows:
@@ -384,182 +350,15 @@ class RiskguardRegistrySink:
                 # Kind only: the key is an account id and stays out of the log (masked elsewhere).
                 log.warning("registry sink refused a pnl figure (%s)", exc.kind)
 
-    def _observe_locked(self, snap_text: str, ev_text: str, seq: int, confirmed: str) -> None:
-        _rs._call(self._outbox.observe, snap_text, ev_text, seq, confirmed)
-
     def _refused(self, kind: str) -> None:
         self.counters["observe_refused"] += 1
         self.last_error_kind = kind
         log.warning("registry sink refused a poll (%s)", kind)
 
-    # -- delivering ------------------------------------------------------------------------
-
-    def pump(self) -> int:
-        """Deliver what is due, in order, until the first failure. Returns envelopes acked.
-
-        The state lock is held only around in-memory outbox calls, never across the token
-        read, the HTTP post or the file write: a slow riskguard cannot stall `observe`.
-        """
-        if self._outbox is None:
-            return 0
-        acked = 0
-        with self._pump_lock:
-            try:
-                for _ in range(MAX_ENVELOPES_PER_PUMP):
-                    if self._stop.is_set():
-                        break  # stop: no new post; the last persisted file stays whole
-                    outcome = self._send_one()
-                    if outcome == "idle":
-                        break
-                    if outcome == "acked":
-                        acked += 1
-                        continue
-                    if outcome == "need_snapshot":
-                        continue
-                    break  # retry / refused / halted: stop at the first failure
-            finally:
-                self._persist()
-        return acked
-
-    def _send_one(self) -> str:
-        now = _iso_z(self._clock.now_utc())
-        with self._lock:
-            try:
-                body = _rs._call(self._outbox.next_envelope, now)
-            except AccountRuleError as exc:
-                self._halted(exc.kind)
-                return "halted"
-            if body is None:
-                return "idle"
-            self._dirty = True
-        try:
-            token = read_token(self._config.token_file)
-        except TokenUnavailable:
-            self.counters["token_failures"] += 1
-            self.last_error_kind = "token_unavailable"
-            log.warning("registry sink cannot read the connector token file")
-            return "retry"
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        del token
-        self.counters["posts"] += 1
-        status, text = self._post(
-            self._config.base_url.rstrip("/") + "/v1/registry/ingest",
-            body.encode("utf-8"),
-            headers,
-            REQUEST_TIMEOUT_S,
-        )
-        del headers
-        with self._lock:
-            try:
-                result = _rs._call(self._outbox.on_response, status, text, now)
-            except AccountRuleError as exc:
-                if exc.kind == "ack_ahead" and self._rebase_on_ack_ahead(status, text):
-                    return "need_snapshot"
-                if exc.kind in ("ack_missing", "ack_short", "bad_response"):
-                    self.counters["ack_refused"] += 1
-                    self.last_error_kind = exc.kind
-                    log.warning("registry sink: delivery not confirmed (%s)", exc.kind)
-                    return "retry"
-                self._halted(exc.kind)
-                return "halted"
-            self._dirty = True
-        if result == "retry":
-            self.counters["post_failures"] += 1
-            self.last_error_kind = f"http_{status}" if status else "no_answer"
-            return "retry"
-        if result == "need_snapshot":
-            self.counters["snapshots_requested"] += 1
-            return "need_snapshot"
-        self.counters["acks"] += 1
-        return "acked"
-
-    def _rebase_on_ack_ahead(self, status: int, text: str) -> bool:
-        """Riskguard is ahead of this outbox (BP-4a-SEQ). Move the base above its seq and
-        re-seed instead of halting, once per `REBASE_MIN_INTERVAL_S`. Caller holds the lock."""
-        try:
-            applied = json.loads(text).get("applied_seq") if status == 200 else None
-        except (ValueError, AttributeError):
-            applied = None
-        if not isinstance(applied, int) or isinstance(applied, bool) or applied < 0:
-            return False
-        now = self._clock.now_utc()
-        last = self._last_rebase
-        if last is not None and (now - last).total_seconds() < REBASE_MIN_INTERVAL_S:
-            return False
-        head = json.loads(self._outbox.stats()).get("head_seq", 0)
-        old_base = self._seq_base
-        self._seq_base += max(0, applied - head + 1)
-        self._outbox.reset()
-        self._outbox.resume()  # `ack_ahead` set the halt; the next observe re-seeds
-        self._last_rebase = now
-        self._dirty = True
-        self.counters["rebases"] += 1
-        self.counters["snapshots_requested"] += 1
-        self.last_error_kind = "ack_ahead"
-        self._persist_base()
-        log.warning(
-            "registry sink rebased: riskguard applied_seq=%d is ahead of outbox head=%d; seq_base %d -> %d",
-            applied,
-            head,
-            old_base,
-            self._seq_base,
-        )
-        return True
-
     def _halted(self, kind: str) -> None:
         self.counters["halts"] += 1
         self.last_error_kind = kind
         log.error("registry sink halted (%s); the owner must look before it is resumed", kind)
-
-    def resume(self) -> None:
-        """Clear a halt after the cause is fixed; the next envelope is a full snapshot."""
-        if self._outbox is None:
-            return
-        with self._lock:
-            self._outbox.resume()
-            self._dirty = True
-        self._wake.set()
-
-    # -- the worker ------------------------------------------------------------------------
-
-    def start(self, tick_seconds: float = 5.0) -> None:
-        """Run `pump` on a daemon thread: on each observe, and every tick for heartbeats."""
-        if self._outbox is None or self._thread is not None:
-            return
-        self._stop.clear()
-
-        def run() -> None:
-            while not self._stop.is_set():
-                self._wake.wait(tick_seconds)
-                self._wake.clear()
-                if self._stop.is_set():
-                    break
-                try:
-                    self.pump()
-                except Exception as exc:  # noqa: BLE001 - the worker must outlive any one failure
-                    self.last_error_kind = type(exc).__name__
-                    log.warning("registry sink pump failed (%s)", type(exc).__name__)
-
-        self._thread = threading.Thread(target=run, name="registry-sink", daemon=True)
-        self._thread.start()
-
-    def stop(self, timeout: float = 1.0) -> None:
-        """Stop the worker, wait at most `timeout`, then flush one last persist if dirty.
-
-        The worker checks the stop flag before each post, so the join normally returns within
-        one post. A post still in flight after the join is not waited for: the thread is a
-        daemon, the last persisted file is whole (tmp + replace), and unacked envelopes are sent
-        again after a restart. The flush is skipped while the worker is alive (no two writers).
-        """
-        self._stop.set()
-        self._wake.set()
-        thread, self._thread = self._thread, None
-        if thread is not None:
-            thread.join(timeout)
-            if thread.is_alive():
-                log.warning("registry sink still delivering at stop; final flush skipped")
-                return
-        self._persist()
 
 
 __all__ = [
