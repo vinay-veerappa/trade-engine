@@ -20,6 +20,7 @@ mod option_oms;
 mod precheck;
 mod reconcile;
 mod riskguard;
+mod eod_runner;
 mod sim;
 mod sim_broker;
 mod lock;
@@ -916,6 +917,9 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reconcile::pending_request, m)?)?;
     m.add_function(wrap_pyfunction!(reconcile::restorable, m)?)?;
     m.add_function(wrap_pyfunction!(reconcile::restorable_positions, m)?)?;
+    m.add_class::<eod_runner::EodRunnerBase>()?;
+    m.add_function(wrap_pyfunction!(eod_runner::void_session, m)?)?;
+    m.add_function(wrap_pyfunction!(eod_runner::write_off_order, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_holiday, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_early_close, m)?)?;
