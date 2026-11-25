@@ -429,14 +429,14 @@ pub(crate) fn tos_paper_follow_run_pass_mirror(
     run_kw.set_item("may_wait", may_wait)?;
     let report = sn.call_method("run_mirror", (ledger, broker, &sending_list), Some(&run_kw))?;
 
-    // return _with(report, fills=..., closes=..., refused=..., halted=...)
+    // return dataclasses.replace(report, fills=..., closes=..., refused=..., halted=...)
     let with_kw = PyDict::new(py);
     with_kw.set_item("fills", concat(&collected.getattr("fills")?, &report.getattr("fills")?)?)?;
     with_kw.set_item("closes", concat(&collected.getattr("closes")?, &report.getattr("closes")?)?)?;
     let written_t = py.import("builtins")?.call_method1("tuple", (&written,))?;
     with_kw.set_item("refused", concat(&written_t, &report.getattr("refused")?)?)?;
     with_kw.set_item("halted", py_or(&report.getattr("halted")?, &collected.getattr("halted")?)?)?;
-    Ok(sn.call_method("_with", (&report,), Some(&with_kw))?.unbind())
+    replaced(py, &report, &with_kw)
 }
 
 /// `follow_cycle(...)`: one follow pass. The entries refused here are the report's too.
@@ -481,13 +481,13 @@ pub(crate) fn tos_paper_follow_cycle(
         settle,
     )?;
 
-    // return _with(report, refused=tuple(written) + report.refused)
+    // return dataclasses.replace(report, refused=tuple(written) + report.refused)
     let report_b = report.bind(py);
     let written_t = py.import("builtins")?.call_method1("tuple", (&written,))?;
     let refused = concat(&written_t, &report_b.getattr("refused")?)?;
     let with_kw = PyDict::new(py);
     with_kw.set_item("refused", &refused)?;
-    Ok(sn.call_method("_with", (report_b,), Some(&with_kw))?.unbind())
+    replaced(py, report_b, &with_kw)
 }
 
 /// `SplitLedger`: the sim's strategy accounts (read-only) joined to the follower's own ledger.
@@ -630,4 +630,12 @@ impl SplitLedgerBase {
             None => Ok(self.mirror.bind(py).call_method1("append", (event_item,))?.unbind()),
         }
     }
+}
+
+/// `dataclasses.replace(report, **changes)`: a copy of the frozen `MirrorRunReport` with `changes` set.
+fn replaced(py: Python<'_>, report: &Bound<'_, PyAny>, changes: &Bound<'_, PyDict>) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("dataclasses")?
+        .call_method("replace", (report,), Some(changes))?
+        .unbind())
 }
