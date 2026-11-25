@@ -327,7 +327,8 @@ impl TosPaperBrokerBase {
             ));
         }
 
-        let balance = Self::balance(slf)?;
+        // Through attribute lookup, so a subclass `balance` override is honoured.
+        let balance = any.call_method0("balance")?.unbind();
         let balance_bound = balance.bind(py);
         if balance_bound.is_none() {
             if !any.getattr("_balance_unproven_ok")?.is_truthy()? {
