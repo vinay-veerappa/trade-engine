@@ -18,18 +18,20 @@ Written against the journal's routes in `third_party/trade-journal/apps/web/src/
 - A zero fee is replaced by the journal's default fee rule, if one matches.
 - With a password configured every route answers 401; that raises `JournalAuthError` so
   the outbox records why it is stuck instead of retrying silently.
+
+The delivery sequencing now lives in `trade_engine_rs` (`HttpJournalSinkBase`); this module
+keeps the import path, the public names, the urllib I/O shell (`_default_http_request`) and
+the stamp helpers the tests still read.
 """
 
 from __future__ import annotations
 
 import json
 import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime
 from typing import Any, Callable
 
-from trade_engine.interfaces.sinks import JournalExecution, JournalSink
 from trade_engine.sim._rs import call, rs
 
 HttpHandler = Callable[[str, str, dict[str, Any] | None], tuple[int, dict[str, Any]]]
@@ -60,7 +62,7 @@ def _default_http_request(
     body: dict[str, Any] | None = None,
     timeout: float = 10.0,
 ) -> tuple[int, dict[str, Any]]:
-    """Default HTTP request handler using standard library urllib."""
+    """Default HTTP request handler using standard library urllib (the I/O shell)."""
     data = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {"Content-Type": "application/json"} if body is not None else {}
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -79,7 +81,7 @@ def _default_http_request(
         return exc.code, parsed
 
 
-class HttpJournalSink(JournalSink):
+class HttpJournalSink(rs.HttpJournalSinkBase):
     """HTTP Journal sink connecting to the trade-journal (:3300) API."""
 
     def __init__(
@@ -90,6 +92,7 @@ class HttpJournalSink(JournalSink):
         http_client: HttpHandler | None = None,
         name: str = "journal",
     ) -> None:
+        super().__init__()
         if not base_url or not base_url.strip():
             raise ValueError("base_url must be non-empty string")
         if not account_id or not account_id.strip():
@@ -99,167 +102,3 @@ class HttpJournalSink(JournalSink):
         self.account_id = account_id.strip()
         self.name = name
         self._http = http_client or _default_http_request
-
-    def _request(self, path: str, method: str, body: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
-        status, parsed = self._http(f"{self.base_url}{path}", method, body)
-        if status in (401, 403):
-            raise JournalAuthError(
-                f"Journal at {self.base_url} refused {method} {path} with {status}: it has a "
-                "password configured and this sink does not authenticate"
-            )
-        return status, parsed if isinstance(parsed, dict) else {}
-
-    def publish(self, event_seq: int, event: Any) -> bool:
-        """Publish an event to the journal.
-
-        Converts dictionaries or domain events to JournalExecution and calls publish_execution.
-        """
-        if isinstance(event, JournalExecution):
-            return self.publish_execution(event_seq, event)
-        if isinstance(event, dict):
-            execution = self._dict_to_execution(event)
-            return self.publish_execution(event_seq, execution)
-        return False
-
-    def publish_execution(self, event_seq: int, execution: JournalExecution) -> bool:
-        """Publish execution, annotate stop/target/tag, and confirm delivery by reading back.
-
-        Raises JournalAuthError when the journal demands a login; returns False for every
-        other failure, so the outbox keeps the item queued (I12).
-        """
-        # 0. Invariant I8: refuse cross-account delivery
-        if not call(rs.journal_account, execution.account_id, self.account_id):
-            return False
-
-        # 1. Multiplier first, so the journal's rebuild on insert already prices the fill
-        # with it.
-        if call(rs.journal_derivative, execution.multiplier) and not self._ensure_multiplier(execution):
-            return False
-
-        # 2. Post the execution
-        payload = call(rs.journal_payload, self.account_id, event_seq, execution)
-
-        try:
-            status, body = self._request("/api/executions", "POST", payload)
-        except JournalAuthError:
-            raise
-        except Exception:
-            return False
-
-        if not call(rs.journal_accepted, status):
-            return False
-
-        # Verify the journal actually stored or deduplicated the row
-        if not call(rs.journal_stored, body):
-            return False
-
-        # 3. Patch trade annotations (stopLoss, profitTarget, strategy tag)
-        self._patch_trade_annotations(execution)
-
-        # 4. Invariant I12: Confirm delivery by reading back, not by HTTP 200
-        return self.confirm_delivery(event_seq, execution)
-
-    def _read_multipliers(self) -> dict[str, Any] | None:
-        status, body = self._request("/api/settings", "GET", None)
-        multipliers = body.get("multipliers")
-        if status != 200 or not isinstance(multipliers, dict):
-            return None
-        return multipliers
-
-    def _ensure_multiplier(self, execution: JournalExecution) -> bool:
-        """Set `symbol -> multiplier` without dropping anyone else's entry.
-
-        PATCH replaces the whole map, so it is only sent as a merge over a map read just
-        before, and the result is read back. A map that cannot be read is never written.
-        """
-        symbol = call(rs.journal_symbol, execution.symbol)
-        try:
-            existing = self._read_multipliers()
-            plan = call(rs.journal_multiplier, existing, symbol, execution.multiplier)
-            if plan["action"] == "refuse":
-                return False
-            if plan["action"] == "done":
-                return True
-            merged = plan["multipliers"]
-            status, _ = self._request("/api/settings", "PATCH", {"multipliers": merged})
-            if not call(rs.journal_accepted, status):
-                return False
-            return self._read_multipliers() == merged
-        except JournalAuthError:
-            raise
-        except Exception:
-            return False
-
-    def confirm_delivery(self, event_seq: int, execution: JournalExecution | None = None) -> bool:
-        """Verify delivery confirmation for an execution by reading back from the journal (I12)."""
-        if execution is None:
-            return False
-
-        symbol = call(rs.journal_symbol, execution.symbol)
-        sent_at = _parse_instant(journal_executed_at(execution.executed_at, event_seq))
-        try:
-            query = urllib.parse.urlencode({"accounts": self.account_id})
-            status, body = self._request(f"/api/trades?{query}", "GET", None)
-            if status != 200:
-                return False
-
-            trades = body.get("trades", [])
-            # Search candidate trades newest first to minimize HTTP lookups
-            candidate_trades = call(rs.journal_candidates, trades, symbol)
-            for trade in candidate_trades:
-                trade_key = trade.get("key")
-                if not trade_key:
-                    continue
-
-                # Query detailed trade record with executions
-                key_encoded = urllib.parse.quote(trade_key, safe="")
-                dt_status, dt_body = self._request(f"/api/trades/{key_encoded}", "GET", None)
-                if dt_status != 200:
-                    continue
-
-                for fill in dt_body.get("executions", []):
-                    if call(rs.journal_match, execution, fill, dt_body, sent_at):
-                        return True
-
-            return False
-        except JournalAuthError:
-            raise
-        except Exception:
-            return False
-
-    def _patch_trade_annotations(self, execution: JournalExecution) -> None:
-        """Find the matching trade and patch stopLoss, profitTarget, and strategy tags."""
-        if not call(rs.journal_annotations, execution.stop_loss, execution.profit_target, execution.strategy_tag):
-            return
-
-        symbol = call(rs.journal_symbol, execution.symbol)
-        try:
-            query = urllib.parse.urlencode({"accounts": self.account_id})
-            status, body = self._request(f"/api/trades?{query}", "GET", None)
-            if status != 200:
-                return
-
-            trades = body.get("trades", [])
-            # Prioritize open trades first, latest first (reversed)
-            matching_trade = call(rs.journal_annotation_trade, trades, symbol)
-            if not matching_trade:
-                return
-
-            trade_key = matching_trade.get("key")
-            if not trade_key:
-                return
-
-            patch_data = call(rs.journal_patch, execution, matching_trade)
-
-            if patch_data:
-                key_encoded = urllib.parse.quote(trade_key, safe="")
-                self._request(f"/api/trades/{key_encoded}", "PATCH", patch_data)
-        except JournalAuthError:
-            raise
-        except Exception:
-            # The read-back in confirm_delivery decides; a failed PATCH just fails it.
-            pass
-
-    def _dict_to_execution(self, d: dict[str, Any]) -> JournalExecution:
-        """Convert a dictionary payload into a JournalExecution domain instance (I5: Refuse, never guess)."""
-        return JournalExecution(**call(rs.journal_execution, d))

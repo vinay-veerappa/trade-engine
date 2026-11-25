@@ -38,6 +38,7 @@ mod option_router;
 mod lifecycle;
 mod schwab_adapter;
 mod ibkr_adapter;
+mod sinks;
 
 /// The git sha (with a `-dirty` suffix) this binary was built from. Python
 /// reads it as `trade_engine_rs.__git_sha__`; the runtime owner's report reads
@@ -959,6 +960,8 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ibkr_adapter::IbkrAccountsAdapterBase>()?;
     accounts::register(m)?;
     registry_outbox::register(m)?;
+    m.add_class::<sinks::HttpJournalSinkBase>()?;
+    m.add_class::<sinks::RiskguardRegistrySinkBase>()?;
     register_options(m)?;
     register_futures(m)?;
     m.add_function(wrap_pyfunction!(risk_rules_from_mapping, m)?)?;
