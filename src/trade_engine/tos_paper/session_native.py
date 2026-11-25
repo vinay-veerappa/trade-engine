@@ -12,7 +12,7 @@ helpers stay here.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
 
 import trade_engine_rs as rs
@@ -220,10 +220,6 @@ def run_mirror(
     a caller that never learned about waiting can never send a naked call. See ``tos_paper.cover``.
     """
     return rs.run_mirror(ledger, broker, orders, clock=clock, may_wait=may_wait, settle=settle)
-
-
-def _with(report: MirrorRunReport, **changes) -> MirrorRunReport:
-    return replace(report, **changes)
 
 
 def clear_halt(ledger: Ledger, venue: str, *, reason: str, clock: Clock) -> tuple[str, ...]:

@@ -37,13 +37,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SECONDS = 60
 
-_KIND_TO_EVENT = {
-    "added": "ACCOUNT_ADDED",
-    "removed": "ACCOUNT_REMOVED",
-    "changed": "ACCOUNT_CHANGED",
-}
-
-
 def _value(value: Any) -> Any:
     if isinstance(value, tuple) and value and isinstance(value[0], Route):
         return [route.as_contract() for route in value]
