@@ -7,7 +7,6 @@ late protective stop. Nothing here swallows that error; a raise fails the run lo
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -57,99 +56,16 @@ def reconcile_after(
     Returns how many fills were newly recorded. A fill whose order the ledger does not
     know refuses (I5); a replayed venue fill id is a no-op (I3).
     """
-    recorded = 0
-    for venue_fill in broker.fills(since):
-        recorded += _record_venue_fill(ledger, clock, broker, manager, account_id, venue_fill, journal_account)
-    state: Any = ledger.state(account_id)
-    # Which of the venue's orders the ledger knows and has not settled is Rust's
-    # (``te_core::oms::reconcile``, P3b-1); NEW children were never sent and terminal
-    # states were already folded.
-    venue_order_ids = [order_state.venue_order_id for order_state in broker.orders(since)]
-    for order_id in _rs.call(_rs.rs.oms_native_orders_to_read, state, venue_order_ids):
-        manager.reconcile_order(order_id)
-    return recorded
-
-
-def _record_venue_fill(
-    ledger: Ledger,
-    clock: Clock,
-    broker: BrokerAdapter,
-    manager: OrderManager,
-    account_id: str,
-    venue_fill: VenueFill,
-    journal_account: str | None,
-) -> int:
-    if ledger.has_command(f"fill:{venue_fill.venue_fill_id}"):
-        # Recorded before a crash: the sync or the journal row may never have happened (F2).
-        _heal_recorded_fill(ledger, clock, manager, account_id, _fill_of(broker, account_id, venue_fill), journal_account)
-        return 0
-    state: AccountState = ledger.state(account_id)
-    _rs.call(
-        _rs.rs.oms_native_check_known_order,
-        state,
-        venue_fill.venue_fill_id,
-        venue_fill.venue_order_id,
-        account_id,
-    )
-    fill = _fill_of(broker, account_id, venue_fill)
-    manager.record_fill(fill)
-    if journal_account is not None:
-        enqueue_journal_fill(ledger, clock, journal_account, ledger.state(account_id), fill)
-    return 1
-
-
-def _fill_of(broker: BrokerAdapter, account_id: str, venue_fill: VenueFill) -> Fill:
-    return Fill(
-        fill_id=venue_fill.venue_fill_id,
-        order_id=venue_fill.venue_order_id,
-        account_id=account_id,
-        instrument=venue_fill.instrument,
-        quantity=venue_fill.quantity,
-        price=venue_fill.price,
-        venue_env=broker.env,
-        filled_at=venue_fill.filled_at,
-        side=venue_fill.side,
-        fee=venue_fill.fee,
-        venue_order_id=venue_fill.venue_order_id,
-        venue_execution_id=venue_fill.venue_fill_id,
-        leg_id=venue_fill.leg_id,
-    )
-
-
-def _heal_recorded_fill(
-    ledger: Ledger,
-    clock: Clock,
-    manager: OrderManager,
-    account_id: str,
-    fill: Fill,
-    journal_account: str | None,
-) -> None:
-    """Finish what a crash after a committed fill may have left undone (F2).
-
-    The bracket sync is re-run only for the bracket's latest fill: an older cause can
-    collide with a command id already used for a different quantity. The journal row is
-    re-enqueued only for the account's latest fill: reconcile records and journals one
-    fill at a time, so a crash can leave only the last one unjournaled.
-    """
-    state = ledger.state(account_id)
-    # Which bracket to re-sync, and whether this fill is the account's latest, is Rust's
-    # (``te_core::oms::reconcile::heal_plan``, W5 P2). The fill event is read natively; its
-    # seq comes back so the outbox row can be checked without another read.
-    resync, rejournal_candidate, fill_seq = _rs.call(
-        _rs.rs.oms_native_heal_plan,
+    return _rs.call(
+        _rs.rs.reconcile_after,
         ledger,
+        clock,
+        broker,
+        manager,
         account_id,
-        state,
-        fill.fill_id,
-        fill.order_id,
+        since,
+        journal_account,
     )
-    if resync is not None:
-        entry_id, cause = resync
-        manager.synchronize_bracket(state.orders[entry_id], cause)
-    if journal_account is None or fill_seq is None or not rejournal_candidate:
-        return
-    if ledger.outbox_row(fill_seq, f"journal:{journal_account}") is None:
-        enqueue_journal_fill(ledger, clock, journal_account, ledger.state(account_id), fill)
 
 
 def bracket_resync_cause(ledger: Ledger, account_id: str, order_id: str) -> tuple[Order, str] | None:
@@ -158,20 +74,7 @@ def bracket_resync_cause(ledger: Ledger, account_id: str, order_id: str) -> tupl
     ``order_id`` is the entry or one of its children. The latest fill is the last FILL
     event (by ledger seq) of the entry or of any order whose parent is the entry.
     """
-    state = ledger.state(account_id)
-    # The entry lookup and the cause are Rust's (``te_core::oms::reconcile``, W5 P2). An
-    # unknown order raises KeyError from there, as the Python lookup did.
-    found = _rs.call(
-        _rs.rs.oms_native_resync_cause,
-        ledger,
-        account_id,
-        state,
-        order_id,
-    )
-    if found is None:
-        return None
-    entry_id, fill_id = found
-    return state.orders[entry_id], fill_id
+    return _rs.call(_rs.rs.bracket_resync_cause, ledger, account_id, order_id)
 
 
 def resync_open_brackets(ledger: Ledger, manager: OrderManager, account_id: str) -> int:
@@ -180,18 +83,7 @@ def resync_open_brackets(ledger: Ledger, manager: OrderManager, account_id: str)
     A crash can leave a fill committed with its protective stop never sent, and a rerun
     may never report that fill again. Returns how many entries were synced.
     """
-    state = ledger.state(account_id)
-    # Which entries to re-sync, and from which fill, is Rust's (``te_core::oms::reconcile``,
-    # W5 P2), in the state's order: the manager syncs them in that order.
-    pairs = _rs.call(
-        _rs.rs.oms_native_brackets_to_resync,
-        ledger,
-        account_id,
-        state,
-    )
-    for entry_id, fill_id in pairs:
-        manager.synchronize_bracket(state.orders[entry_id], fill_id)
-    return len(pairs)
+    return _rs.call(_rs.rs.resync_open_brackets, ledger, manager, account_id)
 
 
 def enqueue_journal_fill(
@@ -206,20 +98,4 @@ def enqueue_journal_fill(
     Shared by both runners: the journal posts every execution with ``assetClass``,
     multiplier, stop and target, and the journal account id comes from config (I12).
     """
-    # The bracket's stop and target, the asset class and the multiplier are Rust's
-    # (``te_core::oms::reconcile``, P3b-1); it refuses an unrecorded fill where Python did.
-    # The fill event is read natively, and its seq comes back for the outbox row.
-    payload, seq = _rs.call(
-        _rs.rs.oms_native_journal_payload,
-        ledger,
-        state.account_id,
-        state,
-        codec.text(codec.encode_payload(fill)),
-        journal_account,
-    )
-    return ledger.enqueue_outbox(
-        seq,
-        f"journal:{journal_account}",
-        json.loads(payload),
-        created_at=clock.now_utc(),
-    )
+    return _rs.call(_rs.rs.enqueue_journal_fill, ledger, clock, journal_account, state, fill)
