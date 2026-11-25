@@ -902,6 +902,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     sim::register(m)?;
     m.add_class::<sim_broker::SimBrokerBase>()?;
     m.add_class::<snapshot_venue::SnapshotVenueBase>()?;
+    m.add_class::<tos_paper_broker::TosPaperBrokerBase>()?;
     oms::register(m)?;
     oms_native::register(m)?;
     oms_manager::register(m)?;
@@ -983,6 +984,7 @@ mod tos_paper;
 mod tos_paper_plan;
 mod tos_paper_session;
 mod tos_paper_rules;
+mod tos_paper_broker;
 mod snapshot;
 mod snapshot_venue;
 mod chain_store;
