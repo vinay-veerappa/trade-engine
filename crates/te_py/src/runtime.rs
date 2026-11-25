@@ -9,7 +9,7 @@ mod options_flow;
 #[path = "equity_flow.rs"]
 mod equity_flow;
 #[path = "intraday_flow.rs"]
-mod intraday_flow;
+pub(crate) mod intraday_flow;
 #[path = "lifecycle_pass.rs"]
 mod lifecycle_pass;
 

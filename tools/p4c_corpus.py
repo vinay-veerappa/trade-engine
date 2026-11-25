@@ -380,6 +380,24 @@ class ReplayAdapter:
         return lambda *args, **kwargs: self.replay.call(self.actor, method, *args, **kwargs)
 
 
+def _native_method(relative: str, symbol: str) -> bool:
+    """True when ``Class.method`` is defined on a ``trade_engine_rs`` base of the module's class.
+
+    W7-CORE moved method bodies into ``#[pyclass(subclass)]`` bases (``class X(rs.XBase)``), so the
+    surface is still ``X.method`` -- it is just not in the Python AST any more.
+    """
+    if "." not in symbol:
+        return False
+    class_name, method = symbol.split(".", 1)
+    module_name = "trade_engine." + relative.removesuffix(".py").replace("\\", ".").replace("/", ".")
+    try:
+        cls = getattr(importlib.import_module(module_name), class_name)
+    except (ImportError, AttributeError):
+        return False
+    return any(base.__module__ == "trade_engine_rs" and method in vars(base)
+               for base in getattr(cls, "__mro__", ()))
+
+
 def inventory(root: Path = ROOT) -> list[dict[str, Any]]:
     rows = []
     for name, relative, symbols in INVENTORY:
@@ -394,7 +412,8 @@ def inventory(root: Path = ROOT) -> list[dict[str, Any]]:
                         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)))
                 elif isinstance(node, ast.ImportFrom):
                     found.update(alias.asname or alias.name for alias in node.names)
-            missing = set(symbols) - found
+            missing = {symbol for symbol in set(symbols) - found
+                       if not _native_method(relative, symbol)}
             if missing:
                 raise CorpusError(f"Inventory discrepancy in {relative}: missing {sorted(missing)}")
             surfaces.append({"path": "src/trade_engine/" + relative.replace("\\", "/"), "symbols": list(symbols)})

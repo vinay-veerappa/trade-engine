@@ -951,6 +951,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LedgerFold>()?;
     m.add_class::<option_router::OptionRouterBase>()?;
     m.add_class::<lifecycle::LifecyclePassBase>()?;
+    m.add_class::<intraday::IntradayServiceBase>()?;
     accounts::register(m)?;
     registry_outbox::register(m)?;
     register_options(m)?;
@@ -977,6 +978,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+mod intraday;
 mod market_data;
 mod runtime;
 mod tos_paper;

@@ -10,18 +10,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from trade_engine.calendar.sessions import ExchangeCalendar
+import trade_engine_rs as rs
+
 from trade_engine.domain.option_orders import OptionIntent
-from trade_engine.eod.options_routing import OptionRouter, RoutingTally
-from trade_engine.interfaces.clock import Clock
+from trade_engine.eod.options_routing import RoutingTally
 from trade_engine.interfaces.market_data import StaleDataError
-from trade_engine.ledger import Ledger
 from trade_engine.market_data.chains import ChainSnapshot
-from trade_engine.oms.reconcile import resync_open_brackets
 from trade_engine.sim._rs import register, rs as native
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -123,86 +120,8 @@ class _EntryGate:
         return [action for action, selected in zip(actions, keep) if selected]
 
 
-class IntradayService:
+class IntradayService(rs.IntradayServiceBase):
     """Run one 0DTE account live from the session open to the close."""
-
-    def __init__(
-        self,
-        ledger: Ledger,
-        clock: Clock,
-        calendar: ExchangeCalendar,
-        config: IntradayConfig,
-        *,
-        heartbeat_path: Any | None = None,
-    ) -> None:
-        native.intraday_require_native(ledger, calendar)
-        self._ledger = ledger
-        self._clock = clock
-        self._calendar = calendar
-        self._config = config
-        self._heartbeat_path = None if heartbeat_path is None else Path(heartbeat_path)
-        self._gate = _EntryGate(config.strategy)
-        self._router = OptionRouter(
-            ledger,
-            clock,
-            brokers={config.account_id: config.broker},
-            strategies={config.account_id: self._gate},
-            option_risk_engines=(
-                {config.account_id: config.option_risk_engine} if config.option_risk_engine else {}
-            ),
-            journal_accounts=(
-                {config.account_id: config.journal_account} if config.journal_account else {}
-            ),
-        )
-
-    # -- entry -------------------------------------------------------------------
-
-    def run(
-        self,
-        session: date,
-        *,
-        start_at: datetime | None = None,
-        stop_at: datetime | None = None,
-    ) -> dict[str, Any]:
-        """Walk one session. ``stop_at`` simulates a crash: the loop stops there
-        without a marker, exactly as a killed process would leave the ledger (I2)."""
-        account_id = self._config.account_id
-        resync_open_brackets(self._ledger, self._router.manager(account_id).orders, account_id)
-        return native.intraday_run(self, session, start_at, stop_at)
-
-    # -- the tick ----------------------------------------------------------------
-
-    def _tick(self, session: date, state: "_TickState") -> None:
-        native.intraday_tick(self, session, state)
-
-    def _flatten(self, session: date, code: str, reason: str) -> int:
-        """Close at market whatever is open and not already closing; returns how many."""
-        return native.intraday_flatten(self, session, code, reason)
-
-    # -- the close -----------------------------------------------------------------
-
-    def _close_mark(self, session: date, state: "_TickState") -> str:
-        return native.intraday_close(self, session, state)
-
-    # -- restart gate, heartbeat, plumbing ---------------------------------------
-
-    def _write_heartbeat(
-        self,
-        session: date,
-        state: "_TickState",
-        note: str,
-        *,
-        alert: bool = False,
-        exited: bool = False,
-    ) -> None:
-        """Written to a temporary file and moved into place: a reader never sees half."""
-        native.intraday_heartbeat_write(self, session, state, note, alert, exited)
-
-    def _read_heartbeat(self) -> Heartbeat | None:
-        return native.intraday_heartbeat_read(self)
-
-    def _pause(self) -> None:
-        self._clock.sleep(self._config.tick_seconds)
 
 
 @dataclass
@@ -211,5 +130,3 @@ class _TickState:
     barred: str | None = None  # a reason entries are refused for the whole session
     tally: RoutingTally = field(default_factory=RoutingTally)
     snapshots: dict[str, ChainSnapshot] = field(default_factory=dict)
-
-
