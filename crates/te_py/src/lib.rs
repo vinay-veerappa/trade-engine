@@ -1005,6 +1005,16 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<tradovate_adapter::TradovateAdapterBase>()?;
     m.add_class::<tradovate_adapter::AccountWatcherBase>()?;
     m.add_function(wrap_pyfunction!(tradovate_adapter::_bracket_index, m)?)?;
+    m.add_class::<registry_feed::SchwabPollerBase>()?;
+    m.add_class::<registry_feed::SchwabFeedBase>()?;
+    m.add_class::<registry_feed::PollPumpBase>()?;
+    m.add_class::<registry_feed::FeedBase>()?;
+    m.add_function(wrap_pyfunction!(registry_feed::schwab_hint_on, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_feed::cme_trading_day, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_feed::_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_feed::schwab_outbox_path, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_feed::run_once, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_feed::run, m)?)?;
     Ok(())
 }
 
@@ -1021,4 +1031,5 @@ mod snapshot;
 mod snapshot_venue;
 mod chain_store;
 mod tradovate_adapter;
+mod registry_feed;
 
