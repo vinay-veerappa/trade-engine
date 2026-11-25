@@ -259,7 +259,10 @@ def test_a_reducing_intent_is_allowed_on_an_unregistered_account(service):
 
     result = RiskGuardClient(config.base_url, config.token).check(UNREGISTERED, request)
 
-    assert result == CheckResult(True, "allowed")
+    # The service stamps every answer (verdictRevision is a u64, checkedAt a string).
+    assert (result.allowed, result.kind) == (True, "allowed")
+    assert isinstance(result.verdict_revision, int) and result.verdict_revision >= 0
+    assert isinstance(result.checked_at, str)
     status, body = _raw_check(config.base_url, UNREGISTERED, request, config.token)
     assert status == 200
     assert body["reasonCode"] == "OK_REDUCING"

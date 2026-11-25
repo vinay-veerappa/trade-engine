@@ -16,15 +16,11 @@ the replace's opening part) are ``te_core::oms::precheck``, reached through ``tr
 
 from __future__ import annotations
 
-import http.client
 import json
 import logging
-import queue
-import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from urllib.parse import quote, urlsplit
 
 from trade_engine.domain.instruments import Instrument, Side
 from trade_engine.domain.orders import Order
@@ -145,57 +141,22 @@ def valid_response(body) -> bool:
 
 
 class RiskGuardClient:
-    """``POST /v1/check?account=`` over loopback with a 250 ms budget (a worker thread bounds it)."""
+    """``POST /v1/check?account=`` over loopback with a 250 ms budget (Rust bounds it)."""
 
     def __init__(self, base_url: str, token: str) -> None:
-        parts = urlsplit(base_url)
-        self._host = parts.hostname
-        self._port = parts.port
+        self._base_url = base_url
         self._token = token
 
     def check(self, core_account: str, request: dict) -> CheckResult:
-        path = f"/v1/check?account={quote(core_account, safe='')}"
-        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
-        error, status, body = self._post(path, json.dumps(request).encode(), headers)
-        if error is not None:
-            return CheckResult(False, error)
-        if status != 200:
-            return CheckResult(False, f"http_{status}")
-        try:
-            text = body.decode("utf-8")
-        except UnicodeDecodeError:
-            return CheckResult(False, "invalid")
-        if not _native.precheck_valid_response(text):
-            return CheckResult(False, "invalid")
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            return CheckResult(False, "invalid")
-        if parsed["allowed"] is True:
-            return CheckResult(True, "allowed", parsed.get("verdictRevision"), parsed.get("checkedAt"))
-        return CheckResult(False, parsed["reasonCode"])
-
-    def _post(self, path: str, payload: bytes, headers: dict) -> tuple[str | None, int, bytes]:
-        outcome: queue.Queue = queue.Queue(maxsize=1)
-
-        def run() -> None:
-            conn = http.client.HTTPConnection(self._host, self._port, timeout=CHECK_TIMEOUT_S)
-            try:
-                conn.request("POST", path, body=payload, headers=headers)
-                response = conn.getresponse()
-                outcome.put((None, response.status, response.read()))
-            except TimeoutError:
-                outcome.put(("timeout", 0, b""))
-            except (OSError, http.client.HTTPException):
-                outcome.put(("network", 0, b""))
-            finally:
-                conn.close()
-
-        threading.Thread(target=run, name="riskguard-precheck", daemon=True).start()
-        try:
-            return outcome.get(timeout=CHECK_TIMEOUT_S)
-        except queue.Empty:
-            return ("timeout", 0, b"")
+        allowed, reason, verdict_revision, checked_at = _rs.call(
+            _native.riskguard_check,
+            self._base_url,
+            self._token,
+            core_account,
+            json.dumps(request),
+            CHECK_TIMEOUT_S,
+        )
+        return CheckResult(allowed, reason, verdict_revision, checked_at)
 
 
 class Precheck:

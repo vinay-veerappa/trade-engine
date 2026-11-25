@@ -16,6 +16,7 @@ mod oms;
 mod oms_native;
 mod oms_manager;
 mod precheck;
+mod riskguard;
 mod sim;
 mod lock;
 pub mod store;
@@ -897,6 +898,7 @@ fn trade_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     oms_manager::register(m)?;
     m.add_function(wrap_pyfunction!(flow::oms_flow_native, m)?)?;
     precheck::register(m)?;
+    m.add_function(wrap_pyfunction!(riskguard::riskguard_check, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_session, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_holiday, m)?)?;
     m.add_function(wrap_pyfunction!(calendar_is_early_close, m)?)?;
