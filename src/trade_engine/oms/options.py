@@ -23,35 +23,22 @@ The guards the old options engine lacked (rules doc §7.1) are structural here:
 from __future__ import annotations
 
 import contextlib
-from datetime import datetime
 from decimal import Decimal
 
-from trade_engine.domain.instruments import (
-    Combo,
-    ComboLeg,
-    Instrument,
-    Side,
-)
+import trade_engine_rs as rs
+
 from trade_engine.domain.option_orders import (
-    CloseHolding,
-    CloseStructure,
     OpenStructure,
     OptionIntent,
     StructureLeg,
     legs_of,
-    reverse,
 )
-from trade_engine.domain.orders import Order, OrderState, OrderType, TimeInForce
-from trade_engine.interfaces.broker import BrokerAdapter
-from trade_engine.interfaces.clock import Clock
-from trade_engine.ledger import Event, EventKind, Ledger, OrdersCreated
+from trade_engine.domain.orders import Order
 from trade_engine.ledger import codec
 from trade_engine.ledger.codec import DecimalRangeError, canon_decimal, encode_payload, legacy_spelling
 from trade_engine.ledger.state import AccountState
-from trade_engine.oms.manager import IdempotencyConflictError, OrderManagementError, OrderManager
+from trade_engine.oms.manager import IdempotencyConflictError, OrderManagementError
 from trade_engine.sim import _rs
-
-_TERMINAL = frozenset({OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED})
 
 
 class OptionOrderError(OrderManagementError):
@@ -76,10 +63,6 @@ _rs.register("duplicate", DuplicateEntryError)
 _rs.register("uncovered", UncoveredCallError)
 _rs.register("closed", StructureClosedError)
 _rs.register("idempotency", IdempotencyConflictError)
-
-
-def _target_id(entry_order_id: str) -> str:
-    return f"{entry_order_id}:target"
 
 
 def _tree(value: object) -> str:
@@ -144,216 +127,13 @@ def uncovered_calls(state: AccountState, *, closing_counts: bool) -> dict[str, t
     }
 
 
-class OptionOrderManager:
+class OptionOrderManager(rs.OptionOrderManagerBase):
     """Open, protect and close options structures for the accounts of one ledger."""
 
-    def __init__(self, broker: BrokerAdapter, clock: Clock, ledger: Ledger) -> None:
-        self._clock = clock
-        self._ledger = ledger
-        self.orders = OrderManager(broker, clock, ledger)
-
-    # -- open ---------------------------------------------------------------------------
-
-    def open(self, intent: OptionIntent) -> Order:
-        """Persist and submit the entry, with its profit target waiting for the fill."""
-        fingerprint = self._intent_fingerprint(intent)
-        existing = self._ledger.event_by_command(intent.command_id)
-        if existing is not None:
-            _rs.call(
-                _rs.rs.oms_replay_conflict,
-                intent.command_id,
-                existing.kind is EventKind.ORDERS_CREATED,
-                existing.account == intent.account_id,
-            )
-            presented = self._presented_fingerprint(intent, existing.payload.fingerprint, fingerprint)
-            _rs.call(_rs.rs.oms_fingerprint_conflict, intent.command_id, existing.payload.fingerprint, presented)
-            return self._submit(existing.payload.orders[0])  # a replay changes nothing (I3)
-        state = self._ledger.state(intent.account_id)
-        _rs.call(
-            _rs.rs.oms_plan_open,
-            _state_text(state),
-            intent.account_id,
-            _tree(intent.instrument),
-            intent.side.value,
-            str(intent.quantity),
-        )
-        now = self._now()
-        entry = Order(
-            order_id=f"{intent.command_id}:entry",
-            account_id=intent.account_id,
-            instrument=intent.instrument,
-            order_type=intent.order_type,
-            side=intent.side,
-            quantity=intent.quantity,
-            command_id=f"{intent.command_id}:entry",
-            created_at=now,
-            limit_price=intent.limit_price,
-            tif=intent.tif,
-        )
-        orders = [entry]
-        if intent.profit_target is not None:
-            instrument, side = reverse(intent.instrument, intent.side)
-            orders.append(
-                Order(
-                    order_id=_target_id(entry.order_id),
-                    account_id=intent.account_id,
-                    instrument=instrument,
-                    order_type=OrderType.LIMIT,
-                    side=side,
-                    quantity=intent.quantity,
-                    command_id=_target_id(entry.order_id),
-                    created_at=now,
-                    limit_price=intent.profit_target,
-                    tif=TimeInForce.GTC,
-                    parent_order_id=entry.order_id,
-                    oco_group=f"{intent.command_id}:exits",
-                )
-            )
-        self._append(
-            intent.account_id,
-            OrdersCreated(orders=tuple(orders), fingerprint=fingerprint, reason=f"Options entry: {intent.reason}"),
-            intent.command_id,
-        )
-        return self._submit(entry)
-
-    # -- close --------------------------------------------------------------------------
-
-    def close(self, account_id: str, action: CloseStructure) -> Order:
-        """Close what is open of a structure; its resting target is cancelled first."""
-        existing = self._ledger.event_by_command(action.command_id)
-        if existing is not None:
-            _rs.call(
-                _rs.rs.oms_replay_conflict,
-                action.command_id,
-                existing.kind is EventKind.ORDERS_CREATED,
-                existing.account == account_id,
-            )
-            [order] = existing.payload.orders
-            _rs.call(_rs.rs.oms_close_target_conflict, action.command_id, order.parent_order_id, action.entry_order_id)
-            return self._submit(order)
-        state = self._ledger.state(account_id)
-        order_id, mode, leg_indices, side_value, quantity, oco_group, target_id = _rs.call(
-            _rs.rs.oms_plan_close, _state_text(state), account_id, action.entry_order_id
-        )
-        entry = state.orders[action.entry_order_id]
-        held = legs_of(entry.instrument, entry.side)
-        open_legs = [held[i] for i in leg_indices]
-        if mode == "single":
-            instrument: Instrument = open_legs[0].contract
-        else:
-            instrument = reverse(
-                Combo(tuple(ComboLeg(leg.contract, leg.ratio, leg.side) for leg in open_legs)), entry.side
-            )[0]
-        close = Order(
-            order_id=order_id,
-            account_id=account_id,
-            instrument=instrument,
-            order_type=OrderType.MARKET if action.limit_price is None else OrderType.LIMIT,
-            side=Side(side_value),
-            quantity=Decimal(quantity),
-            command_id=action.command_id,
-            created_at=self._now(),
-            limit_price=action.limit_price,
-            tif=TimeInForce.DAY,
-            parent_order_id=action.entry_order_id,
-            oco_group=oco_group,
-        )
-        if target_id is not None:
-            # Both would buy back the same contracts at the same snapshot.
-            self.orders.cancel(target_id, command_id=f"{action.command_id}:replaces-target")
-        self._append(
-            account_id,
-            OrdersCreated(orders=(close,), fingerprint=self._order_fingerprint(close), reason=f"Options close: {action.reason}"),
-            action.command_id,
-        )
-        return self._submit(close)
-
-    def close_holding(self, account_id: str, action: CloseHolding) -> Order:
-        """Sell (or cover) shares held outside any structure, at market."""
-        existing = self._ledger.event_by_command(action.command_id)
-        if existing is not None:
-            _rs.call(
-                _rs.rs.oms_replay_conflict,
-                action.command_id,
-                existing.kind is EventKind.ORDERS_CREATED,
-                existing.account == account_id,
-            )
-            return self._submit(existing.payload.orders[0])
-        state = self._ledger.state(account_id)
-        side = Side(
-            _rs.call(
-                _rs.rs.oms_plan_holding,
-                _state_text(state),
-                account_id,
-                _tree(action.instrument),
-                str(action.quantity),
-                action.command_id,
-            )
-        )
-        order = Order(
-            order_id=f"{action.command_id}:holding",
-            account_id=account_id,
-            instrument=action.instrument,
-            order_type=OrderType.MARKET,
-            side=side,
-            quantity=action.quantity,
-            command_id=action.command_id,
-            created_at=self._now(),
-            tif=TimeInForce.DAY,
-        )
-        self._append(
-            account_id,
-            OrdersCreated(orders=(order,), fingerprint=self._order_fingerprint(order), reason=f"Holding close: {action.reason}"),
-            action.command_id,
-        )
-        return self._submit(order)
-
-    # -- keeping children in step ---------------------------------------------------------
-
-    def sync(self, account_id: str, cause: str) -> None:
-        """Bring every structure's children in line with what has filled and settled.
-
-        - A filled entry sends its resting profit target.
-        - An entry that ended unfilled cancels the target it never needed.
-        - A structure with nothing left open (closed, target filled, expired, assigned)
-          cancels whatever of its exits still works.
-        - A structure one of whose legs has settled cancels its target, which would trade
-          contracts it no longer holds.
-        """
-        state = self._ledger.state(account_id)
-        for child_id, action in _rs.call(_rs.rs.oms_sync_plan, _state_text(state)):
-            current = self.orders.get_order(child_id)
-            if current.state in _TERMINAL:
-                continue
-            if action in ("structure-done", "leg-settled"):
-                self.orders.cancel(child_id, command_id=f"{cause}:{child_id}:{action}")
-            elif action == "submit-target" and current.state is OrderState.NEW:
-                self._submit(current)
-
-    # -- plumbing -------------------------------------------------------------------------
-
-    def _submit(self, order: Order) -> Order:
-        current = self.orders.get_order(order.order_id)
-        if current.state is not OrderState.NEW:
-            return current
-        submitted = self.orders.submit(current)
-        if submitted.state not in _TERMINAL:
-            # Confirm the acknowledgement now, so a re-run derives the same commands.
-            submitted = self.orders.reconcile_order(order.order_id)
-        return submitted
-
-    def _append(self, account_id: str, payload: OrdersCreated, command_id: str) -> Event:
-        now = self._now()
-        # W6-E: native options OMS
-        return self._ledger.append(
-            Event(account=account_id, kind=EventKind.ORDERS_CREATED, payload=payload, ts_utc=now, command_id=command_id)
-        )
-
-    def _now(self) -> datetime:
-        now = self._clock.now_utc()
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise ValueError("Clock returned a naive datetime")
-        return now
+    # The sequencing (open, close, close_holding, sync, and the _submit/_append/_now
+    # plumbing) lives in `trade_engine_rs.OptionOrderManagerBase`. The fingerprint helpers
+    # stay here: they are codec + `_rs.call` glue over the P7 legacy-spelling context, and
+    # `test_p7_migrate` calls `_intent_fingerprint(..., legacy=True)` directly on the class.
 
     def _presented_fingerprint(self, intent: OptionIntent, stored: str, current: str) -> str:
         """The fingerprint to hold against the stored one when a command id replays (P7).
